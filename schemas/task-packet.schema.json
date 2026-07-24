@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "jobId", "executionId", "role", "objective", "issue", "repository", "promptPath", "expectedOutput", "timeoutSeconds", "environmentRefs", "constraints"],
+  "properties": {
+    "protocolVersion": {"const": "1.0"},
+    "jobId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "executionId": {"type": "string", "minLength": 1, "maxLength": 128},
+    "role": {"enum": ["planner", "developer", "reviewer", "repairer"]},
+    "objective": {"type": "string", "minLength": 1, "maxLength": 32768},
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["externalId", "title", "body"],
+      "properties": {
+        "externalId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "title": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "body": {"type": "string", "maxLength": 65536}
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "mode", "defaultBranch", "branch"],
+      "properties": {
+        "projectId": {"type": "string", "minLength": 1, "maxLength": 128},
+        "mode": {"enum": ["managed_clone", "existing_path"]},
+        "url": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "localPath": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "defaultBranch": {"type": "string", "minLength": 1, "maxLength": 255},
+        "branch": {"type": "string", "minLength": 1, "maxLength": 255}
+      },
+      "allOf": [
+        {"if": {"properties": {"mode": {"const": "managed_clone"}}}, "then": {"required": ["url"]}},
+        {"if": {"properties": {"mode": {"const": "existing_path"}}}, "then": {"required": ["localPath"]}}
+      ]
+    },
+    "promptPath": {"type": "string", "pattern": "^\\.loop/[^\\u0000]+$", "maxLength": 1024},
+    "expectedOutput": {"const": ".loop/result.json"},
+    "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+    "environmentRefs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "secretRef"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,127}$"},
+          "secretRef": {"type": "string", "minLength": 1, "maxLength": 512}
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mayModifyFiles", "mayPush", "mayMerge"],
+      "properties": {
+        "mayModifyFiles": {"type": "boolean"},
+        "mayPush": {"type": "boolean"},
+        "mayMerge": {"const": false}
+      }
+    }
+  }
+}

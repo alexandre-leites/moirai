@@ -1,0 +1,23 @@
+{
+  "name": "loop-engineering-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && vite build",
+    "lint": "tsc --noEmit",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.4",
+    "vite": "^5.4.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.5.3"
+  }
+}

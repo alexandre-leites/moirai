@@ -1,0 +1,37 @@
+syntax = "proto3";
+package loop.runner.v1;
+option go_package = "github.com/loop-engineering/contracts/gen/runner/v1;runnerv1";
+
+service RunnerControl {
+  rpc RegisterRunner(RegisterRunnerRequest) returns (RegisterRunnerResponse);
+  rpc Connect(stream RunnerToOrchestrator) returns (stream OrchestratorToRunner);
+}
+
+message RegisterRunnerRequest { string token = 1; string name = 2; repeated string labels = 3; string protocol_version = 4; }
+message RegisterRunnerResponse { string runner_id = 1; string credential = 2; }
+message RunnerToOrchestrator {
+  string runner_id = 1;
+  string credential = 2;
+  oneof message {
+    Heartbeat heartbeat = 3;
+    ExecutionEvent event = 4;
+    JobOfferAccepted offer_accepted = 5;
+    JobOfferRejected offer_rejected = 6;
+    LeaseRenewal lease_renewal = 7;
+  }
+}
+message OrchestratorToRunner {
+  oneof message {
+    JobOffer offer = 1;
+    CancelExecution cancel = 2;
+    LeaseAcknowledged lease_acknowledged = 3;
+  }
+}
+message Heartbeat { repeated string labels = 1; bool busy = 2; }
+message JobOffer { string job_id = 1; int64 lease_generation = 2; string task_packet_json = 3; }
+message JobOfferAccepted { string job_id = 1; }
+message JobOfferRejected { string job_id = 1; string reason = 2; }
+message LeaseRenewal { string job_id = 1; int64 lease_generation = 2; int64 requested_expires_at_unix_ms = 3; }
+message LeaseAcknowledged { string job_id = 1; int64 lease_generation = 2; int64 expires_at_unix_ms = 3; }
+message CancelExecution { string execution_id = 1; int64 lease_generation = 2; }
+message ExecutionEvent { string job_id = 1; string execution_id = 2; int64 lease_generation = 3; int64 event_sequence = 4; string type = 5; string payload_json = 6; }

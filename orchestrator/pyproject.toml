@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loop-engineering-orchestrator"
+version = "0.1.0"
+description = "Durable control plane for Moirai"
+requires-python = ">=3.12"
+dependencies = [
+  "asyncpg>=0.29",
+  "grpcio>=1.64",
+  "protobuf>=7.35,<8",
+  "langgraph>=0.2",
+  "langgraph-checkpoint-postgres>=2.0",
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2", "ruff>=0.5", "mypy>=1.10"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["moirai"]

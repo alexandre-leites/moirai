@@ -1,0 +1,56 @@
+syntax = "proto3";
+package loop.control.v1;
+option go_package = "github.com/loop-engineering/contracts/gen/control/v1;controlv1";
+
+service ControlPlane {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
+  rpc UpdateProject(UpdateProjectRequest) returns (UpdateProjectResponse);
+  rpc SetProjectEnabled(SetProjectEnabledRequest) returns (SetProjectEnabledResponse);
+  rpc CreateRunnerRegistrationToken(CreateRunnerRegistrationTokenRequest) returns (CreateRunnerRegistrationTokenResponse);
+  rpc ListRunnerRegistrationTokens(ListRunnerRegistrationTokensRequest) returns (ListRunnerRegistrationTokensResponse);
+  rpc RevokeRunnerRegistrationToken(RevokeRunnerRegistrationTokenRequest) returns (RevokeRunnerRegistrationTokenResponse);
+  rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
+}
+
+message LoginRequest { string username = 1; string password = 2; }
+message LoginResponse { string session_token = 1; string user_id = 2; }
+message ListProjectsRequest {}
+message Project { string id = 1; string name = 2; bool enabled = 3; }
+message ListProjectsResponse { repeated Project projects = 1; }
+message ProjectConfiguration {
+  string name = 1;
+  string repository_mode = 2;
+  string repository_url = 3;
+  string local_repository_path = 4;
+  string default_branch = 5;
+  repeated string required_runner_labels = 6;
+}
+message CreateProjectRequest { ProjectConfiguration project = 1; }
+message CreateProjectResponse { Project project = 1; }
+message UpdateProjectRequest { string project_id = 1; ProjectConfiguration project = 2; }
+message UpdateProjectResponse { Project project = 1; }
+message SetProjectEnabledRequest { string project_id = 1; bool enabled = 2; }
+message SetProjectEnabledResponse { Project project = 1; }
+message CreateRunnerRegistrationTokenRequest { repeated string allowed_labels = 1; }
+message CreateRunnerRegistrationTokenResponse { string token = 1; string expires_at = 2; }
+message RunnerRegistrationToken {
+  string id = 1;
+  repeated string allowed_labels = 2;
+  string created_at = 3;
+  string expires_at = 4;
+  string used_at = 5;
+  string revoked_at = 6;
+}
+message ListRunnerRegistrationTokensRequest {}
+message ListRunnerRegistrationTokensResponse { repeated RunnerRegistrationToken tokens = 1; }
+message RevokeRunnerRegistrationTokenRequest { string token_id = 1; }
+message RevokeRunnerRegistrationTokenResponse { RunnerRegistrationToken token = 1; }
+message ListWorkflowsRequest {}
+message Workflow { string id = 1; string project_id = 2; string status = 3; string phase = 4; }
+message ListWorkflowsResponse { repeated Workflow workflows = 1; }
+message ListRunnersRequest {}
+message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; }
+message ListRunnersResponse { repeated Runner runners = 1; }

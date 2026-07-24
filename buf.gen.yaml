@@ -1,0 +1,14 @@
+version: v1
+plugins:
+  - plugin: buf.build/protocolbuffers/go:v1.36.6
+    out: gen/go
+    opt:
+      - module=github.com/loop-engineering/contracts
+  - plugin: buf.build/grpc/go:v1.5.1
+    out: gen/go
+    opt:
+      - module=github.com/loop-engineering/contracts
+  - plugin: buf.build/protocolbuffers/python
+    out: orchestrator/src/moirai/protocols
+  - plugin: buf.build/grpc/python
+    out: orchestrator/src/moirai/protocols

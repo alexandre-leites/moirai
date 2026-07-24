@@ -1,0 +1,14 @@
+version: v1
+name: buf.build/loop-engineering/loop-engineering
+lint:
+  use:
+    - STANDARD
+  except:
+    - DIRECTORY_SAME_PACKAGE
+    - PACKAGE_DIRECTORY_MATCH
+    - SERVICE_SUFFIX
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+breaking:
+  use:
+    - FILE
