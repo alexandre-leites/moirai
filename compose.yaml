@@ -42,6 +42,7 @@ services:
     networks: [database, control]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json')); sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else 1)\""]
       interval: 15s

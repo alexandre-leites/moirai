@@ -6,7 +6,7 @@ RUN addgroup --system --gid 65532 loop \
     && mkdir -p /app /data \
     && chown -R loop:loop /app /data
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y git ca-certificates curl \
+    && apt-get install --no-install-recommends -y git ca-certificates curl gosu \
     && arch="$(dpkg --print-architecture)" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${arch}.tar.gz" -o /tmp/gh.tar.gz \
     && tar -xzf /tmp/gh.tar.gz -C /tmp \
@@ -20,6 +20,8 @@ COPY migrations ./migrations
 COPY src ./src
 RUN pip install --no-cache-dir . \
     && rm -rf /root/.cache
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod 0755 /docker-entrypoint.sh
 ENV PYTHONPATH=/app/src
 EXPOSE 50051
-CMD ["python", "-m", "moirai.main"]
+ENTRYPOINT ["/docker-entrypoint.sh"]

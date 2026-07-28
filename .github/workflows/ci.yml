@@ -128,8 +128,16 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan Python lockfile dependencies
         run: |
-          python3 -m pip install uv pip-audit
-          uv export --directory orchestrator --locked --all-extras --no-emit-project --output-file .audit-requirements.txt
+          python3 -m pip install pip-audit
+          python3 - <<'PY' > .audit-requirements.txt
+          import tomllib
+          from pathlib import Path
+
+          lock = tomllib.loads(Path("orchestrator/uv.lock").read_text())
+          for package in sorted(lock["package"], key=lambda package: package["name"]):
+              if "registry" in package.get("source", {}):
+                  print(f'{package["name"]}=={package["version"]}')
+          PY
           pip-audit --requirement .audit-requirements.txt
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
