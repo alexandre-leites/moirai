@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"time"
@@ -54,22 +52,9 @@ func (h *AuthHandlers) login(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
-	csrfToken, err := csrfToken()
-	if err != nil {
-		apiserver.WriteError(w, http.StatusServiceUnavailable, "Session creation failed", "")
-		return
-	}
 	sessionExpiry := time.Now().UTC().Add(8 * time.Hour)
-	auth.SetSessionCookies(w, resp.SessionToken, csrfToken, sessionExpiry, h.cookieSecure)
+	auth.SetSessionCookies(w, resp.SessionToken, resp.CsrfToken, sessionExpiry, h.cookieSecure)
 	apiserver.WriteJSON(w, http.StatusOK, map[string]string{"userId": resp.UserId})
-}
-
-func csrfToken() (string, error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
 func (h *AuthHandlers) logout(w http.ResponseWriter, r *http.Request) {

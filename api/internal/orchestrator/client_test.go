@@ -19,10 +19,13 @@ func TestMapErrorReturnsNilForNilInput(t *testing.T) {
 }
 
 func TestWithSessionAddsOpaqueMetadataOnlyWhenPresent(t *testing.T) {
-	ctx := orchestrator.WithSession(context.Background(), "session-token")
+	ctx := orchestrator.WithSession(context.Background(), "session-token", "csrf-token")
 	values, ok := metadata.FromOutgoingContext(ctx)
 	if !ok || len(values.Get("x-loop-session")) != 1 || values.Get("x-loop-session")[0] != "session-token" {
 		t.Fatalf("missing session metadata: %v", values)
+	}
+	if len(values.Get("x-loop-csrf")) != 1 || values.Get("x-loop-csrf")[0] != "csrf-token" {
+		t.Fatalf("missing CSRF metadata: %v", values)
 	}
 	if _, ok := metadata.FromOutgoingContext(orchestrator.WithSession(context.Background(), "")); ok {
 		t.Fatal("empty token must not add metadata")

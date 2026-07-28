@@ -14,6 +14,7 @@ const (
 )
 
 type sessionKey struct{}
+type csrfKey struct{}
 
 func WithSessionToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, sessionKey{}, token)
@@ -21,6 +22,15 @@ func WithSessionToken(ctx context.Context, token string) context.Context {
 
 func SessionToken(ctx context.Context) (string, bool) {
 	token, ok := ctx.Value(sessionKey{}).(string)
+	return token, ok && token != ""
+}
+
+func WithCSRFToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, csrfKey{}, token)
+}
+
+func CSRFToken(ctx context.Context) (string, bool) {
+	token, ok := ctx.Value(csrfKey{}).(string)
 	return token, ok && token != ""
 }
 
@@ -43,7 +53,7 @@ func RequireCSRF(next http.Handler) http.Handler {
 			writeForbidden(w)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(WithCSRFToken(r.Context(), cookie.Value)))
 	})
 }
 

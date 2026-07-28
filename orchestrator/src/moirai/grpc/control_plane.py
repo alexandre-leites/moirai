@@ -18,6 +18,7 @@ from moirai.persistence.authentication import AuthenticatedSession
 from proto import control_plane_pb2, control_plane_pb2_grpc
 
 _SESSION_METADATA_KEY = "x-loop-session"
+_CSRF_METADATA_KEY = "x-loop-csrf"
 
 
 class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
@@ -51,7 +52,11 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "login was rejected")
         if not credentials.session_token or not credentials.user_id:
             await context.abort(grpc.StatusCode.INTERNAL, "login could not be completed")
-        return control_plane_pb2.LoginResponse(session_token=credentials.session_token, user_id=credentials.user_id)
+        return control_plane_pb2.LoginResponse(
+            session_token=credentials.session_token,
+            user_id=credentials.user_id,
+            csrf_token=credentials.csrf_token,
+        )
 
     async def WhoAmI(
         self,
@@ -86,7 +91,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         request: control_plane_pb2.CreateProjectRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.CreateProjectResponse:
-        session = await self._require_session(context, administrator=True)
+        session = await self._require_session(context, administrator=True, require_csrf=True)
         try:
             project = await self._control_plane.create_project(
                 *_project_arguments(request.project),
@@ -102,7 +107,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         request: control_plane_pb2.UpdateProjectRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.UpdateProjectResponse:
-        session = await self._require_session(context, administrator=True)
+        session = await self._require_session(context, administrator=True, require_csrf=True)
         if not request.project_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project ID is required")
         try:
@@ -121,7 +126,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         request: control_plane_pb2.SetProjectEnabledRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.SetProjectEnabledResponse:
-        session = await self._require_session(context, administrator=True)
+        session = await self._require_session(context, administrator=True, require_csrf=True)
         if not request.project_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project ID is required")
         try:
@@ -140,7 +145,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         request: control_plane_pb2.CreateRunnerRegistrationTokenRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.CreateRunnerRegistrationTokenResponse:
-        session = await self._require_session(context, administrator=True)
+        session = await self._require_session(context, administrator=True, require_csrf=True)
         labels = tuple(label.strip() for label in request.allowed_labels)
         if not labels or any(not label for label in labels) or len(set(labels)) != len(labels):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "runner token request is invalid")
@@ -183,7 +188,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         request: control_plane_pb2.RevokeRunnerRegistrationTokenRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.RevokeRunnerRegistrationTokenResponse:
-        session = await self._require_session(context, administrator=True)
+        session = await self._require_session(context, administrator=True, require_csrf=True)
         if not request.token_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "registration token ID is required")
         try:
@@ -233,7 +238,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         request: control_plane_pb2.SubmitHumanDecisionRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.SubmitHumanDecisionResponse:
-        session = await self._require_session(context)
+        session = await self._require_session(context, require_csrf=True)
         decision = request.decision
         if not request.workflow_run_id or decision not in ("approved", "changes_requested"):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "human decision request is invalid")
@@ -274,17 +279,20 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         )
 
     async def _require_session(
-        self, context: grpc.aio.ServicerContext, administrator: bool = False
+        self,
+        context: grpc.aio.ServicerContext,
+        administrator: bool = False,
+        require_csrf: bool = False,
     ) -> AuthenticatedSession:
-        raw_token = next(
-            (value for key, value in (context.invocation_metadata() or ()) if key.lower() == _SESSION_METADATA_KEY),
-            "",
-        )
+        metadata = context.invocation_metadata() or ()
+        raw_token = next((value for key, value in metadata if key.lower() == _SESSION_METADATA_KEY), "")
+        raw_csrf = next((value for key, value in metadata if key.lower() == _CSRF_METADATA_KEY), "")
         token = raw_token if isinstance(raw_token, str) else raw_token.decode("utf-8", errors="replace")
+        csrf_token = raw_csrf if isinstance(raw_csrf, str) else raw_csrf.decode("utf-8", errors="replace")
         if not token:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "session is required")
         try:
-            session = await self._control_plane.validate_session(token, None, self._now(), False)
+            session = await self._control_plane.validate_session(token, csrf_token or None, self._now(), require_csrf)
         except (NotImplementedError, PermissionError, ValueError):
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "session is invalid")
         if administrator and session.role != "admin":

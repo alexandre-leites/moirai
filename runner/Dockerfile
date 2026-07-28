@@ -1,4 +1,5 @@
 FROM golang:1.25-alpine AS build
+ENV GOTOOLCHAIN=local
 WORKDIR /build
 COPY runner/go.mod runner/go.sum ./runner/
 COPY gen/go/ ./gen/go/

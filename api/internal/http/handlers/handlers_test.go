@@ -3,7 +3,6 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,19 +85,3 @@ func TestRequireMutationRequiresSessionAndCSRF(t *testing.T) {
 		t.Errorf("got %d, want %d", rec.Code, http.StatusNoContent)
 	}
 }
-
-func TestCSRFTokensAreRandomAndURLSafe(t *testing.T) {
-	first, err := csrfToken()
-	if err != nil {
-		t.Fatalf("csrf token: %v", err)
-	}
-	second, err := csrfToken()
-	if err != nil {
-		t.Fatalf("csrf token: %v", err)
-	}
-	if first == second || len(first) < 32 {
-		t.Fatalf("unexpected CSRF tokens: %q %q", first, second)
-	}
-}
-
-var _ = errors.New

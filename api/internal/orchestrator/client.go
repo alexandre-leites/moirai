@@ -26,11 +26,15 @@ type Client struct {
 	client controlv1.ControlPlaneClient
 }
 
-func WithSession(ctx context.Context, sessionToken string) context.Context {
+func WithSession(ctx context.Context, sessionToken string, csrfToken ...string) context.Context {
 	if sessionToken == "" {
 		return ctx
 	}
-	return metadata.AppendToOutgoingContext(ctx, "x-loop-session", sessionToken)
+	values := []string{"x-loop-session", sessionToken}
+	if len(csrfToken) > 0 && csrfToken[0] != "" {
+		values = append(values, "x-loop-csrf", csrfToken[0])
+	}
+	return metadata.AppendToOutgoingContext(ctx, values...)
 }
 
 func Dial(ctx context.Context, endpoint string) (*Client, error) {

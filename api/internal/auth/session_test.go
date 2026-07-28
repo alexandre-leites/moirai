@@ -46,7 +46,13 @@ func TestRequireSessionAndCSRFFailClosed(t *testing.T) {
 }
 
 func TestRequireCSRFAcceptsMatchingToken(t *testing.T) {
-	h := RequireCSRF(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	h := RequireCSRF(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := CSRFToken(r.Context())
+		if !ok || token != "csrf" {
+			t.Error("CSRF token was not loaded")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	req.AddCookie(&http.Cookie{Name: CSRFCookieName, Value: "csrf"})
 	req.Header.Set(CSRFHeaderName, "csrf")

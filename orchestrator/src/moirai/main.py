@@ -116,7 +116,7 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
     # is what the runner container presents to register (LOOP_RUNNER_REGISTRATION_TOKEN),
     # so the orchestrator must seed a token hash for that same value, not a separate,
     # unrelated variable that happens to default to the same literal.
-    seed_token_value = os.environ.get("RUNNER_REGISTRATION_TOKEN")
+    seed_token_value = read_optional_secret(os.environ, "RUNNER_REGISTRATION_TOKEN")
     if not seed_token_value:
         _LOGGER.warning("RUNNER_REGISTRATION_TOKEN unset — skipping runner registration token bootstrap")
         return

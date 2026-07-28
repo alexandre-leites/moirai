@@ -211,7 +211,8 @@ func requireMutation(limiter *auth.RateLimiter, handler http.HandlerFunc) http.H
 
 func requestContext(r *http.Request) context.Context {
 	if token, ok := auth.SessionToken(r.Context()); ok {
-		return orchestrator.WithSession(r.Context(), token)
+		csrfToken, _ := auth.CSRFToken(r.Context())
+		return orchestrator.WithSession(r.Context(), token, csrfToken)
 	}
 	return r.Context()
 }

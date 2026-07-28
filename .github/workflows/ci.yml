@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "22"
@@ -13,8 +20,8 @@ jobs:
   test-orchestrator:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install orchestrator with dev extras
@@ -24,8 +31,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install orchestrator with dev extras
@@ -35,8 +42,8 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install orchestrator with dev extras
@@ -46,8 +53,8 @@ jobs:
   runner:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: runner/go.mod
           cache-dependency-path: runner/go.sum
@@ -57,38 +64,88 @@ jobs:
   api:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: api/go.mod
           cache-dependency-path: api/go.sum
-      - run: cd api && go test ./...
+      - run: cd api && go test -race ./...
       - run: cd api && go vet ./...
 
   build-web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: make build-web
 
-  compose:
+  compose-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: make compose
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Create Compose secrets
+        run: |
+          umask 077
+          mkdir secrets
+          printf '%s\n' 'postgres-password' > secrets/postgres_password
+          printf '%s\n' 'postgresql+asyncpg://loop:postgres-password@postgres:5432/loop' > secrets/database_url
+          printf '%s\n' 'admin-password' > secrets/initial_admin_password
+          printf '%s\n' 'github-token' > secrets/github_token
+          printf '%s\n' 'runner-registration-token' > secrets/runner_registration_token
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Build and start stack
+        run: docker compose up --build --detach --wait --wait-timeout 180
+      - name: Verify readiness endpoints
+        run: |
+          curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/
+          curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:8080/ready
+      - name: Collect diagnostics
+        if: always()
+        run: docker compose ps && docker compose logs --no-color
+      - name: Tear down stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
 
-  validate:
+  vulnerability-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: api/go.mod
+      - name: Scan Go dependencies
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          cd api && govulncheck ./...
+          cd ../runner && govulncheck ./...
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install orchestrator with dev extras
-        run: python3 -m pip install -e "./orchestrator[dev]"
-      - run: make validate
+      - name: Scan Python dependencies
+        run: |
+          python3 -m venv .audit-venv
+          .audit-venv/bin/pip install ./orchestrator pip-audit
+          .audit-venv/bin/pip-audit --local
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Scan Node dependencies
+        run: cd web && npm ci && npm audit
+      - name: Scan filesystem, secrets, and container configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,config
+          exit-code: "1"
+
+  validate:
+    needs: [test-orchestrator, lint, typecheck, runner, api, build-web, compose-smoke, vulnerability-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - run: true

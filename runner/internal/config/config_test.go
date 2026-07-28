@@ -2,11 +2,17 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
+	registrationTokenFile := filepath.Join(t.TempDir(), "registration-token")
+	if err := os.WriteFile(registrationTokenFile, []byte("registration-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	environment := map[string]string{
 		"LOOP_ORCHESTRATOR_ENDPOINT":      "control.example:7443",
 		"LOOP_RUNNER_DATA_DIR":            "/var/lib/loop",
@@ -14,7 +20,7 @@ func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 		"LOOP_RUNNER_LABELS":              "linux, docker,opencode",
 		"LOOP_RUNNER_ALLOWED_ENVIRONMENT": "GITHUB_TOKEN,PROJECT_KEY",
 
-		"LOOP_RUNNER_REGISTRATION_TOKEN":         "registration-token",
+		"LOOP_RUNNER_REGISTRATION_TOKEN_FILE":    registrationTokenFile,
 		"LOOP_RUNNER_HEARTBEAT_INTERVAL":         "15s",
 		"LOOP_RUNNER_RECONNECT_MIN":              "2s",
 		"LOOP_RUNNER_RECONNECT_MAX":              "20s",
@@ -68,6 +74,9 @@ func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 	if config.AgentBackend != "cli" || config.AgentBinary != "custom-agent" || len(config.AgentArguments) != 2 {
 		t.Fatalf("Load() agent backend = %q/%q/%#v", config.AgentBackend, config.AgentBinary, config.AgentArguments)
 	}
+	if config.RegistrationToken != "registration-token" {
+		t.Fatalf("Load() registration token = %q", config.RegistrationToken)
+	}
 }
 
 func TestLoadDefaultsEndpointDataDirectoryAndHostname(t *testing.T) {
@@ -80,6 +89,12 @@ func TestLoadDefaultsEndpointDataDirectoryAndHostname(t *testing.T) {
 	}
 	if config.TLS || config.HeartbeatInterval != 10*time.Second || config.ReconnectMin != time.Second || config.ReconnectMax != time.Minute {
 		t.Fatalf("Load() timing defaults = %#v", config)
+	}
+}
+
+func TestLoadRejectsUnreadableRegistrationTokenFile(t *testing.T) {
+	if _, err := Load(lookup(map[string]string{"LOOP_RUNNER_REGISTRATION_TOKEN_FILE": "/missing/token"}), func() (string, error) { return "runner", nil }); err == nil {
+		t.Fatal("Load() accepted an unreadable registration token file")
 	}
 }
 
