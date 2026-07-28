@@ -1,5 +1,4 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
 import type { ApiClient, Project } from "./api";
 
 export function ProjectsPage({ api }: { api: ApiClient }) {
@@ -45,7 +44,6 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
 }
 
 function CreateProjectForm({ api, onCreated }: { api: ApiClient; onCreated: (p: Project) => void }) {
-  const navigate = useNavigate();
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"managed_clone" | "existing_path">("managed_clone");
   const [url, setUrl] = useState("");

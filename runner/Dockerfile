@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.24-alpine AS build
 WORKDIR /build
 COPY runner/go.mod runner/go.sum ./runner/
 COPY gen/go/ ./gen/go/
@@ -8,7 +8,7 @@ RUN go build -o /runner ./cmd/runner
 
 FROM node:22-alpine
 RUN apk add --no-cache git ca-certificates \
-    && npm install --global opencode-ai \
+    && npm install --global opencode-ai@1.18.7 \
     && addgroup -S loop \
     && adduser -S -D -h /home/loop -G loop loop \
     && mkdir -p /data \

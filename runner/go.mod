@@ -1,6 +1,6 @@
 module github.com/loop-engineering/runner
 
-go 1.22
+go 1.24
 
 require github.com/loop-engineering/contracts v0.0.0
 

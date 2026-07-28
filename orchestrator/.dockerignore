@@ -1,0 +1,12 @@
+.git/
+tests/
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+uv.lock
+README.md

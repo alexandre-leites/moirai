@@ -1,11 +1,20 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
+VENV ?= .venv
 
-.PHONY: test lint typecheck validate compose \
+.PHONY: test lint typecheck validate compose dev-install \
         proto-lint proto-generate proto-check \
         test-orchestrator test-runner test-api test-web \
         build-runner build-api build-web
 
 test: test-orchestrator
+
+# Bootstraps a local virtualenv with the orchestrator installed in editable
+# mode plus dev tools (ruff, mypy, pytest). Required on a clean checkout
+# before `make lint` / `make typecheck` will find their tools.
+dev-install:
+	test -d $(VENV) || python3 -m venv $(VENV)
+	$(VENV)/bin/pip install --upgrade pip
+	$(VENV)/bin/pip install -e "orchestrator[dev]"
 
 test-orchestrator:
 	PYTHONPATH=orchestrator/src python3 -m unittest discover -s orchestrator/tests
@@ -17,13 +26,13 @@ test-api:
 	cd api && go test ./...
 
 test-web:
-	cd web && npm run lint
+	cd web && npm run typecheck && npm run lint
 
-lint:
-	python3 -m ruff check orchestrator/src orchestrator/tests
+lint: dev-install
+	$(VENV)/bin/python3 -m ruff check orchestrator/src orchestrator/tests
 
-typecheck:
-	python3 -m mypy orchestrator/src
+typecheck: dev-install
+	$(VENV)/bin/python3 -m mypy orchestrator/src
 
 build-runner:
 	cd runner && go build ./cmd/runner

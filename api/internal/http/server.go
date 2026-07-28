@@ -110,6 +110,9 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		w.Header().Set(requestIDHeader, requestID)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxRequestBodyBytes)
 		started := time.Now()
 		recorded := &statusRecorder{ResponseWriter: w}
