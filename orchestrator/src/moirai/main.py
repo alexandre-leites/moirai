@@ -267,6 +267,20 @@ def _bind_grpc_endpoint(server: Any, config: OrchestratorConfig) -> int:
     return server.add_secure_port(config.grpc_bind, credentials)
 
 
+async def _metrics_loop(control_plane: Any, metrics: Metrics, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            metrics.update_snapshot(await control_plane.metrics_snapshot(datetime.now(UTC)))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("metrics collection failed")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=15)
+        except TimeoutError:
+            pass
+
+
 async def serve(
     config: OrchestratorConfig | None = None,
     stop_event: asyncio.Event | None = None,
@@ -292,10 +306,12 @@ async def serve(
     db_health_task: asyncio.Task[None] | None = None
     reaper_task: asyncio.Task[None] | None = None
     workflow_maintenance_task: asyncio.Task[None] | None = None
+    metrics_task: asyncio.Task[None] | None = None
 
     supports_durability = isinstance(control_plane, AsyncpgControlPlane)
     if supports_durability:
         pool = control_plane.pool
+        metrics_task = asyncio.create_task(_metrics_loop(control_plane, metrics, shutdown))
 
         from moirai.persistence.migrations import MigrationRunner
         migrations = await MigrationRunner(pool).run()
@@ -387,6 +403,8 @@ async def serve(
             await reaper_task
         if workflow_maintenance_task is not None:
             await workflow_maintenance_task
+        if metrics_task is not None:
+            await metrics_task
         await control_plane.close()
         raise RuntimeError("orchestrator gRPC endpoint could not bind")
     _install_signal_handlers(shutdown)
@@ -412,6 +430,8 @@ async def serve(
             await reaper_task
         if workflow_maintenance_task is not None:
             await workflow_maintenance_task
+        if metrics_task is not None:
+            await metrics_task
         await server.stop(grace=5)
         await control_plane.close()
 

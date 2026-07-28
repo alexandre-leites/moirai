@@ -2,7 +2,7 @@
 
 ## Current Status
 
-- Overall status: PR #75 review remediation in progress.
+- Overall status: PR #75 review remediation complete; preparing push and CI verification.
 - Current phase: production-readiness hardening.
 - Active implementation: GitHub issues #64, #65, and #66.
 - Last updated: 2026-07-28
@@ -13,10 +13,10 @@
 - [ ] Resolve PR #75 independent review findings
   - Started: 2026-07-28
   - Relevant files: `orchestrator/src/moirai`, `orchestrator/tests`, `runner/internal/control`
-  - Current state: rebased onto `origin/main`; implementing live control-plane metrics and TLS integration coverage.
-  - Remaining work: validation, push, and CI monitoring.
+  - Current state: rebased onto `origin/main`; metrics use read-only control-plane state and runner mTLS integration coverage is passing.
+  - Remaining work: push and CI monitoring.
   - Definition of done: metrics are backed by control-plane state and a runner↔orchestrator mTLS integration test passes.
-  - Targeted validation: orchestrator tests, runner TLS tests, lint, and typecheck.
+  - Targeted validation: completed — 272 orchestrator tests, full API and runner race suites, ruff, and mypy.
 
 ## Done
 
@@ -53,12 +53,12 @@
 
 ## Validation Status
 
-- Targeted tests: pending review remediation.
-- Service tests: prior API/runner and orchestrator suites passed.
+- Targeted tests: 272 orchestrator tests passed; runner mTLS integration test passed.
+- Service tests: API `go test ./...` and runner `go test -race ./...` passed.
 - Full repository tests: not run.
-- Build: prior API/runner builds passed.
-- Lint: prior ruff passed with EXE002 ignored.
-- Type checks: prior mypy passed.
+- Build: `go build ./cmd/api` and `go build ./cmd/runner` passed.
+- Lint: ruff passed with EXE002 ignored.
+- Type checks: mypy passed on all 47 orchestrator source files.
 - Database migrations: not applicable.
 - Docker Compose: configuration passed; fresh boot blocked by host disk exhaustion.
 - End-to-end workflow: prior orchestrator fake-adapter suite passed.

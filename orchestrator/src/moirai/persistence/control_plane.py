@@ -79,6 +79,31 @@ class AsyncpgControlPlane:
     async def close(self) -> None:
         await self._pool.close()
 
+    async def metrics_snapshot(self, now: datetime) -> dict[str, float]:
+        record = await self._pool.fetchrow(
+            """
+            SELECT
+                (SELECT COUNT(*)
+                 FROM app.issues AS issue
+                 JOIN app.projects AS project ON project.id = issue.project_id
+                 WHERE project.enabled = true AND issue.eligible = true AND issue.state = 'open') AS queue_depth,
+                (SELECT COUNT(*)
+                 FROM app.workflow_runs
+                 WHERE status NOT IN ('completed', 'blocked', 'failed', 'cancelled')) AS active_workflows,
+                (SELECT EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_seen_at)))
+                 FROM app.runners
+                 WHERE enabled = true AND revoked_at IS NULL AND last_seen_at IS NOT NULL) AS runner_heartbeat_age
+            """,
+            now,
+        )
+        if record is None:
+            return {"queue_depth": 0, "active_workflows": 0, "runner_heartbeat_age": 0}
+        return {
+            "queue_depth": float(record["queue_depth"] or 0),
+            "active_workflows": float(record["active_workflows"] or 0),
+            "runner_heartbeat_age": float(record["runner_heartbeat_age"] or 0),
+        }
+
     async def login(self, username: str, password: str, now: datetime) -> SessionCredentials:
         return await self._authentication.login(username, password, now)
 

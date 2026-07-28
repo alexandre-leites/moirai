@@ -62,6 +62,13 @@ class Metrics:
         self._active_workflows.set(active_workflows)
         self._runner_heartbeat_age.set(runner_heartbeat_age)
 
+    def update_snapshot(self, snapshot: dict[str, float]) -> None:
+        self.update(
+            queue_depth=snapshot["queue_depth"],
+            active_workflows=snapshot["active_workflows"],
+            runner_heartbeat_age=snapshot["runner_heartbeat_age"],
+        )
+
 
 def _split_bind(bind: str) -> tuple[str, int]:
     host, port = bind.rsplit(":", 1)
