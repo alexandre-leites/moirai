@@ -36,9 +36,10 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
     user_count = await pool.fetchval("SELECT COUNT(*) FROM app.users")
     if user_count and user_count > 0:
         return
+    from moirai.config import read_optional_secret
     from moirai.persistence.authentication import AsyncpgAuthentication
     username = os.environ.get("LOOP_INITIAL_ADMIN_USERNAME", "admin")
-    password = os.environ.get("LOOP_INITIAL_ADMIN_PASSWORD")
+    password = read_optional_secret(os.environ, "LOOP_INITIAL_ADMIN_PASSWORD")
     if not password:
         _LOGGER.warning("LOOP_INITIAL_ADMIN_PASSWORD unset — skipping admin bootstrap")
         return
@@ -173,6 +174,7 @@ async def serve(
     if isinstance(control_plane, AsyncpgControlPlane):
         from moirai.code_hosts import GitHubCliCodeHost
         from moirai.issue_trackers import GitHubCliIssueTracker, GitHubRepository
+        from moirai.issue_trackers.github_cli import SubprocessCommandRunner, verify_gh_ready
         from moirai.workflows.runtime import build_persisted_runtime
         repos_by_id: dict[str, GitHubRepository] = {}
         async with control_plane._pool.acquire() as conn:
@@ -182,11 +184,14 @@ async def serve(
                     repos_by_id[str(row["id"])] = GitHubRepository.from_remote_url(str(row["repository_url"]))
                 except ValueError:
                     pass
-        code_host = GitHubCliCodeHost(next(iter(repos_by_id.values()))) if repos_by_id else None
+        gh_runner = SubprocessCommandRunner(github_token=active_config.github_token)
+        code_host = GitHubCliCodeHost(next(iter(repos_by_id.values())), runner=gh_runner) if repos_by_id else None
         issue_tracker: Any = None
         if repos_by_id:
             repo = next(iter(repos_by_id.values()))
-            issue_tracker = GitHubCliIssueTracker(repo)
+            issue_tracker = GitHubCliIssueTracker(repo, runner=gh_runner)
+        if code_host is not None or issue_tracker is not None:
+            await verify_gh_ready(gh_runner)
         checkpointer = await _build_checkpointer(active_config.database_url)
         workflow_runtime = build_persisted_runtime(
             control_plane._pool, checkpointer=checkpointer, code_host=code_host, issue_tracker=issue_tracker,
@@ -209,7 +214,7 @@ async def serve(
             scheduler.run_with_leader(
                 shutdown,
                 lambda: datetime.now(UTC),
-                timedelta(seconds=5),
+                timedelta(seconds=1),
                 leader,
             )
         )

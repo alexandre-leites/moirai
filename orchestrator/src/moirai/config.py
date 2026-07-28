@@ -15,6 +15,7 @@ class ConfigurationError(ValueError):
 class OrchestratorConfig:
     database_url: str
     grpc_bind: str
+    github_token: str | None = None
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> OrchestratorConfig:
@@ -22,6 +23,7 @@ class OrchestratorConfig:
         return cls(
             database_url=read_secret(values, "LOOP_DATABASE_URL"),
             grpc_bind=read_bind(values.get("LOOP_GRPC_BIND", "0.0.0.0:50051")),
+            github_token=read_optional_secret(values, "LOOP_GITHUB_TOKEN"),
         )
 
 
@@ -36,6 +38,12 @@ def read_secret(environment: Mapping[str, str], name: str) -> str:
     if not file_path:
         raise ConfigurationError(f"{name} or {file_name} is required")
     return read_secret_file(file_name, file_path)
+
+
+def read_optional_secret(environment: Mapping[str, str], name: str) -> str | None:
+    if name not in environment and f"{name}_FILE" not in environment:
+        return None
+    return read_secret(environment, name)
 
 
 def read_secret_file(name: str, path_value: str) -> str:
