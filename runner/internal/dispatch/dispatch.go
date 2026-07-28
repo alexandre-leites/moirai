@@ -106,7 +106,7 @@ type Result struct {
 }
 
 func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (result Result, err error) {
-	if dispatcher.Workspaces == nil || dispatcher.Backend == nil {
+	if dispatcher.Workspaces == nil || (lease.Packet.Role != taskpacket.RolePipeline && dispatcher.Backend == nil) {
 		return Result{}, errors.New("workspace manager and agent backend are required")
 	}
 	if lease.JobID == "" || lease.Generation < 1 || lease.Packet.JobID != lease.JobID {
@@ -160,6 +160,26 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	environment, err := dispatcher.resolveEnvironment(ctx, packet.EnvironmentRefs)
 	if err != nil {
 		return Result{}, err
+	}
+	if packet.Role == taskpacket.RolePipeline {
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
+		result = Result{Status: "completed", ExitCode: 0, InitialRevision: initial.Revision, PipelineResults: pipelineResults}
+		if pipelineErr != nil {
+			result.Status = "failed"
+			result.Summary = pipelineErr.Error()
+		}
+		final, snapshotErr := dispatcher.snapshot(context.Background(), workspace)
+		if snapshotErr != nil {
+			return Result{}, snapshotErr
+		}
+		result.FinalRevision = final.Revision
+		if artifactErr := writeTerminalResult(workspace, result); artifactErr != nil {
+			return Result{}, artifactErr
+		}
+		if pipelineErr != nil {
+			return result, fmt.Errorf("run pipeline: %w", pipelineErr)
+		}
+		return result, nil
 	}
 	backendResult, executeErr := dispatcher.Backend.Execute(ctx, agents.Request{
 		ExecutionID: packet.ExecutionID,

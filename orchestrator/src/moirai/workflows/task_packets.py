@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, cast
 
-ExecutionRole = Literal["planner", "developer", "reviewer", "repairer"]
+ExecutionRole = Literal["planner", "developer", "pipeline", "reviewer", "repairer"]
+
+
+@dataclass(frozen=True)
+class PipelineCommand:
+    command: str
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,7 @@ class TaskExecutionRequest:
     may_modify_files: bool
     may_push: bool
     may_merge: bool
+    pipeline: tuple[PipelineCommand, ...] = ()
 
 
 def task_execution(
@@ -67,9 +74,9 @@ def task_execution(
     if repository_mode not in {"managed_clone", "existing_path"}:
         raise ValueError("task packet repository mode is invalid")
     mode = cast(Literal["managed_clone", "existing_path"], repository_mode)
-    if role not in {"planner", "developer", "reviewer", "repairer"}:
+    if role not in {"planner", "developer", "pipeline", "reviewer", "repairer"}:
         raise ValueError("task packet execution role is invalid")
-    read_only = role in {"planner", "reviewer"}
+    read_only = role in {"planner", "pipeline", "reviewer"}
     return TaskExecutionRequest(
         job_id=job_id,
         execution_id=execution_id,
@@ -91,6 +98,38 @@ def task_execution(
         may_push=role == "developer",
         may_merge=False,
     )
+
+
+def pipeline_task_execution(
+    *,
+    job_id: str,
+    execution_id: str,
+    project_id: str,
+    issue_external_id: str,
+    issue_title: str,
+    issue_body: str,
+    repository_mode: str,
+    repository_url: str | None,
+    local_repository_path: str | None,
+    default_branch: str,
+    pipeline: tuple[PipelineCommand, ...],
+    timeout_seconds: int = 3600,
+) -> TaskExecutionRequest:
+    request = task_execution(
+        job_id=job_id,
+        execution_id=execution_id,
+        role="pipeline",
+        project_id=project_id,
+        issue_external_id=issue_external_id,
+        issue_title=issue_title,
+        issue_body=issue_body,
+        repository_mode=repository_mode,
+        repository_url=repository_url,
+        local_repository_path=local_repository_path,
+        default_branch=default_branch,
+        timeout_seconds=timeout_seconds,
+    )
+    return replace(request, pipeline=pipeline)
 
 
 def planner_task_execution(
@@ -129,6 +168,11 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
         raise ValueError("task objective is required")
     if request.timeout_seconds <= 0:
         raise ValueError("task timeout must be positive")
+    if len(request.pipeline) > 32 or any(
+        not command.command.strip() or command.timeout_seconds < 1 or command.timeout_seconds > 3600
+        for command in request.pipeline
+    ):
+        raise ValueError("task pipeline is invalid")
     return {
         "protocolVersion": "1.0",
         "jobId": request.job_id,
@@ -145,6 +189,10 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
         "expectedOutput": ".loop/result.json",
         "timeoutSeconds": request.timeout_seconds,
         "environmentRefs": [],
+        "pipeline": [
+            {"command": command.command, "timeoutSeconds": command.timeout_seconds}
+            for command in request.pipeline
+        ],
         "constraints": {
             "mayModifyFiles": request.may_modify_files,
             "mayPush": request.may_push,

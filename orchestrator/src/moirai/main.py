@@ -415,7 +415,7 @@ async def _run_workflow_maintenance_loop(
                 current = now()
                 try:
                     await control_plane.drain_pending_transitions(on_transition, current)
-                    stalled = await control_plane.find_stalled_workflow_runs(current, timedelta(minutes=5))
+                    stalled = await control_plane.find_stalled_workflow_runs(current, timedelta(seconds=30))
                     for workflow_run_id in stalled:
                         await control_plane.recover_stalled_workflow_run(workflow_run_id, on_transition)
                 except Exception:

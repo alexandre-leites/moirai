@@ -11,6 +11,8 @@ class WorkflowCheckpointStore(Protocol):
 
     async def checkpoint(self, workflow_run_id: str, state: dict[str, object]) -> int: ...
 
+    async def load_state(self, workflow_run_id: str) -> dict[str, object]: ...
+
 
 class WorkflowGraph(Protocol):
     def ainvoke(
@@ -65,26 +67,29 @@ class PersistedWorkflowRuntime:
         config: dict[str, object] = {"configurable": {"thread_id": workflow_run_id}}
 
         _TERMINAL_STATUSES = frozenset({"blocked", "completed", "cancelled", "failed"})
+        state_updates = dict(initial_state)
 
         try:
+            seed = await self._checkpoints.load_state(workflow_run_id)
+            state_updates = {**seed, **initial_state}
+            if str(state_updates.get("status", "")) in _TERMINAL_STATUSES:
+                terminal_state = {**state_updates, "workflow_run_id": workflow_run_id}
+                await self._checkpoints.checkpoint(workflow_run_id, terminal_state)
+                return terminal_state
             if self._has_checkpointer:
                 app_checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
                 if app_checkpoint is None:
-                    state = dict(initial_state)
-                    state["workflow_run_id"] = workflow_run_id
-                    result = self._graph.ainvoke(state, config)
+                    result = self._graph.ainvoke({**state_updates, "workflow_run_id": workflow_run_id}, config)
                 else:
                     prev_status = str(app_checkpoint[1].get("status", ""))
                     if prev_status in _TERMINAL_STATUSES and initial_state.get("status") not in _TERMINAL_STATUSES:
-                        state = dict(initial_state)
-                        state["workflow_run_id"] = workflow_run_id
-                        result = self._graph.ainvoke(state, config)
+                        result = self._graph.ainvoke({**state_updates, "workflow_run_id": workflow_run_id}, config)
                     else:
-                        await self._graph.aupdate_state(config, initial_state)
+                        await self._graph.aupdate_state(config, state_updates)
                         result = self._graph.ainvoke(None, config)
             else:
                 checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
-                state = dict(initial_state if checkpoint is None else checkpoint[1])
+                state = {**(checkpoint[1] if checkpoint is not None else {}), **state_updates}
                 state["workflow_run_id"] = workflow_run_id
                 result = self._graph.ainvoke(state, config)
 
@@ -92,8 +97,10 @@ class PersistedWorkflowRuntime:
                 state = await result
             else:
                 state = result
-        except Exception as error:  # noqa: BLE001 - any node/checkpointer failure must not strand the run
-            return await self._fail(workflow_run_id, initial_state, error)
+        except Exception as error:
+            if _is_transient_error(error):
+                raise
+            return await self._fail(workflow_run_id, state_updates, error)
 
         # run() reports every invalid input as ValueError (see the
         # workflow-run-ID guard above); a lone TypeError here would split one
@@ -114,12 +121,20 @@ class PersistedWorkflowRuntime:
         failed_state["blocking_reason"] = reason
         transition = getattr(self._checkpoints, "transition", None)
         if transition is not None:
-            try:
-                await transition(workflow_run_id, "failed", {"status": "failed", "blocking_reason": reason})
-            except Exception:  # noqa: BLE001, S110 - best-effort; the checkpoint below still records the failure
-                pass
-        try:
-            await self._checkpoints.checkpoint(workflow_run_id, failed_state)
-        except Exception:  # noqa: BLE001, S110 - nothing further to do if durable storage itself is failing
-            pass
+            await transition(workflow_run_id, "failed", {"status": "failed", "blocking_reason": reason})
+        await self._checkpoints.checkpoint(workflow_run_id, failed_state)
         return failed_state
+
+
+def _is_transient_error(error: Exception) -> bool:
+    if isinstance(error, (ConnectionError, TimeoutError, OSError)):
+        return True
+    return type(error).__module__.startswith("asyncpg") and type(error).__name__ in {
+        "CannotConnectNowError",
+        "ConnectionDoesNotExistError",
+        "ConnectionFailureError",
+        "InterfaceError",
+        "PostgresConnectionError",
+        "SerializationError",
+        "TooManyConnectionsError",
+    }

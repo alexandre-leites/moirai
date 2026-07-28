@@ -49,7 +49,9 @@ from moirai.workflows.runner_events import (
 )
 from moirai.workflows.task_packets import (
     ExecutionRole,
+    PipelineCommand,
     build_task_packet,
+    pipeline_task_execution,
     planner_task_execution,
     task_execution,
 )
@@ -738,6 +740,35 @@ class AsyncpgControlPlane:
                     default_branch=default_branch,
                 )
             )
+        if role == "pipeline":
+            steps = await self._pool.fetch(
+                """
+                SELECT command, timeout_seconds
+                FROM app.project_pipeline_steps
+                WHERE project_id = $1 AND required = true
+                ORDER BY position, id
+                """,
+                _uuid(project_id),
+            )
+            pipeline = tuple(
+                PipelineCommand(command=str(step["command"]), timeout_seconds=int(step["timeout_seconds"]))
+                for step in steps
+            )
+            return build_task_packet(
+                pipeline_task_execution(
+                    job_id=job_id,
+                    execution_id=f"{request_id}-pipeline",
+                    project_id=project_id,
+                    issue_external_id=issue_external_id,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    repository_mode=repository_mode,
+                    repository_url=repository_url,
+                    local_repository_path=local_repository_path,
+                    default_branch=default_branch,
+                    pipeline=pipeline,
+                )
+            )
         if role not in {"planner", "developer", "reviewer", "repairer"}:
             raise ValueError("workflow execution request role is invalid")
         return build_task_packet(
@@ -1398,6 +1429,23 @@ class AsyncpgControlPlane:
                             attempt,
                         )
 
+                if resolved_role == "pipeline" and summary.terminal:
+                    await connection.execute(
+                        """
+                        INSERT INTO app.pipeline_runs
+                            (id, workflow_run_id, commit_sha, status, result, started_at, finished_at)
+                        VALUES (gen_random_uuid(), $1, '', $2, $3::jsonb, $4, $4)
+                        """,
+                        job["workflow_run_id"],
+                        "passed" if summary.succeeded else "failed",
+                        json.dumps(
+                            {"exitCode": summary.exit_code, "commandsRun": summary.commands_run},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now,
+                    )
+
                 if resolved_role == "reviewer" and summary.terminal and summary.succeeded:
                     await self._record_ai_review(connection, job["workflow_run_id"], summary, now)
 
@@ -1775,6 +1823,7 @@ def _uuid_or_none(value: str | None) -> Any:
 _EXECUTION_TYPE_BY_ROLE: dict[str, str] = {
     "planner": "run_planner",
     "developer": "run_developer",
+    "pipeline": "run_local_pipeline",
     "reviewer": "run_reviewer",
     "repairer": "run_repair",
 }

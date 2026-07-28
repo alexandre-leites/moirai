@@ -99,6 +99,7 @@ def validate_runner_event(
 ROLE_TO_SUFFIX = {
     "planner": "plan",
     "developer": "implement",
+    "pipeline": "pipeline",
     "reviewer": "review",
     "repairer": "repair",
 }
@@ -178,6 +179,12 @@ def workflow_transition_for_terminal_event(
         return None
 
     resolved_role = role if role is not None else execution_role_from_id(summary.execution_id)
+
+    if resolved_role == "pipeline" and summary.terminal:
+        return WorkflowTransition(
+            new_status="local_pipeline",
+            state_updates={"status": "local_pipeline", "pipeline_passed": summary.succeeded},
+        )
 
     if summary.cancelled:
         return WorkflowTransition(

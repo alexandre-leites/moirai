@@ -1,11 +1,12 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock
 
 from moirai.persistence.migrations import MigrationRunner
 
 
-class MigrationRunnerTests(unittest.TestCase):
+class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
     def test_split_statements_simple(self) -> None:
         sql = "CREATE TABLE foo (id INT); CREATE TABLE bar (id INT);"
         result = MigrationRunner._split_statements(sql)
@@ -43,6 +44,27 @@ class MigrationRunnerTests(unittest.TestCase):
     def test_filename_pattern_rejects_non_matching(self) -> None:
         self.assertIsNone(MigrationRunner._FILENAME_PATTERN.match("setup.sql"))
         self.assertIsNone(MigrationRunner._FILENAME_PATTERN.match("abc_initial.sql"))
+
+    async def test_discovery_rejects_duplicate_versions(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "001_one.sql").write_text("SELECT 1;", encoding="utf-8")
+            (root / "001_two.sql").write_text("SELECT 2;", encoding="utf-8")
+            runner = MigrationRunner(MagicMock())
+            runner.MIGRATIONS_DIR = root
+            with self.assertRaisesRegex(ValueError, "duplicate migration version"):
+                await runner._discover_migrations()
+
+    async def test_discovery_uses_a_stable_sha256_checksum(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "001_one.sql").write_text("SELECT 1;", encoding="utf-8")
+            runner = MigrationRunner(MagicMock())
+            runner.MIGRATIONS_DIR = root
+            first = await runner._discover_migrations()
+            second = await runner._discover_migrations()
+            self.assertEqual(first[0][2], second[0][2])
+            self.assertEqual(len(first[0][2]), 64)
 
 
 if __name__ == "__main__":

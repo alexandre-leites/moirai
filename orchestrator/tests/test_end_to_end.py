@@ -372,6 +372,10 @@ class _FakeCodeHost:
         self.checked_prs: list[str] = []
         self.merged_prs: list[tuple[str, str]] = []
 
+    async def get_pull_request(self, pull_request_id: str) -> Any:
+        from moirai.code_hosts import PullRequest
+        return PullRequest(external_id=pull_request_id, url="https://example.test/pr/42", state="open", head_branch="agent/42/run-1", head_commit="abc123")
+
     async def create_or_find_pull_request(
         self, workflow_id: str, branch: str, base_branch: str, title: str, issue_number: str | None = None,
     ) -> Any:

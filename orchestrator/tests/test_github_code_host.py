@@ -4,10 +4,12 @@ import unittest
 from collections.abc import Sequence
 
 from moirai.code_hosts.github_cli import (
+    ChecksResult,
     CheckStatus,
     GitHubCliCodeHost,
     PullRequestCheck,
     checks_pass,
+    checks_result,
 )
 from moirai.issue_trackers.github_cli import GitHubCliError, GitHubRepository
 
@@ -136,6 +138,10 @@ class GitHubCliCodeHostTests(unittest.TestCase):
 class ChecksPassTests(unittest.TestCase):
     def test_empty_check_list_does_not_pass(self) -> None:
         self.assertFalse(checks_pass([]))
+
+    def test_pending_checks_have_a_distinct_result(self) -> None:
+        checks = [PullRequestCheck("a", CheckStatus.PENDING)]
+        self.assertEqual(checks_result(checks), ChecksResult.PENDING)
 
     def test_all_passing_checks_pass(self) -> None:
         checks = [PullRequestCheck("a", CheckStatus.PASSING), PullRequestCheck("b", CheckStatus.PASSING)]

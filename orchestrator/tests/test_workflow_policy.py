@@ -37,6 +37,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         budget = RetryBudget()
         incomplete = GateState(checks_passed=True, pipeline_passed=True)
         self.assertEqual(route_after_checks(incomplete, budget), WorkflowRoute.BLOCKED)
+        pending = GateState(pipeline_passed=True, review_approved=True, checks_pending=True)
+        self.assertEqual(route_after_checks(pending, budget), WorkflowRoute.WAIT_FOR_CHECKS)
         waiting = GateState(
             checks_passed=True,
             pipeline_passed=True,

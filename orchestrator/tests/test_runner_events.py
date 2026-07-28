@@ -205,6 +205,17 @@ class WorkflowTransitionTests(unittest.TestCase):
         self.assertEqual(transition.new_status, "blocked")
         self.assertFalse(transition.state_updates.get("review_approved"))
 
+    def test_pipeline_result_controls_pipeline_gate_independently_of_developer(self) -> None:
+        failed = self._summary("failed", "job-1-pipeline", exit_code=1)
+        transition = workflow_transition_for_terminal_event(failed, "local_pipeline", role="pipeline")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "local_pipeline")
+        self.assertFalse(transition.state_updates["pipeline_passed"])
+        passed = self._summary("completed", "job-1-pipeline", exit_code=0)
+        transition = workflow_transition_for_terminal_event(passed, "local_pipeline", role="pipeline")
+        assert transition is not None
+        self.assertTrue(transition.state_updates["pipeline_passed"])
+
     def test_completed_repairer_transitions_to_local_pipeline(self) -> None:
         summary = self._summary("completed", "job-1-repair")
         transition = workflow_transition_for_terminal_event(summary, "repairing", role="repairer")

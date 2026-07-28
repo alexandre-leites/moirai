@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseAcceptsValidRolePackets(t *testing.T) {
-	for _, role := range []Role{RolePlanner, RoleDeveloper, RoleReviewer, RoleRepairer} {
+	for _, role := range []Role{RolePlanner, RoleDeveloper, RolePipeline, RoleReviewer, RoleRepairer} {
 		t.Run(string(role), func(t *testing.T) {
 			packet := validPacket(role)
 			if role == RoleDeveloper || role == RoleRepairer {
