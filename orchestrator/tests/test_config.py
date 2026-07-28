@@ -11,6 +11,17 @@ class ConfigurationTests(unittest.TestCase):
 
         self.assertEqual(config.database_url, "postgresql://loop:secret@db/loop")
         self.assertEqual(config.grpc_bind, "0.0.0.0:50051")
+        self.assertIsNone(config.github_token)
+
+    def test_configuration_reads_github_token(self) -> None:
+        config = OrchestratorConfig.from_environment(
+            {
+                "LOOP_DATABASE_URL": "postgresql://loop:secret@db/loop",
+                "LOOP_GITHUB_TOKEN": "github-token",
+            }
+        )
+
+        self.assertEqual(config.github_token, "github-token")
 
     def test_configuration_reads_trimmed_secret_file(self) -> None:
         with TemporaryDirectory() as directory:

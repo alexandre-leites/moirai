@@ -1,12 +1,15 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
 VENV ?= .venv
 
-.PHONY: test lint typecheck validate compose dev-install \
+.PHONY: help test lint typecheck validate compose dev-install \
         proto-lint proto-generate proto-check \
         test-orchestrator test-runner test-api test-web \
         build-runner build-api build-web
 
-test: test-orchestrator
+help:
+	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run orchestrator tests.' '  make test-runner       Run runner tests with the race detector.' '  make test-api          Run API tests.' '  make test-web          Install web dependencies and run typecheck/lint.' '  make lint              Run orchestrator lint.' '  make typecheck         Run orchestrator type checks.' '  make validate          Run test, lint, typecheck, Compose, and proto checks.' '  make compose           Validate the Compose configuration.' '  make proto-check       Lint, generate, and verify protobuf outputs.'
+
+test: test-orchestrator test-runner test-api test-web
 
 # Bootstraps a local virtualenv with the orchestrator installed in editable
 # mode plus dev tools (ruff, mypy, pytest). Required on a clean checkout
@@ -26,7 +29,7 @@ test-api:
 	cd api && go test ./...
 
 test-web:
-	cd web && npm run typecheck && npm run lint
+	cd web && npm ci && npm run typecheck && npm run lint
 
 lint: dev-install
 	$(VENV)/bin/python3 -m ruff check orchestrator/src orchestrator/tests
