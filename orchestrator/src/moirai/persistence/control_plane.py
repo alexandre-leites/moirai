@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         WorkflowRecord,
     )
 from moirai.workflows.runner_events import (
+    WorkflowTransition,
     role_to_suffix,
     validate_runner_event,
     workflow_transition_for_terminal_event,
@@ -240,7 +241,6 @@ class AsyncpgControlPlane:
             FROM app.workflow_runs wr
             JOIN app.issues i ON i.id = wr.issue_id
             WHERE wr.project_id = $1
-              AND wr.status NOT IN ('completed', 'blocked', 'failed', 'cancelled')
             ORDER BY wr.id ASC
             """,
             _uuid(project_id),
@@ -340,6 +340,40 @@ class AsyncpgControlPlane:
             SET consecutive_failures = 0, next_retry_at = NULL, last_error = NULL, updated_at = EXCLUDED.updated_at
             """,
             _uuid(project_id),
+            now,
+        )
+
+    async def record_provider_failure(self, provider: str, reason: str, now: datetime) -> None:
+        if not provider.strip():
+            raise ValueError("provider is required")
+        await self._pool.execute(
+            """
+            INSERT INTO app.provider_circuit_state
+                (provider, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
+            VALUES ($1, 'closed', 1, $2, NULL, $3)
+            ON CONFLICT (provider) DO UPDATE
+            SET consecutive_failures = app.provider_circuit_state.consecutive_failures + 1,
+                state = CASE WHEN app.provider_circuit_state.consecutive_failures >= 2 THEN 'open' ELSE 'closed' END,
+                opened_at = CASE WHEN app.provider_circuit_state.consecutive_failures >= 2 THEN EXCLUDED.updated_at ELSE NULL END,
+                last_failure_reason = EXCLUDED.last_failure_reason,
+                updated_at = EXCLUDED.updated_at
+            """,
+            provider.strip(),
+            reason[:1024],
+            now,
+        )
+
+    async def clear_provider_failure(self, provider: str, now: datetime) -> None:
+        await self._pool.execute(
+            """
+            INSERT INTO app.provider_circuit_state
+                (provider, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
+            VALUES ($1, 'closed', 0, NULL, NULL, $2)
+            ON CONFLICT (provider) DO UPDATE
+            SET state = 'closed', consecutive_failures = 0, last_failure_reason = NULL,
+                opened_at = NULL, updated_at = EXCLUDED.updated_at
+            """,
+            provider,
             now,
         )
 
@@ -696,8 +730,9 @@ class AsyncpgControlPlane:
         record = await self._pool.fetchrow(
             """
             SELECT j.id AS job_id, i.external_id, i.title, i.body, p.id AS project_id,
-                   p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
-                   request.id AS execution_request_id, request.role AS execution_role
+                    p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
+                    w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
+                    request.id AS execution_request_id, request.role AS execution_role
             FROM app.jobs AS j
             JOIN app.workflow_runs AS w ON w.id = j.workflow_run_id
             JOIN app.issues AS i ON i.id = w.issue_id
@@ -724,6 +759,11 @@ class AsyncpgControlPlane:
         repository_url = _optional_text(record["repository_url"])
         local_repository_path = _optional_text(record["local_repository_path"])
         default_branch = str(record["default_branch"])
+        current_commit = _optional_text(record.get("current_commit")) or ""
+        prior_failure = _optional_text(record.get("last_failure_fingerprint"))
+        blocking_reason = _optional_text(record.get("blocking_reason"))
+        acceptance_criteria = (issue_title,)
+        previous_failures = tuple(value for value in (prior_failure, blocking_reason) if value)
         request_id = record.get("execution_request_id")
         role = record.get("execution_role")
         if request_id is None or role is None:
@@ -784,6 +824,9 @@ class AsyncpgControlPlane:
                 repository_url=repository_url,
                 local_repository_path=local_repository_path,
                 default_branch=default_branch,
+                acceptance_criteria=acceptance_criteria,
+                previous_failures=previous_failures,
+                current_commit=current_commit,
             )
         )
 
@@ -811,12 +854,20 @@ class AsyncpgControlPlane:
                       AND r.draining = false
                       AND r.revoked_at IS NULL
                       AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM app.project_locks AS lock
-                          WHERE lock.project_id = p.id
-                      )
-                      AND (
-                          SELECT COUNT(*) FROM app.jobs AS active_job
+                       AND NOT EXISTS (
+                           SELECT 1 FROM app.project_locks AS lock
+                           WHERE lock.project_id = p.id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM app.project_circuit_state AS circuit
+                           WHERE circuit.project_id = p.id AND circuit.state = 'open'
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM app.provider_circuit_state AS circuit
+                           WHERE circuit.provider = i.provider AND circuit.state = 'open'
+                       )
+                       AND (
+                           SELECT COUNT(*) FROM app.jobs AS active_job
                           WHERE active_job.runner_id = r.id
                             AND active_job.status IN ('offered', 'preparing', 'running')
                       ) < r.capacity
@@ -1317,7 +1368,8 @@ class AsyncpgControlPlane:
                 job = await connection.fetchrow(
                     """
                     SELECT j.id, j.workflow_run_id, j.lease_generation, j.lease_expires_at,
-                           j.last_event_sequence, w.status AS workflow_status
+                           j.last_event_sequence, w.status AS workflow_status, w.last_diff_hash,
+                           w.last_failure_fingerprint, w.non_progress_attempts
                     FROM app.jobs AS j
                     JOIN app.workflow_runs AS w ON w.id = j.workflow_run_id
                     WHERE j.id = $1 AND j.runner_id = $2 AND j.status IN ('preparing', 'running')
@@ -1348,6 +1400,18 @@ class AsyncpgControlPlane:
                 transition = workflow_transition_for_terminal_event(
                     summary, current_workflow_status, role=resolved_role
                 )
+                progress_updates = await self._record_progress_evidence(connection, job, summary, event.payload, now)
+                non_progress_attempts = progress_updates.get("non_progress_attempts", 0)
+                if isinstance(non_progress_attempts, int) and non_progress_attempts >= 4:
+                    transition = WorkflowTransition(
+                        new_status="blocked",
+                        state_updates={
+                            **(transition.state_updates if transition is not None else {}),
+                            **progress_updates,
+                            "status": "blocked",
+                            "blocking_reason": "workflow stopped after four identical execution outcomes",
+                        },
+                    )
 
                 if transition is not None:
                     await connection.execute(
@@ -1490,6 +1554,65 @@ class AsyncpgControlPlane:
 
         updated_sequence = max(int(job["last_event_sequence"]), event.event_sequence)
         return JobLease(event.job_id, event.runner_id, int(job["lease_generation"]), job["lease_expires_at"], updated_sequence)
+
+    async def _record_progress_evidence(
+        self,
+        connection: Any,
+        job: Any,
+        summary: Any,
+        payload: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, object]:
+        if not summary.terminal:
+            return {}
+        diff_hash = (
+            sha256(json.dumps(sorted(summary.changed_files), separators=(",", ":")).encode("utf-8")).hexdigest()
+            if summary.succeeded
+            else None
+        )
+        fingerprint = sha256(
+            json.dumps(
+                {
+                    "event_type": summary.event_type,
+                    "exit_code": summary.exit_code,
+                    "changed_files": sorted(summary.changed_files),
+                    "result": summary.result,
+                    "payload": payload,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        current = diff_hash or fingerprint
+        previous = _optional_text(job.get("last_diff_hash")) or _optional_text(
+            job.get("last_failure_fingerprint")
+        )
+        same_outcome = previous == current
+        attempts = int(job.get("non_progress_attempts") or 0) + 1 if same_outcome else 0
+        await connection.execute(
+            """
+            UPDATE app.workflow_runs
+            SET last_diff_hash = $2,
+                last_failure_fingerprint = $3,
+                non_progress_attempts = $4,
+                last_progress_at = CASE WHEN $5 THEN $6 ELSE last_progress_at END,
+                updated_at = $6
+            WHERE id = $1
+            """,
+            job["workflow_run_id"],
+            diff_hash,
+            fingerprint,
+            attempts,
+            not same_outcome,
+            now,
+        )
+        return {
+            "last_diff_hash": diff_hash or "",
+            "last_failure_fingerprint": fingerprint,
+            "non_progress_attempts": attempts,
+            "progressed": not same_outcome,
+        }
 
     async def _resolve_dispatched_execution(
         self, connection: Any, workflow_run_id: str, job_id: str, execution_id: str

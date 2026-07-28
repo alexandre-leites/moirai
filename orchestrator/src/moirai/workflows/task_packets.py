@@ -54,6 +54,13 @@ class TaskExecutionRequest:
     may_push: bool
     may_merge: bool
     pipeline: tuple[PipelineCommand, ...] = ()
+    acceptance_criteria: tuple[str, ...] = ()
+    plan: tuple[str, ...] = ()
+    previous_failures: tuple[str, ...] = ()
+    current_commit: str = ""
+    diff_summary: str = ""
+    failed_checks: tuple[str, ...] = ()
+    review_findings: tuple[str, ...] = ()
 
 
 def task_execution(
@@ -70,6 +77,13 @@ def task_execution(
     local_repository_path: str | None,
     default_branch: str,
     timeout_seconds: int = 1800,
+    acceptance_criteria: tuple[str, ...] = (),
+    plan: tuple[str, ...] = (),
+    previous_failures: tuple[str, ...] = (),
+    current_commit: str = "",
+    diff_summary: str = "",
+    failed_checks: tuple[str, ...] = (),
+    review_findings: tuple[str, ...] = (),
 ) -> TaskExecutionRequest:
     if repository_mode not in {"managed_clone", "existing_path"}:
         raise ValueError("task packet repository mode is invalid")
@@ -97,6 +111,13 @@ def task_execution(
         may_modify_files=not read_only,
         may_push=role == "developer",
         may_merge=False,
+        acceptance_criteria=acceptance_criteria,
+        plan=plan,
+        previous_failures=previous_failures,
+        current_commit=current_commit,
+        diff_summary=diff_summary,
+        failed_checks=failed_checks,
+        review_findings=review_findings,
     )
 
 
@@ -173,6 +194,15 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
         for command in request.pipeline
     ):
         raise ValueError("task pipeline is invalid")
+    context_lists = (
+        request.acceptance_criteria,
+        request.plan,
+        request.previous_failures,
+        request.failed_checks,
+        request.review_findings,
+    )
+    if any(len(values) > 64 or any(not value.strip() for value in values) for values in context_lists):
+        raise ValueError("task execution context is invalid")
     return {
         "protocolVersion": "1.0",
         "jobId": request.job_id,
@@ -193,6 +223,13 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
             {"command": command.command, "timeoutSeconds": command.timeout_seconds}
             for command in request.pipeline
         ],
+        "acceptanceCriteria": list(request.acceptance_criteria),
+        "plan": list(request.plan),
+        "previousFailures": list(request.previous_failures),
+        "currentCommit": request.current_commit,
+        "diffSummary": request.diff_summary,
+        "failedChecks": list(request.failed_checks),
+        "reviewFindings": list(request.review_findings),
         "constraints": {
             "mayModifyFiles": request.may_modify_files,
             "mayPush": request.may_push,

@@ -128,6 +128,20 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("INSERT INTO app.pull_requests" in q for q in self.pool.connection.queries))
 
+    async def test_terminal_transitions_update_project_circuit_and_only_mark_real_progress(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "blocked",
+            {"status": "blocked", "blocking_reason": "base branch is broken", "progressed": False},
+        )
+        update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)
+        self.assertNotIn("last_progress_at", update_query)
+        self.assertTrue(any("project_circuit_state" in q for q in self.pool.connection.queries))
+        self.pool.connection.queries.clear()
+        await self.store.transition(WORKFLOW_ID, "planning", {"status": "planning", "progressed": True})
+        update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)
+        self.assertIn("last_progress_at", update_query)
+
     async def test_transition_omits_columns_not_present_in_updates(self) -> None:
         await self.store.transition(WORKFLOW_ID, "planning", {"status": "planning"})
         update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)

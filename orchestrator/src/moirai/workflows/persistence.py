@@ -25,6 +25,9 @@ _DURABLE_COLUMNS: dict[str, str] = {
     "current_commit": "current_commit",
     "pull_request_id": "pull_request_external_id",
     "pull_request_url": "pull_request_url",
+    "last_diff_hash": "last_diff_hash",
+    "last_failure_fingerprint": "last_failure_fingerprint",
+    "non_progress_attempts": "non_progress_attempts",
 }
 
 _TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
@@ -39,8 +42,10 @@ class AsyncpgWorkflowPersistence:
         self, workflow_run_id: str, status: str, updates: dict[str, object]
     ) -> None:
         now = self._now()
-        set_clauses = ["status = $2", "current_phase = $2", "updated_at = $3", "last_progress_at = $3"]
+        set_clauses = ["status = $2", "current_phase = $2", "updated_at = $3"]
         params: list[Any] = [_uuid(workflow_run_id), status, now]
+        if updates.get("progressed") is True:
+            set_clauses.append("last_progress_at = $3")
         for key, column in _DURABLE_COLUMNS.items():
             if key in updates:
                 params.append(updates[key])
@@ -60,6 +65,7 @@ class AsyncpgWorkflowPersistence:
                         changed["project_id"],
                         _uuid(workflow_run_id),
                     )
+                    await self._update_project_circuit(connection, changed["project_id"], status, updates, now)
                 await connection.execute(
                     """
                     INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
@@ -88,6 +94,49 @@ class AsyncpgWorkflowPersistence:
                         str(updates.get("pull_request_state") or "open"),
                     )
 
+
+    async def _update_project_circuit(
+        self, connection: Any, project_id: Any, status: str, updates: dict[str, object], now: datetime
+    ) -> None:
+        if status == "completed":
+            await connection.execute(
+                """
+                INSERT INTO app.project_circuit_state
+                    (project_id, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
+                VALUES ($1, 'closed', 0, NULL, NULL, $2)
+                ON CONFLICT (project_id) DO UPDATE
+                SET state = 'closed', consecutive_failures = 0, last_failure_reason = NULL,
+                    opened_at = NULL, updated_at = EXCLUDED.updated_at
+                """,
+                project_id,
+                now,
+            )
+            return
+        if status != "blocked":
+            return
+        reason = str(updates.get("blocking_reason") or "workflow blocked")[:1024]
+        await connection.execute(
+            """
+            INSERT INTO app.project_circuit_state
+                (project_id, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
+            VALUES ($1, 'closed', 1, $2, NULL, $3)
+            ON CONFLICT (project_id) DO UPDATE
+            SET consecutive_failures = CASE
+                    WHEN app.project_circuit_state.last_failure_reason = EXCLUDED.last_failure_reason
+                    THEN app.project_circuit_state.consecutive_failures + 1 ELSE 1 END,
+                state = CASE
+                    WHEN app.project_circuit_state.last_failure_reason = EXCLUDED.last_failure_reason
+                     AND app.project_circuit_state.consecutive_failures >= 2 THEN 'open' ELSE 'closed' END,
+                opened_at = CASE
+                    WHEN app.project_circuit_state.last_failure_reason = EXCLUDED.last_failure_reason
+                     AND app.project_circuit_state.consecutive_failures >= 2 THEN EXCLUDED.updated_at ELSE NULL END,
+                last_failure_reason = EXCLUDED.last_failure_reason,
+                updated_at = EXCLUDED.updated_at
+            """,
+            project_id,
+            reason,
+            now,
+        )
 
     async def load_state(self, workflow_run_id: str) -> dict[str, object]:
         async with self._pool.acquire() as connection:

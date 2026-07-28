@@ -58,6 +58,22 @@ class GitHubCliCodeHostTests(unittest.TestCase):
         self.assertIn("<!-- loop-engineering-workflow:workflow-1 -->", body)
         self.assertIn("Closes #7", body)
 
+    def test_portable_operations_update_pull_request_and_read_default_branch_head(self) -> None:
+        runner = FakeRunner([
+            (0, "", ""),
+            (0, json.dumps({"reviews": [{"author": {"login": "reviewer"}, "state": "APPROVED", "body": "looks good"}]}), ""),
+            (0, "", ""),
+            (0, json.dumps({"default_branch": "main"}), ""),
+            (0, json.dumps({"object": {"sha": "abc123"}}), ""),
+        ])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+        asyncio.run(host.update_pull_request("42", "Updated", "body"))
+        self.assertEqual(asyncio.run(host.get_pull_request_reviews("42"))[0].author, "reviewer")
+        asyncio.run(host.close_pull_request("42"))
+        self.assertEqual(asyncio.run(host.get_default_branch_head()), "abc123")
+        self.assertIn("edit", runner.commands[0])
+        self.assertIn("close", runner.commands[2])
+
     def test_required_checks_keep_distinct_statuses(self) -> None:
         runner = FakeRunner([(0, json.dumps([
             {"name": "unit", "bucket": "pass", "link": "https://checks/1", "state": "SUCCESS"},

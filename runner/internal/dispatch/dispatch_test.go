@@ -133,6 +133,21 @@ func TestDispatcherPreparesPersistsExecutesAndCleansUp(t *testing.T) {
 	}
 }
 
+func TestReviewerPromptUsesIndependentContextWithoutDeveloperPlan(t *testing.T) {
+	packet := validLease().Packet
+	packet.Role = taskpacket.RoleReviewer
+	packet.AcceptanceCriteria = []string{"Review the implementation"}
+	packet.Plan = []string{"developer private reasoning"}
+	packet.DiffSummary = "main.go changed"
+	prompt := promptFor(packet)
+	if !strings.Contains(prompt, "# ROLE") || !strings.Contains(prompt, "# ACCEPTANCE CRITERIA") || !strings.Contains(prompt, "# EXPECTED OUTPUT SCHEMA") {
+		t.Fatalf("prompt is missing required sections: %q", prompt)
+	}
+	if strings.Contains(prompt, "CURRENT PLAN") || strings.Contains(prompt, "developer private reasoning") || !strings.Contains(prompt, "do not defend") {
+		t.Fatalf("reviewer prompt leaked developer context: %q", prompt)
+	}
+}
+
 func TestDispatcherCapturesRepositoryRevisionAndChanges(t *testing.T) {
 	manager := &workspaceManager{workspace: testWorkspace(t)}
 	inspector := &revisionInspector{summaries: []repository.RevisionSummary{

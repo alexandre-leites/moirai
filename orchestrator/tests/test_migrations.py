@@ -45,6 +45,14 @@ class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(MigrationRunner._FILENAME_PATTERN.match("setup.sql"))
         self.assertIsNone(MigrationRunner._FILENAME_PATTERN.match("abc_initial.sql"))
 
+    async def test_workflow_quality_migration_defines_progress_and_circuit_state(self) -> None:
+        migration = Path(__file__).parents[1] / "migrations" / "005_workflow_quality_recovery.sql"
+        contents = migration.read_text(encoding="utf-8")
+        self.assertIn("last_diff_hash", contents)
+        self.assertIn("non_progress_attempts", contents)
+        self.assertIn("project_circuit_state", contents)
+        self.assertIn("provider_circuit_state", contents)
+
     async def test_discovery_rejects_duplicate_versions(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

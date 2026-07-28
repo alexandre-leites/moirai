@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -432,11 +433,76 @@ func writeArtifacts(workspace repository.Workspace, packet taskpacket.Packet) er
 }
 
 func promptFor(packet taskpacket.Packet) string {
-	body := packet.Issue.Body
-	if body == "" {
-		body = "Implement the requested changes."
+	if packet.Role == taskpacket.RoleReviewer {
+		return reviewerPromptFor(packet)
 	}
-	return fmt.Sprintf("# %s task\n\nObjective:\n%s\n\nIssue %s: %s\n\n%s\n\nAnalyze the repository, implement the changes, and verify they work.\n", packet.Role, packet.Objective, packet.Issue.ExternalID, packet.Issue.Title, body)
+	return executionPromptFor(packet)
+}
+
+func executionPromptFor(packet taskpacket.Packet) string {
+	return strings.Join([]string{
+		"# ROLE", string(packet.Role),
+		"# IMMUTABLE OBJECTIVE", packet.Objective,
+		"# ISSUE", fmt.Sprintf("%s: %s\n%s", packet.Issue.ExternalID, packet.Issue.Title, defaultText(packet.Issue.Body, "No additional issue body was supplied.")),
+		"# ACCEPTANCE CRITERIA", listText(packet.AcceptanceCriteria, "No explicit acceptance criteria were supplied."),
+		"# CURRENT PLAN", listText(packet.Plan, "No plan has been recorded yet."),
+		"# CURRENT REPOSITORY COMMIT", defaultText(packet.CurrentCommit, "Unknown"),
+		"# CURRENT DIFF SUMMARY", defaultText(packet.DiffSummary, "No diff summary is available."),
+		"# FAILED CHECKS", listText(packet.FailedChecks, "No failed checks are recorded."),
+		"# AI REVIEW FINDINGS", listText(packet.ReviewFindings, "No review findings are recorded."),
+		"# PREVIOUS FAILURES", listText(packet.PreviousFailures, "No previous failures are recorded."),
+		"# ALLOWED ACTIONS", allowedActions(packet),
+		"# FORBIDDEN ACTIONS", "Do not merge, alter credentials, or claim success without writing the required result.",
+		"# EXPECTED OUTPUT SCHEMA", expectedOutputSchema(packet.Role),
+	}, "\n\n") + "\n"
+}
+
+func reviewerPromptFor(packet taskpacket.Packet) string {
+	return strings.Join([]string{
+		"# ROLE", "Independent reviewer. Evaluate the repository change; do not defend or continue a developer session.",
+		"# IMMUTABLE OBJECTIVE", packet.Objective,
+		"# ISSUE", fmt.Sprintf("%s: %s\n%s", packet.Issue.ExternalID, packet.Issue.Title, defaultText(packet.Issue.Body, "No additional issue body was supplied.")),
+		"# ACCEPTANCE CRITERIA", listText(packet.AcceptanceCriteria, "No explicit acceptance criteria were supplied."),
+		"# CURRENT REPOSITORY COMMIT", defaultText(packet.CurrentCommit, "Unknown"),
+		"# CURRENT DIFF SUMMARY", defaultText(packet.DiffSummary, "Inspect the repository diff independently."),
+		"# FAILED CHECKS", listText(packet.FailedChecks, "No failed checks are recorded."),
+		"# AI REVIEW FINDINGS", listText(packet.ReviewFindings, "No prior review findings are recorded."),
+		"# ALLOWED ACTIONS", "Inspect files, diffs, tests, and run read-only validation. Do not modify, push, or merge files.",
+		"# FORBIDDEN ACTIONS", "Do not use developer conversation history, infer hidden reasoning, modify files, push, merge, or defend an implementation.",
+		"# EXPECTED OUTPUT SCHEMA", expectedOutputSchema(packet.Role),
+	}, "\n\n") + "\n"
+}
+
+func listText(values []string, empty string) string {
+	if len(values) == 0 {
+		return empty
+	}
+	return "- " + strings.Join(values, "\n- ")
+}
+
+func defaultText(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func allowedActions(packet taskpacket.Packet) string {
+	actions := []string{"Inspect the repository and run relevant validation."}
+	if packet.Constraints.MayModifyFiles {
+		actions = append(actions, "Modify files needed to satisfy the objective.")
+	}
+	if packet.Constraints.MayPush {
+		actions = append(actions, "Commit and push the prepared branch.")
+	}
+	return strings.Join(actions, " ")
+}
+
+func expectedOutputSchema(role taskpacket.Role) string {
+	if role == taskpacket.RoleReviewer {
+		return `Write .loop/result.json with protocolVersion, executionId, status, summary, verdict, acceptanceCriteria, and findings.`
+	}
+	return `Write .loop/result.json with protocolVersion, executionId, status, summary, changedFiles, commandsRun, remainingWork, and sessionId.`
 }
 
 func writeTerminalResult(workspace repository.Workspace, result Result) error {
