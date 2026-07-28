@@ -54,6 +54,7 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             )
         if not request.name.strip() or any(not label.strip() for label in request.labels):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "runner registration request is invalid")
+        capacity = request.capacity if request.capacity > 0 else 1
         try:
             runner, credential = await _await_if_needed(
                 self._control_plane.register_runner(
@@ -61,6 +62,7 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
                     request.name.strip(),
                     (label.strip() for label in request.labels),
                     self._now(),
+                    capacity,
                 )
             )
         except RegistrationError:
@@ -101,7 +103,7 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
                     if authenticated_runner_id is not None and request.runner_id != authenticated_runner_id:
                         raise _StreamFailure(grpc.StatusCode.UNAUTHENTICATED, "runner identity cannot change")
                     try:
-                        await _await_if_needed(
+                        authenticated_runner = await _await_if_needed(
                             self._control_plane.authenticate_runner(
                                 request.runner_id, request.credential, self._now()
                             )
@@ -112,7 +114,8 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
                         ) from error
                     if authenticated_runner_id is None:
                         authenticated_runner_id = str(request.runner_id)
-                        session = await self._sessions.connect(authenticated_runner_id)
+                        capacity = getattr(authenticated_runner, "capacity", 1) or 1
+                        session = await self._sessions.connect(authenticated_runner_id, capacity=capacity)
                         session_ready.set()
                     await self._handle_message(request, authenticated_runner_id)
             except _StreamFailure as error:
@@ -272,6 +275,8 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             ) from error
 
     async def _advance_workflow(self, workflow_run_id: str, new_status: str, state_updates: dict[str, object]) -> None:
+        # Only registered as an on_transition callback when workflow_runtime is set.
+        assert self._workflow_runtime is not None
         try:
             await self._workflow_runtime.run(workflow_run_id, state_updates)
         except Exception:

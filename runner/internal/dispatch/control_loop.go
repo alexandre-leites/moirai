@@ -45,7 +45,7 @@ type ControlLoop struct {
 
 	mu       sync.Mutex
 	draining bool
-	active   *activeExecution
+	active   map[string]*activeExecution
 }
 
 func NewControlLoop(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration) (*ControlLoop, error) {
@@ -57,10 +57,20 @@ func NewControlLoopWithRedaction(client ControlClient, dispatcher executionDispa
 }
 
 func NewControlLoopWithOutbox(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string) (*ControlLoop, error) {
+	return NewControlLoopWithCapacity(client, dispatcher, now, leaseDuration, renewalLead, redactionPrefixes, outboxPath, 1)
+}
+
+// NewControlLoopWithCapacity allows the runner to work on up to `capacity`
+// executions concurrently (e.g. for different projects). ProjectConcurrencyGuard
+// still serializes executions that share a project's worktree.
+func NewControlLoopWithCapacity(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string, capacity int) (*ControlLoop, error) {
 	if client == nil || now == nil {
 		return nil, errors.New("runner control loop dependencies are required")
 	}
-	offers, err := control.NewOfferState(client, now, leaseDuration, renewalLead)
+	if capacity < 1 {
+		capacity = 1
+	}
+	offers, err := control.NewOfferStateWithCapacity(client, now, leaseDuration, renewalLead, capacity)
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +78,7 @@ func NewControlLoopWithOutbox(client ControlClient, dispatcher executionDispatch
 	if err != nil {
 		return nil, err
 	}
-	return &ControlLoop{Client: client, Offers: offers, Reporter: reporter, Dispatcher: dispatcher}, nil
+	return &ControlLoop{Client: client, Offers: offers, Reporter: reporter, Dispatcher: dispatcher, active: map[string]*activeExecution{}}, nil
 }
 
 func (loop *ControlLoop) Run(ctx context.Context) error {
@@ -114,14 +124,15 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 		return nil
 	}
 	if acknowledgement := message.GetLeaseAcknowledged(); acknowledgement != nil {
-		_, alreadyActive := loop.Offers.ActiveLease()
+		jobID := acknowledgement.GetJobId()
+		_, alreadyActive := loop.Offers.ActiveLease(jobID)
 		if !loop.Offers.ApplyAcknowledgement(acknowledgement) {
 			return nil
 		}
 		if alreadyActive {
 			return nil
 		}
-		lease, ok := loop.Offers.ActiveLease()
+		lease, ok := loop.Offers.ActiveLease(jobID)
 		if !ok {
 			return errors.New("acknowledged lease is unavailable")
 		}
@@ -131,7 +142,7 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 		}
 		executionContext, cancel := context.WithCancel(ctx)
 		loop.mu.Lock()
-		loop.active = &activeExecution{lease: lease, cancel: cancel}
+		loop.active[lease.JobID] = &activeExecution{lease: lease, cancel: cancel}
 		loop.mu.Unlock()
 		loop.logger().Info("runner execution acknowledged", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
 		go loop.execute(executionContext, lease)
@@ -163,8 +174,14 @@ func (loop *ControlLoop) Cancel(executionID string, generation int64) bool {
 		return false
 	}
 	loop.mu.Lock()
-	active := loop.active
-	if active == nil || active.terminal || active.lease.Packet.ExecutionID != executionID || active.lease.Generation != generation {
+	var active *activeExecution
+	for _, candidate := range loop.active {
+		if !candidate.terminal && candidate.lease.Packet.ExecutionID == executionID && candidate.lease.Generation == generation {
+			active = candidate
+			break
+		}
+	}
+	if active == nil {
 		loop.mu.Unlock()
 		return false
 	}
@@ -182,11 +199,10 @@ func (loop *ControlLoop) Reconcile() error {
 	if err := loop.validate(); err != nil {
 		return err
 	}
-	if expired := loop.Offers.Expire(); expired != nil {
+	for _, expired := range loop.Offers.Expire() {
 		loop.logger().Warn("runner lease expired", "job_id", expired.JobID, "execution_id", expired.Packet.ExecutionID, "lease_generation", expired.Generation)
-		loop.cancelExpired(*expired)
+		loop.cancelExpired(expired)
 		loop.Reporter.Abandon(expired.JobID, expired.Generation)
-		return nil
 	}
 	if _, err := loop.Offers.RenewDue(); err != nil {
 		return fmt.Errorf("renew active lease: %w", err)
@@ -211,12 +227,12 @@ func (loop *ControlLoop) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// Busy reports whether the runner is at its concurrency capacity.
 func (loop *ControlLoop) Busy() bool {
 	if loop == nil || loop.Offers == nil {
 		return false
 	}
-	_, active := loop.Offers.ActiveLease()
-	return active
+	return loop.Offers.ActiveCount() >= loop.Offers.Capacity()
 }
 
 func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
@@ -282,26 +298,27 @@ func terminalPayload(status string, result Result, usage map[string]any) map[str
 func (loop *ControlLoop) finish(lease control.Lease) bool {
 	loop.mu.Lock()
 	defer loop.mu.Unlock()
-	if loop.active == nil || loop.active.lease.JobID != lease.JobID || loop.active.lease.Generation != lease.Generation {
+	active, ok := loop.active[lease.JobID]
+	if !ok || active.lease.Generation != lease.Generation {
 		return false
 	}
-	loop.active.terminal = true
-	cancelled := loop.active.cancelled
-	loop.active = nil
+	active.terminal = true
+	cancelled := active.cancelled
+	delete(loop.active, lease.JobID)
 	return cancelled
 }
 
 func (loop *ControlLoop) cancelExpired(lease control.Lease) {
 	loop.mu.Lock()
-	active := loop.active
-	if active == nil || active.lease.JobID != lease.JobID || active.lease.Generation != lease.Generation {
+	active, ok := loop.active[lease.JobID]
+	if !ok || active.lease.Generation != lease.Generation {
 		loop.mu.Unlock()
 		return
 	}
 	active.cancelled = true
 	active.terminal = true
 	active.cancel()
-	loop.active = nil
+	delete(loop.active, lease.JobID)
 	loop.mu.Unlock()
 	if dispatcher, ok := loop.Dispatcher.(cancellableDispatcher); ok {
 		go func() { _ = dispatcher.Cancel(context.Background(), lease) }()

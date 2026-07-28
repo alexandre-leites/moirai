@@ -171,17 +171,22 @@ func TestControlLoopLogsOfferCorrelationFields(t *testing.T) {
 
 func loopOffer(t *testing.T) *runnerv1.JobOffer {
 	t.Helper()
+	return loopOfferFor(t, "job-1", "execution-1", "project-1")
+}
+
+func loopOfferFor(t *testing.T, jobID, executionID, projectID string) *runnerv1.JobOffer {
+	t.Helper()
 	contents, err := json.Marshal(taskpacket.Packet{
 		ProtocolVersion: taskpacket.ProtocolVersion,
-		JobID:           "job-1", ExecutionID: "execution-1", Role: taskpacket.RoleDeveloper,
+		JobID:           jobID, ExecutionID: executionID, Role: taskpacket.RoleDeveloper,
 		Objective: "Implement task", Issue: taskpacket.Issue{ExternalID: "7", Title: "Task", Body: "Body"},
-		Repository: taskpacket.Repository{ProjectID: "project-1", Mode: "managed_clone", URL: "https://example.test/repo.git", DefaultBranch: "main", Branch: "agent/issue-7/run-1"},
+		Repository: taskpacket.Repository{ProjectID: projectID, Mode: "managed_clone", URL: "https://example.test/repo.git", DefaultBranch: "main", Branch: "agent/issue-7/run-1"},
 		PromptPath: ".loop/prompt.md", ExpectedOutput: ".loop/result.json", TimeoutSeconds: 60,
 	})
 	if err != nil {
 		t.Fatalf("encode packet: %v", err)
 	}
-	return &runnerv1.JobOffer{JobId: "job-1", LeaseGeneration: 1, TaskPacketJson: string(contents)}
+	return &runnerv1.JobOffer{JobId: jobID, LeaseGeneration: 1, TaskPacketJson: string(contents)}
 }
 
 func waitForEvents(t *testing.T, client *loopClient, count int) {
@@ -392,4 +397,45 @@ func TestControlLoopFlushesBufferedEventsAfterReconnectBeforeLeaseExpiry(t *test
 	}
 	loop.Cancel("execution-1", 1)
 	waitForEvents(t, client, 2)
+}
+
+func TestControlLoopWithCapacityRunsExecutionsForDifferentProjectsConcurrently(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	dispatcher := &staticDispatcher{result: Result{Status: "completed"}}
+	loop, err := NewControlLoopWithCapacity(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "", 2)
+	if err != nil {
+		t.Fatalf("NewControlLoopWithCapacity() error = %v", err)
+	}
+
+	first := loopOfferFor(t, "job-1", "execution-1", "project-1")
+	second := loopOfferFor(t, "job-2", "execution-2", "project-2")
+	for _, offer := range []*runnerv1.JobOffer{first, second} {
+		if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+			t.Fatalf("Handle(offer %s) error = %v", offer.GetJobId(), err)
+		}
+	}
+	client.mu.Lock()
+	if len(client.accepted) != 2 {
+		t.Fatalf("accepted = %#v, want both offers accepted under capacity 2", client.accepted)
+	}
+	client.mu.Unlock()
+
+	for _, offer := range []*runnerv1.JobOffer{first, second} {
+		ack := &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}
+		if err := loop.Handle(context.Background(), ack); err != nil {
+			t.Fatalf("Handle(acknowledgement %s) error = %v", offer.GetJobId(), err)
+		}
+	}
+	waitForEvents(t, client, 4)
+
+	dispatcher.mu.Lock()
+	calls := dispatcher.calls
+	dispatcher.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("dispatcher calls = %d, want 2 concurrent executions", calls)
+	}
+	if loop.Busy() {
+		t.Fatal("loop reports busy after both leases were consumed to capacity and completed")
+	}
 }

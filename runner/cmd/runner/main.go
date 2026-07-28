@@ -155,6 +155,7 @@ func run(ctx context.Context) error {
 		settings.RegistrationToken,
 		settings.RunnerName,
 		settings.Labels,
+		settings.Capacity,
 	)
 	if err != nil {
 		return fmt.Errorf("bootstrap runner identity: %w", err)
@@ -164,7 +165,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create runner control client: %w", err)
 	}
 	projects := dispatch.NewProjectConcurrencyGuard()
-	loop, err := dispatch.NewControlLoopWithOutbox(
+	loop, err := dispatch.NewControlLoopWithCapacity(
 		client,
 		dispatch.Dispatcher{
 			Workspaces:         repository.Manager{DataDirectory: settings.DataDir},
@@ -182,6 +183,7 @@ func run(ctx context.Context) error {
 		15*time.Second,
 		settings.RedactionPrefixes,
 		settings.EventOutboxPath(),
+		settings.Capacity,
 	)
 	if err != nil {
 		return fmt.Errorf("create runner dispatch loop: %w", err)

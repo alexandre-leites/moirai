@@ -9,22 +9,23 @@ from uuid import uuid4
 @dataclass
 class RunnerSession:
     runner_id: str
+    capacity: int = 1
     token: str = field(default_factory=lambda: str(uuid4()))
     _messages: asyncio.Queue[Any | None] = field(default_factory=asyncio.Queue)
-    _offered_job_id: str | None = None
+    _offered_job_ids: set[str] = field(default_factory=set)
     _closed: bool = False
 
     @property
-    def offered_job_id(self) -> str | None:
-        return self._offered_job_id
+    def offered_job_ids(self) -> frozenset[str]:
+        return frozenset(self._offered_job_ids)
 
     async def next_message(self) -> Any | None:
         return await self._messages.get()
 
     def deliver_offer(self, job_id: str, message: Any) -> bool:
-        if self._closed or self._offered_job_id is not None:
+        if self._closed or len(self._offered_job_ids) >= self.capacity:
             return False
-        self._offered_job_id = job_id
+        self._offered_job_ids.add(job_id)
         self._messages.put_nowait(message)
         return True
 
@@ -35,9 +36,9 @@ class RunnerSession:
         return True
 
     def clear_offer(self, job_id: str) -> bool:
-        if self._offered_job_id != job_id:
+        if job_id not in self._offered_job_ids:
             return False
-        self._offered_job_id = None
+        self._offered_job_ids.discard(job_id)
         return True
 
     def close(self) -> None:
@@ -51,8 +52,8 @@ class RunnerSessionRegistry:
         self._sessions: dict[str, RunnerSession] = {}
         self._lock = asyncio.Lock()
 
-    async def connect(self, runner_id: str) -> RunnerSession:
-        session = RunnerSession(runner_id)
+    async def connect(self, runner_id: str, capacity: int = 1) -> RunnerSession:
+        session = RunnerSession(runner_id, capacity=max(1, capacity))
         async with self._lock:
             previous = self._sessions.get(runner_id)
             self._sessions[runner_id] = session

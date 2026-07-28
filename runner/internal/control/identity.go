@@ -13,7 +13,7 @@ type IdentityStore struct {
 	Path string
 }
 
-func LoadOrRegister(ctx context.Context, store IdentityStore, service ControlService, token, name string, labels []string) (Identity, error) {
+func LoadOrRegister(ctx context.Context, store IdentityStore, service ControlService, token, name string, labels []string, capacity int) (Identity, error) {
 	identity, err := store.Load()
 	if err == nil {
 		return identity, nil
@@ -24,7 +24,7 @@ func LoadOrRegister(ctx context.Context, store IdentityStore, service ControlSer
 	if token == "" {
 		return Identity{}, errors.New("runner registration token is required when no stored identity exists")
 	}
-	identity, err = Register(ctx, service, token, name, labels)
+	identity, err = Register(ctx, service, token, name, labels, capacity)
 	if err != nil {
 		return Identity{}, fmt.Errorf("register runner: %w", err)
 	}

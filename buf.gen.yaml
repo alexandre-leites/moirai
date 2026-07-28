@@ -10,5 +10,7 @@ plugins:
       - module=github.com/loop-engineering/contracts
   - plugin: buf.build/protocolbuffers/python
     out: orchestrator/src/moirai/protocols
+  - plugin: buf.build/protocolbuffers/pyi
+    out: orchestrator/src/moirai/protocols
   - plugin: buf.build/grpc/python
     out: orchestrator/src/moirai/protocols

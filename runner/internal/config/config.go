@@ -38,6 +38,7 @@ type Config struct {
 	TLSClientKeyFile     string
 	TLSServerName        string
 	MinimumFreeBytes     uint64
+	Capacity             int
 	RedactionPrefixes    []string
 	DockerEnabled        bool
 	WorkspaceRetention   []string
@@ -72,6 +73,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		ReconnectMin:         defaultReconnectMin,
 		ReconnectMax:         defaultReconnectMax,
 		MinimumFreeBytes:     1 << 30,
+		Capacity:             1,
 		AgentBackend:         envOrDefault(lookupEnv, "LOOP_RUNNER_AGENT_BACKEND", "opencode"),
 		AgentBinary:          envValue(lookupEnv, "LOOP_RUNNER_AGENT_BINARY"),
 		AgentDockerImage:     envValue(lookupEnv, "LOOP_RUNNER_AGENT_DOCKER_IMAGE"),
@@ -113,6 +115,9 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 	if config.MinimumFreeBytes, err = uint64Env(lookupEnv, "LOOP_RUNNER_MINIMUM_FREE_BYTES", config.MinimumFreeBytes); err != nil {
 		return Config{}, err
 	}
+	if config.Capacity, err = intEnv(lookupEnv, "LOOP_RUNNER_CAPACITY", config.Capacity); err != nil {
+		return Config{}, err
+	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -150,6 +155,9 @@ func (c Config) Validate() error {
 	}
 	if c.AgentBackend == "docker" && (c.AgentDockerImage == "" || hasUnsafeText(c.AgentDockerImage)) {
 		return errors.New("runner Docker agent image is invalid")
+	}
+	if c.Capacity < 1 {
+		return errors.New("runner capacity must be a positive integer")
 	}
 	return nil
 }
@@ -208,6 +216,18 @@ func uint64Env(lookupEnv func(string) (string, bool), key string, defaultValue u
 	}
 	parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
 	if err != nil || parsed == 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+func intEnv(lookupEnv func(string) (string, bool), key string, defaultValue int) (int, error) {
+	value, ok := lookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < 1 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
 	}
 	return parsed, nil

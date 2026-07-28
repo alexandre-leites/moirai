@@ -27,6 +27,7 @@ type RegisterRunnerRequest struct {
 	Name            string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	Labels          []string               `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty"`
 	ProtocolVersion string                 `protobuf:"bytes,4,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
+	Capacity        int32                  `protobuf:"varint,5,opt,name=capacity,proto3" json:"capacity,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -87,6 +88,13 @@ func (x *RegisterRunnerRequest) GetProtocolVersion() string {
 		return x.ProtocolVersion
 	}
 	return ""
+}
+
+func (x *RegisterRunnerRequest) GetCapacity() int32 {
+	if x != nil {
+		return x.Capacity
+	}
+	return 0
 }
 
 type RegisterRunnerResponse struct {
@@ -853,12 +861,13 @@ var File_proto_runner_control_proto protoreflect.FileDescriptor
 
 const file_proto_runner_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/runner_control.proto\x12\x0eloop.runner.v1\"\x84\x01\n" +
+	"\x1aproto/runner_control.proto\x12\x0eloop.runner.v1\"\xa0\x01\n" +
 	"\x15RegisterRunnerRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n" +
 	"\x06labels\x18\x03 \x03(\tR\x06labels\x12)\n" +
-	"\x10protocol_version\x18\x04 \x01(\tR\x0fprotocolVersion\"U\n" +
+	"\x10protocol_version\x18\x04 \x01(\tR\x0fprotocolVersion\x12\x1a\n" +
+	"\bcapacity\x18\x05 \x01(\x05R\bcapacity\"U\n" +
 	"\x16RegisterRunnerResponse\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1e\n" +
 	"\n" +

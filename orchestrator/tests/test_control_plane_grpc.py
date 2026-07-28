@@ -5,6 +5,7 @@ try:
     import grpc
 
     from moirai.main import register_services
+    from moirai.persistence.authentication import AuthenticatedSession, SessionCredentials
     from proto import control_plane_pb2, control_plane_pb2_grpc, runner_control_pb2_grpc
 except ModuleNotFoundError:
     grpc = None
@@ -14,24 +15,30 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class FakeControlPlane:
+    """Implements moirai.grpc.protocol.ControlPlane for tests."""
+
     def __init__(self) -> None:
         self.token_labels: tuple[str, ...] | None = None
         self.token_expiry: datetime | None = None
 
-    async def login(self, username: str, password: str, now: datetime) -> tuple[str, str]:
+    async def login(self, username: str, password: str, now: datetime) -> SessionCredentials:
         if username != "admin" or password != "correct":
             raise PermissionError()
         self.login_at = now
-        return "session-token", "user-1"
+        return SessionCredentials(session_token="session-token", csrf_token="csrf-token", user_id="user-1", expires_at=now)
 
     async def validate_session(
         self, session_token: str, csrf_token: str | None, now: datetime, require_csrf: bool
-    ) -> dict[str, str]:
-        del csrf_token, now, require_csrf
+    ) -> AuthenticatedSession:
+        del csrf_token, require_csrf
         if session_token == "admin-session":
-            return {"role": "admin", "user_id": "00000000-0000-0000-0000-000000000099"}
+            return AuthenticatedSession(
+                id="session-1", user_id="00000000-0000-0000-0000-000000000099", username="admin", role="admin", expires_at=now
+            )
         if session_token == "viewer-session":
-            return {"role": "viewer", "user_id": "00000000-0000-0000-0000-000000000098"}
+            return AuthenticatedSession(
+                id="session-2", user_id="00000000-0000-0000-0000-000000000098", username="viewer", role="viewer", expires_at=now
+            )
         raise PermissionError()
 
     async def list_projects(self) -> list[dict[str, object]]:
@@ -116,17 +123,22 @@ class FakeControlPlane:
             }
         ]
 
+    async def list_runners(self) -> list[dict[str, object]]:
+        return []
+
 
 @unittest.skipIf(grpc is None, "grpcio is not installed")
-class _MissingListProjects:
-    """Has validate_session but not list_projects — returns UNIMPLEMENTED."""
-    async def validate_session(
-        self, session_token: str, csrf_token: str | None, now: datetime, require_csrf: bool
-    ) -> dict[str, str]:
-        del csrf_token, now, require_csrf
-        if session_token == "admin-session":
-            return {"role": "admin", "user_id": "u1"}
-        raise PermissionError()
+class _UnsupportedListProjects(FakeControlPlane):
+    """Fully implements ControlPlane but declines list_projects explicitly.
+
+    Distinguishes "this control plane intentionally doesn't support this
+    operation" (a NotImplementedError raised from a real, typed method) from
+    a renamed/missing method, which is now a `make typecheck` failure instead
+    of a silent runtime UNIMPLEMENTED.
+    """
+
+    async def list_projects(self) -> list[dict[str, object]]:
+        raise NotImplementedError("list_projects")
 
 
 @unittest.skipIf(grpc is None, "grpcio is not installed")
@@ -231,12 +243,12 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
 
-    async def test_maps_login_failures_and_missing_capabilities_to_typed_errors(self) -> None:
+    async def test_maps_login_failures_and_declined_capabilities_to_typed_errors(self) -> None:
         with self.assertRaises(grpc.aio.AioRpcError) as rejected:
             await self.client.Login(control_plane_pb2.LoginRequest(username="admin", password="wrong"))
         self.assertEqual(rejected.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
         missing_server = grpc.aio.server()
-        register_services(missing_server, _MissingListProjects())
+        register_services(missing_server, _UnsupportedListProjects())
         port = missing_server.add_insecure_port("127.0.0.1:0")
         await missing_server.start()
         channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
