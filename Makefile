@@ -1,5 +1,6 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
 VENV ?= .venv
+MYPY_CACHE ?= /tmp/moirai-mypy-cache
 
 .PHONY: help test lint typecheck validate compose dev-install \
         proto-lint proto-generate proto-check \
@@ -35,7 +36,8 @@ lint: dev-install
 	$(VENV)/bin/python3 -m ruff check orchestrator/src orchestrator/tests
 
 typecheck: dev-install
-	$(VENV)/bin/python3 -m mypy orchestrator/src
+	rm -rf "$(MYPY_CACHE)"
+	$(VENV)/bin/python3 -m mypy --cache-dir="$(MYPY_CACHE)" orchestrator/src
 
 build-runner:
 	cd runner && go build ./cmd/runner

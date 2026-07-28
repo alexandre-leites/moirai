@@ -68,7 +68,6 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		OrchestratorEndpoint: envOrDefault(lookupEnv, "LOOP_ORCHESTRATOR_ENDPOINT", "orchestrator:50051"),
 		DataDir:              envOrDefault(lookupEnv, "LOOP_RUNNER_DATA_DIR", defaultDataDir),
 		RunnerName:           envOrDefault(lookupEnv, "LOOP_RUNNER_NAME", name),
-		RegistrationToken:    envValue(lookupEnv, "LOOP_RUNNER_REGISTRATION_TOKEN"),
 		HeartbeatInterval:    defaultHeartbeatInterval,
 		ReconnectMin:         defaultReconnectMin,
 		ReconnectMax:         defaultReconnectMax,
@@ -81,6 +80,9 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		TLSClientCertFile:    envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE"),
 		TLSClientKeyFile:     envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE"),
 		TLSServerName:        envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_SERVER_NAME"),
+	}
+	if config.RegistrationToken, err = secretFileValue(lookupEnv, "LOOP_RUNNER_REGISTRATION_TOKEN"); err != nil {
+		return Config{}, err
 	}
 	if config.Labels, err = parseLabels(envValue(lookupEnv, "LOOP_RUNNER_LABELS")); err != nil {
 		return Config{}, err
@@ -179,6 +181,29 @@ func validateTLS(config Config) error {
 		return errors.New("runner TLS server name is invalid")
 	}
 	return nil
+}
+
+func secretFileValue(lookupEnv func(string) (string, bool), key string) (string, error) {
+	path := envValue(lookupEnv, key+"_FILE")
+	if path == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(path) || hasUnsafeText(path) {
+		return "", fmt.Errorf("%s_FILE must be an absolute safe path", key)
+	}
+	metadata, err := os.Stat(path)
+	if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 16_384 {
+		return "", fmt.Errorf("%s_FILE cannot be read", key)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s_FILE cannot be read", key)
+	}
+	value := strings.TrimSpace(string(contents))
+	if value == "" || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("%s_FILE contains an invalid token", key)
+	}
+	return value, nil
 }
 
 func envOrDefault(lookupEnv func(string) (string, bool), key, defaultValue string) string {

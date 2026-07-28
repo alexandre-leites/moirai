@@ -263,8 +263,15 @@ func TestControlLoopCancelsMatchingActiveExecution(t *testing.T) {
 	waitForEvents(t, client, 2)
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if client.events[1].GetType() != "cancelled" || loop.Busy() {
-		t.Fatalf("events = %#v, busy = %v", client.events, loop.Busy())
+	if client.events[1].GetType() != "cancelled" {
+		t.Fatalf("events = %#v", client.events)
+	}
+	deadline := time.Now().Add(time.Second)
+	for loop.Busy() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if loop.Busy() {
+		t.Fatal("loop remained busy after cancelled execution completed")
 	}
 }
 

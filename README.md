@@ -1,6 +1,6 @@
 # Moirai Platform
 
-Moirai is a self-hosted control plane for durable software-engineering workflows. The orchestrator schedules eligible issues, runners execute isolated work, and the API and web dashboard expose administration and workflow state.
+Moirai is a self-hosted control plane for durable, autonomous software-engineering workflows. See [`PROJECT.md`](PROJECT.md) for the architecture and product scope.
 
 ## Architecture
 
@@ -12,18 +12,26 @@ Moirai is a self-hosted control plane for durable software-engineering workflows
 
 ## Local stack
 
+Prerequisites: Docker Engine with the Compose plugin and a GitHub token that can access the repository you intend to automate.
+
 ```bash
 cp .env.example .env
 mkdir -p secrets
-printf '%s' 'database-password' > secrets/postgres_password
-printf '%s' 'postgresql://loop:database-password@postgres/loop' > secrets/database_url
-printf '%s' 'admin-password' > secrets/initial_admin_password
-printf '%s' 'github-token' > secrets/github_token
-# Set RUNNER_REGISTRATION_TOKEN in .env to a generated secret.
-docker compose up --build
+printf '%s\n' 'choose-a-strong-postgres-password' > secrets/postgres_password
+printf '%s\n' 'postgresql+asyncpg://loop:choose-a-strong-postgres-password@postgres:5432/loop' > secrets/database_url
+printf '%s\n' 'choose-a-strong-admin-password' > secrets/initial_admin_password
+printf '%s\n' 'github-token-with-repo-and-workflow-scopes' > secrets/github_token
+openssl rand -hex 32 > secrets/runner_registration_token
+chmod 600 secrets/*
+docker compose up --build -d
+docker compose ps
+curl --fail http://localhost:3000/
+curl --fail http://localhost:8080/ready
 ```
 
-The Compose configuration mounts secrets as files. The orchestrator reads the database URL, initial admin password, and GitHub token through their `_FILE` settings. A configured GitHub token is verified with `gh auth status` when the orchestrator starts.
+`docker compose ps` reports every service as healthy once startup completes. The API port is bound to loopback for local diagnostics; use the web endpoint on port 3000 for normal browser access. Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to remove local database and runner data.
+
+Compose reads passwords, tokens, and registration credentials only from the files in `secrets/`. Do not put their values in `.env` or shell environment variables. The `.env` file contains non-secret configuration only; its `${...}` values are the variables Compose reads.
 
 The API is published at `http://localhost:8080`; the dashboard is published at `http://localhost:3000`. Compose disables the API secure-cookie setting only because this development topology terminates no TLS.
 

@@ -20,7 +20,7 @@ dependencies = [
 # ruff and mypy are capped: CI gates on them, and an unpinned linter/type
 # checker turns any upstream release (new default rules, stricter inference)
 # into a red build on an unrelated commit. Raise the caps deliberately.
-dev = ["pytest>=8.2", "ruff>=0.5,<0.17", "mypy>=1.10,<2.4", "types-grpcio>=1.0", "types-protobuf>=5.27", "asyncpg-stubs>=0.29"]
+dev = ["pytest>=8.2", "ruff>=0.5,<0.16", "mypy>=1.10,<2.4", "types-grpcio>=1.0", "types-protobuf>=5.27", "asyncpg-stubs>=0.29"]
 
 [tool.setuptools.package-data]
 "moirai.workflows" = ["schemas/*.schema.json"]
@@ -33,7 +33,7 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py312"
 # Generated protobuf/grpc code -- not hand-maintained, not worth linting.
-extend-exclude = ["src/moirai/protocols/proto"]
+extend-exclude = ["src/moirai/protocols/proto", "src/proto"]
 
 [tool.ruff.lint]
 ignore = [
@@ -43,7 +43,8 @@ ignore = [
     # rewrites the embedded SQL heredocs purely for style; ruff itself offers
     # no safe autofix for these sites.
     "SIM117",
-    "EXE002",
+"EXE002",
+    "E402",
 ]
 
 [tool.mypy]

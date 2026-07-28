@@ -15,12 +15,14 @@ class LoginRequest(_message.Message):
     def __init__(self, username: _Optional[str] = ..., password: _Optional[str] = ...) -> None: ...
 
 class LoginResponse(_message.Message):
-    __slots__ = ("session_token", "user_id")
+    __slots__ = ("session_token", "user_id", "csrf_token")
     SESSION_TOKEN_FIELD_NUMBER: _ClassVar[int]
     USER_ID_FIELD_NUMBER: _ClassVar[int]
+    CSRF_TOKEN_FIELD_NUMBER: _ClassVar[int]
     session_token: str
     user_id: str
-    def __init__(self, session_token: _Optional[str] = ..., user_id: _Optional[str] = ...) -> None: ...
+    csrf_token: str
+    def __init__(self, session_token: _Optional[str] = ..., user_id: _Optional[str] = ..., csrf_token: _Optional[str] = ...) -> None: ...
 
 class WhoAmIRequest(_message.Message):
     __slots__ = ()

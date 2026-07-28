@@ -9,6 +9,9 @@ services:
     secrets: [postgres_password]
     volumes: [postgres-data:/var/lib/postgresql/data]
     networks: [database]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, DAC_READ_SEARCH, FOWNER, SETGID, SETUID]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U loop -d loop"]
       interval: 10s
@@ -27,16 +30,19 @@ services:
       LOOP_INITIAL_ADMIN_USERNAME: "${LOOP_INITIAL_ADMIN_USERNAME:-admin}"
       LOOP_INITIAL_ADMIN_PASSWORD_FILE: /run/secrets/initial_admin_password
       LOOP_GITHUB_TOKEN_FILE: /run/secrets/github_token
+      RUNNER_REGISTRATION_TOKEN_FILE: /run/secrets/runner_registration_token
       LOOP_SEED_PROJECT_NAME: "${LOOP_SEED_PROJECT_NAME:-demo}"
-      RUNNER_REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
       LOOP_SEED_PROJECT_REPOSITORY_URL: "${LOOP_SEED_PROJECT_REPOSITORY_URL}"
       LOOP_SEED_TOKEN_LABELS: "${LOOP_SEED_TOKEN_LABELS:-linux}"
       LOOP_SEED_ISSUE_TITLE: "${LOOP_SEED_ISSUE_TITLE:-}"
       LOOP_SEED_ISSUE_BODY: "${LOOP_SEED_ISSUE_BODY:-}"
-    secrets: [database_url, initial_admin_password, github_token]
+    secrets: [database_url, initial_admin_password, github_token, runner_registration_token]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [database, control]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json')); sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else 1)\""]
       interval: 15s
@@ -55,7 +61,9 @@ services:
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/ready || exit 1"]
       interval: 15s
@@ -70,8 +78,10 @@ services:
       api: {condition: service_healthy}
     networks: [public]
     ports: ["3000:8080"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -84,15 +94,28 @@ services:
     restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
-      LOOP_RUNNER_REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
+      LOOP_RUNNER_REGISTRATION_TOKEN_FILE: /run/secrets/runner_registration_token
       LOOP_RUNNER_NAME: "${LOOP_RUNNER_NAME:-runner-1}"
       LOOP_RUNNER_LABELS: "${LOOP_RUNNER_LABELS:-linux}"
       LOOP_RUNNER_CAPACITY: "${LOOP_RUNNER_CAPACITY:-1}"
       LOOP_RUNNER_AGENT_ARGUMENTS: "--model,opencode/deepseek-v4-flash-free,--auto"
+    secrets: [runner_registration_token]
+    read_only: true
+    tmpfs:
+      - /run:mode=0755
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]
     volumes: [runner-data:/data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    healthcheck:
+      test: ["CMD", "/runner", "live"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -117,3 +140,5 @@ secrets:
     file: ./secrets/initial_admin_password
   github_token:
     file: ./secrets/github_token
+  runner_registration_token:
+    file: ./secrets/runner_registration_token

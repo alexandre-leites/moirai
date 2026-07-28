@@ -30,7 +30,8 @@ class FakeControlPlane:
     async def validate_session(
         self, session_token: str, csrf_token: str | None, now: datetime, require_csrf: bool
     ) -> AuthenticatedSession:
-        del csrf_token, require_csrf
+        if require_csrf and csrf_token != "csrf-token":
+            raise PermissionError()
         if session_token == "admin-session":
             return AuthenticatedSession(
                 id="session-1", user_id="00000000-0000-0000-0000-000000000099", username="admin", role="admin", expires_at=now
@@ -182,11 +183,12 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.session_token, "session-token")
         self.assertEqual(response.user_id, "user-1")
+        self.assertEqual(response.csrf_token, "csrf-token")
         self.assertIsNotNone(self.runner_client.Connect)
 
     async def test_who_am_i_returns_the_authenticated_session(self) -> None:
         response = await self.client.WhoAmI(
-            control_plane_pb2.WhoAmIRequest(), metadata=(("x-loop-session", "admin-session"),)
+            control_plane_pb2.WhoAmIRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(response.user_id, "00000000-0000-0000-0000-000000000099")
         self.assertEqual(response.username, "admin")
@@ -197,7 +199,7 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_maps_typed_responses_and_validates_runner_token_requests(self) -> None:
         projects = await self.client.ListProjects(
-            control_plane_pb2.ListProjectsRequest(), metadata=(("x-loop-session", "admin-session"),)
+            control_plane_pb2.ListProjectsRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual([(project.id, project.name, project.enabled) for project in projects.projects], [("project-1", "Example", True)])
         created = await self.client.CreateProject(
@@ -210,7 +212,7 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                     required_runner_labels=["docker"],
                 )
             ),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual((created.project.id, created.project.name, created.project.enabled), ("project-2", "Created", True))
         updated = await self.client.UpdateProject(
@@ -224,17 +226,17 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                     required_runner_labels=["linux"],
                 ),
             ),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(updated.project.name, "Renamed")
         disabled = await self.client.SetProjectEnabled(
             control_plane_pb2.SetProjectEnabledRequest(project_id="project-2", enabled=False),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertFalse(disabled.project.enabled)
         token = await self.client.CreateRunnerRegistrationToken(
             control_plane_pb2.CreateRunnerRegistrationTokenRequest(allowed_labels=["docker", "linux"]),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(token.token, "runner-token")
         self.assertEqual(token.expires_at, (NOW + timedelta(minutes=15)).isoformat())
@@ -242,23 +244,23 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.control_plane.token_actor, "00000000-0000-0000-0000-000000000099")
         tokens = await self.client.ListRunnerRegistrationTokens(
             control_plane_pb2.ListRunnerRegistrationTokensRequest(),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(tokens.tokens[0].id, "token-1")
         revoked = await self.client.RevokeRunnerRegistrationToken(
             control_plane_pb2.RevokeRunnerRegistrationTokenRequest(token_id="token-1"),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(revoked.token.id, "token-1")
         self.assertEqual(self.control_plane.revoked_token[1], "00000000-0000-0000-0000-000000000099")
         workflows = await self.client.ListWorkflows(
-            control_plane_pb2.ListWorkflowsRequest(), metadata=(("x-loop-session", "admin-session"),)
+            control_plane_pb2.ListWorkflowsRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(workflows.workflows[0].phase, "prepare_workspace")
         with self.assertRaises(grpc.aio.AioRpcError) as invalid:
             await self.client.CreateRunnerRegistrationToken(
                 control_plane_pb2.CreateRunnerRegistrationTokenRequest(allowed_labels=["docker", "docker"]),
-                metadata=(("x-loop-session", "admin-session"),),
+                metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(invalid.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
@@ -266,10 +268,16 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
             await self.client.ListProjects(control_plane_pb2.ListProjectsRequest())
         self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+        with self.assertRaises(grpc.aio.AioRpcError) as missing_csrf:
+            await self.client.CreateRunnerRegistrationToken(
+                control_plane_pb2.CreateRunnerRegistrationTokenRequest(allowed_labels=["docker"]),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(missing_csrf.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
         with self.assertRaises(grpc.aio.AioRpcError) as viewer:
             await self.client.CreateRunnerRegistrationToken(
                 control_plane_pb2.CreateRunnerRegistrationTokenRequest(allowed_labels=["docker"]),
-                metadata=(("x-loop-session", "viewer-session"),),
+                metadata=(("x-loop-session", "viewer-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
 
@@ -287,7 +295,7 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(grpc.aio.AioRpcError) as unavailable:
                 await missing_client.ListProjects(
                     control_plane_pb2.ListProjectsRequest(),
-                    metadata=(("x-loop-session", "admin-session"),),
+                    metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
                 )
             self.assertEqual(unavailable.exception.code(), grpc.StatusCode.UNIMPLEMENTED)
         finally:
@@ -316,7 +324,7 @@ class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
             control_plane_pb2.SubmitHumanDecisionRequest(
                 workflow_run_id="workflow-waiting", decision="approved", comment="ship it",
             ),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(
             self.control_plane.recorded_decision,
@@ -332,7 +340,7 @@ class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
             control_plane_pb2.SubmitHumanDecisionRequest(
                 workflow_run_id="workflow-waiting", decision="changes_requested",
             ),
-            metadata=(("x-loop-session", "admin-session"),),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(self.workflow_runtime.resumed_with, ("workflow-waiting", {
             "human_approved": False, "human_changes_requested": True,
@@ -343,7 +351,7 @@ class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(grpc.aio.AioRpcError) as invalid:
             await self.client.SubmitHumanDecision(
                 control_plane_pb2.SubmitHumanDecisionRequest(workflow_run_id="workflow-waiting", decision="maybe"),
-                metadata=(("x-loop-session", "admin-session"),),
+                metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(invalid.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
@@ -358,7 +366,7 @@ class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(grpc.aio.AioRpcError) as failed_precondition:
             await self.client.SubmitHumanDecision(
                 control_plane_pb2.SubmitHumanDecisionRequest(workflow_run_id="workflow-other", decision="approved"),
-                metadata=(("x-loop-session", "admin-session"),),
+                metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(failed_precondition.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
 
@@ -375,7 +383,7 @@ class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
                     control_plane_pb2.SubmitHumanDecisionRequest(
                         workflow_run_id="workflow-waiting", decision="approved"
                     ),
-                    metadata=(("x-loop-session", "admin-session"),),
+                    metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
                 )
             self.assertEqual(unimplemented.exception.code(), grpc.StatusCode.UNIMPLEMENTED)
         finally:

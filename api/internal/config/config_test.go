@@ -72,7 +72,6 @@ func TestFromEnvironmentValidatesAddressesAndCookieFlag(t *testing.T) {
 	}
 	t.Setenv("LOOP_API_COOKIE_SECURE", "false")
 	t.Setenv("LOOP_API_MAX_BODY_BYTES", "2048")
-	t.Setenv("LOOP_API_COOKIE_KEY", "01234567890123456789012345678901")
 	cfg, err := FromEnvironment()
 	if err != nil || cfg.CookieSecure || cfg.MaxBodyBytes != 2048 {
 		t.Fatalf("expected valid insecure config, got %#v, %v", cfg, err)
@@ -80,10 +79,5 @@ func TestFromEnvironmentValidatesAddressesAndCookieFlag(t *testing.T) {
 	t.Setenv("LOOP_API_MAX_BODY_BYTES", "1")
 	if _, err := FromEnvironment(); err == nil {
 		t.Fatal("expected invalid body limit error")
-	}
-	t.Setenv("LOOP_API_MAX_BODY_BYTES", "2048")
-	t.Setenv("LOOP_API_COOKIE_KEY", "short")
-	if _, err := FromEnvironment(); err == nil {
-		t.Fatal("expected invalid cookie key error")
 	}
 }

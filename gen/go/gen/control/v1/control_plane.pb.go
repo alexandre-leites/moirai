@@ -77,6 +77,7 @@ type LoginResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionToken  string                 `protobuf:"bytes,1,opt,name=session_token,json=sessionToken,proto3" json:"session_token,omitempty"`
 	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	CsrfToken     string                 `protobuf:"bytes,3,opt,name=csrf_token,json=csrfToken,proto3" json:"csrf_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -121,6 +122,13 @@ func (x *LoginResponse) GetSessionToken() string {
 func (x *LoginResponse) GetUserId() string {
 	if x != nil {
 		return x.UserId
+	}
+	return ""
+}
+
+func (x *LoginResponse) GetCsrfToken() string {
+	if x != nil {
+		return x.CsrfToken
 	}
 	return ""
 }
@@ -1504,10 +1512,12 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x19proto/control_plane.proto\x12\x0floop.control.v1\"F\n" +
 	"\fLoginRequest\x12\x1a\n" +
 	"\busername\x18\x01 \x01(\tR\busername\x12\x1a\n" +
-	"\bpassword\x18\x02 \x01(\tR\bpassword\"M\n" +
+	"\bpassword\x18\x02 \x01(\tR\bpassword\"l\n" +
 	"\rLoginResponse\x12#\n" +
 	"\rsession_token\x18\x01 \x01(\tR\fsessionToken\x12\x17\n" +
-	"\auser_id\x18\x02 \x01(\tR\x06userId\"\x0f\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1d\n" +
+	"\n" +
+	"csrf_token\x18\x03 \x01(\tR\tcsrfToken\"\x0f\n" +
 	"\rWhoAmIRequest\"Y\n" +
 	"\x0eWhoAmIResponse\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1a\n" +

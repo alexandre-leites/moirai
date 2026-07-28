@@ -130,10 +130,14 @@ printf simulated > runner-proof.txt
 	runnerv1.RegisterRunnerControlServer(grpcServer, server)
 	go grpcServer.Serve(listener)
 	t.Cleanup(func() { grpcServer.Stop(); listener.Close() })
+	registrationTokenFile := filepath.Join(t.TempDir(), "registration-token")
+	if err := os.WriteFile(registrationTokenFile, []byte("registration-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("LOOP_ORCHESTRATOR_ENDPOINT", listener.Addr().String())
 	t.Setenv("LOOP_RUNNER_DATA_DIR", dataDir)
 	t.Setenv("LOOP_RUNNER_NAME", "runner-integration")
-	t.Setenv("LOOP_RUNNER_REGISTRATION_TOKEN", "registration-token")
+	t.Setenv("LOOP_RUNNER_REGISTRATION_TOKEN_FILE", registrationTokenFile)
 	t.Setenv("LOOP_RUNNER_AGENT_BACKEND", "cli")
 	t.Setenv("LOOP_RUNNER_AGENT_BINARY", agent)
 	t.Setenv("LOOP_RUNNER_HEARTBEAT_INTERVAL", "20ms")
