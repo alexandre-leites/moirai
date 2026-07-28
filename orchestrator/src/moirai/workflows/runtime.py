@@ -13,7 +13,13 @@ class WorkflowCheckpointStore(Protocol):
 
 
 class WorkflowGraph(Protocol):
-    def ainvoke(self, state: dict[str, object], config: dict[str, object]) -> Awaitable[dict[str, object]]: ...
+    def ainvoke(
+        self, state: dict[str, object] | None, config: dict[str, object]
+    ) -> Awaitable[dict[str, object]]: ...
+
+    def aupdate_state(
+        self, config: dict[str, object], values: dict[str, object]
+    ) -> Awaitable[object]: ...
 
 
 def build_persisted_runtime(
@@ -36,6 +42,9 @@ def build_persisted_runtime(
         interrupt_after=interrupt_after,
         interrupt_before=interrupt_before,
     )
+    # build_issue_graph() intentionally returns `object` so this module does not
+    # need langgraph's own (RunnableConfig-keyed) types. WorkflowGraph describes
+    # the subset of the real CompiledStateGraph API this runtime depends on.
     return PersistedWorkflowRuntime(cast(WorkflowGraph, graph), persistence, has_checkpointer=checkpointer is not None)
 
 
@@ -48,7 +57,7 @@ class PersistedWorkflowRuntime:
     async def run(self, workflow_run_id: str, initial_state: dict[str, object]) -> dict[str, object]:
         if not workflow_run_id:
             raise ValueError("workflow run ID is required")
-        config = {"configurable": {"thread_id": workflow_run_id}}
+        config: dict[str, object] = {"configurable": {"thread_id": workflow_run_id}}
 
         _TERMINAL_STATUSES = frozenset({"blocked", "completed", "cancelled", "failed"})
 
@@ -65,7 +74,7 @@ class PersistedWorkflowRuntime:
                     state["workflow_run_id"] = workflow_run_id
                     result = self._graph.ainvoke(state, config)
                 else:
-                    update = await self._graph.aupdate_state(config, initial_state)
+                    await self._graph.aupdate_state(config, initial_state)
                     result = self._graph.ainvoke(None, config)
         else:
             checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
