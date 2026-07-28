@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -25,14 +26,19 @@ func ReconcileManifests(dataDirectory string) error {
 	for _, path := range paths {
 		contents, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read execution manifest: %w", err)
+			slog.Warn("skip unreadable stale execution manifest", "path", path, "error", err)
+			continue
 		}
 		var manifest executionManifest
 		if err := json.Unmarshal(contents, &manifest); err != nil || manifest.ExecutionID == "" || manifest.PID < 1 {
-			return errors.New("execution manifest is invalid")
+			slog.Warn("discard invalid stale execution manifest", "path", path)
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				slog.Warn("remove invalid stale execution manifest", "path", path, "error", removeErr)
+			}
+			continue
 		}
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove execution manifest: %w", err)
+			slog.Warn("remove stale execution manifest", "path", path, "error", err)
 		}
 	}
 	return nil

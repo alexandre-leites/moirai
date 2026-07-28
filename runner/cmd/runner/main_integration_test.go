@@ -102,7 +102,7 @@ func TestRunnerAgainstSimulatedOrchestratorReconnectsAfterControlStreamInterrupt
 func testRunnerAgainstSimulatedOrchestrator(t *testing.T, cancel, dropAfterStarted bool, terminalType string) {
 	t.Helper()
 	repositoryURL := createRemoteRepository(t)
-	dataDir := t.TempDir()
+	dataDir := runnerDataDirectory(t)
 	agent := filepath.Join(t.TempDir(), "agent.sh")
 	script := `#!/bin/sh
 mkdir -p .loop
@@ -136,6 +136,7 @@ printf simulated > runner-proof.txt
 	t.Setenv("LOOP_RUNNER_REGISTRATION_TOKEN", "registration-token")
 	t.Setenv("LOOP_RUNNER_AGENT_BACKEND", "cli")
 	t.Setenv("LOOP_RUNNER_AGENT_BINARY", agent)
+	t.Setenv("LOOP_RUNNER_DOCKER_ENABLED", "false")
 	t.Setenv("LOOP_RUNNER_HEARTBEAT_INTERVAL", "20ms")
 	t.Setenv("LOOP_RUNNER_RECONNECT_MIN", "10ms")
 	t.Setenv("LOOP_RUNNER_RECONNECT_MAX", "20ms")
@@ -145,7 +146,7 @@ printf simulated > runner-proof.txt
 	defer stop()
 	runResult := make(chan error, 1)
 	go func() { runResult <- run(ctx) }()
-	registered := receiveRegistration(t, server.registered)
+	registered := receiveRegistration(t, server.registered, runResult)
 	if registered.GetToken() != "registration-token" || registered.GetName() != "runner-integration" || registered.GetProtocolVersion() != "1.0" {
 		t.Fatalf("registration = %#v", registered)
 	}
@@ -180,11 +181,14 @@ printf simulated > runner-proof.txt
 	}
 }
 
-func receiveRegistration(t *testing.T, registrations <-chan *runnerv1.RegisterRunnerRequest) *runnerv1.RegisterRunnerRequest {
+func receiveRegistration(t *testing.T, registrations <-chan *runnerv1.RegisterRunnerRequest, runResult <-chan error) *runnerv1.RegisterRunnerRequest {
 	t.Helper()
 	select {
 	case registration := <-registrations:
 		return registration
+	case err := <-runResult:
+		t.Fatalf("runner stopped before registration: %v", err)
+		return nil
 	case <-time.After(3 * time.Second):
 		t.Fatal("runner did not register")
 		return nil
@@ -209,6 +213,16 @@ func receiveTerminalEvents(t *testing.T, messages <-chan *runnerv1.RunnerToOrche
 		}
 	}
 	return events
+}
+
+func runnerDataDirectory(t *testing.T) string {
+	t.Helper()
+	directory, err := os.MkdirTemp("/dev/shm", "moirai-runner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return directory
 }
 
 func createRemoteRepository(t *testing.T) string {

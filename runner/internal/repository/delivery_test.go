@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +35,48 @@ func TestCommitStagesChangesAndPushesValidatedBranch(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(joined, "\n"), "add -A -- . :!.loop :!.loop/**") || !strings.Contains(strings.Join(joined, "\n"), "commit -m loop: implement issue 7") || !strings.Contains(strings.Join(joined, "\n"), "push --set-upstream origin agent/issue-7/run-1") {
 		t.Fatalf("delivery commands = %#v", commands)
+	}
+}
+
+func TestCommitAndPushUseRunnerIdentityWithoutAmbientGitConfiguration(t *testing.T) {
+	root := t.TempDir()
+	working := filepath.Join(root, "working")
+	remote := filepath.Join(root, "remote.git")
+	runRealGit(t, root, "init", "-b", "main", working)
+	if err := os.WriteFile(filepath.Join(working, "README.md"), []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, working, "add", "README.md")
+	runRealGit(t, working, "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid", "commit", "-m", "initial")
+	runRealGit(t, root, "init", "--bare", remote)
+	runRealGit(t, working, "remote", "add", "origin", remote)
+	runRealGit(t, working, "push", "origin", "main")
+	if err := os.WriteFile(filepath.Join(working, "delivery.txt"), []byte("delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{GitCommitterName: "Moirai Runner", GitCommitterEmail: "runner@example.invalid"}
+	workspace := Workspace{Repository: working}
+	result, err := manager.Commit(context.Background(), workspace, "runner delivery")
+	if err != nil || !result.Committed {
+		t.Fatalf("Commit() = %#v, %v", result, err)
+	}
+	pushed, err := manager.Push(context.Background(), workspace, "main", nil)
+	if err != nil || !pushed.Pushed {
+		t.Fatalf("Push() = %#v, %v", pushed, err)
+	}
+	command := exec.Command("git", "--git-dir", remote, "log", "-1", "--format=%an <%ae>", "refs/heads/main")
+	output, err := command.Output()
+	if err != nil || strings.TrimSpace(string(output)) != "Moirai Runner <runner@example.invalid>" {
+		t.Fatalf("pushed commit identity = %q, %v", output, err)
+	}
+}
+
+func runRealGit(t *testing.T, directory string, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	command.Dir = directory
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", arguments, err, output)
 	}
 }
 

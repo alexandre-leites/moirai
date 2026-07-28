@@ -46,6 +46,24 @@ type Config struct {
 	AgentBinary          string
 	AgentArguments       []string
 	AgentDockerImage     string
+	GitCommitterName     string
+	GitCommitterEmail    string
+	LeaseDuration        time.Duration
+	LeaseRenewalLead     time.Duration
+	OfferTimeout         time.Duration
+	ReconnectGrace       time.Duration
+	EventBufferSize      int
+	EventPayloadBytes    int
+	LogChunkBytes        int
+	MaxLogBytes          int
+	TerminationGrace     time.Duration
+	DockerCPULimit       string
+	DockerMemoryLimit    string
+	DockerNetwork        string
+	DockerStopTimeout    time.Duration
+	RepositoryLockPoll   time.Duration
+	CleanupAttempts      int
+	CleanupRetryDelay    time.Duration
 }
 
 func (c Config) IdentityPath() string {
@@ -77,6 +95,22 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		AgentBackend:         envOrDefault(lookupEnv, "LOOP_RUNNER_AGENT_BACKEND", "opencode"),
 		AgentBinary:          envValue(lookupEnv, "LOOP_RUNNER_AGENT_BINARY"),
 		AgentDockerImage:     envValue(lookupEnv, "LOOP_RUNNER_AGENT_DOCKER_IMAGE"),
+		GitCommitterName:     envOrDefault(lookupEnv, "LOOP_RUNNER_GIT_COMMITTER_NAME", "moirai-runner"),
+		GitCommitterEmail:    envOrDefault(lookupEnv, "LOOP_RUNNER_GIT_COMMITTER_EMAIL", "moirai-runner@localhost"),
+		LeaseDuration:        time.Minute,
+		LeaseRenewalLead:     15 * time.Second,
+		OfferTimeout:         30 * time.Second,
+		ReconnectGrace:       time.Minute,
+		EventBufferSize:      128,
+		EventPayloadBytes:    16 * 1024,
+		LogChunkBytes:        6 * 1024,
+		MaxLogBytes:          4 << 20,
+		TerminationGrace:     5 * time.Second,
+		DockerNetwork:        "bridge",
+		DockerStopTimeout:    10 * time.Second,
+		RepositoryLockPoll:   25 * time.Millisecond,
+		CleanupAttempts:      3,
+		CleanupRetryDelay:    250 * time.Millisecond,
 		TLSCAFile:            envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CA_FILE"),
 		TLSClientCertFile:    envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE"),
 		TLSClientKeyFile:     envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE"),
@@ -106,6 +140,40 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 	if config.ReconnectMax, err = durationEnv(lookupEnv, "LOOP_RUNNER_RECONNECT_MAX", config.ReconnectMax); err != nil {
 		return Config{}, err
 	}
+	for _, value := range []struct {
+		key    string
+		target *time.Duration
+	}{
+		{"LOOP_RUNNER_LEASE_DURATION", &config.LeaseDuration},
+		{"LOOP_RUNNER_LEASE_RENEWAL_LEAD", &config.LeaseRenewalLead},
+		{"LOOP_RUNNER_OFFER_TIMEOUT", &config.OfferTimeout},
+		{"LOOP_RUNNER_RECONNECT_GRACE", &config.ReconnectGrace},
+		{"LOOP_RUNNER_TERMINATION_GRACE", &config.TerminationGrace},
+		{"LOOP_RUNNER_DOCKER_STOP_TIMEOUT", &config.DockerStopTimeout},
+		{"LOOP_RUNNER_REPOSITORY_LOCK_POLL", &config.RepositoryLockPoll},
+		{"LOOP_RUNNER_CLEANUP_RETRY_DELAY", &config.CleanupRetryDelay},
+	} {
+		if *value.target, err = durationEnv(lookupEnv, value.key, *value.target); err != nil {
+			return Config{}, err
+		}
+	}
+	for _, value := range []struct {
+		key    string
+		target *int
+	}{
+		{"LOOP_RUNNER_EVENT_BUFFER_SIZE", &config.EventBufferSize},
+		{"LOOP_RUNNER_EVENT_PAYLOAD_BYTES", &config.EventPayloadBytes},
+		{"LOOP_RUNNER_LOG_CHUNK_BYTES", &config.LogChunkBytes},
+		{"LOOP_RUNNER_MAX_LOG_BYTES", &config.MaxLogBytes},
+		{"LOOP_RUNNER_CLEANUP_ATTEMPTS", &config.CleanupAttempts},
+	} {
+		if *value.target, err = intEnv(lookupEnv, value.key, *value.target); err != nil {
+			return Config{}, err
+		}
+	}
+	config.DockerCPULimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_CPU_LIMIT")
+	config.DockerMemoryLimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_MEMORY_LIMIT")
+	config.DockerNetwork = envOrDefault(lookupEnv, "LOOP_RUNNER_DOCKER_NETWORK", config.DockerNetwork)
 	if config.TLS, err = boolEnv(lookupEnv, "LOOP_ORCHESTRATOR_TLS", false); err != nil {
 		return Config{}, err
 	}
@@ -153,11 +221,23 @@ func (c Config) Validate() error {
 	if c.AgentBackend == "cli" && (c.AgentBinary == "" || hasUnsafeText(c.AgentBinary)) {
 		return errors.New("runner CLI agent binary is invalid")
 	}
-	if c.AgentBackend == "docker" && (c.AgentDockerImage == "" || hasUnsafeText(c.AgentDockerImage)) {
+	if (c.AgentBackend == "docker" || c.DockerEnabled) && (c.AgentDockerImage == "" || hasUnsafeText(c.AgentDockerImage)) {
 		return errors.New("runner Docker agent image is invalid")
 	}
 	if c.Capacity < 1 {
 		return errors.New("runner capacity must be a positive integer")
+	}
+	if hasUnsafeText(c.GitCommitterName) || hasUnsafeText(c.GitCommitterEmail) || !strings.Contains(c.GitCommitterEmail, "@") {
+		return errors.New("runner git committer identity is invalid")
+	}
+	if c.LeaseRenewalLead >= c.LeaseDuration {
+		return errors.New("runner lease renewal lead must be shorter than lease duration")
+	}
+	if c.EventBufferSize < 1 || c.EventPayloadBytes < 1 || c.LogChunkBytes < 1 || c.MaxLogBytes < 1 || c.CleanupAttempts < 1 {
+		return errors.New("runner sizing configuration is invalid")
+	}
+	if hasUnsafeText(c.DockerNetwork) || hasUnsafeText(c.DockerCPULimit) && c.DockerCPULimit != "" || hasUnsafeText(c.DockerMemoryLimit) && c.DockerMemoryLimit != "" {
+		return errors.New("runner Docker configuration is invalid")
 	}
 	return nil
 }

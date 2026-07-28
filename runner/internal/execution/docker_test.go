@@ -36,11 +36,10 @@ func TestDockerExecutorBuildsRestrictedRunCommand(t *testing.T) {
 	want := []string{
 		"run", "--rm", "--init", "--name", dockerContainerName("execution-1"),
 		"--workdir", "/workspace", "--mount", "type=bind,src=" + workspace + ",dst=/workspace",
-		"--network", "none", "--cpus", "2", "--memory", "1g",
-		"--env", "A=first", "--env", "B=second", "example/agent:1", "/bin/sh", "-c", "true",
+		"--network", "bridge", "--cpus", "2", "--memory", "1g", "--env-file",
 	}
-	if strings.Join(arguments, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("docker arguments = %#v, want %#v", arguments, want)
+	if len(arguments) != len(want)+5 || strings.Join(arguments[:len(want)], "\n") != strings.Join(want, "\n") || strings.Contains(strings.Join(arguments, "\n"), "A=first") || strings.Contains(strings.Join(arguments, "\n"), "B=second") {
+		t.Fatalf("docker arguments = %#v", arguments)
 	}
 }
 
@@ -82,7 +81,7 @@ func TestDockerExecutorTimeoutStopsContainer(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Execute() error = %v, want deadline exceeded", err)
 	}
-	if !strings.Contains(strings.Join(readDockerArguments(t, recorded), "\n"), "stop\n--time\n5\n"+dockerContainerName("execution-timeout")) {
+	if !strings.Contains(strings.Join(readDockerArguments(t, recorded), "\n"), "stop\n--time\n10\n"+dockerContainerName("execution-timeout")) {
 		t.Fatalf("expected Docker stop command, got %q", readDockerArguments(t, recorded))
 	}
 }
