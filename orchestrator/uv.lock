@@ -557,7 +557,6 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5,<0.17" },
->>>>>>> origin/agent/api-transport-observability
     { name = "types-grpcio", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "types-protobuf", marker = "extra == 'dev'", specifier = ">=5.27" },
 ]

@@ -320,7 +320,7 @@ async def serve(
 
         await _bootstrap_initial_setup(pool)
         await _seed_issue_if_needed(pool)
-        from moirai.issue_trackers.github_cli import SubprocessCommandRunner, verify_gh_ready
+        from moirai.issue_trackers.github_cli import GitHubCliUnavailableError, SubprocessCommandRunner, verify_gh_ready
         from moirai.scheduler import AsyncpgLeader, Scheduler
         from moirai.services.issue_sync import IssueSync, github_issue_tracker_for_project
         from moirai.workflows.code_host_factory import ProjectCodeHostFactory
@@ -328,7 +328,10 @@ async def serve(
 
         github_runner = SubprocessCommandRunner(active_config.github_token)
         if active_config.github_token is not None:
-            await verify_gh_ready(github_runner)
+            try:
+                await verify_gh_ready(github_runner)
+            except GitHubCliUnavailableError:
+                _LOGGER.warning("GitHub CLI is not authenticated; issue sync and code host operations will fail")
         code_hosts = ProjectCodeHostFactory(pool, command_runner=github_runner)
         checkpointer = await _build_checkpointer(active_config.database_url)
         health.mark_checkpointer(checkpointer is not None)
