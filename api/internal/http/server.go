@@ -10,6 +10,10 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/loop-engineering/api/internal/orchestrator"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
@@ -53,10 +57,11 @@ func (c Config) Validate() error {
 }
 
 type Server struct {
-	cfg    Config
-	mux    *http.ServeMux
-	srv    *http.Server
-	logger *slog.Logger
+	cfg     Config
+	mux     *http.ServeMux
+	srv     *http.Server
+	logger  *slog.Logger
+	metrics *prometheus.Registry
 }
 
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
@@ -68,10 +73,20 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 	}
 	mux := http.NewServeMux()
 	s := &Server{
-		cfg:    cfg,
-		mux:    mux,
-		logger: logger,
+		cfg:     cfg,
+		mux:     mux,
+		logger:  logger,
+		metrics: prometheus.NewRegistry(),
 	}
+	for _, gauge := range []prometheus.Gauge{
+		prometheus.NewGauge(prometheus.GaugeOpts{Name: "moirai_queue_depth", Help: "Eligible issue queue depth"}),
+		prometheus.NewGauge(prometheus.GaugeOpts{Name: "moirai_active_workflow_count", Help: "Active workflow count"}),
+		prometheus.NewGauge(prometheus.GaugeOpts{Name: "moirai_runner_heartbeat_age_seconds", Help: "Age of the oldest runner heartbeat"}),
+	} {
+		gauge.Set(0)
+		s.metrics.MustRegister(gauge)
+	}
+	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.metrics, promhttp.HandlerOpts{}))
 	srv := &http.Server{
 		Addr:         cfg.BindAddress,
 		Handler:      s.withMiddleware(mux),
@@ -138,6 +153,7 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 			requestID = newRequestID()
 		}
 		w.Header().Set(requestIDHeader, requestID)
+		r = r.WithContext(orchestrator.WithRequestID(r.Context(), requestID))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")

@@ -16,14 +16,29 @@ class OrchestratorConfig:
     database_url: str
     grpc_bind: str
     github_token: str | None = None
+    grpc_tls_cert_file: str | None = None
+    grpc_tls_key_file: str | None = None
+    grpc_tls_client_ca_file: str | None = None
+    metrics_bind: str = "0.0.0.0:9090"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> OrchestratorConfig:
         values = os.environ if environment is None else environment
+        cert_file = read_optional_secret(values, "LOOP_GRPC_TLS_CERT_FILE")
+        key_file = read_optional_secret(values, "LOOP_GRPC_TLS_KEY_FILE")
+        client_ca_file = read_optional_secret(values, "LOOP_GRPC_TLS_CLIENT_CA_FILE")
+        if (cert_file is None) != (key_file is None):
+            raise ConfigurationError("LOOP_GRPC_TLS_CERT_FILE and LOOP_GRPC_TLS_KEY_FILE must be configured together")
+        if client_ca_file is not None and cert_file is None:
+            raise ConfigurationError("LOOP_GRPC_TLS_CLIENT_CA_FILE requires server TLS")
         return cls(
             database_url=read_secret(values, "LOOP_DATABASE_URL"),
             grpc_bind=read_bind(values.get("LOOP_GRPC_BIND", "0.0.0.0:50051")),
             github_token=read_optional_secret(values, "LOOP_GITHUB_TOKEN"),
+            grpc_tls_cert_file=cert_file,
+            grpc_tls_key_file=key_file,
+            grpc_tls_client_ca_file=client_ca_file,
+            metrics_bind=read_bind(values.get("LOOP_METRICS_BIND", "0.0.0.0:9090")),
         )
 
 

@@ -25,7 +25,9 @@ func main() {
 		os.Exit(1)
 	}
 	dialContext, cancelDial := context.WithTimeout(context.Background(), 10*time.Second)
-	client, err := orchestrator.Dial(dialContext, runtimeConfig.OrchestratorEndpoint)
+	client, err := orchestrator.DialWithTLS(dialContext, runtimeConfig.OrchestratorEndpoint, orchestrator.TLSOptions{
+		Enabled: runtimeConfig.OrchestratorTLS, CAFile: runtimeConfig.OrchestratorTLSCAFile, ServerName: runtimeConfig.OrchestratorTLSServerName,
+	})
 	cancelDial()
 	if err != nil {
 		logger.Error("orchestrator connection error", "error", err)

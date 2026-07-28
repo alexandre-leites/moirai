@@ -8,12 +8,14 @@ import os
 import signal
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-logging.basicConfig(level=logging.INFO, format='%(message)s', force=True)
-_LOGGER = logging.getLogger(__name__)
-
 from .config import OrchestratorConfig
+from .observability import CorrelationLoggingInterceptor, Metrics, configure_logging
+
+configure_logging()
+_LOGGER = logging.getLogger(__name__)
 from .health import HealthState
 
 if TYPE_CHECKING:
@@ -251,6 +253,20 @@ def _log_unexpected_completion(name: str, health: HealthState, shutdown: asyncio
     shutdown.set()
 
 
+def _bind_grpc_endpoint(server: Any, config: OrchestratorConfig) -> int:
+    if config.grpc_tls_cert_file is None:
+        return server.add_insecure_port(config.grpc_bind)
+    import grpc
+
+    certificate_chain = Path(config.grpc_tls_cert_file).read_bytes()
+    private_key = Path(config.grpc_tls_key_file or "").read_bytes()
+    client_ca = None if config.grpc_tls_client_ca_file is None else Path(config.grpc_tls_client_ca_file).read_bytes()
+    credentials = grpc.ssl_server_credentials(
+        [(private_key, certificate_chain)], root_certificates=client_ca, require_client_auth=client_ca is not None
+    )
+    return server.add_secure_port(config.grpc_bind, credentials)
+
+
 async def serve(
     config: OrchestratorConfig | None = None,
     stop_event: asyncio.Event | None = None,
@@ -261,11 +277,14 @@ async def serve(
     from moirai.persistence.control_plane import AsyncpgControlPlane
 
     active_config = config or OrchestratorConfig.from_environment()
+    metrics = Metrics()
+    metrics.start(active_config.metrics_bind)
+    metrics.update()
     shutdown = stop_event or asyncio.Event()
     factory = control_plane_factory or AsyncpgControlPlane.connect
     control_plane = await factory(active_config.database_url)
     health = HealthState()
-    server = grpc.aio.server()
+    server = grpc.aio.server(interceptors=(CorrelationLoggingInterceptor(),))
     workflow_runtime: Any | None = None
 
     scheduler_task: asyncio.Task[None] | None = None
@@ -355,7 +374,7 @@ async def serve(
             "(migrations, workflow checkpointing, scheduling, issue sync) — running in reduced capacity"
         )
         register_services(server, control_plane)
-    port = server.add_insecure_port(active_config.grpc_bind)
+    port = _bind_grpc_endpoint(server, active_config)
     if port == 0:
         shutdown.set()
         if scheduler_task is not None:

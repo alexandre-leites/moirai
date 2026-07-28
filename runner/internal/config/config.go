@@ -46,6 +46,7 @@ type Config struct {
 	AgentBinary          string
 	AgentArguments       []string
 	AgentDockerImage     string
+	MetricsBind          string
 }
 
 func (c Config) IdentityPath() string {
@@ -81,6 +82,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		TLSClientCertFile:    envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE"),
 		TLSClientKeyFile:     envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE"),
 		TLSServerName:        envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_SERVER_NAME"),
+		MetricsBind:          envOrDefault(lookupEnv, "LOOP_RUNNER_METRICS_BIND", ":9091"),
 	}
 	if config.Labels, err = parseLabels(envValue(lookupEnv, "LOOP_RUNNER_LABELS")); err != nil {
 		return Config{}, err
@@ -134,6 +136,9 @@ func (c Config) Validate() error {
 	}
 	if _, _, err := net.SplitHostPort(c.OrchestratorEndpoint); err != nil {
 		return errors.New("runner orchestrator endpoint must include a host and port")
+	}
+	if _, _, err := net.SplitHostPort(c.MetricsBind); err != nil {
+		return errors.New("runner metrics bind must include a host and port")
 	}
 	if hasUnsafeText(c.DataDir) || !filepath.IsAbs(c.DataDir) {
 		return errors.New("runner data directory must be an absolute safe path")

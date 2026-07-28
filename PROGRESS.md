@@ -2,77 +2,73 @@
 
 ## Current Status
 
-- Overall status: Complete; PR preparation
-- Current phase: Core workflow correctness
-- Active implementation: None
+- Overall status: PR #75 review remediation in progress.
+- Current phase: production-readiness hardening.
+- Active implementation: GitHub issues #64, #65, and #66.
 - Last updated: 2026-07-28
-- Agent/session identifier: agent/workflow-correctness
+- Agent/session identifier: agent/api-transport-observability
 
 ## In Progress
 
-- [ ] Monitor the workflow-correctness PR CI and merge when green.
+- [ ] Resolve PR #75 independent review findings
   - Started: 2026-07-28
-  - Relevant files: GitHub Actions / PR checks
-  - Current state: Local orchestrator validation is green; PR pending creation.
-  - Remaining work: Push, create PR, resolve CI, merge.
-  - Definition of done: Non-draft PR is mergeable and merged.
-  - Targeted validation: GitHub Actions checks.
+  - Relevant files: `orchestrator/src/moirai`, `orchestrator/tests`, `runner/internal/control`
+  - Current state: rebased onto `origin/main`; implementing live control-plane metrics and TLS integration coverage.
+  - Remaining work: validation, push, and CI monitoring.
+  - Definition of done: metrics are backed by control-plane state and a runner↔orchestrator mTLS integration test passes.
+  - Targeted validation: orchestrator tests, runner TLS tests, lint, and typecheck.
 
 ## Done
 
 - [x] Resolve core workflow correctness issues #37, #38, #39, #45, #46, #47, #58
   - Completed: 2026-07-28
-  - Relevant files: `orchestrator/migrations/`, `orchestrator/src/moirai/{persistence,workflows,grpc}/`, `runner/internal/`, `api/Dockerfile`, `runner/Dockerfile`
-  - Behavior delivered: Unique stable migrations; durable seeded graph state; terminal lock release; retryable transient outbox failures; dedicated pipeline execution and persistence; pending-check polling state; idempotent merge; reachable human approval state.
-  - Validation performed: 267 orchestrator tests plus 6 subtests; targeted Ruff lint; runner taskpacket/dispatch tests.
-  - Commands executed: `/tmp/opencode/moirai-workflow-venv/bin/pytest -q`; `/tmp/opencode/moirai-workflow-venv/bin/ruff check --ignore EXE002 src tests`; `go test ./internal/taskpacket ./internal/dispatch`.
-  - Notes: `mypy` reports existing generated-protobuf and unrelated strict errors; Docker Compose build is blocked by host disk exhaustion after correcting stale Go 1.24 images to Go 1.25.
+  - Validation performed: 267 orchestrator tests, targeted Ruff, runner taskpacket/dispatch tests.
+
+- [x] Structured logging, metrics, request correlation, and config-gated TLS
+  - Completed: 2026-07-28
+  - Behavior delivered: JSON logs retain extras, API propagates request IDs, and TLS/mTLS is config-gated across API, orchestrator, and runner.
+  - Validation performed: API and runner Go tests/builds; 258 orchestrator tests; ruff, mypy, and Compose configuration.
 
 ## Blocked
 
-- [ ] Full Docker Compose fresh-volume boot and runner integration binary test
-  - Reason: Host/containerd disk exhaustion.
-  - Evidence: `no space left on device` during Compose image export and Go linker output.
-  - Attempts made: Updated API and runner Docker builders from Go 1.24 to Go 1.25; rebuilt Compose.
-  - Required resolution: Free host Docker/build cache space, then rerun Compose and runner integration tests.
-  - Independent work still available: PR CI monitoring and merge.
+- [ ] Fresh Compose boot and runner integration image build
+  - Reason: Host/containerd disk exhaustion reported by the workflow-correctness workstream.
+  - Independent work still available: PR #75 review remediation.
 
 ## Pending Implementation
 
-- [ ] Continue next incomplete MVP requirement after this coherent workflow-correctness PR.
+- [ ] Continue next incomplete MVP requirement after PR #75.
 
 ## Quality Backlog
 
 ## Decisions
 
-- Decision: Treat pipeline execution as a dedicated runner role instead of accepting developer-agent exit status as a deterministic gate.
-  - Context: Issue #47.
-  - Reason: Keeps runner execution and pipeline result independently durable and deterministic.
+- Decision: Insecure gRPC remains the local-development default; TLS requires explicit configuration.
+  - Context: remote runners require secure transport while existing Compose development remains compatible.
+  - Reason: preserves compatibility and allows mTLS enforcement with a configured client CA.
 
-- Decision: Complete pending GitHub checks at a durable graph boundary and re-enter through the maintenance loop.
-  - Context: Issue #46.
-  - Reason: Avoids a busy graph self-loop while preserving a bounded 30-second reconciliation cadence.
+- Decision: Metrics collection reads state only through the orchestrator control plane.
+  - Context: database access belongs exclusively to the orchestrator.
+  - Reason: preserves service boundaries while providing meaningful operational gauges.
 
 ## Validation Status
 
-- Targeted tests: Passed — 138 tests for workflow-focused subset.
-- Service tests: Passed — 267 tests, 6 subtests.
-- Full repository tests: Not run.
-- Build: API/runner Docker builders corrected; Compose blocked by disk exhaustion.
-- Lint: Passed — Ruff with existing executable-bit EXE002 ignored.
-- Type checks: Blocked by 83 existing generated-protobuf and unrelated strict errors; no new errors in changed workflow modules.
-- Database migrations: Unit-tested; real Compose boot blocked by disk exhaustion.
-- Docker Compose: Blocked by disk exhaustion.
-- End-to-end workflow: Passed in orchestrator fake-adapter suite.
+- Targeted tests: pending review remediation.
+- Service tests: prior API/runner and orchestrator suites passed.
+- Full repository tests: not run.
+- Build: prior API/runner builds passed.
+- Lint: prior ruff passed with EXE002 ignored.
+- Type checks: prior mypy passed.
+- Database migrations: not applicable.
+- Docker Compose: configuration passed; fresh boot blocked by host disk exhaustion.
+- End-to-end workflow: prior orchestrator fake-adapter suite passed.
 
 ## Known Issues
 
-- Issue: Host disk exhaustion blocks Docker Compose and runner integration build.
+- Issue: Host disk exhaustion can block fresh Docker Compose verification.
   - Severity: Environment
-  - Impact: Cannot verify fresh-container boot locally.
-  - Evidence: `no space left on device` from Docker/containerd and Go linker.
-  - Suggested resolution: Free Docker build cache space and rerun the commands recorded above.
+  - Suggested resolution: Free Docker/build cache space before a fresh-container run.
 
 ## Next Recommended Implementation
 
-Monitor and merge the workflow-correctness PR; after host disk space is available, rerun `docker compose -p moiraiworkflowcorrectness up --build -d` and the runner integration suite, then continue the next MVP requirement.
+Finish PR #75 review remediation, push it, and monitor CI until clean and mergeable.

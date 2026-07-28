@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	apiserver "github.com/loop-engineering/api/internal/http"
@@ -75,6 +76,23 @@ func TestWriteErrorSetsCorrectStatusAndContentType(t *testing.T) {
 func TestDefaultConfigIsValid(t *testing.T) {
 	if err := apiserver.DefaultConfig().Validate(); err != nil {
 		t.Errorf("default config invalid: %v", err)
+	}
+}
+
+func TestMetricsExposesCoreGauges(t *testing.T) {
+	s, err := apiserver.New(apiserver.DefaultConfig(), nil)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	s.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics: got %d", rec.Code)
+	}
+	for _, name := range []string{"moirai_queue_depth", "moirai_active_workflow_count", "moirai_runner_heartbeat_age_seconds"} {
+		if !strings.Contains(rec.Body.String(), name) {
+			t.Errorf("metrics response missing %s", name)
+		}
 	}
 }
 

@@ -9,6 +9,9 @@ func TestFromEnvironmentDefaults(t *testing.T) {
 	t.Setenv("LOOP_API_BIND", "")
 	t.Setenv("LOOP_ORCHESTRATOR_ENDPOINT", "")
 	t.Setenv("LOOP_API_COOKIE_SECURE", "")
+	t.Setenv("LOOP_ORCHESTRATOR_TLS", "")
+	t.Setenv("LOOP_ORCHESTRATOR_TLS_CA_FILE", "")
+	t.Setenv("LOOP_ORCHESTRATOR_TLS_SERVER_NAME", "")
 	cfg, err := FromEnvironment()
 	if err != nil {
 		t.Fatalf("from environment: %v", err)
@@ -52,6 +55,20 @@ func TestFromEnvironmentTrustedProxies(t *testing.T) {
 	t.Setenv("LOOP_API_TRUSTED_PROXIES", "not-an-ip")
 	if _, err := FromEnvironment(); err == nil {
 		t.Fatal("expected invalid trusted proxy error")
+	}
+}
+
+func TestFromEnvironmentParsesOrchestratorTLS(t *testing.T) {
+	t.Setenv("LOOP_ORCHESTRATOR_TLS", "true")
+	t.Setenv("LOOP_ORCHESTRATOR_TLS_CA_FILE", "/etc/loop/ca.pem")
+	t.Setenv("LOOP_ORCHESTRATOR_TLS_SERVER_NAME", "orchestrator.internal")
+	cfg, err := FromEnvironment()
+	if err != nil || !cfg.OrchestratorTLS || cfg.OrchestratorTLSCAFile != "/etc/loop/ca.pem" {
+		t.Fatalf("unexpected TLS configuration: %#v, %v", cfg, err)
+	}
+	t.Setenv("LOOP_ORCHESTRATOR_TLS", "false")
+	if _, err := FromEnvironment(); err == nil {
+		t.Fatal("expected TLS options without TLS to be rejected")
 	}
 }
 
