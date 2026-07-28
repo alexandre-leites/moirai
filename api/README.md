@@ -3,6 +3,14 @@
 The API is the HTTP gateway for the orchestrator gRPC control plane. It serves browser sessions, validates JSON requests, and exposes management resources under `/api/v1`.
 
 ## HTTP contract
+## Operations
+
+`GET /metrics` exposes Prometheus metrics. API request IDs are forwarded to the orchestrator as gRPC `x-request-id` metadata.
+
+For TLS to the orchestrator, set `LOOP_ORCHESTRATOR_TLS=true`; optionally set `LOOP_ORCHESTRATOR_TLS_CA_FILE` and `LOOP_ORCHESTRATOR_TLS_SERVER_NAME`.
+
+## Testing
+
 
 [`openapi.yaml`](openapi.yaml) is the maintained OpenAPI 3.1 contract for every HTTP endpoint registered by this service. It documents health probes, authentication, projects, runner tokens, runners, and workflows.
 

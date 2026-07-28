@@ -16,19 +16,26 @@ import (
 const defaultTrustedProxies = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128"
 
 type Config struct {
-	BindAddress          string
-	OrchestratorEndpoint string
-	CookieSecure         bool
-	MaxBodyBytes         int64
-	TrustedProxies       []*net.IPNet
+	BindAddress               string
+	OrchestratorEndpoint      string
+	CookieSecure              bool
+	CookieKey                 string
+	MaxBodyBytes              int64
+	TrustedProxies            []*net.IPNet
+	OrchestratorTLS           bool
+	OrchestratorTLSCAFile     string
+	OrchestratorTLSServerName string
 }
 
 func FromEnvironment() (Config, error) {
 	cfg := Config{
-		BindAddress:          envOrDefault("LOOP_API_BIND", ":8080"),
-		OrchestratorEndpoint: envOrDefault("LOOP_ORCHESTRATOR_ENDPOINT", "orchestrator:50051"),
-		CookieSecure:         true,
-		MaxBodyBytes:         1 << 20,
+		BindAddress:               envOrDefault("LOOP_API_BIND", ":8080"),
+		OrchestratorEndpoint:      envOrDefault("LOOP_ORCHESTRATOR_ENDPOINT", "orchestrator:50051"),
+		CookieSecure:              true,
+		CookieKey:                 os.Getenv("LOOP_API_COOKIE_KEY"),
+		MaxBodyBytes:              1 << 20,
+		OrchestratorTLSCAFile:     os.Getenv("LOOP_ORCHESTRATOR_TLS_CA_FILE"),
+		OrchestratorTLSServerName: os.Getenv("LOOP_ORCHESTRATOR_TLS_SERVER_NAME"),
 	}
 	if value, ok := os.LookupEnv("LOOP_API_COOKIE_SECURE"); ok && value != "" {
 		parsed, err := strconv.ParseBool(value)
@@ -36,6 +43,13 @@ func FromEnvironment() (Config, error) {
 			return Config{}, errors.New("LOOP_API_COOKIE_SECURE must be a boolean")
 		}
 		cfg.CookieSecure = parsed
+	}
+	if value, ok := os.LookupEnv("LOOP_ORCHESTRATOR_TLS"); ok && value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, errors.New("LOOP_ORCHESTRATOR_TLS must be a boolean")
+		}
+		cfg.OrchestratorTLS = parsed
 	}
 	if value, ok := os.LookupEnv("LOOP_API_MAX_BODY_BYTES"); ok && value != "" {
 		parsed, err := strconv.ParseInt(value, 10, 64)
@@ -68,6 +82,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxBodyBytes < 1024 || c.MaxBodyBytes > 16<<20 {
 		return errors.New("LOOP_API_MAX_BODY_BYTES must be between 1024 and 16777216")
+	}
+	if c.CookieKey != "" && (len(c.CookieKey) < 32 || strings.ContainsAny(c.CookieKey, "\r\n\x00")) {
+		return errors.New("LOOP_API_COOKIE_KEY must be at least 32 printable bytes")
+	}
+	if !c.OrchestratorTLS && (c.OrchestratorTLSCAFile != "" || c.OrchestratorTLSServerName != "") {
+		return errors.New("orchestrator TLS options require LOOP_ORCHESTRATOR_TLS")
 	}
 	return nil
 }

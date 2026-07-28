@@ -17,6 +17,7 @@ import (
 	"github.com/loop-engineering/runner/internal/control"
 	"github.com/loop-engineering/runner/internal/dispatch"
 	"github.com/loop-engineering/runner/internal/health"
+	"github.com/loop-engineering/runner/internal/metrics"
 	"github.com/loop-engineering/runner/internal/repository"
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
@@ -155,6 +156,8 @@ func run(ctx context.Context) error {
 	if err := checkPrerequisites(settings); err != nil {
 		return err
 	}
+	metricsServer := metrics.New(settings.MetricsBind)
+	metricsServer.Start()
 	if err := agents.ReconcileManifests(settings.DataDir); err != nil {
 		return fmt.Errorf("reconcile runner executions: %w", err)
 	}
@@ -255,8 +258,14 @@ func run(ctx context.Context) error {
 		ReconnectMax:      settings.ReconnectMax,
 		Busy:              loop.Busy,
 		OnConnected:       loop.FlushEvents,
-		OnHeartbeat:       loop.Reconcile,
-		Settings:          streamSettings.Get,
+		OnHeartbeat: func() error {
+			if err := loop.Reconcile(); err != nil {
+				return err
+			}
+			metricsServer.MarkHeartbeat()
+			return nil
+		},
+		Settings: streamSettings.Get,
 	}.Run(runCtx)
 	if stored := dispatchErr.Load(); stored != nil {
 		return fmt.Errorf("runner dispatch loop stopped: %w", stored.(error))

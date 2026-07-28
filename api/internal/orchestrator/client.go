@@ -2,13 +2,17 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -26,25 +30,47 @@ type Client struct {
 	client controlv1.ControlPlaneClient
 }
 
-func WithSession(ctx context.Context, sessionToken string, csrfToken ...string) context.Context {
+type TLSOptions struct {
+	Enabled    bool
+	CAFile     string
+	ServerName string
+}
+
+type requestIDKey struct{}
+
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDKey{}, requestID)
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	requestID, _ := ctx.Value(requestIDKey{}).(string)
+	return requestID
+}
+
+func WithSession(ctx context.Context, sessionToken string) context.Context {
 	if sessionToken == "" {
 		return ctx
 	}
-	values := []string{"x-loop-session", sessionToken}
-	if len(csrfToken) > 0 && csrfToken[0] != "" {
-		values = append(values, "x-loop-csrf", csrfToken[0])
-	}
-	return metadata.AppendToOutgoingContext(ctx, values...)
+	return metadata.AppendToOutgoingContext(ctx, "x-loop-session", sessionToken)
 }
 
 func Dial(ctx context.Context, endpoint string) (*Client, error) {
+	return DialWithTLS(ctx, endpoint, TLSOptions{})
+}
+
+func DialWithTLS(ctx context.Context, endpoint string, options TLSOptions) (*Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("orchestrator endpoint is required")
+	}
+	transport, err := transportCredentials(options)
+	if err != nil {
+		return nil, err
 	}
 	conn, err := grpc.DialContext(
 		ctx,
 		endpoint,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(transport),
+		grpc.WithUnaryInterceptor(correlationInterceptor),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -54,6 +80,35 @@ func Dial(ctx context.Context, endpoint string) (*Client, error) {
 		conn:   conn,
 		client: controlv1.NewControlPlaneClient(conn),
 	}, nil
+}
+
+func correlationInterceptor(ctx context.Context, method string, request, reply any, conn *grpc.ClientConn, invoke grpc.UnaryInvoker, options ...grpc.CallOption) error {
+	if requestID := requestIDFromContext(ctx); requestID != "" {
+		ctx = metadata.AppendToOutgoingContext(ctx, "x-request-id", requestID)
+	}
+	return invoke(ctx, method, request, reply, conn, options...)
+}
+
+func transportCredentials(options TLSOptions) (credentials.TransportCredentials, error) {
+	if !options.Enabled {
+		if options.CAFile != "" || options.ServerName != "" {
+			return nil, errors.New("orchestrator TLS options require TLS")
+		}
+		return insecure.NewCredentials(), nil
+	}
+	config := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: options.ServerName}
+	if options.CAFile != "" {
+		contents, err := os.ReadFile(options.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read orchestrator TLS CA file: %w", err)
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(contents) {
+			return nil, errors.New("orchestrator TLS CA file contains no certificates")
+		}
+		config.RootCAs = roots
+	}
+	return credentials.NewTLS(config), nil
 }
 
 func (c *Client) Close() error {
