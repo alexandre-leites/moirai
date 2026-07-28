@@ -4,6 +4,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Self
+from uuid import uuid4
 
 from moirai.domain.control_plane import AuthenticationError, OfferError, RegistrationError
 from moirai.domain.leases import StaleLeaseError
@@ -172,6 +173,10 @@ class _DurableConnection:
                 return None
             self.pool.job_status = "cancelled"
             return {"workflow_run_id": self.pool.workflow_id, "project_id": self.pool.project_id}
+        if "SELECT state, opened_at FROM app.project_circuit_state" in query:
+            return self.pool.project_circuit
+        if "SELECT state, opened_at FROM app.provider_circuit_state" in query:
+            return self.pool.provider_circuit
         if "FROM app.issues AS i" in query:
             return self.pool.candidate
         if "UPDATE app.job_offers" in query:
@@ -229,6 +234,12 @@ class _DurableConnection:
 
     async def execute(self, query: str, *arguments: object) -> str:
         self.pool.queries.append(query)
+        if "SET state = 'half_open'" in query:
+            if "project_circuit_state" in query and self.pool.project_circuit is not None:
+                self.pool.project_circuit["state"] = "half_open"
+            if "provider_circuit_state" in query and self.pool.provider_circuit is not None:
+                self.pool.provider_circuit["state"] = "half_open"
+            return "UPDATE 1"
         if "UPDATE app.workflow_execution_requests" in query:
             if self.pool.execution_request_status != "queued":
                 return "UPDATE 0"
@@ -263,10 +274,13 @@ class _DurablePool:
         self.execution_request_id = "00000000-0000-0000-0000-000000000007"
         self.execution_request_status = "none"
         self.dispatched_requests: list[tuple[str, str, int]] = []
+        self.project_circuit: dict[str, object] | None = None
+        self.provider_circuit: dict[str, object] | None = None
         self.queries: list[str] = []
         self.candidate: dict[str, object] | None = {
             "issue_id": "00000000-0000-0000-0000-000000000004",
             "project_id": "00000000-0000-0000-0000-000000000005",
+            "provider": "github",
             "external_id": "42",
             "priority": 100,
             "external_created_at": NOW - timedelta(days=1),
@@ -477,6 +491,41 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled.offer.lease.generation, 1)
         self.assertTrue(any("INSERT INTO app.project_locks" in query for query in pool.queries))
         self.assertTrue(any("INSERT INTO app.job_offers" in query for query in pool.queries))
+
+    async def test_expired_circuits_allow_one_half_open_probe_and_block_another(self) -> None:
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        probe = await control_plane.schedule(NOW, timedelta(seconds=30))
+        duplicate = await control_plane.schedule(NOW, timedelta(seconds=30))
+
+        self.assertIsNotNone(probe)
+        self.assertIsNone(duplicate)
+        self.assertEqual(pool.project_circuit["state"], "half_open")
+        self.assertEqual(pool.provider_circuit["state"], "half_open")
+        self.assertEqual(sum("SET state = 'half_open'" in query for query in pool.queries), 2)
+
+    async def test_unexpired_open_circuit_is_not_eligible_for_a_probe(self) -> None:
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=4)}
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        self.assertFalse(await control_plane._claim_circuit_probes(
+            _DurableConnection(pool), pool.project_id, "github", uuid4(), NOW
+        ))
+
+    async def test_provider_probe_contention_does_not_claim_the_project_circuit(self) -> None:
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_circuit = {"state": "half_open", "opened_at": NOW - timedelta(minutes=5)}
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        self.assertFalse(await control_plane._claim_circuit_probes(
+            _DurableConnection(pool), pool.project_id, "github", uuid4(), NOW
+        ))
+        self.assertEqual(pool.project_circuit["state"], "open")
 
     async def test_accept_renew_and_fence_events_for_a_durable_job(self) -> None:
         pool = _DurablePool()

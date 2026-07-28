@@ -302,6 +302,50 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("42", issue_tracker.closed_issues)
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_runner_event_entry_point_seeds_runtime_and_completes_external_delivery(self) -> None:
+        from moirai.grpc.runner_control import RunnerControlService
+        from moirai.workflows.issue_graph import build_issue_graph
+        from moirai.workflows.nodes import PersistedWorkflowNodes
+        from moirai.workflows.runtime import PersistedWorkflowRuntime
+        from proto import runner_control_pb2
+
+        persistence = _EntryPointPersistence()
+        dispatcher = _FakeDispatcher()
+        code_host = _FakeCodeHost()
+        issue_tracker = _FakeIssueTracker()
+        runtime = PersistedWorkflowRuntime(
+            build_issue_graph(
+                PersistedWorkflowNodes(
+                    persistence,
+                    dispatcher,
+                    code_host_factory=lambda project_id: code_host,
+                    issue_tracker_factory=lambda project_id: issue_tracker,
+                ).build()
+            ),
+            persistence,
+        )
+        control_plane = _EntryPointControlPlane()
+        service = RunnerControlService(control_plane, now=lambda: NOW, workflow_runtime=runtime)
+        message = runner_control_pb2.RunnerToOrchestrator(
+            event=runner_control_pb2.ExecutionEvent(
+                job_id="job-entry",
+                lease_generation=1,
+                event_sequence=1,
+                type="completed",
+                execution_id="job-entry-implement",
+                payload_json='{"exitCode":0}',
+            )
+        )
+
+        await service._handle_message(message, "runner-entry")
+
+        self.assertEqual(control_plane.events[0].job_id, "job-entry")
+        self.assertGreaterEqual(len(code_host.created_prs), 1)
+        self.assertGreaterEqual(len(code_host.merged_prs), 1)
+        self.assertEqual(issue_tracker.closed_issues, ["42"])
+        self.assertTrue(persistence.checkpoints)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_repair_loop_routes_through_pipeline_after_developer_completes(self) -> None:
         """After developer completes with failed pipeline, the graph routes to repair."""
 
@@ -336,8 +380,8 @@ class _FakePersistence:
     def __init__(self) -> None:
         self.transitions: list[tuple[str, str, dict[str, object]]] = []
 
-    async def transition(self, workflow_run_id: str, status_key: str, updates: dict[str, object]) -> None:
-        self.transitions.append((workflow_run_id, status_key, updates))
+    async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
+        self.transitions.append((workflow_run_id, status, updates))
 
     async def dispatch(self, workflow_run_id: str, role: str, status_key: str, attempt_field: str | None) -> str:
         self.dispatches: list[tuple[str, str]] = getattr(self, "dispatches", [])
@@ -355,6 +399,43 @@ class _FakePersistence:
 
     async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
         return None
+
+
+class _EntryPointPersistence(_FakePersistence):
+    def __init__(self) -> None:
+        super().__init__()
+        self.checkpoints: list[dict[str, object]] = []
+
+    async def load_state(self, workflow_run_id: str) -> dict[str, object]:
+        return {
+            "workflow_run_id": workflow_run_id,
+            "project_id": "project-entry",
+            "issue_id": "42",
+            "status": "pushing",
+            "branch_name": "agent/42/entry",
+            "base_branch": "main",
+            "merge_method": "squash",
+            "plan_valid": True,
+            "pipeline_passed": True,
+            "review_approved": True,
+            "checks_passed": True,
+            "human_approval_required": False,
+        }
+
+    async def checkpoint(self, workflow_run_id: str, state: dict[str, object]) -> int:
+        self.checkpoints.append({"workflow_run_id": workflow_run_id, **state})
+        return len(self.checkpoints)
+
+
+class _EntryPointControlPlane:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def accept_event(self, event: object, now: datetime, on_transition: Any = None) -> None:
+        del now
+        self.events.append(event)
+        if on_transition is not None:
+            await on_transition("wf-entry", "pr_created", {"status": "pr_created"})
 
 
 class _FakeDispatcher:

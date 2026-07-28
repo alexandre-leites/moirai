@@ -170,6 +170,24 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tracker.added, [])
         self.assertEqual(tracker.removed, [])
 
+    async def test_terminal_workflows_receive_blocked_and_delivered_labels(self) -> None:
+        sync, control_plane, tracker = self._sync()
+        control_plane.active_workflows = [
+            {"project_id": "project-1", "issue_id": "issue-blocked", "external_id": "42", "status": "blocked"},
+            {"project_id": "project-1", "issue_id": "issue-delivered", "external_id": "43", "status": "completed"},
+        ]
+        control_plane.issue_labels = {
+            "issue-blocked": ["agent:running"],
+            "issue-delivered": ["agent:running"],
+        }
+        await sync.reconcile_project_labels(Project("project-1", True))
+        self.assertEqual(control_plane.issue_labels["issue-blocked"], ["agent:blocked"])
+        self.assertEqual(control_plane.issue_labels["issue-delivered"], ["agent:delivered"])
+        self.assertEqual(
+            tracker.added,
+            [("42", ["agent:blocked"]), ("43", ["agent:delivered"])],
+        )
+
     async def test_sync_project_raises_on_tracker_failure(self) -> None:
         sync, _, _ = self._sync(tracker_fail=True)
         project = Project("project-1", True)

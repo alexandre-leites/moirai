@@ -106,6 +106,16 @@ class GitHubCliIssueTracker:
             raise GitHubCliError("GitHub CLI issue list response is not an array")
         return [self._issue_from_json(item) for item in payload]
 
+    async def list_eligible_issues(self) -> list[ExternalIssue]:
+        return await self.list_open_issues()
+
+    async def get_issue(self, external_issue_id: str) -> ExternalIssue:
+        fields = "number,title,body,state,labels,createdAt,updatedAt"
+        payload = await self._json(
+            "issue", "view", external_issue_id, "--repo", self._repository.slug, "--json", fields
+        )
+        return self._issue_from_json(payload)
+
     async def add_labels(self, external_issue_id: str, labels: Sequence[str]) -> None:
         if not labels:
             return
@@ -118,6 +128,22 @@ class GitHubCliIssueTracker:
 
     async def close_issue(self, external_issue_id: str) -> None:
         await self._run("issue", "close", external_issue_id, "--repo", self._repository.slug)
+
+    async def add_comment(self, external_issue_id: str, body: str, idempotency_key: str) -> None:
+        marker = f"<!-- moirai-comment:{idempotency_key} -->"
+        if not body.strip() or not idempotency_key.strip():
+            raise ValueError("comment body and idempotency key are required")
+        existing = await self._json(
+            "issue", "view", external_issue_id, "--repo", self._repository.slug, "--json", "comments"
+        )
+        comments = existing.get("comments", []) if isinstance(existing, dict) else []
+        if isinstance(comments, list) and any(
+            isinstance(comment, dict) and marker in str(comment.get("body", "")) for comment in comments
+        ):
+            return
+        await self._run(
+            "issue", "comment", external_issue_id, "--repo", self._repository.slug, "--body", f"{body}\n\n{marker}"
+        )
 
     async def _json(self, *arguments: str) -> Any:
         stdout = await self._run(*arguments)

@@ -54,6 +54,19 @@ class GitHubCliIssueTrackerTests(unittest.TestCase):
         self.assertEqual(len(runner.commands), 1)
         self.assertEqual(runner.commands[0][-4:], ("--add-label", "agent:running", "--add-label", "agent:review"))
 
+    def test_get_issue_and_idempotent_comment_use_structured_cli_calls(self) -> None:
+        issue = {
+            "number": 7, "title": "Fix scheduling", "body": "body", "state": "OPEN",
+            "labels": [], "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z",
+        }
+        runner = FakeRunner(0, json.dumps(issue))
+        tracker = GitHubCliIssueTracker(GitHubRepository("owner", "repo"), runner)
+        self.assertEqual(asyncio.run(tracker.get_issue("7")).external_id, "7")
+        runner.stdout = json.dumps({"comments": []})
+        asyncio.run(tracker.add_comment("7", "Investigating", "workflow-1"))
+        self.assertIn("comment", runner.commands[-1])
+        self.assertIn("moirai-comment:workflow-1", runner.commands[-1][-1])
+
     def test_nonzero_status_redacts_github_tokens(self) -> None:
         runner = FakeRunner(1, "", "authentication failed ghp_abcdefghijklmnopqrstuvwxyz123456")
         tracker = GitHubCliIssueTracker(GitHubRepository("owner", "repo"), runner)

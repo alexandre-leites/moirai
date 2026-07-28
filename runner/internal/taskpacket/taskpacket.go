@@ -26,19 +26,26 @@ const (
 )
 
 type Packet struct {
-	ProtocolVersion string            `json:"protocolVersion"`
-	JobID           string            `json:"jobId"`
-	ExecutionID     string            `json:"executionId"`
-	Role            Role              `json:"role"`
-	Objective       string            `json:"objective"`
-	Issue           Issue             `json:"issue"`
-	Repository      Repository        `json:"repository"`
-	PromptPath      string            `json:"promptPath"`
-	ExpectedOutput  string            `json:"expectedOutput"`
-	TimeoutSeconds  int               `json:"timeoutSeconds"`
-	EnvironmentRefs []EnvironmentRef  `json:"environmentRefs"`
-	Constraints     Constraints       `json:"constraints"`
-	Pipeline        []PipelineCommand `json:"pipeline"`
+	ProtocolVersion    string            `json:"protocolVersion"`
+	JobID              string            `json:"jobId"`
+	ExecutionID        string            `json:"executionId"`
+	Role               Role              `json:"role"`
+	Objective          string            `json:"objective"`
+	Issue              Issue             `json:"issue"`
+	Repository         Repository        `json:"repository"`
+	PromptPath         string            `json:"promptPath"`
+	ExpectedOutput     string            `json:"expectedOutput"`
+	TimeoutSeconds     int               `json:"timeoutSeconds"`
+	EnvironmentRefs    []EnvironmentRef  `json:"environmentRefs"`
+	Constraints        Constraints       `json:"constraints"`
+	Pipeline           []PipelineCommand `json:"pipeline"`
+	AcceptanceCriteria []string          `json:"acceptanceCriteria"`
+	Plan               []string          `json:"plan"`
+	PreviousFailures   []string          `json:"previousFailures"`
+	CurrentCommit      string            `json:"currentCommit"`
+	DiffSummary        string            `json:"diffSummary"`
+	FailedChecks       []string          `json:"failedChecks"`
+	ReviewFindings     []string          `json:"reviewFindings"`
 }
 
 type Issue struct {
@@ -113,6 +120,9 @@ func (packet Packet) Validate() error {
 	if err := validatePipeline(packet.Pipeline); err != nil {
 		return err
 	}
+	if err := validateContext(packet); err != nil {
+		return err
+	}
 	if packet.Constraints.MayMerge {
 		return errors.New("task packet must not permit merge")
 	}
@@ -155,6 +165,29 @@ func validatePipeline(commands []PipelineCommand) error {
 		if !safeText(command.Command, 4096) || command.TimeoutSeconds < 1 || command.TimeoutSeconds > 3600 {
 			return errors.New("task packet pipeline command is invalid")
 		}
+	}
+	return nil
+}
+
+func validateContext(packet Packet) error {
+	for _, values := range [][]string{
+		packet.AcceptanceCriteria,
+		packet.Plan,
+		packet.PreviousFailures,
+		packet.FailedChecks,
+		packet.ReviewFindings,
+	} {
+		if len(values) > 64 {
+			return errors.New("task packet context has too many entries")
+		}
+		for _, value := range values {
+			if !safeText(value, 8192) {
+				return errors.New("task packet context is invalid")
+			}
+		}
+	}
+	if !safeTextAllowEmpty(packet.CurrentCommit, 1024) || !safeTextAllowEmpty(packet.DiffSummary, 16384) {
+		return errors.New("task packet context is invalid")
 	}
 	return nil
 }

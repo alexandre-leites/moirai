@@ -33,6 +33,13 @@ curl --fail http://localhost:8080/ready
 
 Compose reads passwords, tokens, and registration credentials only from the files in `secrets/`. Do not put their values in `.env` or shell environment variables. The `.env` file contains non-secret configuration only; its `${...}` values are the variables Compose reads.
 
+## Workflow recovery guarantees
+
+- Terminal runner events persist a diff hash and outcome fingerprint. Four identical terminal outcomes block the workflow instead of retrying indefinitely.
+- Three consecutive blocked workflows with the same project failure reason open that project's circuit. After a five-minute cooldown, one durable half-open probe is allowed; its delivery closes the circuit and a blocked probe reopens it. Provider failures use the same durable circuit state.
+- Task packets carry acceptance criteria, prior failures, revision and diff context. Reviewer prompts are independently generated and exclude developer plans or reasoning.
+- Issue reconciliation revisits terminal workflows so `agent:blocked` and `agent:delivered` labels converge after retries or restarts.
+
 The API is published at `http://localhost:8080`; the dashboard is published at `http://localhost:3000`. Compose disables the API secure-cookie setting only because this development topology terminates no TLS.
 
 ## Development

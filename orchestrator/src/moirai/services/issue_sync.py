@@ -132,6 +132,9 @@ class IssueSync:
                 clear_failure = getattr(self._control_plane, "clear_issue_sync_failure", None)
                 if clear_failure is not None:
                     await _await(clear_failure(project.id, now))
+                clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
+                if clear_provider is not None:
+                    await _await(clear_provider("github", now))
                 results[project.id] = count
             except IssueSyncError as error:
                 failures = self._failure_counts.get(project.id, 0) + 1
@@ -141,6 +144,9 @@ class IssueSync:
                 record_failure = getattr(self._control_plane, "record_issue_sync_failure", None)
                 if record_failure is not None:
                     await _await(record_failure(project.id, failures, retry_at, str(error), now))
+                record_provider = getattr(self._control_plane, "record_provider_failure", None)
+                if record_provider is not None:
+                    await _await(record_provider("github", str(error), now))
                 results[project.id] = str(error)
         return results
 

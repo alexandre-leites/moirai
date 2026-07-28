@@ -27,6 +27,28 @@ func TestParseAcceptsValidRolePackets(t *testing.T) {
 	}
 }
 
+func TestParsePreservesWorkflowContext(t *testing.T) {
+	packet := validPacket(RoleReviewer)
+	packet.AcceptanceCriteria = []string{"Returns an actionable review"}
+	packet.Plan = []string{"Inspect the change"}
+	packet.PreviousFailures = []string{"lint failed previously"}
+	packet.CurrentCommit = "abc123"
+	packet.DiffSummary = "one file changed"
+	packet.FailedChecks = []string{"lint"}
+	packet.ReviewFindings = []string{"none"}
+	contents, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	parsed, err := Parse(contents)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if parsed.CurrentCommit != "abc123" || len(parsed.AcceptanceCriteria) != 1 || len(parsed.Plan) != 1 {
+		t.Fatalf("Parse() = %#v", parsed)
+	}
+}
+
 func TestParseSupportsExistingPathRepository(t *testing.T) {
 	packet := validPacket(RoleDeveloper)
 	packet.Constraints.MayModifyFiles = true

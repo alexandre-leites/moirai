@@ -49,6 +49,13 @@ class PullRequestCheck:
     required: bool = True
 
 
+@dataclass(frozen=True)
+class PullRequestReview:
+    author: str
+    state: str
+    body: str
+
+
 def checks_result(checks: Sequence[PullRequestCheck]) -> ChecksResult:
     if not checks:
         return ChecksResult.PENDING
@@ -121,6 +128,32 @@ class GitHubCliCodeHost:
         )
         return self._pull_request_from_json(payload)
 
+    async def create_or_find_branch(self, branch: str, base_branch: str) -> str:
+        try:
+            existing = await self._json("api", f"repos/{self._repository.slug}/git/ref/heads/{branch}")
+        except GitHubCliError:
+            existing = None
+        if isinstance(existing, dict):
+            return branch
+        base = await self._json("api", f"repos/{self._repository.slug}/git/ref/heads/{base_branch}")
+        object_data = base.get("object") if isinstance(base, dict) else None
+        sha = object_data.get("sha") if isinstance(object_data, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise GitHubCliError("GitHub default branch reference is invalid")
+        await self._run(
+            "api", f"repos/{self._repository.slug}/git/refs", "-X", "POST",
+            "-f", f"ref=refs/heads/{branch}", "-f", f"sha={sha}",
+        )
+        return branch
+
+    async def push_branch(self, branch: str, commit_sha: str) -> None:
+        if not branch or not commit_sha:
+            raise ValueError("branch and commit SHA are required")
+        await self._run(
+            "api", f"repos/{self._repository.slug}/git/refs/heads/{branch}", "-X", "PATCH",
+            "-f", f"sha={commit_sha}", "-f", "force=false",
+        )
+
     async def create_or_find_pull_request(
         self,
         workflow_id: str,
@@ -167,6 +200,48 @@ class GitHubCliCodeHost:
         if not isinstance(payload, list):
             raise GitHubCliError("GitHub CLI pull request checks response is not an array")
         return [self._check_from_json(check) for check in payload]
+
+    async def update_pull_request(self, pull_request_id: str, title: str, body: str) -> None:
+        if not title.strip():
+            raise ValueError("pull request title is required")
+        await self._run(
+            "pr", "edit", pull_request_id, "--repo", self._repository.slug, "--title", title, "--body", body
+        )
+
+    async def get_pull_request_reviews(self, pull_request_id: str) -> list[PullRequestReview]:
+        payload = await self._json(
+            "pr", "view", pull_request_id, "--repo", self._repository.slug, "--json", "reviews"
+        )
+        reviews = payload.get("reviews", []) if isinstance(payload, dict) else []
+        if not isinstance(reviews, list):
+            raise GitHubCliError("GitHub CLI pull request reviews are invalid")
+        result: list[PullRequestReview] = []
+        for review in reviews:
+            if not isinstance(review, dict):
+                raise GitHubCliError("GitHub CLI pull request review is invalid")
+            author = review.get("author")
+            login = author.get("login") if isinstance(author, dict) else None
+            state = review.get("state")
+            body = review.get("body", "")
+            if not isinstance(login, str) or not isinstance(state, str) or not isinstance(body, str):
+                raise GitHubCliError("GitHub CLI pull request review is invalid")
+            result.append(PullRequestReview(login, state, body))
+        return result
+
+    async def close_pull_request(self, pull_request_id: str) -> None:
+        await self._run("pr", "close", pull_request_id, "--repo", self._repository.slug)
+
+    async def get_default_branch_head(self) -> str:
+        repository = await self._json("api", f"repos/{self._repository.slug}")
+        default_branch = repository.get("default_branch") if isinstance(repository, dict) else None
+        if not isinstance(default_branch, str) or not default_branch:
+            raise GitHubCliError("GitHub CLI repository default branch is invalid")
+        reference = await self._json("api", f"repos/{self._repository.slug}/git/ref/heads/{default_branch}")
+        object_data = reference.get("object") if isinstance(reference, dict) else None
+        sha = object_data.get("sha") if isinstance(object_data, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise GitHubCliError("GitHub CLI repository default branch head is invalid")
+        return sha
 
     async def enable_auto_merge(self, pull_request_id: str, method: str) -> None:
         await self._run(
