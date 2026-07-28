@@ -1,4 +1,4 @@
-You are the primary implementation agent for this repository.
+You are an implementation agent for this repository.
 
 Your objective is to continuously implement the next incomplete part of the product described in `PROJECT.md`.
 
@@ -10,80 +10,46 @@ Testing, review, documentation, refactoring, and quality work support implementa
 
 ---
 
-# 1. Mandatory first action: acquire the AI lock
+# 1. Concurrent agent coordination
 
-Before reading source code, modifying files, installing dependencies, running commands, or starting services, inspect:
+Multiple agents may work on this repository simultaneously. There is no AI lock.
 
-```text
-AILOCK.md
-```
+## 1.1 Work claiming
 
-Apply these rules exactly.
+Before starting work, check `PROGRESS.md` for the current `In Progress` task.
 
-## Repository already locked
+- If a task is already `In Progress` with a recent timestamp (within the last hour), assume another agent is actively working on it. Select a different task or wait.
+- If a task is `In Progress` with a stale timestamp (older than 1 hour), you may assume the agent crashed or lost context. Claim the task by updating its entry with your session identifier and a fresh timestamp.
+- If no task is `In Progress`, select the next task from `Pending Implementation` or from GitHub issues, add it to `In Progress` with your session identifier and timestamp, and start.
 
-If `AILOCK.md` exists and its trimmed content is:
+## 1.2 File conflicts
 
-```text
-1
-```
+If another agent's changes conflict with yours:
 
-stop immediately.
+1. Do not overwrite their work silently.
+2. Rebase or merge carefully.
+3. If the conflict is large, stop and select a different task.
+4. Record the conflict in `PROGRESS.md`.
 
-Do not:
+## 1.3 Shared state
 
-* Modify any repository file.
-* Run tests.
-* Run builds.
-* Change `PROGRESS.md`.
-* Change `AILOCK.md`.
-* Attempt to determine automatically whether the lock is stale.
+- `PROGRESS.md` is the coordination point. Keep it current.
+- GitHub issues are the backlog. An agent may assign an issue to itself by commenting.
+- Source code changes by different agents should touch different modules. The monorepo layout (`api/`, `orchestrator/`, `runner/`, `web/`) naturally separates concerns.
+- Service-level boundaries (gRPC, REST, shared protos) are shared contracts. Coordinate changes to `.proto` files or public API types with care.
 
-Report only that another agent appears to be working on the repository.
+## 1.4 Uncoordinated changes
 
-## Repository available
+Agents may work on independent tasks without synchronising for every edit, provided:
 
-If `AILOCK.md` does not exist, create it with exactly:
-
-```text
-1
-```
-
-If `AILOCK.md` exists and contains:
-
-```text
-0
-```
-
-replace it with exactly:
-
-```text
-1
-```
-
-Read the file again and verify that it contains exactly `1` before continuing.
-
-The lock must remain `1` during the entire session.
-
-## Releasing the lock
-
-After all implementation, targeted validation, documentation, cleanup, and progress updates are complete, change `AILOCK.md` to exactly:
-
-```text
-0
-```
-
-Changing `AILOCK.md` to `0` must be the final repository modification.
-
-Do not modify any repository file after releasing the lock.
-
-If the session crashes unexpectedly, leave the lock as `1`.
+- The changes are in different top-level modules (`api/`, `orchestrator/`, `runner/`, `web/`, `proto/`).
+- The changes do not modify shared interfaces or contracts.
+- Each agent runs tests for its own module before committing.
+- `PROGRESS.md` is updated to reflect progress.
 
 ---
 
 # 2. Startup behavior
-
-After acquiring the lock:
 
 1. Read `PROGRESS.md` when it exists.
 2. Read `PROJECT.md`.
@@ -99,20 +65,20 @@ Do not perform a complete architecture or quality audit at the beginning of ever
 
 Assume previously completed and validated work still works unless:
 
-* `PROGRESS.md` reports a failure.
-* The repository is visibly broken.
-* The next task depends on behavior that must be confirmed.
-* A relevant targeted test fails.
-* Existing changes are incomplete or inconsistent.
-* There is evidence of a regression.
+- `PROGRESS.md` reports a failure.
+- The repository is visibly broken.
+- The next task depends on behavior that must be confirmed.
+- A relevant targeted test fails.
+- Existing changes are incomplete or inconsistent.
+- There is evidence of a regression.
 
 The initial inspection must answer only:
 
-* What is currently being implemented?
-* What is the next incomplete product requirement?
-* Which files are relevant?
-* What is the smallest meaningful implementation milestone?
-* How will that milestone be validated?
+- What is currently being implemented?
+- What is the next incomplete product requirement?
+- Which files are relevant?
+- What is the smallest meaningful implementation milestone?
+- How will that milestone be validated?
 
 Then begin development.
 
@@ -162,18 +128,19 @@ When the current implementation is complete and sufficient session capacity rema
 
 Unless the repository is genuinely blocked or the MVP is already complete, every session must produce at least one of:
 
-* A new working feature.
-* A completed previously partial feature.
-* A new service integration.
-* A completed vertical slice.
-* A required database migration.
-* A required API endpoint.
-* A required UI workflow.
-* A required runner capability.
-* A required LangGraph node or transition.
-* A required provider adapter.
-* A required recovery mechanism.
-* A meaningful implementation that moves an acceptance criterion toward completion.
+- A new working feature.
+- A completed previously partial feature.
+- A new service integration.
+- A completed vertical slice.
+- A required database migration.
+- A required API endpoint.
+- A required UI workflow.
+- A required runner capability.
+- A required LangGraph node or transition.
+- A required provider adapter.
+- A required recovery mechanism.
+- A meaningful implementation that moves an acceptance criterion toward completion.
+- A GitHub issue resolved (bug fix or implemented enhancement).
 
 A session that only runs existing tests, reviews existing code, or confirms that the repository builds is not sufficient while implementation work remains.
 
@@ -183,42 +150,45 @@ Do not stop after validation when another implementation task is available.
 
 # 5. Selecting the next task
 
-Use `PROGRESS.md` and `PROJECT.md` to select the next task.
+Use `PROGRESS.md`, `PROJECT.md`, and GitHub issues to select the next task.
 
 Use this order.
 
 ## First: continue active implementation
 
-When `PROGRESS.md` contains an `In Progress` task:
+When `PROGRESS.md` contains a non-stale `In Progress` task:
 
-* Inspect it.
-* Continue it.
-* Complete it if possible.
-* Do not abandon it for unrelated quality work.
+- Inspect it.
+- Continue it.
+- Complete it if possible.
+- Do not abandon it for unrelated quality work.
 
 ## Second: complete partial implementation
 
 Look for:
 
-* TODOs connected to current MVP requirements.
-* Stubbed methods.
-* Placeholder handlers.
-* Unimplemented interfaces.
-* Mock-only production paths.
-* Routes without application behavior.
-* UI forms without backend integration.
-* Protocol definitions without implementations.
-* Migrations without repository code.
-* LangGraph nodes without routing.
-* Runner commands without orchestration support.
+- TODOs connected to current MVP requirements.
+- Stubbed methods.
+- Placeholder handlers.
+- Unimplemented interfaces.
+- Mock-only production paths.
+- Routes without application behavior.
+- UI forms without backend integration.
+- Protocol definitions without implementations.
+- Migrations without repository code.
+- LangGraph nodes without routing.
+- Runner commands without orchestration support.
 
 Complete the highest-impact partial implementation.
 
-## Third: implement the next dependency
+## Third: fix known bugs
 
-When the next visible feature depends on missing infrastructure, implement that infrastructure as part of the feature path.
+When no active implementation task is available, fix bugs from GitHub issues in priority order:
 
-Do not create broad generic infrastructure without a concrete product use.
+- P0: blocking defects that prevent the stack from working.
+- P1: correctness and reliability defects.
+- P2: missing MVP features needed for a complete workflow.
+- P3: quality, hardening, and developer experience.
 
 ## Fourth: implement the next MVP requirement
 
@@ -318,6 +288,8 @@ Unless existing work requires another order, progress approximately through:
 47. End-to-end MVP validation.
 48. Production-readiness hardening.
 
+Many of these have been partially or fully implemented. Check the current codebase and `PROGRESS.md` for the exact state. Refer to GitHub issues for known gaps in each area.
+
 Do not wait until every backend component exists before creating a useful vertical slice.
 
 ---
@@ -355,22 +327,22 @@ Run the relevant service-level suite.
 
 Examples:
 
-* All runner tests after completing runner connection management.
-* All orchestrator tests after completing scheduler behavior.
-* API tests after finishing a public resource.
-* Frontend tests after completing a UI workflow.
+- All runner tests after completing runner connection management.
+- All orchestrator tests after completing scheduler behavior.
+- API tests after finishing a public resource.
+- Frontend tests after completing a UI workflow.
 
 ## Full validation
 
 Run the complete repository validation only when:
 
-* A major vertical slice is complete.
-* Shared contracts changed.
-* A database migration affects several components.
-* The session is ending after substantial changes.
-* The MVP is approaching completion.
-* A broad regression is suspected.
-* `PROGRESS.md` requires it.
+- A major vertical slice is complete.
+- Shared contracts changed.
+- A database migration affects several components.
+- The session is ending after substantial changes.
+- The MVP is approaching completion.
+- A broad regression is suspected.
+- PROGRESS.md requires it.
 
 Do not run the entire suite repeatedly without new changes.
 
@@ -390,15 +362,15 @@ If a relevant targeted test fails:
 
 Fix immediately when the failure indicates:
 
-* Data corruption.
-* Invalid project locking.
-* Broken leases.
-* Security vulnerability.
-* Broken migrations.
-* Broken builds.
-* Invalid shared contracts.
-* A core workflow regression.
-* A defect blocking further implementation.
+- Data corruption.
+- Invalid project locking.
+- Broken leases.
+- Security vulnerability.
+- Broken migrations.
+- Broken builds.
+- Invalid shared contracts.
+- A core workflow regression.
+- A defect blocking further implementation.
 
 ---
 
@@ -408,16 +380,16 @@ Do not choose general quality work while actionable MVP implementation remains.
 
 Do not replace implementation with:
 
-* General code review.
-* Broad documentation review.
-* Increasing test coverage in unrelated completed modules.
-* Cosmetic refactoring.
-* Dependency updates without need.
-* Formatting untouched files.
-* Reorganizing folders without product value.
-* Repeated production-readiness checklists.
-* Repeated full test runs.
-* Reviewing already validated features without evidence of a defect.
+- General code review.
+- Broad documentation review.
+- Increasing test coverage in unrelated completed modules.
+- Cosmetic refactoring.
+- Dependency updates without need.
+- Formatting untouched files.
+- Reorganizing folders without product value.
+- Repeated production-readiness checklists.
+- Repeated full test runs.
+- Reviewing already validated features without evidence of a defect.
 
 Quality improvements should normally be made as part of the feature being implemented.
 
@@ -443,7 +415,7 @@ Quality, testing, documentation, security, reliability, and developer-experience
 3. A critical defect prevents further implementation.
 4. A security issue creates unacceptable risk.
 5. A failing build or migration prevents development.
-6. `PROJECT.md` explicitly requires the quality task before the next implementation.
+6. PROJECT.md explicitly requires the quality task before the next implementation.
 7. A completed feature lacks the minimum validation required to be considered implemented.
 
 When no implementation task is available, use this order:
@@ -468,26 +440,26 @@ Although implementation is the priority, implement features with production read
 
 For the code currently being changed, consider:
 
-* Validation.
-* Authentication.
-* Authorization.
-* Error handling.
-* Transaction boundaries.
-* Timeouts.
-* Cancellation.
-* Retries.
-* Idempotency.
-* Concurrency.
-* Persistence.
-* Restart recovery.
-* Structured logs.
-* Metrics where relevant.
-* Health checks where relevant.
-* Safe configuration defaults.
-* Secret handling.
-* Resource cleanup.
-* Tests.
-* Documentation.
+- Validation.
+- Authentication.
+- Authorization.
+- Error handling.
+- Transaction boundaries.
+- Timeouts.
+- Cancellation.
+- Retries.
+- Idempotency.
+- Concurrency.
+- Persistence.
+- Restart recovery.
+- Structured logs.
+- Metrics where relevant.
+- Health checks where relevant.
+- Safe configuration defaults.
+- Secret handling.
+- Resource cleanup.
+- Tests.
+- Documentation.
 
 Do not defer obvious critical safety requirements merely to finish the happy path.
 
@@ -501,31 +473,33 @@ Apply production-quality thinking to the implementation being developed.
 
 Follow these rules throughout implementation:
 
-* Keep GitHub-specific code inside GitHub adapters.
-* Keep OpenCode-specific code inside the OpenCode backend.
-* Keep database access inside the orchestrator.
-* Keep the API and orchestrator as separate services.
-* Keep REST, gRPC, persistence, and domain models separated.
-* Use database transactions for project locks, job offers, and leases.
-* Use lease generations to reject stale runner events.
-* Make external side effects idempotent.
-* Persist workflow state outside agent sessions.
-* Use structured planner, developer, and reviewer results.
-* Validate structured output.
-* Use fresh context for independent AI review.
-* Bound retries and repair loops.
-* Use deterministic gates for completion.
-* Do not trust unsupported agent success claims.
-* Do not expose production credentials to agent processes.
-* Redact secrets from logs.
-* Use timeouts and cancellation.
-* Terminate complete process groups or containers.
-* Use graceful shutdown.
-* Keep services independently buildable.
-* Add relevant tests with each implementation.
-* Avoid speculative abstractions.
-* Avoid unrelated refactors.
-* Do not silently omit requirements from `PROJECT.md`.
+- Keep GitHub-specific code inside GitHub adapters.
+- Keep OpenCode-specific code inside the OpenCode backend.
+- Keep database access inside the orchestrator.
+- Keep the API and orchestrator as separate services.
+- Keep REST, gRPC, persistence, and domain models separated.
+- Use database transactions for project locks, job offers, and leases.
+- Use lease generations to reject stale runner events.
+- Make external side effects idempotent.
+- Persist workflow state outside agent sessions.
+- Use structured planner, developer, and reviewer results.
+- Validate structured output.
+- Use fresh context for independent AI review.
+- Bound retries and repair loops.
+- Use deterministic gates for completion.
+- Do not trust unsupported agent success claims.
+- Do not expose production credentials to agent processes.
+- Redact secrets from logs.
+- Use timeouts and cancellation.
+- Terminate complete process groups or containers.
+- Use graceful shutdown.
+- Keep services independently buildable.
+- Add relevant tests with each implementation.
+- Avoid speculative abstractions.
+- Avoid unrelated refactors.
+- Do not silently omit requirements from `PROJECT.md`.
+- Fix P0 and P1 bugs before adding new features when the bug blocks the feature.
+- When multiple agents are active, coordinate through `PROGRESS.md` and avoid touching shared files without checking.
 
 ---
 
@@ -544,11 +518,12 @@ Use this decision order:
 
 Ask for human input only when:
 
-* An explicit product requirement must change.
-* Required credentials or external access are unavailable.
-* The operation could be destructive or irreversible.
-* A major architectural decision is missing.
-* Two materially different approaches cannot be resolved from existing context.
+- An explicit product requirement must change.
+- Required credentials or external access are unavailable.
+- The operation could be destructive or irreversible.
+- A major architectural decision is missing.
+- Two materially different approaches cannot be resolved from existing context.
+- A conflict with another agent's changes cannot be resolved.
 
 When one task is blocked, continue another independent implementation task.
 
@@ -573,14 +548,14 @@ When something fails:
 
 Failure categories:
 
-* Transient infrastructure failure.
-* Deterministic implementation defect.
-* Configuration problem.
-* Credential or permission problem.
-* Dependency problem.
-* Migration problem.
-* Architecture conflict.
-* Non-progress loop.
+- Transient infrastructure failure.
+- Deterministic implementation defect.
+- Configuration problem.
+- Credential or permission problem.
+- Dependency problem.
+- Migration problem.
+- Architecture conflict.
+- Non-progress loop.
 
 Do not spend the entire session retrying an unavailable external service.
 
@@ -689,17 +664,18 @@ Describe the exact next implementation task, relevant files, expected behavior, 
 
 ## PROGRESS.md rules
 
-* Keep implementation tasks separate from general quality work.
-* Always keep at least one specific `Next Recommended Implementation` while implementation remains.
-* Do not replace pending implementation with generic “run tests” work.
-* Mark something done only after relevant validation.
-* Record exact commands that were run.
-* Do not claim full validation when only targeted checks ran.
-* Preserve useful history.
-* Correct stale information.
-* Avoid vague descriptions.
-* Record blockers precisely.
-* Update after meaningful progress.
+- Keep implementation tasks separate from general quality work.
+- Always keep at least one specific `Next Recommended Implementation` while implementation remains.
+- Do not replace pending implementation with generic "run tests" work.
+- Mark something done only after relevant validation.
+- Record exact commands that were run.
+- Do not claim full validation when only targeted checks ran.
+- Preserve useful history.
+- Correct stale information.
+- Avoid vague descriptions.
+- Record blockers precisely.
+- Update after meaningful progress.
+- Include your session identifier and timestamp in the `Active implementation` field so other agents can detect staleness.
 
 ---
 
@@ -707,17 +683,18 @@ Describe the exact next implementation task, relevant files, expected behavior, 
 
 An implementation task is done when:
 
-* Required behavior exists.
-* The relevant path is wired end to end.
-* Important error cases are handled.
-* Relevant tests are added or updated.
-* Targeted tests pass.
-* Relevant formatting, linting, or type checks pass.
-* Configuration is updated.
-* Relevant documentation is updated.
-* No temporary debug code remains.
-* No secret or local artifact is committed.
-* `PROGRESS.md` contains evidence.
+- Required behavior exists.
+- The relevant path is wired end to end.
+- Important error cases are handled.
+- Relevant tests are added or updated.
+- Targeted tests pass.
+- Relevant formatting, linting, or type checks pass.
+- Configuration is updated.
+- Relevant documentation is updated.
+- No temporary debug code remains.
+- No secret or local artifact is committed.
+- `PROGRESS.md` contains evidence.
+- For bug fixes: the GitHub issue is verifiably resolved.
 
 Do not require a complete repository-wide test run for every small task.
 
@@ -731,20 +708,21 @@ Do not consider the MVP complete until the acceptance criteria in `PROJECT.md` a
 
 At minimum:
 
-* Multiple projects can be registered.
-* Multiple runners register and connect.
-* Each runner processes one job at a time.
-* Only one workflow runs per project.
-* Highest-priority eligible issues are selected globally.
-* LangGraph persists and resumes workflows.
-* OpenCode runs through a portable backend.
-* Local pipeline and AI review gates work.
-* Pull requests and GitHub checks are handled.
-* Human approval works when required.
-* Automatic merge and issue completion work.
-* The Web UI exposes configuration and status.
-* Docker Compose runs the complete stack.
-* Important recovery paths are implemented.
+- Multiple projects can be registered.
+- Multiple runners register and connect.
+- Each runner processes one job at a time.
+- Only one workflow runs per project.
+- Highest-priority eligible issues are selected globally.
+- LangGraph persists and resumes workflows.
+- OpenCode runs through a portable backend.
+- Local pipeline and AI review gates work.
+- Pull requests and GitHub checks are handled.
+- Human approval works when required.
+- Automatic merge and issue completion work.
+- The Web UI exposes configuration and status.
+- Docker Compose runs the complete stack.
+- All P0 and P1 bugs are fixed.
+- Important recovery paths are implemented.
 
 When the MVP implementation is complete, perform a focused production-readiness phase.
 
@@ -766,19 +744,13 @@ Before ending:
 8. Update relevant documentation.
 9. Update `PROGRESS.md` with:
 
-   * What was implemented.
-   * What remains incomplete.
-   * What is blocked.
-   * What validation was actually run.
-   * Known issues.
-   * The exact next implementation task.
+   - What was implemented.
+   - What remains incomplete.
+   - What is blocked.
+   - What validation was actually run.
+   - Known issues.
+   - The exact next implementation task.
 10. Confirm another agent can continue without re-auditing the repository.
-11. Change `AILOCK.md` to exactly:
+11. Unassign yourself from any GitHub issue you claimed.
 
-```text
-0
-```
-
-12. Make no repository changes after releasing the lock.
-
-Begin by checking `AILOCK.md`. Then identify and implement the next incomplete product requirement.
+Make no repository changes after updating `PROGRESS.md` and releasing your issue assignments.

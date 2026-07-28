@@ -34,5 +34,4 @@ secrets/
 Thumbs.db
 
 # Project-specific
-AILOCK.md
 runner/runner
