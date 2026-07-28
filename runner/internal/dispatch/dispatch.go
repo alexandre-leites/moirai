@@ -163,7 +163,6 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	if err != nil {
 		return Result{}, err
 	}
-<<<<<<< HEAD
 	if packet.Role == taskpacket.RolePipeline {
 		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
 		result = Result{Status: "completed", ExitCode: 0, InitialRevision: initial.Revision, PipelineResults: pipelineResults}
@@ -184,9 +183,8 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		}
 		return result, nil
 	}
-=======
+
 	output := dispatcher.logOutput(lease)
->>>>>>> 0b4fea5 (Harden runner execution reliability)
 	backendResult, executeErr := dispatcher.Backend.Execute(ctx, agents.Request{
 		ExecutionID: packet.ExecutionID,
 		Role:        agents.Role(packet.Role),
