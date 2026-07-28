@@ -36,27 +36,7 @@ services:
       LOOP_SEED_TOKEN_LABELS: "${LOOP_SEED_TOKEN_LABELS:-linux}"
       LOOP_SEED_ISSUE_TITLE: "${LOOP_SEED_ISSUE_TITLE:-}"
       LOOP_SEED_ISSUE_BODY: "${LOOP_SEED_ISSUE_BODY:-}"
-    secrets:
-      - source: database_url
-        target: database_url
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
-      - source: initial_admin_password
-        target: initial_admin_password
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
-      - source: github_token
-        target: github_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
-      - source: runner_registration_token
-        target: runner_registration_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
+    secrets: [database_url, initial_admin_password, github_token, runner_registration_token]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [database, control]
@@ -99,7 +79,7 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -117,20 +97,19 @@ services:
       LOOP_RUNNER_LABELS: "${LOOP_RUNNER_LABELS:-linux}"
       LOOP_RUNNER_CAPACITY: "${LOOP_RUNNER_CAPACITY:-1}"
       LOOP_RUNNER_AGENT_ARGUMENTS: "--model,opencode/deepseek-v4-flash-free,--auto"
-    secrets:
-      - source: runner_registration_token
-        target: runner_registration_token
-        uid: "65532"
-        gid: "65532"
-        mode: 0400
+    secrets: [runner_registration_token]
+    read_only: true
+    tmpfs:
+      - /run:mode=0755
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]
     volumes: [runner-data:/data]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     healthcheck:
-      test: ["CMD", "/runner", "ready"]
+      test: ["CMD", "/runner", "live"]
       interval: 15s
       timeout: 10s
       retries: 5
