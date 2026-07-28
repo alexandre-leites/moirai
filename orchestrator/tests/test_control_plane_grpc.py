@@ -307,11 +307,11 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail.workflow.implementation_attempts, 2)
         self.assertEqual(detail.events[0].id, "9")
         retried = await self.client.RetryWorkflow(
-            control_plane_pb2.WorkflowActionRequest(workflow_run_id="workflow-1"), metadata=metadata
+            control_plane_pb2.RetryWorkflowRequest(workflow_run_id="workflow-1"), metadata=metadata
         )
         self.assertEqual(retried.workflow.status, "recovering")
         cancelled = await self.client.CancelWorkflow(
-            control_plane_pb2.WorkflowActionRequest(workflow_run_id="workflow-1", reason="operator request"), metadata=metadata
+            control_plane_pb2.CancelWorkflowRequest(workflow_run_id="workflow-1", reason="operator request"), metadata=metadata
         )
         self.assertEqual(cancelled.workflow.status, "cancelled")
         runner = await self.client.SetRunnerState(
@@ -322,7 +322,7 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.items[0].priority, 100)
         with self.assertRaises(grpc.aio.AioRpcError) as viewer:
             await self.client.BlockWorkflow(
-                control_plane_pb2.WorkflowActionRequest(workflow_run_id="workflow-1"),
+                control_plane_pb2.BlockWorkflowRequest(workflow_run_id="workflow-1"),
                 metadata=(("x-loop-session", "viewer-session"),),
             )
         self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)

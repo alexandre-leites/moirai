@@ -81,18 +81,18 @@ class ControlPlaneStub:
                 _registered_method=True)
         self.RetryWorkflow = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/RetryWorkflow',
-                request_serializer=proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
-                response_deserializer=proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+                request_serializer=proto_dot_control__plane__pb2.RetryWorkflowRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.RetryWorkflowResponse.FromString,
                 _registered_method=True)
         self.CancelWorkflow = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/CancelWorkflow',
-                request_serializer=proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
-                response_deserializer=proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+                request_serializer=proto_dot_control__plane__pb2.CancelWorkflowRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.CancelWorkflowResponse.FromString,
                 _registered_method=True)
         self.BlockWorkflow = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/BlockWorkflow',
-                request_serializer=proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
-                response_deserializer=proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+                request_serializer=proto_dot_control__plane__pb2.BlockWorkflowRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.BlockWorkflowResponse.FromString,
                 _registered_method=True)
         self.SetRunnerState = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/SetRunnerState',
@@ -298,18 +298,18 @@ def add_ControlPlaneServicer_to_server(servicer, server):
             ),
             'RetryWorkflow': grpc.unary_unary_rpc_method_handler(
                     servicer.RetryWorkflow,
-                    request_deserializer=proto_dot_control__plane__pb2.WorkflowActionRequest.FromString,
-                    response_serializer=proto_dot_control__plane__pb2.WorkflowActionResponse.SerializeToString,
+                    request_deserializer=proto_dot_control__plane__pb2.RetryWorkflowRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.RetryWorkflowResponse.SerializeToString,
             ),
             'CancelWorkflow': grpc.unary_unary_rpc_method_handler(
                     servicer.CancelWorkflow,
-                    request_deserializer=proto_dot_control__plane__pb2.WorkflowActionRequest.FromString,
-                    response_serializer=proto_dot_control__plane__pb2.WorkflowActionResponse.SerializeToString,
+                    request_deserializer=proto_dot_control__plane__pb2.CancelWorkflowRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.CancelWorkflowResponse.SerializeToString,
             ),
             'BlockWorkflow': grpc.unary_unary_rpc_method_handler(
                     servicer.BlockWorkflow,
-                    request_deserializer=proto_dot_control__plane__pb2.WorkflowActionRequest.FromString,
-                    response_serializer=proto_dot_control__plane__pb2.WorkflowActionResponse.SerializeToString,
+                    request_deserializer=proto_dot_control__plane__pb2.BlockWorkflowRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.BlockWorkflowResponse.SerializeToString,
             ),
             'SetRunnerState': grpc.unary_unary_rpc_method_handler(
                     servicer.SetRunnerState,
@@ -703,8 +703,8 @@ class ControlPlane:
             request,
             target,
             '/loop.control.v1.ControlPlane/RetryWorkflow',
-            proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
-            proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+            proto_dot_control__plane__pb2.RetryWorkflowRequest.SerializeToString,
+            proto_dot_control__plane__pb2.RetryWorkflowResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -730,8 +730,8 @@ class ControlPlane:
             request,
             target,
             '/loop.control.v1.ControlPlane/CancelWorkflow',
-            proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
-            proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+            proto_dot_control__plane__pb2.CancelWorkflowRequest.SerializeToString,
+            proto_dot_control__plane__pb2.CancelWorkflowResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -757,8 +757,8 @@ class ControlPlane:
             request,
             target,
             '/loop.control.v1.ControlPlane/BlockWorkflow',
-            proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
-            proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+            proto_dot_control__plane__pb2.BlockWorkflowRequest.SerializeToString,
+            proto_dot_control__plane__pb2.BlockWorkflowResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -196,26 +196,35 @@ func (c *Client) GetWorkflow(ctx context.Context, workflowID string) (*controlv1
 	return resp, nil
 }
 
-func (c *Client) WorkflowAction(ctx context.Context, workflowID, action, reason string) (*controlv1.WorkflowActionResponse, error) {
-	req := &controlv1.WorkflowActionRequest{WorkflowRunId: workflowID, Reason: reason}
-	var (
-		resp *controlv1.WorkflowActionResponse
-		err  error
-	)
+func (c *Client) WorkflowAction(ctx context.Context, workflowID, action, reason string) (*controlv1.Workflow, error) {
+	var workflow *controlv1.Workflow
+	var err error
 	switch action {
 	case "retry":
-		resp, err = c.client.RetryWorkflow(ctx, req)
+		resp, callErr := c.client.RetryWorkflow(ctx, &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID})
+		err = callErr
+		if resp != nil {
+			workflow = resp.Workflow
+		}
 	case "cancel":
-		resp, err = c.client.CancelWorkflow(ctx, req)
+		resp, callErr := c.client.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: reason})
+		err = callErr
+		if resp != nil {
+			workflow = resp.Workflow
+		}
 	case "block":
-		resp, err = c.client.BlockWorkflow(ctx, req)
+		resp, callErr := c.client.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowID, Reason: reason})
+		err = callErr
+		if resp != nil {
+			workflow = resp.Workflow
+		}
 	default:
 		return nil, ErrInvalidInput
 	}
 	if err != nil {
 		return nil, mapError(err)
 	}
-	return resp, nil
+	return workflow, nil
 }
 
 func (c *Client) SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error) {

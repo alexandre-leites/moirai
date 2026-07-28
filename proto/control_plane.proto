@@ -16,9 +16,9 @@ service ControlPlane {
   rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
   rpc SubmitHumanDecision(SubmitHumanDecisionRequest) returns (SubmitHumanDecisionResponse);
   rpc GetWorkflow(GetWorkflowRequest) returns (GetWorkflowResponse);
-  rpc RetryWorkflow(WorkflowActionRequest) returns (WorkflowActionResponse);
-  rpc CancelWorkflow(WorkflowActionRequest) returns (WorkflowActionResponse);
-  rpc BlockWorkflow(WorkflowActionRequest) returns (WorkflowActionResponse);
+  rpc RetryWorkflow(RetryWorkflowRequest) returns (RetryWorkflowResponse);
+  rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
+  rpc BlockWorkflow(BlockWorkflowRequest) returns (BlockWorkflowResponse);
   rpc SetRunnerState(SetRunnerStateRequest) returns (SetRunnerStateResponse);
   rpc ListQueue(ListQueueRequest) returns (ListQueueResponse);
   rpc SubscribeEvents(SubscribeEventsRequest) returns (stream ControlPlaneEvent);
@@ -84,8 +84,12 @@ message WorkflowEvent {
 message ListWorkflowsResponse { repeated Workflow workflows = 1; }
 message GetWorkflowRequest { string workflow_run_id = 1; }
 message GetWorkflowResponse { Workflow workflow = 1; repeated WorkflowEvent events = 2; }
-message WorkflowActionRequest { string workflow_run_id = 1; string reason = 2; }
-message WorkflowActionResponse { Workflow workflow = 1; }
+message RetryWorkflowRequest { string workflow_run_id = 1; }
+message RetryWorkflowResponse { Workflow workflow = 1; }
+message CancelWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
+message CancelWorkflowResponse { Workflow workflow = 1; }
+message BlockWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
+message BlockWorkflowResponse { Workflow workflow = 1; }
 message ListRunnersRequest {}
 message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; }
 message ListRunnersResponse { repeated Runner runners = 1; }

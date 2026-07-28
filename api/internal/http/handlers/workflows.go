@@ -80,7 +80,7 @@ func (h *WorkflowHandlers) action(action string) http.HandlerFunc {
 			writeClientError(w, err)
 			return
 		}
-		apiserver.WriteJSON(w, http.StatusOK, workflowPayload(resp.Workflow))
+		apiserver.WriteJSON(w, http.StatusOK, workflowPayload(resp))
 	}
 }
 

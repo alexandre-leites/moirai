@@ -230,7 +230,19 @@ class GetWorkflowResponse(_message.Message):
     events: _containers.RepeatedCompositeFieldContainer[WorkflowEvent]
     def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ..., events: _Optional[_Iterable[_Union[WorkflowEvent, _Mapping]]] = ...) -> None: ...
 
-class WorkflowActionRequest(_message.Message):
+class RetryWorkflowRequest(_message.Message):
+    __slots__ = ("workflow_run_id",)
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    def __init__(self, workflow_run_id: _Optional[str] = ...) -> None: ...
+
+class RetryWorkflowResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
+
+class CancelWorkflowRequest(_message.Message):
     __slots__ = ("workflow_run_id", "reason")
     WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
@@ -238,7 +250,21 @@ class WorkflowActionRequest(_message.Message):
     reason: str
     def __init__(self, workflow_run_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
 
-class WorkflowActionResponse(_message.Message):
+class CancelWorkflowResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
+
+class BlockWorkflowRequest(_message.Message):
+    __slots__ = ("workflow_run_id", "reason")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    reason: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class BlockWorkflowResponse(_message.Message):
     __slots__ = ("workflow",)
     WORKFLOW_FIELD_NUMBER: _ClassVar[int]
     workflow: Workflow

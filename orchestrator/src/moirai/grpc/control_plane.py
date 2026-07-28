@@ -289,32 +289,41 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         )
 
     async def RetryWorkflow(
-        self, request: control_plane_pb2.WorkflowActionRequest, context: grpc.aio.ServicerContext
-    ) -> control_plane_pb2.WorkflowActionResponse:
-        return await self._workflow_action(request, context, "retry")
-
-    async def CancelWorkflow(
-        self, request: control_plane_pb2.WorkflowActionRequest, context: grpc.aio.ServicerContext
-    ) -> control_plane_pb2.WorkflowActionResponse:
-        return await self._workflow_action(request, context, "cancel")
-
-    async def BlockWorkflow(
-        self, request: control_plane_pb2.WorkflowActionRequest, context: grpc.aio.ServicerContext
-    ) -> control_plane_pb2.WorkflowActionResponse:
-        return await self._workflow_action(request, context, "block")
-
-    async def _workflow_action(
-        self, request: control_plane_pb2.WorkflowActionRequest, context: grpc.aio.ServicerContext, action: str
-    ) -> control_plane_pb2.WorkflowActionResponse:
+        self, request: control_plane_pb2.RetryWorkflowRequest, context: grpc.aio.ServicerContext
+    ) -> control_plane_pb2.RetryWorkflowResponse:
         session = await self._require_session(context, administrator=True)
         if not request.workflow_run_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "workflow run ID is required")
-        operation = getattr(self._control_plane, f"{action}_workflow")
         try:
-            workflow = await operation(request.workflow_run_id, session.user_id or None, self._now()) if action == "retry" else await operation(request.workflow_run_id, request.reason, session.user_id or None, self._now())
+            workflow = await self._control_plane.retry_workflow(request.workflow_run_id, session.user_id or None, self._now())
         except ValueError as error:
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
-        return control_plane_pb2.WorkflowActionResponse(workflow=_workflow_message(workflow))
+        return control_plane_pb2.RetryWorkflowResponse(workflow=_workflow_message(workflow))
+
+    async def CancelWorkflow(
+        self, request: control_plane_pb2.CancelWorkflowRequest, context: grpc.aio.ServicerContext
+    ) -> control_plane_pb2.CancelWorkflowResponse:
+        workflow = await self._terminal_workflow_action(request.workflow_run_id, request.reason, context, "cancel")
+        return control_plane_pb2.CancelWorkflowResponse(workflow=_workflow_message(workflow))
+
+    async def BlockWorkflow(
+        self, request: control_plane_pb2.BlockWorkflowRequest, context: grpc.aio.ServicerContext
+    ) -> control_plane_pb2.BlockWorkflowResponse:
+        workflow = await self._terminal_workflow_action(request.workflow_run_id, request.reason, context, "block")
+        return control_plane_pb2.BlockWorkflowResponse(workflow=_workflow_message(workflow))
+
+    async def _terminal_workflow_action(
+        self, workflow_run_id: str, reason: str, context: grpc.aio.ServicerContext, action: str
+    ) -> WorkflowRecord:
+        session = await self._require_session(context, administrator=True)
+        if not workflow_run_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "workflow run ID is required")
+        try:
+            operation = self._control_plane.cancel_workflow if action == "cancel" else self._control_plane.block_workflow
+            return await operation(workflow_run_id, reason, session.user_id or None, self._now())
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+        raise AssertionError("context.abort must not return")
 
     async def SetRunnerState(
         self, request: control_plane_pb2.SetRunnerStateRequest, context: grpc.aio.ServicerContext
