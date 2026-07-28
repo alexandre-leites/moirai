@@ -8,7 +8,7 @@ import (
 )
 
 func TestSubmitDecisionRejectsInvalidContentType(t *testing.T) {
-	h := NewWorkflowHandlers(nil)
+	h := NewWorkflowHandlers(nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/wf-1/decision", bytes.NewReader([]byte(`{"decision":"approved"}`)))
 	req.SetPathValue("workflow_id", "wf-1")
 	rec := httptest.NewRecorder()
@@ -19,7 +19,7 @@ func TestSubmitDecisionRejectsInvalidContentType(t *testing.T) {
 }
 
 func TestSubmitDecisionRejectsUnknownDecisionValue(t *testing.T) {
-	h := NewWorkflowHandlers(nil)
+	h := NewWorkflowHandlers(nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/wf-1/decision", bytes.NewReader([]byte(`{"decision":"maybe"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	req.SetPathValue("workflow_id", "wf-1")
@@ -33,7 +33,7 @@ func TestSubmitDecisionRejectsUnknownDecisionValue(t *testing.T) {
 func TestSubmitDecisionAcceptsApprovedAndChangesRequested(t *testing.T) {
 	for _, decision := range []string{"approved", "changes_requested"} {
 		t.Run(decision, func(t *testing.T) {
-			h := NewWorkflowHandlers(nil)
+			h := NewWorkflowHandlers(nil, nil)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/wf-1/decision", bytes.NewReader([]byte(`{"decision":"`+decision+`"}`)))
 			req.Header.Set("Content-Type", "application/json")
 			req.SetPathValue("workflow_id", "wf-1")

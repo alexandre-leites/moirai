@@ -4,7 +4,6 @@ from typing import Any
 from moirai.workflows.runner_events import (
     RunnerEventError,
     RunnerEventSummary,
-    WorkflowTransition,
     execution_role_from_id,
     validate_runner_event,
     workflow_transition_for_terminal_event,

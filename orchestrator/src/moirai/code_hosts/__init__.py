@@ -1,4 +1,5 @@
-from typing import Protocol, Sequence
+from collections.abc import Sequence
+from typing import Protocol
 
 from moirai.issue_trackers.github_cli import GitHubCliError
 

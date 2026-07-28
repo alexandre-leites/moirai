@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import Any
 import unittest
+from datetime import UTC, datetime, timedelta
+from typing import Any, Self
 
 from moirai.domain.control_plane import InMemoryControlPlane
 from moirai.domain.models import Issue, Project, Runner
 from moirai.scheduler import Scheduler
-
 
 try:
     import langgraph  # noqa: F401
@@ -20,7 +19,7 @@ NOW = datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
 
 
 class _Transaction:
-    async def __aenter__(self) -> _Transaction:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -31,7 +30,7 @@ class _DurableConnection:
     def __init__(self, pool: _ExecutionPool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _DurableConnection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -188,8 +187,8 @@ class EndToEndExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_accept_event_with_on_transition_callback(self) -> None:
         """accept_event invokes the on_transition callback for terminal events."""
-        from moirai.domain.models import ExecutionEvent
         from moirai.domain.control_plane import InMemoryControlPlane
+        from moirai.domain.models import ExecutionEvent
 
         control_plane = InMemoryControlPlane()
         control_plane.add_project(Project("project-1", True, frozenset({"linux"})))

@@ -9,16 +9,17 @@ import (
 )
 
 type WorkflowHandlers struct {
-	client *orchestrator.Client
+	client  *orchestrator.Client
+	limiter *auth.RateLimiter
 }
 
-func NewWorkflowHandlers(client *orchestrator.Client) *WorkflowHandlers {
-	return &WorkflowHandlers{client: client}
+func NewWorkflowHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *WorkflowHandlers {
+	return &WorkflowHandlers{client: client, limiter: limiter}
 }
 
 func (h *WorkflowHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/workflows", auth.RequireSession(http.HandlerFunc(h.list)))
-	mux.Handle("POST /api/v1/workflows/{workflow_id}/decision", requireMutation(h.submitDecision))
+	mux.Handle("POST /api/v1/workflows/{workflow_id}/decision", requireMutation(h.limiter, h.submitDecision))
 }
 
 func (h *WorkflowHandlers) list(w http.ResponseWriter, r *http.Request) {

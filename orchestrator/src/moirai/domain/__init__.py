@@ -6,7 +6,14 @@ from .control_plane import (
     RegistrationError,
     ScheduledJob,
 )
-from .issues import ExternalIssue, LabelPolicy, SynchronizedIssue, is_eligible, reconcile_labels, synchronize_issue
+from .issues import (
+    ExternalIssue,
+    LabelPolicy,
+    SynchronizedIssue,
+    is_eligible,
+    reconcile_labels,
+    synchronize_issue,
+)
 from .leases import EventSequenceError, StaleLeaseError, accept_event, renew_lease
 from .models import ExecutionEvent, Issue, JobLease, Project, Runner, Workflow, WorkflowStatus
 from .scheduling import Assignment, eligible_issues, parse_priority, select_assignment

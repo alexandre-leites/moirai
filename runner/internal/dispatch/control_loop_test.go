@@ -76,7 +76,7 @@ func TestControlLoopDispatchesAcknowledgedLeaseAndReportsTerminalResult(t *testi
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &staticDispatcher{result: Result{Status: "completed", ExitCode: 0, Summary: "token should not leave runner", ChangedFiles: []string{"main.go"}, CommandsRun: []string{"go test ./..."}}}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -122,7 +122,7 @@ func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &staticDispatcher{result: Result{ExitCode: 1, Summary: "credential=unsafe"}, err: context.DeadlineExceeded}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -155,7 +155,7 @@ func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *
 
 func TestControlLoopLogsOfferCorrelationFields(t *testing.T) {
 	client := &loopClient{}
-	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestControlLoopCancelsMatchingActiveExecution(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -270,7 +270,7 @@ func TestControlLoopCancelsMatchingActiveExecution(t *testing.T) {
 
 func TestControlLoopDrainRejectsNewOffer(t *testing.T) {
 	client := &loopClient{}
-	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -289,7 +289,7 @@ func TestControlLoopDrainKeepsBusyExecutionUntilTerminal(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -331,7 +331,7 @@ func TestControlLoopRecoversLeaseLossByCancellingExecution(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -391,7 +391,7 @@ func TestControlLoopFlushesBufferedEventsAfterReconnectBeforeLeaseExpiry(t *test
 	now := time.Now()
 	client := &loopClient{sendErr: errors.New("control stream disconnected")}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}

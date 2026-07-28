@@ -95,8 +95,11 @@ class PersistedWorkflowRuntime:
         except Exception as error:  # noqa: BLE001 - any node/checkpointer failure must not strand the run
             return await self._fail(workflow_run_id, initial_state, error)
 
+        # run() reports every invalid input as ValueError (see the
+        # workflow-run-ID guard above); a lone TypeError here would split one
+        # contract across two exception types.
         if not isinstance(state, dict):
-            raise ValueError("workflow graph returned an invalid state")
+            raise ValueError("workflow graph returned an invalid state")  # noqa: TRY004
         state["workflow_run_id"] = workflow_run_id
         await self._checkpoints.checkpoint(workflow_run_id, state)
         return state

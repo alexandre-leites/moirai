@@ -1,20 +1,20 @@
 from __future__ import annotations
 
+import unittest
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-import unittest
+from typing import Self
 
 from moirai.domain.control_plane import AuthenticationError, OfferError, RegistrationError
 from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import ExecutionEvent
 from moirai.persistence.control_plane import AsyncpgControlPlane
 
-
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 class _Transaction:
-    async def __aenter__(self) -> _Transaction:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -25,7 +25,7 @@ class _Connection:
     def __init__(self, pool: _Pool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _Connection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -90,7 +90,7 @@ class _DurableConnection:
     def __init__(self, pool: _DurablePool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _DurableConnection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -321,7 +321,7 @@ class _ProjectConnection:
     def __init__(self, pool: _ProjectPool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _ProjectConnection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -658,7 +658,7 @@ class _HumanDecisionConnection:
     def __init__(self, pool: _HumanDecisionPool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _HumanDecisionConnection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -739,7 +739,7 @@ class _EventConnection:
     def __init__(self, pool: _EventPool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _EventConnection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -917,7 +917,7 @@ class _OutboxConnection:
     def __init__(self, pool: _OutboxPool) -> None:
         self.pool = pool
 
-    async def __aenter__(self) -> _OutboxConnection:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:

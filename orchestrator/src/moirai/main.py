@@ -42,6 +42,8 @@ async def _build_checkpointer(database_url: str) -> Any | None:
     allow_missing = _allow_no_checkpointer()
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        from psycopg import AsyncConnection
+        from psycopg.rows import DictRow, dict_row
         from psycopg_pool import AsyncConnectionPool
     except ModuleNotFoundError:
         _LOGGER.exception("checkpointer dependencies are not installed")
@@ -49,7 +51,16 @@ async def _build_checkpointer(database_url: str) -> Any | None:
             return None
         raise
     pg_url = database_url.replace("+asyncpg", "")
-    pool = AsyncConnectionPool(pg_url, min_size=1, max_size=5, open=False, kwargs={"autocommit": True})
+    # AsyncPostgresSaver reads rows as mappings, so the pool has to hand out
+    # dict-row connections; the psycopg default is tuple rows.
+    pool = AsyncConnectionPool(
+        pg_url,
+        connection_class=AsyncConnection[DictRow],
+        min_size=1,
+        max_size=5,
+        open=False,
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
     try:
         await pool.open()
         checkpointer = AsyncPostgresSaver(pool)
@@ -182,7 +193,7 @@ async def _run_retention_reaper(
             removed = await control_plane.reap_expired_data(now())
             if any(removed.values()):
                 _LOGGER.info("reaped expired data", extra=removed)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a transient reap failure must not kill the loop
             _LOGGER.warning("retention reaper failed: %s", str(exc))
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())

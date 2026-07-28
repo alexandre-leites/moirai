@@ -1,8 +1,15 @@
-from datetime import UTC, datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 
-from moirai.domain import Issue, Project, Runner, Workflow, WorkflowStatus, parse_priority, select_assignment
-
+from moirai.domain import (
+    Issue,
+    Project,
+    Runner,
+    Workflow,
+    WorkflowStatus,
+    parse_priority,
+    select_assignment,
+)
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 

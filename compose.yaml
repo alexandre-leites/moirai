@@ -33,7 +33,6 @@ services:
       LOOP_SEED_TOKEN_LABELS: "${LOOP_SEED_TOKEN_LABELS:-linux}"
       LOOP_SEED_ISSUE_TITLE: "${LOOP_SEED_ISSUE_TITLE:-}"
       LOOP_SEED_ISSUE_BODY: "${LOOP_SEED_ISSUE_BODY:-}"
-      RUNNER_REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
     secrets: [database_url, initial_admin_password, github_token]
     depends_on:
       postgres: {condition: service_healthy}

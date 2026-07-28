@@ -29,6 +29,15 @@ class WorkflowRecord(TypedDict):
     project_id: str
     status: str
     phase: str
+    pull_request_external_id: str | None
+    pull_request_url: str | None
+    blocking_reason: str | None
+    planning_attempts: int
+    implementation_attempts: int
+    pipeline_repair_attempts: int
+    review_cycles: int
+    ci_repair_attempts: int
+    total_agent_executions: int
 
 
 class RunnerRecord(TypedDict):
@@ -97,6 +106,15 @@ class ControlPlane(Protocol):
     ) -> RegistrationTokenRecord: ...
 
     async def list_workflows(self) -> list[WorkflowRecord]: ...
+
+    async def record_human_decision(
+        self,
+        workflow_run_id: str,
+        decision: str,
+        comment: str | None,
+        actor_user_id: str | None,
+        now: datetime,
+    ) -> dict[str, object]: ...
 
     async def list_runners(self) -> list[RunnerRecord]: ...
 

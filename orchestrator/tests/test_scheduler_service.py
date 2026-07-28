@@ -1,12 +1,11 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from moirai.domain.control_plane import InMemoryControlPlane
 from moirai.domain.models import Issue, Project, Runner
 from moirai.scheduler import AsyncpgLeader, OfferDeliveryError, Scheduler
-
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 

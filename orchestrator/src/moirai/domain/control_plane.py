@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from secrets import token_urlsafe
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any
 from uuid import uuid4
 
 from .leases import StaleLeaseError, accept_event, renew_lease

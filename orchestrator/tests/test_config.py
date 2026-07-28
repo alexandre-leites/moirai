@@ -1,6 +1,6 @@
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 from moirai.config import ConfigurationError, OrchestratorConfig, read_bind, read_secret
 
@@ -44,9 +44,8 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_bind_validation_rejects_malformed_or_unsafe_endpoints(self) -> None:
         for bind in ("", "localhost", "localhost:0", "localhost:65536", "localhost:port", "::1:50051"):
-            with self.subTest(bind=bind):
-                with self.assertRaises(ConfigurationError):
-                    read_bind(bind)
+            with self.subTest(bind=bind), self.assertRaises(ConfigurationError):
+                read_bind(bind)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-from datetime import UTC, datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from moirai.domain import (
     EventSequenceError,
@@ -9,7 +9,6 @@ from moirai.domain import (
     accept_event,
     renew_lease,
 )
-
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 

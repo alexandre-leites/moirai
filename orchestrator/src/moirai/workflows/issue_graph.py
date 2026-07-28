@@ -1,10 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 
-from .policy import GateState, RetryBudget, route_after_checks, route_after_human_response, route_after_pipeline, route_after_plan, route_after_review
+from .policy import (
+    GateState,
+    RetryBudget,
+    route_after_checks,
+    route_after_human_response,
+    route_after_pipeline,
+    route_after_plan,
+    route_after_review,
+)
+
+if TYPE_CHECKING:
+    from langgraph.types import Checkpointer
 
 
 class IssueWorkflowState(TypedDict, total=False):
@@ -34,7 +44,24 @@ class IssueWorkflowState(TypedDict, total=False):
 
 
 WorkflowUpdate = dict[str, object]
-WorkflowNode = Callable[[IssueWorkflowState], Awaitable[WorkflowUpdate]]
+
+
+class WorkflowNode(Protocol):
+    """A single graph node: takes the workflow state, returns a state update.
+
+    Spelled as a Protocol rather than `Callable[[IssueWorkflowState], ...]`
+    because langgraph's `StateGraph.add_node` expects a node whose state
+    parameter can be passed by name. A bare `Callable` alias makes that
+    parameter positional-only, which does not satisfy langgraph's node
+    protocol under `mypy --strict`.
+    """
+
+    async def __call__(self, state: IssueWorkflowState) -> WorkflowUpdate: ...
+
+
+# RetryBudget is a frozen dataclass, so one shared default instance is safe
+# and avoids constructing it in argument defaults (ruff B008).
+_DEFAULT_BUDGET = RetryBudget()
 
 
 @dataclass(frozen=True)
@@ -55,25 +82,25 @@ class IssueWorkflowNodes:
 
 
 def route_plan(
-    state: IssueWorkflowState, budget: RetryBudget = RetryBudget()
+    state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
 ) -> Literal["plan", "implement", "blocked"]:
     return cast(Literal["plan", "implement", "blocked"], route_after_plan(_gate_state(state), budget).value)
 
 
 def route_pipeline(
-    state: IssueWorkflowState, budget: RetryBudget = RetryBudget()
+    state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
 ) -> Literal["review", "repair", "blocked"]:
     return cast(Literal["review", "repair", "blocked"], route_after_pipeline(_gate_state(state), budget).value)
 
 
 def route_review(
-    state: IssueWorkflowState, budget: RetryBudget = RetryBudget()
+    state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
 ) -> Literal["push", "repair", "blocked"]:
     return cast(Literal["push", "repair", "blocked"], route_after_review(_gate_state(state), budget).value)
 
 
 def route_checks(
-    state: IssueWorkflowState, budget: RetryBudget = RetryBudget()
+    state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
 ) -> Literal["wait_for_human", "merge", "repair", "blocked"]:
     return cast(
         Literal["wait_for_human", "merge", "repair", "blocked"],
@@ -82,7 +109,7 @@ def route_checks(
 
 
 def route_human(
-    state: IssueWorkflowState, budget: RetryBudget = RetryBudget()
+    state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
 ) -> Literal["merge", "repair", "blocked"]:
     del budget
     return cast(
@@ -96,7 +123,7 @@ def route_human(
 
 def build_issue_graph(
     nodes: IssueWorkflowNodes,
-    budget: RetryBudget = RetryBudget(),
+    budget: RetryBudget = _DEFAULT_BUDGET,
     checkpointer: object = None,
     interrupt_after: tuple[str, ...] | None = None,
     interrupt_before: tuple[str, ...] | None = None,
@@ -157,7 +184,9 @@ def build_issue_graph(
     graph.add_edge("complete", END)
     graph.add_edge("blocked", END)
     return graph.compile(
-        checkpointer=checkpointer,
+        # `checkpointer` stays `object` in this signature so callers need no
+        # langgraph types; narrow it here, where langgraph is already imported.
+        checkpointer=cast("Checkpointer", checkpointer),
         interrupt_after=list(interrupt_after) if interrupt_after is not None else None,
         interrupt_before=list(interrupt_before) if interrupt_before is not None else None,
     )

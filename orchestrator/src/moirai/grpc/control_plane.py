@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-import inspect
-import logging
 from typing import Any
 
 import grpc
 
-from moirai.grpc.protocol import ControlPlane, ProjectRecord, RegistrationTokenRecord, RunnerRecord, WorkflowRecord
+from moirai.grpc.protocol import (
+    ControlPlane,
+    ProjectRecord,
+    RegistrationTokenRecord,
+    RunnerRecord,
+    WorkflowRecord,
+)
 from moirai.persistence.authentication import AuthenticatedSession
 from proto import control_plane_pb2, control_plane_pb2_grpc
-
 
 _SESSION_METADATA_KEY = "x-loop-session"
 
@@ -57,9 +61,9 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         del request
         session = await self._require_session(context)
         return control_plane_pb2.WhoAmIResponse(
-            user_id=_text(_value(session, "user_id")),
-            username=_text(_value(session, "username")),
-            role=_text(_value(session, "role")),
+            user_id=session.user_id,
+            username=session.username,
+            role=session.role,
         )
 
     async def ListProjects(
@@ -234,12 +238,11 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         if not request.workflow_run_id or decision not in ("approved", "changes_requested"):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "human decision request is invalid")
         try:
-            await self._invoke(
-                "record_human_decision",
+            await self._control_plane.record_human_decision(
                 request.workflow_run_id,
                 decision,
                 request.comment or None,
-                _text(_value(session, "user_id")) or None,
+                session.user_id or None,
                 self._now(),
             )
         except NotImplementedError:
@@ -319,6 +322,15 @@ def _registration_token_message(token: RegistrationTokenRecord) -> control_plane
         used_at=_optional_timestamp(token["used_at"]),
         revoked_at=_optional_timestamp(token["revoked_at"]),
     )
+
+
+def _text(value: object) -> str:
+    """Coerce an untyped workflow-state value into a protobuf string field.
+
+    Graph state is `dict[str, object]`, so a missing key yields None, which
+    protobuf rejects. Absent values become the empty string.
+    """
+    return "" if value is None else str(value)
 
 
 def _optional_timestamp(value: datetime | None) -> str:

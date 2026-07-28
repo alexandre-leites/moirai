@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
 import inspect
 import json
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import grpc
@@ -71,7 +71,9 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
 
     async def deliver_offer(self, offer: JobOffer, task_packet: dict[str, Any]) -> bool:
         if not isinstance(task_packet, dict):
-            raise ValueError("task packet must be an object")
+            # ValueError keeps this consistent with the other request-validation
+            # failures on this service rather than introducing a second type.
+            raise ValueError("task packet must be an object")  # noqa: TRY004
         message = runner_control_pb2.OrchestratorToRunner(
             offer=runner_control_pb2.JobOffer(
                 job_id=offer.job_id,

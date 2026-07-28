@@ -16,7 +16,7 @@ from moirai.domain.control_plane import (
     RegistrationError,
     ScheduledJob,
 )
-from moirai.domain.leases import EventSequenceError, StaleLeaseError
+from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import (
     ExecutionEvent,
     Issue,
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
         WorkflowRecord,
     )
 from moirai.workflows.runner_events import (
-    execution_type_from_id,
     role_to_suffix,
     validate_runner_event,
     workflow_transition_for_terminal_event,
@@ -562,7 +561,8 @@ class AsyncpgControlPlane:
         return runner[0]
 
     async def heartbeat(self, runner_id: str, credential: str, now: datetime) -> Runner:
-        runner = await self.authenticate_runner(runner_id, credential, now)
+        # Raises if the credential is invalid; the record itself is re-read below.
+        await self.authenticate_runner(runner_id, credential, now)
         updated = await self._pool.fetchrow(
             """
             UPDATE app.runners
@@ -577,7 +577,7 @@ class AsyncpgControlPlane:
             raise AuthenticationError("runner is inactive")
         return _runner(updated, connected=True, healthy=True)
 
-    async def list_workflows(self) -> list[dict[str, object]]:
+    async def list_workflows(self) -> list[WorkflowRecord]:
         records = await self._pool.fetch(
             """
             SELECT wr.id, wr.project_id, wr.status, wr.current_phase,
@@ -607,7 +607,7 @@ class AsyncpgControlPlane:
             for record in records
         ]
 
-    async def list_runners(self) -> list[dict[str, object]]:
+    async def list_runners(self) -> list[RunnerRecord]:
         records = await self._pool.fetch(
             "SELECT id, name, enabled, draining, status, labels, last_seen_at FROM app.runners ORDER BY name ASC, id ASC"
         )
@@ -1770,19 +1770,6 @@ def _uuid_or_none(value: str | None) -> Any:
     if value is None:
         return None
     return _uuid(value)
-
-
-def role_to_suffix(role: str) -> str:
-    suffixes = {
-        "planner": "plan",
-        "developer": "implement",
-        "reviewer": "review",
-        "repairer": "repair",
-    }
-    try:
-        return suffixes[role]
-    except KeyError as error:
-        raise ValueError("workflow execution request role is invalid") from error
 
 
 _EXECUTION_TYPE_BY_ROLE: dict[str, str] = {

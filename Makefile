@@ -16,8 +16,8 @@ dev-install:
 	$(VENV)/bin/pip install --upgrade pip
 	$(VENV)/bin/pip install -e "orchestrator[dev]"
 
-test-orchestrator:
-	PYTHONPATH=orchestrator/src python3 -m unittest discover -s orchestrator/tests
+test-orchestrator: dev-install
+	PYTHONPATH=orchestrator/src $(VENV)/bin/python3 -m unittest discover -s orchestrator/tests
 
 test-runner:
 	cd runner && go test -race ./...

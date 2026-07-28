@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from moirai.code_hosts import CheckStatus, GitHubCliError, PullRequest, PullRequestCheck
-from moirai.issue_trackers import IssueTracker
 from moirai.workflows.issue_graph import IssueWorkflowState
 from moirai.workflows.nodes import PersistedWorkflowNodes
 
@@ -187,7 +186,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wait_for_checks_treats_empty_check_list_as_not_passed(self) -> None:
         code_host = _FakeCodeHost(_checks_result=[])
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
         update = await nodes.wait_for_checks(state)
         self.assertFalse(update.get("checks_passed"))
@@ -196,7 +195,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         code_host = _FakeCodeHost(_checks_result=[
             PullRequestCheck(name="test", status=CheckStatus.SKIPPED, required=True),
         ])
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
         update = await nodes.wait_for_checks(state)
         self.assertFalse(update.get("checks_passed"))
@@ -205,7 +204,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         code_host = _FakeCodeHost(_checks_result=[
             PullRequestCheck(name="test", status=CheckStatus.SKIPPED, required=False),
         ])
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
         update = await nodes.wait_for_checks(state)
         self.assertTrue(update.get("checks_passed"))
@@ -225,7 +224,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_merge_transitions_to_blocked_when_code_host_refuses(self) -> None:
         code_host = _FakeCodeHost(merge_error=GitHubCliError("refusing to merge pull request"))
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42", "merge_method": "squash"}
         update = await nodes.merge(state)
         self.assertEqual(update["status"], "blocked")

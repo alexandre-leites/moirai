@@ -1,6 +1,6 @@
 import sys
-from types import ModuleType
 import unittest
+from types import ModuleType
 
 from moirai.workflows.runtime import PersistedWorkflowRuntime, build_persisted_runtime
 
@@ -159,9 +159,9 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         package = ModuleType("langgraph")
         graph_module = ModuleType("langgraph.graph")
-        setattr(graph_module, "START", "start")
-        setattr(graph_module, "END", "end")
-        setattr(graph_module, "StateGraph", StateGraph)
+        graph_module.START = "start"
+        graph_module.END = "end"
+        graph_module.StateGraph = StateGraph
         previous_package = sys.modules.get("langgraph")
         previous_graph = sys.modules.get("langgraph.graph")
         sys.modules["langgraph"] = package

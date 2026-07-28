@@ -1,12 +1,11 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from moirai.domain.issues import ExternalIssue, LabelPolicy
+from moirai.domain.issues import ExternalIssue
 from moirai.domain.models import Project
 from moirai.services.issue_sync import IssueSync, IssueSyncError
-
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -178,12 +177,12 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
             await sync.sync_project(project, NOW)
 
     async def test_sync_all_projects_returns_counts_per_project(self) -> None:
-        sync, control_plane, _ = self._sync([_external_issue("1"), _external_issue("2")])
+        sync, _control_plane, _ = self._sync([_external_issue("1"), _external_issue("2")])
         results = await sync.sync_all_projects(NOW)
         self.assertEqual(results, {"project-1": 2})
 
     async def test_sync_all_projects_records_error_string_on_tracker_failure(self) -> None:
-        sync, control_plane, _ = self._sync(tracker_fail=True)
+        sync, _control_plane, _ = self._sync(tracker_fail=True)
         results = await sync.sync_all_projects(NOW)
         self.assertIn("project-1", results)
         self.assertIsInstance(results["project-1"], str)

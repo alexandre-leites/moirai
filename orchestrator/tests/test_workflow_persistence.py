@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import unittest
-from typing import Any
+from datetime import UTC, datetime
+from typing import Self
 
 from moirai.workflows.persistence import AsyncpgWorkflowPersistence
-
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 WORKFLOW_ID = "00000000-0000-0000-0000-000000000001"
 
 
 class _Transaction:
-    async def __aenter__(self) -> _Transaction:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:

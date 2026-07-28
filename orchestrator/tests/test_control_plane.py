@@ -1,5 +1,5 @@
-from datetime import UTC, datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from moirai.domain import (
     AuthenticationError,
@@ -12,7 +12,6 @@ from moirai.domain import (
     StaleLeaseError,
     WorkflowStatus,
 )
-
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 

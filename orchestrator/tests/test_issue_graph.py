@@ -1,6 +1,12 @@
 import unittest
 
-from moirai.workflows.issue_graph import route_checks, route_human, route_pipeline, route_plan, route_review
+from moirai.workflows.issue_graph import (
+    route_checks,
+    route_human,
+    route_pipeline,
+    route_plan,
+    route_review,
+)
 from moirai.workflows.policy import RetryBudget
 
 

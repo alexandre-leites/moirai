@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 from .schema_validation import load_schema, validate
 
-
 VALID_EVENT_TYPES = frozenset({"started", "progress", "log", "completed", "failed", "cancelled"})
 TERMINAL_EVENT_TYPES = frozenset({"completed", "failed", "cancelled"})
 MAX_PAYLOAD_FIELDS = 32

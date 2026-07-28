@@ -17,7 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.2", "ruff>=0.5", "mypy>=1.10", "types-grpcio>=1.0", "types-protobuf>=5.27", "asyncpg-stubs>=0.29"]
+# ruff and mypy are capped: CI gates on them, and an unpinned linter/type
+# checker turns any upstream release (new default rules, stricter inference)
+# into a red build on an unrelated commit. Raise the caps deliberately.
+dev = ["pytest>=8.2", "ruff>=0.5,<0.17", "mypy>=1.10,<2.4", "types-grpcio>=1.0", "types-protobuf>=5.27", "asyncpg-stubs>=0.29"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -28,6 +31,16 @@ line-length = 100
 target-version = "py312"
 # Generated protobuf/grpc code -- not hand-maintained, not worth linting.
 extend-exclude = ["src/moirai/protocols/proto"]
+
+[tool.ruff.lint]
+ignore = [
+    # `async with pool.acquire() as connection:` / `async with connection.transaction():`
+    # is the deliberate acquire-then-transaction pairing used throughout the
+    # persistence layer. Collapsing the two dedents each block body, which
+    # rewrites the embedded SQL heredocs purely for style; ruff itself offers
+    # no safe autofix for these sites.
+    "SIM117",
+]
 
 [tool.mypy]
 python_version = "3.12"

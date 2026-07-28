@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-
 _VALID_ROLES = frozenset({"planner", "developer", "pipeline", "reviewer", "repairer"})
 
 # The durable subset of graph state that has a matching app.workflow_runs

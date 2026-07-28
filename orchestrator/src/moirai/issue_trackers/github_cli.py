@@ -4,9 +4,10 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 from moirai.domain.issues import ExternalIssue
 
@@ -154,8 +155,8 @@ class GitHubCliIssueTracker:
                 body=str(value.get("body") or ""),
                 state=str(value["state"]),
                 labels=names,
-                created_at=datetime.fromisoformat(str(value["createdAt"]).replace("Z", "+00:00")).astimezone(UTC),
-                updated_at=datetime.fromisoformat(str(value["updatedAt"]).replace("Z", "+00:00")).astimezone(UTC),
+                created_at=datetime.fromisoformat(str(value["createdAt"])).astimezone(UTC),
+                updated_at=datetime.fromisoformat(str(value["updatedAt"])).astimezone(UTC),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise GitHubCliError("GitHub CLI issue item is missing required fields") from error

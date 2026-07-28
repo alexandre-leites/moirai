@@ -22,6 +22,20 @@ class LoginResponse(_message.Message):
     user_id: str
     def __init__(self, session_token: _Optional[str] = ..., user_id: _Optional[str] = ...) -> None: ...
 
+class WhoAmIRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class WhoAmIResponse(_message.Message):
+    __slots__ = ("user_id", "username", "role")
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    ROLE_FIELD_NUMBER: _ClassVar[int]
+    user_id: str
+    username: str
+    role: str
+    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ...) -> None: ...
+
 class ListProjectsRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
@@ -199,3 +213,19 @@ class ListRunnersResponse(_message.Message):
     RUNNERS_FIELD_NUMBER: _ClassVar[int]
     runners: _containers.RepeatedCompositeFieldContainer[Runner]
     def __init__(self, runners: _Optional[_Iterable[_Union[Runner, _Mapping]]] = ...) -> None: ...
+
+class SubmitHumanDecisionRequest(_message.Message):
+    __slots__ = ("workflow_run_id", "decision", "comment")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    DECISION_FIELD_NUMBER: _ClassVar[int]
+    COMMENT_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    decision: str
+    comment: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., decision: _Optional[str] = ..., comment: _Optional[str] = ...) -> None: ...
+
+class SubmitHumanDecisionResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...

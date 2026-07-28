@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Sequence
+from typing import Any
 
 from moirai.issue_trackers.github_cli import (
     CommandRunner,

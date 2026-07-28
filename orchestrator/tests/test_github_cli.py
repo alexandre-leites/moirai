@@ -1,7 +1,7 @@
 import asyncio
 import json
 import unittest
-from typing import Sequence
+from collections.abc import Sequence
 
 from moirai.issue_trackers.github_cli import GitHubCliError, GitHubCliIssueTracker, GitHubRepository
 
