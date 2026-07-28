@@ -38,8 +38,10 @@ if TYPE_CHECKING:
     # Protocol-conformance check, so this side must not import it at runtime.
     from moirai.grpc.protocol import (
         ProjectRecord,
+        QueueRecord,
         RegistrationTokenRecord,
         RunnerRecord,
+        WorkflowEventRecord,
         WorkflowRecord,
     )
 from moirai.workflows.runner_events import (
@@ -626,7 +628,7 @@ class AsyncpgControlPlane:
             for record in records
         ]
 
-    async def get_workflow(self, workflow_run_id: str) -> tuple[WorkflowRecord, list[dict[str, object]]]:
+    async def get_workflow(self, workflow_run_id: str) -> tuple[WorkflowRecord, list[WorkflowEventRecord]]:
         record = await self._pool.fetchrow(
             """
             SELECT wr.id, wr.project_id, wr.status, wr.current_phase,
@@ -753,7 +755,7 @@ class AsyncpgControlPlane:
                     )
         return _runner_record(record)
 
-    async def list_queue(self) -> list[dict[str, object]]:
+    async def list_queue(self) -> list[QueueRecord]:
         records = await self._pool.fetch(
             """SELECT wr.id AS workflow_run_id, wr.project_id, i.external_id AS issue_id, i.priority,
                       wr.status, wr.current_phase AS phase, wr.created_at AS queued_at
@@ -766,7 +768,7 @@ class AsyncpgControlPlane:
                  "status": str(record["status"]), "phase": str(record["phase"]), "queued_at": record["queued_at"]}
                 for record in records]
 
-    async def list_events_after(self, after_id: int) -> list[dict[str, object]]:
+    async def list_events_after(self, after_id: int) -> list[WorkflowEventRecord]:
         records = await self._pool.fetch(
             """SELECT id, workflow_run_id, event_type, severity, payload, created_at
                FROM app.workflow_events WHERE id > $1 ORDER BY id ASC LIMIT 100""", after_id
@@ -1947,7 +1949,7 @@ def _workflow_record(record: Any) -> WorkflowRecord:
     }
 
 
-def _workflow_event_record(record: Any) -> dict[str, object]:
+def _workflow_event_record(record: Any) -> WorkflowEventRecord:
     payload = record["payload"]
     return {
         "id": str(record["id"]),
