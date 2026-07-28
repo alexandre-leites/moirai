@@ -9,6 +9,27 @@ from uuid import uuid4
 
 _VALID_ROLES = frozenset({"planner", "developer", "pipeline", "reviewer", "repairer"})
 
+# The durable subset of graph state that has a matching app.workflow_runs
+# column. Anything else in `updates` (gate booleans like plan_valid, which
+# have no queryable column) stays in the workflow_events audit trail and the
+# LangGraph checkpoint only.
+_DURABLE_COLUMNS: dict[str, str] = {
+    "planning_attempts": "planning_attempts",
+    "implementation_attempts": "implementation_attempts",
+    "pipeline_repair_attempts": "pipeline_repair_attempts",
+    "review_cycles": "review_cycles",
+    "ci_repair_attempts": "ci_repair_attempts",
+    "total_agent_executions": "total_agent_executions",
+    "blocking_reason": "blocking_reason",
+    "branch_name": "branch_name",
+    "base_commit": "base_commit",
+    "current_commit": "current_commit",
+    "pull_request_id": "pull_request_external_id",
+    "pull_request_url": "pull_request_url",
+}
+
+_TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
+
 
 class AsyncpgWorkflowPersistence:
     def __init__(self, pool: Any, now: Callable[[], datetime] | None = None) -> None:
@@ -19,19 +40,19 @@ class AsyncpgWorkflowPersistence:
         self, workflow_run_id: str, status: str, updates: dict[str, object]
     ) -> None:
         now = self._now()
+        set_clauses = ["status = $2", "current_phase = $2", "updated_at = $3", "last_progress_at = $3"]
+        params: list[Any] = [_uuid(workflow_run_id), status, now]
+        for key, column in _DURABLE_COLUMNS.items():
+            if key in updates:
+                params.append(updates[key])
+                set_clauses.append(f"{column} = ${len(params)}")
+        if status in _TERMINAL_STATUSES:
+            params.append(now)
+            set_clauses.append(f"completed_at = COALESCE(completed_at, ${len(params)})")
+        query = f"UPDATE app.workflow_runs SET {', '.join(set_clauses)} WHERE id = $1 RETURNING id"
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                changed = await connection.fetchrow(
-                    """
-                    UPDATE app.workflow_runs
-                    SET status = $2, current_phase = $2, updated_at = $3
-                    WHERE id = $1
-                    RETURNING id
-                    """,
-                    _uuid(workflow_run_id),
-                    status,
-                    now,
-                )
+                changed = await connection.fetchrow(query, *params)
                 if changed is None:
                     raise ValueError("workflow run is unknown")
                 await connection.execute(
@@ -43,6 +64,24 @@ class AsyncpgWorkflowPersistence:
                     json.dumps({"status": status, "updates": updates}, separators=(",", ":"), sort_keys=True),
                     now,
                 )
+                if "pull_request_id" in updates:
+                    await connection.execute(
+                        """
+                        INSERT INTO app.pull_requests
+                            (id, workflow_run_id, provider, external_id, url, head_commit, state, raw_snapshot)
+                        VALUES (gen_random_uuid(), $1, 'github', $2, $3, $4, $5, '{}'::jsonb)
+                        ON CONFLICT (workflow_run_id) DO UPDATE
+                        SET external_id = EXCLUDED.external_id,
+                            url = EXCLUDED.url,
+                            head_commit = EXCLUDED.head_commit,
+                            state = EXCLUDED.state
+                        """,
+                        _uuid(workflow_run_id),
+                        str(updates.get("pull_request_id")),
+                        str(updates.get("pull_request_url") or ""),
+                        str(updates.get("pull_request_head_commit") or ""),
+                        str(updates.get("pull_request_state") or "open"),
+                    )
 
 
     async def latest_checkpoint(self, workflow_run_id: str) -> tuple[int, dict[str, object]] | None:

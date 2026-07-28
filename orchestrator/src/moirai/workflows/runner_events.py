@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .schema_validation import load_schema, validate
+
 
 VALID_EVENT_TYPES = frozenset({"started", "progress", "log", "completed", "failed", "cancelled"})
 TERMINAL_EVENT_TYPES = frozenset({"completed", "failed", "cancelled"})
@@ -21,6 +23,7 @@ class RunnerEventSummary:
     changed_files: list[str]
     commands_run: list[str]
     terminal: bool
+    result: dict[str, Any] | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -53,6 +56,7 @@ def validate_runner_event(
     exit_code: int | None = None
     changed_files: list[str] = []
     commands_run: list[str] = []
+    result: dict[str, Any] | None = None
 
     if terminal:
         raw_exit = payload.get("exitCode")
@@ -72,6 +76,11 @@ def validate_runner_event(
             if not isinstance(raw_cmds, list) or any(not isinstance(c, str) for c in raw_cmds):
                 raise RunnerEventError("runner event commandsRun must be a list of strings")
             commands_run = list(raw_cmds)
+        raw_result = payload.get("result")
+        if raw_result is not None:
+            if not isinstance(raw_result, dict):
+                raise RunnerEventError("runner event result must be an object")
+            result = raw_result
 
     return RunnerEventSummary(
         event_type=event_type,
@@ -80,10 +89,18 @@ def validate_runner_event(
         changed_files=changed_files,
         commands_run=commands_run,
         terminal=terminal,
+        result=result,
     )
 
 
 def execution_role_from_id(execution_id: str) -> str | None:
+    """Best-effort role guess from an execution ID's suffix.
+
+    This is untrusted: a runner chooses execution_id freely, so this must
+    never be used to authorize a workflow transition. It exists only as a
+    fallback for callers (tests, the in-memory control plane) that have no
+    dispatched-request record to resolve the role from authoritatively.
+    """
     suffix_to_role = {
         "-plan": "planner",
         "-implement": "developer",
@@ -115,14 +132,28 @@ class WorkflowTransition:
     state_updates: dict[str, object]
 
 
+def _schema_field(result: dict[str, Any] | None, schema_name: str, field: str) -> str | None:
+    """Returns result[field] only if result validates against the named
+    schema; otherwise None (covers missing results, malformed JSON shapes,
+    and values outside the schema's enum)."""
+    if not isinstance(result, dict):
+        return None
+    schema = load_schema(schema_name)
+    if validate(result, schema):
+        return None
+    value = result.get(field)
+    return value if isinstance(value, str) else None
+
+
 def workflow_transition_for_terminal_event(
     summary: RunnerEventSummary,
     current_status: str,
+    role: str | None = None,
 ) -> WorkflowTransition | None:
     if not summary.terminal:
         return None
 
-    role = execution_role_from_id(summary.execution_id)
+    resolved_role = role if role is not None else execution_role_from_id(summary.execution_id)
 
     if summary.cancelled:
         return WorkflowTransition(
@@ -139,16 +170,41 @@ def workflow_transition_for_terminal_event(
     if not summary.succeeded:
         return None
 
-    if role == "planner":
+    if resolved_role == "planner":
+        status = _schema_field(summary.result, "planner-result", "status")
+        if status == "ready":
+            return WorkflowTransition(
+                new_status="implementing",
+                state_updates={"status": "implementing", "plan_valid": True},
+            )
+        if status == "human_required":
+            return WorkflowTransition(
+                new_status="blocked",
+                state_updates={
+                    "status": "blocked",
+                    "plan_valid": False,
+                    "blocking_reason": "planner requires human input",
+                },
+            )
+        if status == "blocked":
+            reason = (summary.result or {}).get("summary")
+            return WorkflowTransition(
+                new_status="blocked",
+                state_updates={
+                    "status": "blocked",
+                    "plan_valid": False,
+                    "blocking_reason": reason if isinstance(reason, str) and reason else "planner reported blocked",
+                },
+            )
+        # "invalid" verdict, or a result that failed schema validation / was
+        # never sent: do not trust the plan. Stay in planning so the existing
+        # plan -> plan retry edge (gated by planning_attempts) applies.
         return WorkflowTransition(
-            new_status="implementing",
-            state_updates={
-                "status": "implementing",
-                "plan_valid": True,
-            },
+            new_status="planning",
+            state_updates={"status": "planning", "plan_valid": False},
         )
 
-    if role == "developer":
+    if resolved_role == "developer":
         if current_status == "implementing":
             return WorkflowTransition(
                 new_status="local_pipeline",
@@ -164,16 +220,32 @@ def workflow_transition_for_terminal_event(
             )
         return None
 
-    if role == "reviewer":
+    if resolved_role == "reviewer":
+        verdict = _schema_field(summary.result, "review-result", "verdict")
+        if verdict == "approved":
+            return WorkflowTransition(
+                new_status="pushing",
+                state_updates={"status": "pushing", "review_approved": True},
+            )
+        if verdict == "human_required":
+            return WorkflowTransition(
+                new_status="blocked",
+                state_updates={
+                    "status": "blocked",
+                    "review_approved": False,
+                    "blocking_reason": "reviewer requires human input",
+                },
+            )
+        # "changes_requested", "invalid", or an unparseable/missing result:
+        # never approve. Stay in ai_review so route_after_review (driven by
+        # review_approved=False) sends the workflow through the standard
+        # repair/re-review cycle instead of pushing.
         return WorkflowTransition(
-            new_status="pushing",
-            state_updates={
-                "status": "pushing",
-                "review_approved": True,
-            },
+            new_status="ai_review",
+            state_updates={"status": "ai_review", "review_approved": False},
         )
 
-    if role == "repairer":
+    if resolved_role == "repairer":
         return WorkflowTransition(
             new_status="local_pipeline",
             state_updates={"status": "local_pipeline"},

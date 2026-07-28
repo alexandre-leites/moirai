@@ -259,6 +259,7 @@ async def serve(
     issue_sync_task: asyncio.Task[None] | None = None
     db_health_task: asyncio.Task[None] | None = None
     reaper_task: asyncio.Task[None] | None = None
+    workflow_maintenance_task: asyncio.Task[None] | None = None
 
     supports_durability = isinstance(control_plane, AsyncpgControlPlane)
     if supports_durability:
@@ -271,7 +272,6 @@ async def serve(
 
         await _bootstrap_initial_setup(pool)
         await _seed_issue_if_needed(pool)
-
         from moirai.scheduler import AsyncpgLeader, Scheduler
         from moirai.services.issue_sync import IssueSync, github_issue_tracker_for_project
         from moirai.workflows.code_host_factory import ProjectCodeHostFactory
@@ -324,13 +324,24 @@ async def serve(
         reaper_task = asyncio.create_task(
             _run_retention_reaper(control_plane, shutdown, lambda: datetime.now(UTC), timedelta(hours=1))
         )
+        if workflow_runtime is not None:
+            maintenance_leader = AsyncpgLeader(control_plane._pool, 712346)
+            workflow_maintenance_task = asyncio.create_task(
+                _run_workflow_maintenance_loop(
+                    control_plane,
+                    runner_service._advance_workflow,
+                    shutdown,
+                    lambda: datetime.now(UTC),
+                    timedelta(seconds=30),
+                    maintenance_leader,
+                )
+            )
     else:
         _LOGGER.warning(
             "control plane implementation does not support durability features "
             "(migrations, workflow checkpointing, scheduling, issue sync) — running in reduced capacity"
         )
         register_services(server, control_plane)
-
     port = server.add_insecure_port(active_config.grpc_bind)
     if port == 0:
         shutdown.set()
@@ -342,6 +353,8 @@ async def serve(
             await db_health_task
         if reaper_task is not None:
             await reaper_task
+        if workflow_maintenance_task is not None:
+            await workflow_maintenance_task
         await control_plane.close()
         raise RuntimeError("orchestrator gRPC endpoint could not bind")
     _install_signal_handlers(shutdown)
@@ -365,8 +378,41 @@ async def serve(
             await db_health_task
         if reaper_task is not None:
             await reaper_task
+        if workflow_maintenance_task is not None:
+            await workflow_maintenance_task
         await server.stop(grace=5)
         await control_plane.close()
+
+
+async def _run_workflow_maintenance_loop(
+    control_plane: Any,
+    on_transition: Callable[[str, str, dict[str, object]], Any],
+    stop_event: asyncio.Event,
+    now: Callable[[], datetime],
+    interval: timedelta,
+    leader: Any,
+) -> None:
+    """Drains the workflow_transition_outbox (at-least-once delivery for
+    transitions committed but never invoked, e.g. after a crash) and
+    recovers workflow runs stalled with in-flight status but no queued or
+    active work (see persistence/control_plane.py's accept_event)."""
+    try:
+        while not stop_event.is_set():
+            if await leader.is_leader():
+                current = now()
+                try:
+                    await control_plane.drain_pending_transitions(on_transition, current)
+                    stalled = await control_plane.find_stalled_workflow_runs(current, timedelta(minutes=5))
+                    for workflow_run_id in stalled:
+                        await control_plane.recover_stalled_workflow_run(workflow_run_id, on_transition)
+                except Exception:
+                    _LOGGER.exception("workflow maintenance loop iteration failed")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
+            except TimeoutError:
+                pass
+    finally:
+        await leader.close()
 
 
 def _install_signal_handlers(stop_event: asyncio.Event) -> None:

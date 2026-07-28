@@ -19,6 +19,23 @@ class _Checkpoints:
         return len(self.saved)
 
 
+class _TransitioningCheckpoints(_Checkpoints):
+    def __init__(self, checkpoint: tuple[int, dict[str, object]] | None = None) -> None:
+        super().__init__(checkpoint)
+        self.transitions: list[tuple[str, str, dict[str, object]]] = []
+
+    async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
+        self.transitions.append((workflow_run_id, status, updates))
+
+
+class _FailingGraph:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    async def ainvoke(self, state: dict[str, object] | None, config: dict[str, object]) -> dict[str, object]:
+        raise self.error
+
+
 class _Graph:
     def __init__(self, response: object) -> None:
         self.response = response
@@ -88,6 +105,30 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(graph.updates), 0)
         self.assertEqual(graph.calls[0][0], {"status": "offered", "workflow_run_id": "wf-1"})
         self.assertEqual(result["status"], "planning")
+
+    async def test_node_exception_transitions_run_to_failed_instead_of_propagating(self) -> None:
+        checkpoints = _TransitioningCheckpoints()
+        graph = _FailingGraph(RuntimeError("node exploded"))
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run("workflow-1", {"status": "implementing"})
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("node exploded", str(result["blocking_reason"]))
+        self.assertEqual(checkpoints.transitions, [
+            ("workflow-1", "failed", {"status": "failed", "blocking_reason": result["blocking_reason"]}),
+        ])
+        self.assertEqual(checkpoints.saved, [("workflow-1", result)])
+
+    async def test_node_exception_without_transition_support_still_fails_gracefully(self) -> None:
+        checkpoints = _Checkpoints()
+        graph = _FailingGraph(RuntimeError("checkpointer unavailable"))
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run("workflow-1", {"status": "implementing"})
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(checkpoints.saved, [("workflow-1", result)])
 
     def test_factory_builds_langgraph_compatible_runtime(self) -> None:
         class Graph:

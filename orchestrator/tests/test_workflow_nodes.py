@@ -2,7 +2,7 @@ import unittest
 from dataclasses import dataclass
 from typing import Any, cast
 
-from moirai.code_hosts import CheckStatus, PullRequest, PullRequestCheck
+from moirai.code_hosts import CheckStatus, GitHubCliError, PullRequest, PullRequestCheck
 from moirai.issue_trackers import IssueTracker
 from moirai.workflows.issue_graph import IssueWorkflowState
 from moirai.workflows.nodes import PersistedWorkflowNodes
@@ -34,6 +34,7 @@ class _FakeCodeHost:
     checked_prs: list[str] = None
     merged_prs: list[tuple[str, str]] = None
     _checks_result: list[PullRequestCheck] = None
+    merge_error: GitHubCliError | None = None
 
     def __post_init__(self) -> None:
         if self.created_prs is None:
@@ -59,6 +60,8 @@ class _FakeCodeHost:
         pass
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:
+        if self.merge_error is not None:
+            raise self.merge_error
         self.merged_prs.append((pull_request_id, method))
 
 
@@ -182,6 +185,31 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         update = await self.nodes.wait_for_checks(self.state)
         self.assertEqual(update, {"status": "waiting_github_checks"})
 
+    async def test_wait_for_checks_treats_empty_check_list_as_not_passed(self) -> None:
+        code_host = _FakeCodeHost(_checks_result=[])
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
+        update = await nodes.wait_for_checks(state)
+        self.assertFalse(update.get("checks_passed"))
+
+    async def test_wait_for_checks_treats_skipped_required_check_as_not_passed(self) -> None:
+        code_host = _FakeCodeHost(_checks_result=[
+            PullRequestCheck(name="test", status=CheckStatus.SKIPPED, required=True),
+        ])
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
+        update = await nodes.wait_for_checks(state)
+        self.assertFalse(update.get("checks_passed"))
+
+    async def test_wait_for_checks_treats_skipped_optional_check_as_passed(self) -> None:
+        code_host = _FakeCodeHost(_checks_result=[
+            PullRequestCheck(name="test", status=CheckStatus.SKIPPED, required=False),
+        ])
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
+        update = await nodes.wait_for_checks(state)
+        self.assertTrue(update.get("checks_passed"))
+
     async def test_merge_calls_code_host_and_transitions(self) -> None:
         code_host = _FakeCodeHost()
         nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
@@ -194,6 +222,15 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         state: IssueWorkflowState = {"workflow_run_id": "wf-1"}
         update = await self.nodes.merge(state)
         self.assertEqual(update, {"status": "merging"})
+
+    async def test_merge_transitions_to_blocked_when_code_host_refuses(self) -> None:
+        code_host = _FakeCodeHost(merge_error=GitHubCliError("refusing to merge pull request"))
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42", "merge_method": "squash"}
+        update = await nodes.merge(state)
+        self.assertEqual(update["status"], "blocked")
+        self.assertIn("refusing to merge", str(update["blocking_reason"]))
+        self.assertEqual(code_host.merged_prs, [])
 
     async def test_complete_closes_issue_and_adds_delivered_label(self) -> None:
         issue_tracker = _FakeIssueTracker()

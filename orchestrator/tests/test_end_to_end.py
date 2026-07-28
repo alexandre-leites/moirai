@@ -382,7 +382,8 @@ class _FakeCodeHost:
 
     async def required_checks(self, pull_request_id: str) -> list[Any]:
         self.checked_prs.append(pull_request_id)
-        return []
+        from moirai.code_hosts import CheckStatus, PullRequestCheck
+        return [PullRequestCheck(name="ci", status=CheckStatus.PASSING)]
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:
         self.merged_prs.append((pull_request_id, method))

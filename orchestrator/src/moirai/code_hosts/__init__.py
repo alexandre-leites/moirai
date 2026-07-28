@@ -1,6 +1,8 @@
 from typing import Protocol, Sequence
 
-from .github_cli import CheckStatus, GitHubCliCodeHost, PullRequest, PullRequestCheck
+from moirai.issue_trackers.github_cli import GitHubCliError
+
+from .github_cli import CheckStatus, GitHubCliCodeHost, PullRequest, PullRequestCheck, checks_pass
 
 
 class CodeHost(Protocol):
@@ -20,4 +22,12 @@ class CodeHost(Protocol):
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None: ...
 
 
-__all__ = ["CheckStatus", "CodeHost", "GitHubCliCodeHost", "PullRequest", "PullRequestCheck"]
+__all__ = [
+    "CheckStatus",
+    "CodeHost",
+    "GitHubCliCodeHost",
+    "GitHubCliError",
+    "PullRequest",
+    "PullRequestCheck",
+    "checks_pass",
+]

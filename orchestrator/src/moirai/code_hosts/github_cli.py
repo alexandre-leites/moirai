@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Sequence
@@ -12,6 +13,8 @@ from moirai.issue_trackers.github_cli import (
     SubprocessCommandRunner,
     _redact,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class CheckStatus(StrEnum):
@@ -36,6 +39,27 @@ class PullRequestCheck:
     name: str
     status: CheckStatus
     url: str | None = None
+    required: bool = True
+
+
+def checks_pass(checks: Sequence[PullRequestCheck]) -> bool:
+    """The single pass/fail policy for a pull request's checks, shared by
+    the workflow's wait_for_checks gate and merge_pull_request's own guard
+    so the two layers can never disagree.
+
+    An empty check list does not pass (no CI configured is not the same as
+    CI having passed). A skipped check passes only if it is not required;
+    a skipped required check does not pass.
+    """
+    if not checks:
+        return False
+    for check in checks:
+        if check.status is CheckStatus.PASSING:
+            continue
+        if check.status is CheckStatus.SKIPPED and not check.required:
+            continue
+        return False
+    return True
 
 
 class GitHubCliCodeHost:
@@ -111,7 +135,7 @@ class GitHubCliCodeHost:
             "--repo",
             self._repository.slug,
             "--json",
-            "name,bucket,link,state",
+            "name,bucket,link,state,isRequired",
         )
         if not isinstance(payload, list):
             raise GitHubCliError("GitHub CLI pull request checks response is not an array")
@@ -130,8 +154,8 @@ class GitHubCliCodeHost:
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:
         checks = await self.required_checks(pull_request_id)
-        if any(check.status is not CheckStatus.PASSING for check in checks):
-            raise GitHubCliError("refusing to merge pull request before every reported check is passing")
+        if not checks_pass(checks):
+            raise GitHubCliError("refusing to merge pull request before every required check is passing")
         await self._run(
             "pr",
             "merge",
@@ -186,7 +210,10 @@ class GitHubCliCodeHost:
         link = value.get("link")
         if link is not None and not isinstance(link, str):
             raise GitHubCliError("GitHub CLI pull request check link is invalid")
-        return PullRequestCheck(name=value["name"], status=status, url=link)
+        required = value.get("isRequired")
+        if not isinstance(required, bool):
+            required = True
+        return PullRequestCheck(name=value["name"], status=status, url=link, required=required)
 
     @staticmethod
     def _check_status(bucket: object, state: object) -> CheckStatus:
@@ -208,7 +235,8 @@ class GitHubCliCodeHost:
             "cancelled": CheckStatus.CANCELLED,
             "canceled": CheckStatus.CANCELLED,
         }
-        try:
-            return statuses[normalized]
-        except KeyError as error:
-            raise GitHubCliError(f"GitHub CLI returned an unknown check state: {normalized}") from error
+        status = statuses.get(normalized)
+        if status is None:
+            _LOGGER.warning("GitHub CLI returned an unrecognized check state: %s", normalized)
+            return CheckStatus.PENDING
+        return status
