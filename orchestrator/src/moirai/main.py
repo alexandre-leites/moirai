@@ -67,9 +67,10 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
     user_count = await pool.fetchval("SELECT COUNT(*) FROM app.users")
     if user_count and user_count > 0:
         return
+    from moirai.config import read_optional_secret
     from moirai.persistence.authentication import AsyncpgAuthentication
     username = os.environ.get("LOOP_INITIAL_ADMIN_USERNAME", "admin")
-    password = os.environ.get("LOOP_INITIAL_ADMIN_PASSWORD")
+    password = read_optional_secret(os.environ, "LOOP_INITIAL_ADMIN_PASSWORD")
     if not password:
         _LOGGER.warning("LOOP_INITIAL_ADMIN_PASSWORD unset — skipping admin bootstrap")
         return
@@ -255,6 +256,7 @@ async def serve(
     health = HealthState()
     server = grpc.aio.server()
     workflow_runtime: Any | None = None
+
     scheduler_task: asyncio.Task[None] | None = None
     issue_sync_task: asyncio.Task[None] | None = None
     db_health_task: asyncio.Task[None] | None = None
@@ -300,7 +302,7 @@ async def serve(
             scheduler.run_with_leader(
                 shutdown,
                 lambda: datetime.now(UTC),
-                timedelta(seconds=5),
+                timedelta(seconds=1),
                 leader,
                 on_tick=health.mark_scheduler_tick,
             )

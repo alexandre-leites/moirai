@@ -25,14 +25,15 @@ services:
       LOOP_DATABASE_URL_FILE: /run/secrets/database_url
       LOOP_GRPC_BIND: 0.0.0.0:50051
       LOOP_INITIAL_ADMIN_USERNAME: "${LOOP_INITIAL_ADMIN_USERNAME:-admin}"
-      LOOP_INITIAL_ADMIN_PASSWORD: "${LOOP_INITIAL_ADMIN_PASSWORD}"
+      LOOP_INITIAL_ADMIN_PASSWORD_FILE: /run/secrets/initial_admin_password
+      LOOP_GITHUB_TOKEN_FILE: /run/secrets/github_token
       LOOP_SEED_PROJECT_NAME: "${LOOP_SEED_PROJECT_NAME:-demo}"
       LOOP_SEED_PROJECT_REPOSITORY_URL: "${LOOP_SEED_PROJECT_REPOSITORY_URL}"
       LOOP_SEED_TOKEN_LABELS: "${LOOP_SEED_TOKEN_LABELS:-linux}"
       LOOP_SEED_ISSUE_TITLE: "${LOOP_SEED_ISSUE_TITLE:-}"
       LOOP_SEED_ISSUE_BODY: "${LOOP_SEED_ISSUE_BODY:-}"
       RUNNER_REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
-    secrets: [database_url]
+    secrets: [database_url, initial_admin_password, github_token]
     depends_on:
       postgres: {condition: service_healthy}
     networks: [database, control]
@@ -67,7 +68,7 @@ services:
     depends_on:
       api: {condition: service_healthy}
     networks: [public]
-    ports: ["3000:80"]
+    ports: ["3000:8080"]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost/ || exit 1"]
       interval: 15s
@@ -85,11 +86,17 @@ services:
       LOOP_RUNNER_REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
       LOOP_RUNNER_NAME: "${LOOP_RUNNER_NAME:-runner-1}"
       LOOP_RUNNER_LABELS: "${LOOP_RUNNER_LABELS:-linux}"
+      LOOP_RUNNER_CAPACITY: "${LOOP_RUNNER_CAPACITY:-1}"
       LOOP_RUNNER_AGENT_ARGUMENTS: "--model,opencode/deepseek-v4-flash-free,--auto"
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]
     volumes: [runner-data:/data]
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4g
 
 networks:
   database: {internal: true}
@@ -105,3 +112,7 @@ secrets:
     file: ./secrets/postgres_password
   database_url:
     file: ./secrets/database_url
+  initial_admin_password:
+    file: ./secrets/initial_admin_password
+  github_token:
+    file: ./secrets/github_token

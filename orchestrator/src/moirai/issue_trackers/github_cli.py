@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,6 +12,10 @@ from moirai.domain.issues import ExternalIssue
 
 
 class GitHubCliError(RuntimeError):
+    pass
+
+
+class GitHubCliUnavailableError(GitHubCliError):
     pass
 
 
@@ -40,12 +45,20 @@ class GitHubRepository:
 
 
 class SubprocessCommandRunner:
+    def __init__(self, github_token: str | None = None) -> None:
+        self._github_token = github_token
+
     async def run(self, command: Sequence[str], timeout_seconds: float) -> tuple[int, str, str]:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        env = {**os.environ, "GH_TOKEN": self._github_token} if self._github_token else None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except FileNotFoundError as error:
+            raise GitHubCliUnavailableError("GitHub CLI (gh) is not installed in this image") from error
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_seconds)
         except TimeoutError:
@@ -53,6 +66,25 @@ class SubprocessCommandRunner:
             await process.wait()
             raise GitHubCliError("GitHub CLI command timed out") from None
         return process.returncode or 0, stdout.decode(), stderr.decode()
+
+
+async def verify_gh_ready(runner: CommandRunner | None = None, timeout_seconds: float = 10.0) -> None:
+    """Fail loudly at startup if the GitHub CLI is absent or unauthenticated.
+
+    Without this, a missing/unauthenticated `gh` is only discovered when the
+    first workflow tries to open a pull request or sync issues.
+    """
+    active_runner = runner or SubprocessCommandRunner()
+    try:
+        code, _, stderr = await active_runner.run(("gh", "auth", "status"), timeout_seconds)
+    except GitHubCliUnavailableError:
+        raise
+    except GitHubCliError as error:
+        raise GitHubCliUnavailableError(f"GitHub CLI readiness check failed: {error}") from error
+    if code != 0:
+        raise GitHubCliUnavailableError(
+            _redact(f"GitHub CLI is not authenticated: {stderr.strip() or 'gh auth status failed'}")
+        )
 
 
 class GitHubCliIssueTracker:
