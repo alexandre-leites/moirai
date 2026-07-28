@@ -363,6 +363,25 @@ func TestControlLoopRecoversLeaseLossByCancellingExecution(t *testing.T) {
 	}
 }
 
+func TestTerminalPayloadCarriesRawResultOnlyWhenCompleted(t *testing.T) {
+	raw := map[string]any{"verdict": "approved", "findings": []any{}}
+	completed := terminalPayload("completed", Result{Raw: raw}, nil)
+	result, ok := completed["result"].(map[string]any)
+	if !ok || result["verdict"] != "approved" {
+		t.Fatalf("terminalPayload(completed) result = %#v", completed["result"])
+	}
+
+	failed := terminalPayload("failed", Result{Raw: raw}, nil)
+	if _, present := failed["result"]; present {
+		t.Fatalf("terminalPayload(failed) should not carry result: %#v", failed)
+	}
+
+	noRaw := terminalPayload("completed", Result{}, nil)
+	if _, present := noRaw["result"]; present {
+		t.Fatalf("terminalPayload(completed) with no raw document should omit result: %#v", noRaw)
+	}
+}
+
 func TestControlLoopFlushesBufferedEventsAfterReconnectBeforeLeaseExpiry(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{sendErr: errors.New("control stream disconnected")}

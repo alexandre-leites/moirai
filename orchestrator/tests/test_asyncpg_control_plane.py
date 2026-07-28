@@ -218,6 +218,13 @@ class _DurableConnection:
                 "lease_expires_at": self.pool.lease_expires_at,
                 "last_event_sequence": self.pool.last_event_sequence,
             }
+        if "SELECT 1 AS present FROM app.workflow_execution_requests" in query:
+            return {"present": 1} if self.pool.dispatched_requests else None
+        if "SELECT role, attempt" in query and "workflow_execution_requests" in query:
+            for request_id, role, attempt in self.pool.dispatched_requests:
+                if str(request_id) == str(arguments[0]):
+                    return {"role": role, "attempt": attempt}
+            return None
         raise AssertionError(query)
 
     async def execute(self, query: str, *arguments: object) -> str:
@@ -255,6 +262,7 @@ class _DurablePool:
         self.last_event_sequence = 0
         self.execution_request_id = "00000000-0000-0000-0000-000000000007"
         self.execution_request_status = "none"
+        self.dispatched_requests: list[tuple[str, str, int]] = []
         self.queries: list[str] = []
         self.candidate: dict[str, object] | None = {
             "issue_id": "00000000-0000-0000-0000-000000000004",
@@ -725,6 +733,311 @@ class RecordHumanDecisionTests(unittest.IsolatedAsyncioTestCase):
         control_plane, _ = self._control_plane(status="merging")
         with self.assertRaises(ValueError):
             await control_plane.record_human_decision(self._WORKFLOW_ID, "approved", None, self._ACTOR_ID, NOW)
+
+
+class _EventConnection:
+    def __init__(self, pool: _EventPool) -> None:
+        self.pool = pool
+
+    async def __aenter__(self) -> _EventConnection:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def transaction(self) -> _Transaction:
+        return _Transaction()
+
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        self.pool.calls.append((query, arguments))
+        if "FROM app.jobs AS j" in query and "JOIN app.workflow_runs" in query:
+            return dict(self.pool.job_row) if self.pool.job_row is not None else None
+        if "SELECT 1 AS present FROM app.workflow_execution_requests" in query:
+            return {"present": 1} if self.pool.has_existing_requests else None
+        if "SELECT role, attempt" in query and "workflow_execution_requests" in query:
+            return self.pool.dispatched.get(str(arguments[0]))
+        raise AssertionError(query)
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        self.pool.calls.append((query, arguments))
+        return "INSERT 0 1"
+
+
+class _EventPool:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.job_row: dict[str, object] | None = {
+            "id": "00000000-0000-0000-0000-000000000002",
+            "workflow_run_id": "00000000-0000-0000-0000-000000000001",
+            "lease_generation": 1,
+            "lease_expires_at": NOW + timedelta(minutes=5),
+            "last_event_sequence": 0,
+            "workflow_status": "ai_review",
+        }
+        self.has_existing_requests = True
+        self.dispatched: dict[str, dict[str, object]] = {}
+
+    def acquire(self) -> _EventConnection:
+        return _EventConnection(self)
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        self.calls.append((query, arguments))
+        return "INSERT 0 1"
+
+
+class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
+    REQUEST_ID = "00000000-0000-0000-0000-0000000000aa"
+    RUNNER_ID = "00000000-0000-0000-0000-000000000003"
+
+    def _event(self, execution_id: str, event_type: str, payload: dict[str, object] | None = None) -> ExecutionEvent:
+        return ExecutionEvent(
+            job_id="00000000-0000-0000-0000-000000000002",
+            runner_id=self.RUNNER_ID,
+            lease_generation=1,
+            event_sequence=1,
+            event_type=event_type,
+            execution_id=execution_id,
+            payload=payload or {},
+        )
+
+    async def test_terminal_event_with_undispatched_execution_id_is_rejected(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {}
+        control_plane = AsyncpgControlPlane(pool)
+        with self.assertRaises(StaleLeaseError):
+            await control_plane.accept_event(
+                self._event(f"{self.REQUEST_ID}-review", "completed", {"result": {"verdict": "approved"}}),
+                NOW,
+            )
+        self.assertFalse(any("INSERT INTO app.ai_reviews" in query for query, _ in pool.calls))
+
+    async def test_terminal_event_resolves_role_from_dispatched_request_not_suffix(self) -> None:
+        """A dispatched request whose actual role differs from the execution
+        ID's suffix must be trusted over the (attacker-controlled) suffix."""
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 3}}
+        control_plane = AsyncpgControlPlane(pool)
+        # Suffix claims "-implement" (developer) but the dispatched row says reviewer.
+        lease = await control_plane.accept_event(
+            self._event(f"{self.REQUEST_ID}-implement", "completed", {"result": {"verdict": "approved"}}),
+            NOW,
+        )
+        self.assertIsNotNone(lease)
+        executions_update = next(
+            (args for query, args in pool.calls if "UPDATE app.executions" in query),
+            None,
+        )
+        self.assertIsNotNone(executions_update)
+        assert executions_update is not None
+        self.assertEqual(executions_update[1], "run_reviewer")
+
+    async def test_started_and_terminal_events_use_the_dispatched_attempt_not_event_sequence(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 3}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        started_event = self._event(f"{self.REQUEST_ID}-review", "started", {"status": "running"})
+        started_event = ExecutionEvent(
+            job_id=started_event.job_id,
+            runner_id=started_event.runner_id,
+            lease_generation=1,
+            event_sequence=7,
+            event_type="started",
+            execution_id=started_event.execution_id,
+            payload={"status": "running"},
+        )
+        await control_plane.accept_event(started_event, NOW)
+        insert_call = next(args for query, args in pool.calls if "INSERT INTO app.executions" in query)
+        # attempt (index 2) must be the dispatched attempt (3), not event_sequence (7).
+        self.assertEqual(insert_call[2], 3)
+
+        assert pool.job_row is not None
+        pool.job_row["last_event_sequence"] = 0
+        terminal_event = ExecutionEvent(
+            job_id=started_event.job_id,
+            runner_id=started_event.runner_id,
+            lease_generation=1,
+            event_sequence=9,
+            event_type="completed",
+            execution_id=started_event.execution_id,
+            payload={"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+        )
+        await control_plane.accept_event(terminal_event, NOW)
+        update_call = next(
+            args for query, args in pool.calls
+            if "UPDATE app.executions" in query and "attempt = $8" in query
+        )
+        self.assertEqual(update_call[7], 3)
+
+    async def test_reviewer_approval_persists_ai_review_and_outbox_entry(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+        transitions: list[tuple[str, str, dict[str, object]]] = []
+
+        async def on_transition(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
+            transitions.append((workflow_run_id, new_status, updates))
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=on_transition,
+        )
+        self.assertTrue(any("INSERT INTO app.ai_reviews" in query for query, _ in pool.calls))
+        self.assertTrue(any("INSERT INTO app.workflow_transition_outbox" in query for query, _ in pool.calls))
+        self.assertEqual(transitions, [("00000000-0000-0000-0000-000000000001", "pushing", {"status": "pushing", "review_approved": True})])
+        self.assertTrue(any("status = 'processed'" in query for query, _ in pool.calls))
+
+    async def test_outbox_entry_stays_pending_when_on_transition_raises(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def failing_on_transition(*_args: object) -> None:
+            raise RuntimeError("graph runtime unavailable")
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=failing_on_transition,
+        )
+        self.assertTrue(any("attempts = attempts + 1" in query for query, _ in pool.calls))
+        self.assertFalse(any("status = 'processed'" in query for query, _ in pool.calls))
+
+
+class _OutboxConnection:
+    def __init__(self, pool: _OutboxPool) -> None:
+        self.pool = pool
+
+    async def __aenter__(self) -> _OutboxConnection:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        self.pool.calls.append((query, arguments))
+        rows = self.pool.pending_rows
+        self.pool.pending_rows = []
+        return rows
+
+
+class _OutboxPool:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.pending_rows: list[dict[str, object]] = []
+        self.stalled_rows: list[dict[str, object]] = []
+
+    def acquire(self) -> _OutboxConnection:
+        return _OutboxConnection(self)
+
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        self.calls.append((query, arguments))
+        return self.stalled_rows
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        self.calls.append((query, arguments))
+        return "UPDATE 1"
+
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        self.calls.append((query, arguments))
+        return {"status": "implementing"}
+
+
+class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_drain_pending_transitions_marks_processed_on_success(self) -> None:
+        pool = _OutboxPool()
+        pool.pending_rows = [
+            {"id": "e1", "workflow_run_id": "wf-1", "new_status": "pushing", "state_updates": '{"review_approved": true}'},
+        ]
+        control_plane = AsyncpgControlPlane(pool)
+        delivered: list[tuple[str, str, dict[str, object]]] = []
+
+        async def on_transition(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
+            delivered.append((workflow_run_id, new_status, updates))
+
+        processed = await control_plane.drain_pending_transitions(on_transition, NOW)
+        self.assertEqual(processed, 1)
+        self.assertEqual(delivered, [("wf-1", "pushing", {"review_approved": True})])
+        self.assertTrue(any("status = 'processed'" in query for query, _ in pool.calls))
+
+    async def test_drain_pending_transitions_retries_on_failure(self) -> None:
+        pool = _OutboxPool()
+        pool.pending_rows = [
+            {"id": "e1", "workflow_run_id": "wf-1", "new_status": "pushing", "state_updates": {}},
+        ]
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def failing(*_args: object) -> None:
+            raise RuntimeError("boom")
+
+        processed = await control_plane.drain_pending_transitions(failing, NOW)
+        self.assertEqual(processed, 0)
+        self.assertTrue(any("attempts = attempts + 1" in query for query, _ in pool.calls))
+
+    async def test_find_stalled_workflow_runs_returns_ids(self) -> None:
+        pool = _OutboxPool()
+        pool.stalled_rows = [{"id": "wf-1"}, {"id": "wf-2"}]
+        control_plane = AsyncpgControlPlane(pool)
+        stalled = await control_plane.find_stalled_workflow_runs(NOW, timedelta(minutes=5))
+        self.assertEqual(stalled, ("wf-1", "wf-2"))
+
+    async def test_recover_stalled_workflow_run_replays_current_status_with_empty_updates(self) -> None:
+        pool = _OutboxPool()
+        control_plane = AsyncpgControlPlane(pool)
+        delivered: list[tuple[str, str, dict[str, object]]] = []
+
+        async def on_transition(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
+            delivered.append((workflow_run_id, new_status, updates))
+
+        recovered = await control_plane.recover_stalled_workflow_run(
+            "00000000-0000-0000-0000-000000000001", on_transition
+        )
+        self.assertTrue(recovered)
+        self.assertEqual(delivered, [("00000000-0000-0000-0000-000000000001", "implementing", {})])
+
+
+class _ListWorkflowsPool:
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        assert "FROM app.workflow_runs" in query
+        return [
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "project_id": "00000000-0000-0000-0000-000000000002",
+                "status": "blocked",
+                "current_phase": "blocked",
+                "pull_request_external_id": "42",
+                "pull_request_url": "https://github.com/example/repo/pull/42",
+                "blocking_reason": "workflow retry budget exhausted",
+                "planning_attempts": 1,
+                "implementation_attempts": 2,
+                "pipeline_repair_attempts": 0,
+                "review_cycles": 3,
+                "ci_repair_attempts": 0,
+                "total_agent_executions": 6,
+            }
+        ]
+
+
+class ListWorkflowsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_workflows_surfaces_durable_columns(self) -> None:
+        control_plane = AsyncpgControlPlane(_ListWorkflowsPool())
+        workflows = await control_plane.list_workflows()
+        self.assertEqual(len(workflows), 1)
+        workflow = workflows[0]
+        self.assertEqual(workflow["status"], "blocked")
+        self.assertEqual(workflow["pull_request_url"], "https://github.com/example/repo/pull/42")
+        self.assertEqual(workflow["blocking_reason"], "workflow retry budget exhausted")
+        self.assertEqual(workflow["review_cycles"], 3)
+        self.assertEqual(workflow["total_agent_executions"], 6)
 
 
 if __name__ == "__main__":

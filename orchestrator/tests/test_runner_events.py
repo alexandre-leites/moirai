@@ -109,6 +109,7 @@ class WorkflowTransitionTests(unittest.TestCase):
         event_type: str,
         execution_id: str = "job-1-plan",
         exit_code: int | None = 0,
+        result: dict[str, Any] | None = None,
     ) -> RunnerEventSummary:
         return RunnerEventSummary(
             event_type=event_type,
@@ -117,6 +118,7 @@ class WorkflowTransitionTests(unittest.TestCase):
             changed_files=[],
             commands_run=[],
             terminal=event_type in {"completed", "failed", "cancelled"},
+            result=result,
         )
 
     def test_non_terminal_event_returns_none(self) -> None:
@@ -135,35 +137,92 @@ class WorkflowTransitionTests(unittest.TestCase):
         assert transition is not None
         self.assertEqual(transition.new_status, "recovering")
 
-    def test_completed_planner_transitions_to_implementing(self) -> None:
-        summary = self._summary("completed", "job-1-plan")
-        transition = workflow_transition_for_terminal_event(summary, "planning")
+    def _planner_result(self, status: str) -> dict[str, Any]:
+        return {
+            "status": status,
+            "summary": "s",
+            "assumptions": [],
+            "questions": [],
+            "risk": "low",
+            "acceptanceCriteria": [],
+            "steps": [],
+        }
+
+    def _review_result(self, verdict: str) -> dict[str, Any]:
+        return {"verdict": verdict, "acceptanceCriteria": [], "findings": []}
+
+    def test_completed_planner_with_ready_verdict_transitions_to_implementing(self) -> None:
+        summary = self._summary("completed", "job-1-plan", result=self._planner_result("ready"))
+        transition = workflow_transition_for_terminal_event(summary, "planning", role="planner")
         assert transition is not None
         self.assertEqual(transition.new_status, "implementing")
         self.assertTrue(transition.state_updates.get("plan_valid"))
 
+    def test_completed_planner_without_result_does_not_approve_the_plan(self) -> None:
+        summary = self._summary("completed", "job-1-plan")
+        transition = workflow_transition_for_terminal_event(summary, "planning", role="planner")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "planning")
+        self.assertFalse(transition.state_updates.get("plan_valid"))
+
+    def test_completed_planner_with_blocked_verdict_transitions_to_blocked(self) -> None:
+        summary = self._summary("completed", "job-1-plan", result=self._planner_result("blocked"))
+        transition = workflow_transition_for_terminal_event(summary, "planning", role="planner")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "blocked")
+        self.assertFalse(transition.state_updates.get("plan_valid"))
+
     def test_completed_developer_transitions_to_local_pipeline(self) -> None:
         summary = self._summary("completed", "job-1-implement")
-        transition = workflow_transition_for_terminal_event(summary, "implementing")
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
 
-    def test_completed_reviewer_transitions_to_pushing(self) -> None:
-        summary = self._summary("completed", "job-1-review")
-        transition = workflow_transition_for_terminal_event(summary, "ai_review")
+    def test_completed_reviewer_with_approved_verdict_transitions_to_pushing(self) -> None:
+        summary = self._summary("completed", "job-1-review", result=self._review_result("approved"))
+        transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
         assert transition is not None
         self.assertEqual(transition.new_status, "pushing")
         self.assertTrue(transition.state_updates.get("review_approved"))
 
+    def test_completed_reviewer_with_changes_requested_does_not_approve(self) -> None:
+        summary = self._summary("completed", "job-1-review", result=self._review_result("changes_requested"))
+        transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
+        assert transition is not None
+        self.assertNotEqual(transition.new_status, "pushing")
+        self.assertFalse(transition.state_updates.get("review_approved"))
+
+    def test_completed_reviewer_without_result_does_not_approve(self) -> None:
+        """A completed process alone must never approve the review."""
+        summary = self._summary("completed", "job-1-review")
+        transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
+        assert transition is not None
+        self.assertFalse(transition.state_updates.get("review_approved"))
+
+    def test_completed_reviewer_with_human_required_verdict_transitions_to_blocked(self) -> None:
+        summary = self._summary("completed", "job-1-review", result=self._review_result("human_required"))
+        transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "blocked")
+        self.assertFalse(transition.state_updates.get("review_approved"))
+
     def test_completed_repairer_transitions_to_local_pipeline(self) -> None:
         summary = self._summary("completed", "job-1-repair")
-        transition = workflow_transition_for_terminal_event(summary, "repairing")
+        transition = workflow_transition_for_terminal_event(summary, "repairing", role="repairer")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
 
     def test_completed_unknown_role_returns_none(self) -> None:
         summary = self._summary("completed", "job-1-push")
-        self.assertIsNone(workflow_transition_for_terminal_event(summary, "pushing"))
+        self.assertIsNone(workflow_transition_for_terminal_event(summary, "pushing", role=None))
+
+    def test_role_falls_back_to_suffix_derivation_when_not_supplied(self) -> None:
+        """Callers with no authoritative role (e.g. the in-memory control
+        plane used only in tests) fall back to suffix parsing."""
+        summary = self._summary("completed", "job-1-repair")
+        transition = workflow_transition_for_terminal_event(summary, "repairing")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "local_pipeline")
 
 
 if __name__ == "__main__":

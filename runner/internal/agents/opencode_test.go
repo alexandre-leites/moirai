@@ -36,6 +36,29 @@ JSON
 	}
 }
 
+func TestOpenCodeBackendCarriesRawResultDocumentForRoleSpecificFields(t *testing.T) {
+	workspace := t.TempDir()
+	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+cat > .loop/result.json <<'JSON'
+{"protocolVersion":"1.0","executionId":"execution-1","status":"completed","summary":"reviewed","verdict":"approved","findings":[],"acceptanceCriteria":[]}
+JSON
+`)
+	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+	result, err := backend.Execute(context.Background(), Request{
+		ExecutionID: "execution-1",
+		Role:        RoleReviewer,
+		Workspace:   workspace,
+		Prompt:      "review the task",
+		Timeout:     time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Raw == nil || result.Raw["verdict"] != "approved" {
+		t.Fatalf("Raw result = %#v", result.Raw)
+	}
+}
+
 func TestOpenCodeBackendPassesConfiguredArgumentsBeforePrompt(t *testing.T) {
 	workspace := t.TempDir()
 	binary := writeFakeOpenCode(t, workspace, `printf '%s\n' "$@" > arguments

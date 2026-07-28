@@ -7,7 +7,7 @@ from pathlib import PurePath
 from hashlib import sha256
 from secrets import compare_digest, token_urlsafe
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from moirai.domain.control_plane import (
     AuthenticationError,
@@ -554,6 +554,36 @@ class AsyncpgControlPlane:
         if updated is None:
             raise AuthenticationError("runner is inactive")
         return _runner(updated, connected=True, healthy=True)
+
+    async def list_workflows(self) -> list[dict[str, object]]:
+        records = await self._pool.fetch(
+            """
+            SELECT wr.id, wr.project_id, wr.status, wr.current_phase,
+                   wr.pull_request_external_id, wr.pull_request_url, wr.blocking_reason,
+                   wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts,
+                   wr.review_cycles, wr.ci_repair_attempts, wr.total_agent_executions
+            FROM app.workflow_runs AS wr
+            ORDER BY wr.created_at DESC, wr.id ASC
+            """
+        )
+        return [
+            {
+                "id": str(record["id"]),
+                "project_id": str(record["project_id"]),
+                "status": str(record["status"]),
+                "phase": str(record["current_phase"]),
+                "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
+                "pull_request_url": _optional_text(record["pull_request_url"]),
+                "blocking_reason": _optional_text(record["blocking_reason"]),
+                "planning_attempts": int(record["planning_attempts"]),
+                "implementation_attempts": int(record["implementation_attempts"]),
+                "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
+                "review_cycles": int(record["review_cycles"]),
+                "ci_repair_attempts": int(record["ci_repair_attempts"]),
+                "total_agent_executions": int(record["total_agent_executions"]),
+            }
+            for record in records
+        ]
 
     async def list_runners(self) -> list[dict[str, object]]:
         records = await self._pool.fetch(
@@ -1210,6 +1240,7 @@ class AsyncpgControlPlane:
         on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]] | None = None,
     ) -> JobLease:
         summary = validate_runner_event(event.event_type, event.execution_id, event.payload)
+        outbox_id: UUID | None = None
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 job = await connection.fetchrow(
@@ -1232,8 +1263,20 @@ class AsyncpgControlPlane:
                 if job is None:
                     raise StaleLeaseError("runner execution event was rejected")
 
+                resolved = await self._resolve_dispatched_execution(
+                    connection, str(job["workflow_run_id"]), event.job_id, event.execution_id
+                )
+                if summary.terminal and resolved is None:
+                    # The runner's execution ID does not correspond to a request this
+                    # orchestrator actually dispatched for this job: never let it drive
+                    # a workflow transition (that is the gate #8 closes).
+                    raise StaleLeaseError("runner execution event was rejected")
+                resolved_role, resolved_attempt = resolved if resolved is not None else (None, None)
+
                 current_workflow_status = str(job["workflow_status"])
-                transition = workflow_transition_for_terminal_event(summary, current_workflow_status)
+                transition = workflow_transition_for_terminal_event(
+                    summary, current_workflow_status, role=resolved_role
+                )
 
                 if transition is not None:
                     await connection.execute(
@@ -1272,7 +1315,8 @@ class AsyncpgControlPlane:
                     now,
                 )
 
-                execution_type = _execution_type_from_id(event.execution_id)
+                execution_type = _EXECUTION_TYPE_BY_ROLE.get(resolved_role) if resolved_role else None
+                attempt = resolved_attempt if resolved_attempt is not None else 0
                 if execution_type is not None:
                     if summary.event_type == "started":
                         await connection.execute(
@@ -1284,7 +1328,7 @@ class AsyncpgControlPlane:
                             """,
                             _uuid(event.job_id),
                             execution_type,
-                            event.event_sequence,
+                            attempt,
                             event.lease_generation,
                             now,
                         )
@@ -1302,7 +1346,7 @@ class AsyncpgControlPlane:
                             UPDATE app.executions
                             SET status = $3, finished_at = $4, exit_code = $5, result = $6::jsonb
                             WHERE job_id = $1 AND execution_type = $2 AND lease_generation = $7
-                              AND status = 'running'
+                              AND status = 'running' AND attempt = $8
                             """,
                             _uuid(event.job_id),
                             execution_type,
@@ -1311,7 +1355,11 @@ class AsyncpgControlPlane:
                             summary.exit_code,
                             result_json,
                             event.lease_generation,
+                            attempt,
                         )
+
+                if resolved_role == "reviewer" and summary.terminal and summary.succeeded:
+                    await self._record_ai_review(connection, job["workflow_run_id"], summary, now)
 
                 if transition is not None:
                     new_wf_status = transition.new_status
@@ -1332,12 +1380,219 @@ class AsyncpgControlPlane:
                         """,
                         _uuid(event.runner_id),
                     )
+                    outbox_id = uuid4()
+                    await connection.execute(
+                        """
+                        INSERT INTO app.workflow_transition_outbox
+                            (id, workflow_run_id, new_status, state_updates, status, created_at)
+                        VALUES ($1, $2, $3, $4::jsonb, 'pending', $5)
+                        """,
+                        outbox_id,
+                        job["workflow_run_id"],
+                        new_wf_status,
+                        json.dumps(transition.state_updates, separators=(",", ":"), sort_keys=True),
+                        now,
+                    )
 
-        if transition is not None and on_transition is not None:
-            await on_transition(str(job["workflow_run_id"]), transition.new_status, transition.state_updates)
+        if transition is not None and on_transition is not None and outbox_id is not None:
+            await self._drain_outbox_entry(
+                outbox_id, str(job["workflow_run_id"]), transition.new_status, transition.state_updates,
+                on_transition, now,
+            )
 
         updated_sequence = max(int(job["last_event_sequence"]), event.event_sequence)
         return JobLease(event.job_id, event.runner_id, int(job["lease_generation"]), job["lease_expires_at"], updated_sequence)
+
+    async def _resolve_dispatched_execution(
+        self, connection: Any, workflow_run_id: str, job_id: str, execution_id: str
+    ) -> tuple[str, int] | None:
+        """Resolves (role, attempt) for an execution ID by joining the
+        dispatched request it claims to be -- never by trusting the string
+        itself. Returns None when the execution ID does not correspond to
+        anything this orchestrator actually dispatched for this job.
+        """
+        if execution_id == f"{job_id}-plan":
+            # The very first planning dispatch for a workflow predates any
+            # app.workflow_execution_requests row (schedule() bootstraps it
+            # directly), so there is nothing to join on yet. It is only
+            # trustworthy as long as that remains true for this workflow --
+            # job_id is itself bound to a single workflow by the lease check
+            # above, so this cannot be replayed against a different job.
+            existing = await connection.fetchrow(
+                "SELECT 1 AS present FROM app.workflow_execution_requests WHERE workflow_run_id = $1 LIMIT 1",
+                _uuid(workflow_run_id),
+            )
+            if existing is None:
+                return "planner", 1
+            return None
+
+        candidate = execution_id[:36]
+        try:
+            request_id = UUID(candidate)
+        except ValueError:
+            return None
+        if execution_id[36:37] != "-":
+            return None
+        row = await connection.fetchrow(
+            """
+            SELECT role, attempt
+            FROM app.workflow_execution_requests
+            WHERE id = $1 AND workflow_run_id = $2 AND status = 'dispatched'
+            """,
+            request_id,
+            _uuid(workflow_run_id),
+        )
+        if row is not None:
+            return str(row["role"]), int(row["attempt"])
+        return None
+
+    async def _record_ai_review(
+        self, connection: Any, workflow_run_id: Any, summary: Any, now: datetime
+    ) -> None:
+        result = summary.result if isinstance(summary.result, dict) else None
+        verdict = result.get("verdict") if result is not None else None
+        if verdict not in {"approved", "changes_requested", "human_required", "invalid"}:
+            verdict = "invalid"
+        findings = result.get("findings", []) if result is not None else []
+        await connection.execute(
+            """
+            INSERT INTO app.ai_reviews (id, workflow_run_id, commit_sha, verdict, result, created_at)
+            VALUES (gen_random_uuid(), $1, $2, $3, $4::jsonb, $5)
+            """,
+            workflow_run_id,
+            "",
+            verdict,
+            json.dumps({"verdict": verdict, "findings": findings, "raw": result or {}}, separators=(",", ":"), sort_keys=True),
+            now,
+        )
+
+    async def _drain_outbox_entry(
+        self,
+        outbox_id: UUID,
+        workflow_run_id: str,
+        new_status: str,
+        state_updates: dict[str, object],
+        on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
+        now: datetime,
+    ) -> None:
+        try:
+            await on_transition(workflow_run_id, new_status, state_updates)
+        except Exception as error:  # noqa: BLE001 - leaves the outbox row pending for the background drain to retry
+            await self._pool.execute(
+                """
+                UPDATE app.workflow_transition_outbox
+                SET attempts = attempts + 1, last_error = $2
+                WHERE id = $1 AND status = 'pending'
+                """,
+                outbox_id,
+                str(error)[:1024],
+            )
+            return
+        await self._pool.execute(
+            """
+            UPDATE app.workflow_transition_outbox
+            SET status = 'processed', processed_at = $2
+            WHERE id = $1
+            """,
+            outbox_id,
+            now,
+        )
+
+    async def drain_pending_transitions(
+        self,
+        on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
+        now: datetime,
+        limit: int = 50,
+    ) -> int:
+        """At-least-once delivery for transitions an earlier accept_event call
+        committed but never finished invoking (process crash, DB blip, etc).
+        Intended to be polled periodically by a background worker."""
+        async with self._pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                UPDATE app.workflow_transition_outbox
+                SET status = 'processing'
+                WHERE id IN (
+                    SELECT id FROM app.workflow_transition_outbox
+                    WHERE status = 'pending'
+                    ORDER BY created_at
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, workflow_run_id, new_status, state_updates
+                """,
+                limit,
+            )
+        processed = 0
+        for row in rows:
+            state_updates = row["state_updates"]
+            if isinstance(state_updates, str):
+                state_updates = json.loads(state_updates)
+            try:
+                await on_transition(str(row["workflow_run_id"]), str(row["new_status"]), state_updates)
+            except Exception as error:  # noqa: BLE001 - leaves the outbox row pending for the next drain pass
+                await self._pool.execute(
+                    """
+                    UPDATE app.workflow_transition_outbox
+                    SET status = 'pending', attempts = attempts + 1, last_error = $2
+                    WHERE id = $1
+                    """,
+                    row["id"],
+                    str(error)[:1024],
+                )
+                continue
+            await self._pool.execute(
+                """
+                UPDATE app.workflow_transition_outbox
+                SET status = 'processed', processed_at = $2
+                WHERE id = $1
+                """,
+                row["id"],
+                now,
+            )
+            processed += 1
+        return processed
+
+    async def find_stalled_workflow_runs(self, now: datetime, stale_after: timedelta) -> tuple[str, ...]:
+        """Workflow runs whose status implies in-flight work but which have
+        no queued/dispatched execution request and no active job -- the
+        symptom of a crash between committing a transition and invoking the
+        graph runtime (see accept_event / the outbox above)."""
+        rows = await self._pool.fetch(
+            """
+            SELECT wr.id
+            FROM app.workflow_runs AS wr
+            WHERE wr.status NOT IN ('completed', 'blocked', 'failed', 'cancelled', 'offered', 'preparing')
+              AND wr.updated_at <= $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM app.workflow_execution_requests AS req
+                  WHERE req.workflow_run_id = wr.id AND req.status IN ('queued', 'dispatched')
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM app.jobs AS j
+                  WHERE j.workflow_run_id = wr.id AND j.status IN ('offered', 'preparing', 'running')
+              )
+            """,
+            now - stale_after,
+        )
+        return tuple(str(row["id"]) for row in rows)
+
+    async def recover_stalled_workflow_run(
+        self,
+        workflow_run_id: str,
+        on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
+    ) -> bool:
+        """Re-enters the graph runtime for a stalled run using its last
+        checkpoint, with no new state updates, so the current node's
+        dispatch logic re-evaluates and (idempotently) resumes progress."""
+        record = await self._pool.fetchrow(
+            "SELECT status FROM app.workflow_runs WHERE id = $1",
+            _uuid(workflow_run_id),
+        )
+        if record is None:
+            return False
+        await on_transition(workflow_run_id, str(record["status"]), {})
+        return True
 
     async def _load_runner_credential(self, runner_id: str, now: datetime) -> tuple[Runner, str]:
         record = await self._pool.fetchrow(
@@ -1489,15 +1744,9 @@ def role_to_suffix(role: str) -> str:
         raise ValueError("workflow execution request role is invalid") from error
 
 
-def _execution_type_from_id(execution_id: str) -> str | None:
-    suffix_to_type = {
-        "-plan": "run_planner",
-        "-implement": "run_developer",
-        "-review": "run_reviewer",
-        "-repair": "run_repair",
-        "-pipeline": "run_local_pipeline",
-    }
-    for suffix, execution_type in suffix_to_type.items():
-        if execution_id.endswith(suffix):
-            return execution_type
-    return None
+_EXECUTION_TYPE_BY_ROLE: dict[str, str] = {
+    "planner": "run_planner",
+    "developer": "run_developer",
+    "reviewer": "run_reviewer",
+    "repairer": "run_repair",
+}

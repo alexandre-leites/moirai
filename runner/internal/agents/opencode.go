@@ -44,6 +44,7 @@ type Result struct {
 	CommandsRun   []string
 	RemainingWork []string
 	SessionID     string
+	Raw           map[string]any
 }
 
 type Backend interface {
@@ -126,6 +127,8 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 		},
 	}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 
+	raw := readRawResultDocument(resultPath)
+
 	document, docErr := readResultDocument(resultPath, request.ExecutionID)
 	if docErr == nil {
 		return Result{
@@ -136,6 +139,7 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 			CommandsRun:   document.CommandsRun,
 			RemainingWork: document.RemainingWork,
 			SessionID:     document.SessionID,
+			Raw:           raw,
 		}, err
 	}
 
@@ -146,6 +150,7 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 	return Result{
 		Status:   status,
 		ExitCode: executionResult.ExitCode,
+		Raw:      raw,
 	}, err
 }
 
@@ -203,6 +208,22 @@ func resultPathWithinWorkspace(workspace, path string) (string, error) {
 		return "", errors.New("result path must be inside the workspace")
 	}
 	return candidate, nil
+}
+
+// readRawResultDocument returns the agent's .loop/result.json contents as a
+// generic object so role-specific fields (e.g. a reviewer's verdict) reach
+// the orchestrator even though resultDocument only decodes the fields common
+// to every role. It is best-effort: any read or parse failure yields nil.
+func readRawResultDocument(path string) map[string]any {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var document map[string]any
+	if err := json.Unmarshal(contents, &document); err != nil {
+		return nil
+	}
+	return document
 }
 
 func readResultDocument(path, executionID string) (resultDocument, error) {

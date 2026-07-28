@@ -75,6 +75,47 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("UPDATE app.workflow_runs" in query for query in self.pool.connection.queries))
         self.assertTrue(any("INSERT INTO app.workflow_events" in query for query in self.pool.connection.queries))
 
+    async def test_transition_persists_durable_columns_present_in_updates(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "blocked",
+            {
+                "status": "blocked",
+                "review_cycles": 2,
+                "total_agent_executions": 5,
+                "blocking_reason": "workflow retry budget exhausted",
+                "pull_request_id": "42",
+                "pull_request_url": "https://github.com/example/repo/pull/42",
+            },
+        )
+        update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)
+        self.assertIn("review_cycles = $4", update_query)
+        self.assertIn("total_agent_executions = $5", update_query)
+        self.assertIn("blocking_reason = $6", update_query)
+        self.assertIn("pull_request_external_id = $7", update_query)
+        self.assertIn("pull_request_url = $8", update_query)
+        self.assertIn("completed_at = COALESCE(completed_at, $9)", update_query)
+
+    async def test_transition_upserts_pull_request_when_pull_request_id_present(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "pr_created",
+            {
+                "status": "pr_created",
+                "pull_request_id": "42",
+                "pull_request_url": "https://github.com/example/repo/pull/42",
+                "pull_request_head_commit": "abc123",
+                "pull_request_state": "open",
+            },
+        )
+        self.assertTrue(any("INSERT INTO app.pull_requests" in q for q in self.pool.connection.queries))
+
+    async def test_transition_omits_columns_not_present_in_updates(self) -> None:
+        await self.store.transition(WORKFLOW_ID, "planning", {"status": "planning"})
+        update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)
+        self.assertNotIn("review_cycles", update_query)
+        self.assertNotIn("completed_at", update_query)
+
     async def test_transition_rejects_unknown_workflow(self) -> None:
         self.pool.connection.known = False
         with self.assertRaisesRegex(ValueError, "unknown"):

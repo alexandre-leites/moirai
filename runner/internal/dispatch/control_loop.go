@@ -305,6 +305,9 @@ func terminalPayload(status string, result Result, usage map[string]any) map[str
 	if result.Branch != "" {
 		payload["branch"] = result.Branch
 	}
+	if status == "completed" && result.Raw != nil {
+		payload["result"] = result.Raw
+	}
 	for key, value := range usage {
 		payload[key] = value
 	}

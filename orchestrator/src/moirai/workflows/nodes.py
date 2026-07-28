@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from moirai.code_hosts import CodeHost
+from moirai.code_hosts import CodeHost, GitHubCliError, checks_pass
 from moirai.issue_trackers import IssueTracker
 
 from .issue_graph import IssueWorkflowNodes, IssueWorkflowState, WorkflowUpdate
@@ -118,6 +118,8 @@ class PersistedWorkflowNodes:
             "status": "pr_created",
             "pull_request_id": pr.external_id,
             "pull_request_url": pr.url,
+            "pull_request_head_commit": pr.head_commit,
+            "pull_request_state": pr.state,
         })
 
     async def wait_for_checks(self, state: IssueWorkflowState) -> WorkflowUpdate:
@@ -125,13 +127,9 @@ class PersistedWorkflowNodes:
         if code_host is None or not state.get("pull_request_id"):
             return await self._transition(state, "waiting_github_checks", {"status": "waiting_github_checks"})
         checks = await code_host.required_checks(state["pull_request_id"])
-        all_passing = all(
-            check.status.value in {"passing", "skipped"}
-            for check in checks
-        )
         return await self._transition(state, "waiting_github_checks", {
             "status": "waiting_github_checks",
-            "checks_passed": all_passing,
+            "checks_passed": checks_pass(checks),
         })
 
     async def wait_for_human(self, state: IssueWorkflowState) -> WorkflowUpdate:
@@ -149,7 +147,13 @@ class PersistedWorkflowNodes:
         code_host = await self._resolve_code_host(state)
         if code_host is not None and state.get("pull_request_id"):
             method = state.get("merge_method", "squash")
-            await code_host.merge_pull_request(state["pull_request_id"], method)
+            try:
+                await code_host.merge_pull_request(state["pull_request_id"], method)
+            except GitHubCliError as error:
+                return await self._transition(state, "blocked", {
+                    "status": "blocked",
+                    "blocking_reason": f"merge failed: {error}",
+                })
         return await self._transition(state, "merging", {"status": "merging"})
 
     async def complete(self, state: IssueWorkflowState) -> WorkflowUpdate:

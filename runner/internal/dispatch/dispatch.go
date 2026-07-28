@@ -102,6 +102,7 @@ type Result struct {
 	Branch          string            `json:"branch"`
 	Pushed          bool              `json:"pushed"`
 	PipelineResults []pipeline.Result `json:"pipelineResults"`
+	Raw             map[string]any    `json:"raw,omitempty"`
 }
 
 func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (result Result, err error) {
@@ -179,6 +180,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		RemainingWork:   backendResult.RemainingWork,
 		SessionID:       backendResult.SessionID,
 		InitialRevision: initial.Revision,
+		Raw:             backendResult.Raw,
 	}
 	if executeErr == nil && len(packet.Pipeline) > 0 {
 		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)

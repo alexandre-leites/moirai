@@ -1,9 +1,14 @@
 import asyncio
 import json
 import unittest
-from typing import Sequence
+from collections.abc import Sequence
 
-from moirai.code_hosts.github_cli import CheckStatus, GitHubCliCodeHost
+from moirai.code_hosts.github_cli import (
+    CheckStatus,
+    GitHubCliCodeHost,
+    PullRequestCheck,
+    checks_pass,
+)
 from moirai.issue_trackers.github_cli import GitHubCliError, GitHubRepository
 
 
@@ -97,6 +102,66 @@ class GitHubCliCodeHostTests(unittest.TestCase):
 
         self.assertEqual(runner.commands[1][-1], "--squash")
         self.assertNotIn("--admin", runner.commands[1])
+
+    def test_merge_refuses_a_pull_request_with_no_reported_checks(self) -> None:
+        runner = FakeRunner([(0, "[]", "")])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        with self.assertRaisesRegex(GitHubCliError, "refusing to merge"):
+            asyncio.run(host.merge_pull_request("42", "squash"))
+
+    def test_unknown_check_state_is_treated_as_pending_not_fatal(self) -> None:
+        runner = FakeRunner([(0, json.dumps([
+            {"name": "mystery", "bucket": "some_new_bucket", "link": None, "state": "SOME_NEW_BUCKET"},
+        ]), "")])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        checks = asyncio.run(host.required_checks("42"))
+
+        self.assertEqual(checks[0].status, CheckStatus.PENDING)
+
+    def test_required_checks_parses_is_required_field(self) -> None:
+        runner = FakeRunner([(0, json.dumps([
+            {"name": "unit", "bucket": "skipping", "state": "SKIPPED", "isRequired": True},
+            {"name": "lint", "bucket": "skipping", "state": "SKIPPED", "isRequired": False},
+        ]), "")])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        checks = asyncio.run(host.required_checks("42"))
+
+        self.assertTrue(checks[0].required)
+        self.assertFalse(checks[1].required)
+
+
+class ChecksPassTests(unittest.TestCase):
+    def test_empty_check_list_does_not_pass(self) -> None:
+        self.assertFalse(checks_pass([]))
+
+    def test_all_passing_checks_pass(self) -> None:
+        checks = [PullRequestCheck("a", CheckStatus.PASSING), PullRequestCheck("b", CheckStatus.PASSING)]
+        self.assertTrue(checks_pass(checks))
+
+    def test_skipped_non_required_check_passes(self) -> None:
+        checks = [
+            PullRequestCheck("a", CheckStatus.PASSING),
+            PullRequestCheck("b", CheckStatus.SKIPPED, required=False),
+        ]
+        self.assertTrue(checks_pass(checks))
+
+    def test_skipped_required_check_does_not_pass(self) -> None:
+        checks = [
+            PullRequestCheck("a", CheckStatus.PASSING),
+            PullRequestCheck("b", CheckStatus.SKIPPED, required=True),
+        ]
+        self.assertFalse(checks_pass(checks))
+
+    def test_any_failing_check_does_not_pass(self) -> None:
+        checks = [PullRequestCheck("a", CheckStatus.PASSING), PullRequestCheck("b", CheckStatus.FAILING)]
+        self.assertFalse(checks_pass(checks))
+
+    def test_any_pending_check_does_not_pass(self) -> None:
+        checks = [PullRequestCheck("a", CheckStatus.PASSING), PullRequestCheck("b", CheckStatus.PENDING)]
+        self.assertFalse(checks_pass(checks))
 
 
 def _pull_request() -> dict[str, object]:
