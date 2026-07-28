@@ -2,9 +2,9 @@
 
 ## Current Status
 
-- Overall status: In progress
+- Overall status: PR #81 review fix in progress
 - Current phase: Public API and web operations UX
-- Active implementation: Resolve #49, #54, #56, #57, #71 (agent/web-experience, 2026-07-28)
+- Active implementation: Add SSE refresh for projects and runner tokens (agent/web-experience, 2026-07-28)
 - Last updated: 2026-07-28
 - Agent/session identifier: agent/web-experience
 
@@ -13,10 +13,10 @@
 - [ ] Resolve public API and web operations UX issues #49, #54, #56, #57, #71.
   - Started: 2026-07-28 (agent/web-experience)
   - Relevant files: `proto/control_plane.proto`, `api/`, `orchestrator/`, `web/`, `.github/workflows/ci.yml`
-  - Current state: Typed workflow/runner/queue operations and SSE are implemented across the control plane, API, and dashboard; web test setup and CI job added.
-  - Remaining work: Rebase, commit, push, open PR, and resolve CI feedback.
-  - Definition of done: Admin can operate workflows/runners from live UI; auth/deadline/error handling, test suite and CI coverage meet issue acceptance criteria.
-  - Targeted validation: Passed API `go test ./...` and `go vet ./...`; 42 relevant orchestrator tests; Ruff (with existing EXE002 ignored); web typecheck/lint/test/build (63.46% API-client statement coverage).
+  - Current state: Projects and runner-token views refresh on the same authenticated SSE event stream as workflows and operations; focused component tests cover both refresh paths and project-load errors.
+  - Remaining work: Commit, push, and verify PR #81 CI.
+  - Definition of done: Review feedback resolved; all CI checks are green and GitHub reports `CLEAN` merge state.
+  - Targeted validation: Passed API `go test ./...` and `go vet ./...`; 269 orchestrator tests plus Ruff; web test/lint/typecheck/build (5 web tests).
 
 ## Done
 
