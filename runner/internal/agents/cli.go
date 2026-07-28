@@ -69,7 +69,7 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 		OnStarted: func(pid int) {
 			writeExecutionManifest(filepath.Dir(resultPath), backend.NameValue, request.ExecutionID, pid)
 		},
-	}, stdoutLog, stderrLog)
+	}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("CLI backend execution failed: %w", err)
 	}

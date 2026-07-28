@@ -40,7 +40,7 @@ func (c *blockingEventClient) SendExecutionEvent(*runnerv1.ExecutionEvent) error
 
 func TestEventReporterRedactsConfiguredSecretPrefixes(t *testing.T) {
 	client := &eventClient{}
-	reporter, err := NewEventReporterWithRedaction(client, 4, []string{"internal_"})
+	reporter, err := NewEventReporter(client, 4, []string{"internal_"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestEventReporterRedactsConfiguredSecretPrefixes(t *testing.T) {
 	if strings.Contains(client.events[0].PayloadJson, "internal_abcdefghijklmnopqrstuvwxyz") {
 		t.Fatal("configured secret leaked")
 	}
-	if _, err := NewEventReporterWithRedaction(client, 4, []string{"bad\nprefix"}); err == nil {
+	if _, err := NewEventReporter(client, 4, []string{"bad\nprefix"}, ""); err == nil {
 		t.Fatal("unsafe configured prefix was accepted")
 	}
 }
@@ -254,7 +254,7 @@ func TestEventReporterPersistsTerminalEventsForStartupReplay(t *testing.T) {
 	lease := eventLease()
 	disconnected := errors.New("disconnected")
 	initialClient := &eventClient{err: disconnected}
-	reporter, err := NewEventReporterWithOutbox(initialClient, 4, nil, outboxPath)
+	reporter, err := NewEventReporter(initialClient, 4, nil, outboxPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestEventReporterPersistsTerminalEventsForStartupReplay(t *testing.T) {
 		t.Fatalf("event outbox permissions = %o", info.Mode().Perm())
 	}
 	replayClient := &eventClient{}
-	replayed, err := NewEventReporterWithOutbox(replayClient, 4, nil, outboxPath)
+	replayed, err := NewEventReporter(replayClient, 4, nil, outboxPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,14 +298,14 @@ func TestEventReporterRejectsCorruptPersistentOutbox(t *testing.T) {
 	if err := os.WriteFile(outboxPath, []byte("invalid"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewEventReporterWithOutbox(&eventClient{}, 4, nil, outboxPath); err == nil {
-		t.Fatal("NewEventReporterWithOutbox() accepted corrupt outbox")
+	if _, err := NewEventReporter(&eventClient{}, 4, nil, outboxPath); err == nil {
+		t.Fatal("NewEventReporter() accepted corrupt outbox")
 	}
 }
 
 func newEventReporter(t *testing.T, client EventClient, maxPending int) *EventReporter {
 	t.Helper()
-	reporter, err := NewEventReporter(client, maxPending)
+	reporter, err := NewEventReporter(client, maxPending, nil, "")
 	if err != nil {
 		t.Fatalf("NewEventReporter() error = %v", err)
 	}

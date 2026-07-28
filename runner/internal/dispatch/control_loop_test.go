@@ -17,11 +17,12 @@ import (
 )
 
 type loopClient struct {
-	mu       sync.Mutex
-	accepted []string
-	rejected []string
-	events   []*runnerv1.ExecutionEvent
-	sendErr  error
+	mu          sync.Mutex
+	accepted    []string
+	rejected    []string
+	events      []*runnerv1.ExecutionEvent
+	sendErr     error
+	disconnects int
 }
 
 func (client *loopClient) AcceptOffer(jobID string) error {
@@ -41,7 +42,11 @@ func (client *loopClient) RenewLease(string, int64, time.Time) error { return ni
 func (client *loopClient) Receive() (*runnerv1.OrchestratorToRunner, error) {
 	return nil, control.ErrNotConnected
 }
-func (client *loopClient) Disconnect() {}
+func (client *loopClient) Disconnect() {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.disconnects++
+}
 
 func (client *loopClient) SendExecutionEvent(event *runnerv1.ExecutionEvent) error {
 	client.mu.Lock()
@@ -71,7 +76,7 @@ func TestControlLoopDispatchesAcknowledgedLeaseAndReportsTerminalResult(t *testi
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &staticDispatcher{result: Result{Status: "completed", ExitCode: 0, Summary: "token should not leave runner", ChangedFiles: []string{"main.go"}, CommandsRun: []string{"go test ./..."}}}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -117,7 +122,7 @@ func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &staticDispatcher{result: Result{ExitCode: 1, Summary: "credential=unsafe"}, err: context.DeadlineExceeded}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -150,7 +155,7 @@ func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *
 
 func TestControlLoopLogsOfferCorrelationFields(t *testing.T) {
 	client := &loopClient{}
-	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +228,7 @@ func TestControlLoopCancelsMatchingActiveExecution(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -260,7 +265,7 @@ func TestControlLoopCancelsMatchingActiveExecution(t *testing.T) {
 
 func TestControlLoopDrainRejectsNewOffer(t *testing.T) {
 	client := &loopClient{}
-	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -279,7 +284,7 @@ func TestControlLoopDrainKeepsBusyExecutionUntilTerminal(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -321,7 +326,7 @@ func TestControlLoopRecoversLeaseLossByCancellingExecution(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -362,7 +367,7 @@ func TestControlLoopFlushesBufferedEventsAfterReconnectBeforeLeaseExpiry(t *test
 	now := time.Now()
 	client := &loopClient{sendErr: errors.New("control stream disconnected")}
 	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
-	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
 	}
@@ -392,4 +397,44 @@ func TestControlLoopFlushesBufferedEventsAfterReconnectBeforeLeaseExpiry(t *test
 	}
 	loop.Cancel("execution-1", 1)
 	waitForEvents(t, client, 2)
+}
+
+func TestControlLoopSkipsUnsupportedControlMessageInsteadOfErroring(t *testing.T) {
+	client := &loopClient{}
+	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoop() error = %v", err)
+	}
+	var output bytes.Buffer
+	loop.Logger = slog.New(slog.NewJSONHandler(&output, nil))
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{}); err != nil {
+		t.Fatalf("Handle(unsupported) error = %v, want nil", err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatalf("parse structured log: %v", err)
+	}
+	if entry["level"] != "WARN" {
+		t.Fatalf("unsupported message log = %#v, want a warning", entry)
+	}
+}
+
+func TestControlLoopRunBacksOffWithoutDisconnectingWhileUnreachable(t *testing.T) {
+	client := &loopClient{}
+	loop, err := NewControlLoop(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoop() error = %v", err)
+	}
+	loop.ReconnectMin = 2 * time.Millisecond
+	loop.ReconnectMax = 8 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	if err := loop.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.disconnects != 0 {
+		t.Fatalf("Run() called Disconnect() %d times, want 0 (owned by StreamSupervisor)", client.disconnects)
+	}
 }

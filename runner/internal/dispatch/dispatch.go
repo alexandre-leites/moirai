@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,6 +30,11 @@ type EnvironmentResolver interface {
 
 type RevisionInspector interface {
 	Snapshot(context.Context, repository.Workspace) (repository.RevisionSummary, error)
+}
+
+type DeliveryManager interface {
+	Commit(context.Context, repository.Workspace, string) (repository.CommitResult, error)
+	Push(context.Context, repository.Workspace, string, map[string]string) (repository.PushResult, error)
 }
 
 type ProjectConcurrencyGuard struct {
@@ -75,6 +81,11 @@ type Dispatcher struct {
 	Pipeline           pipeline.Runner
 	Retention          RetentionPolicy
 	Projects           *ProjectConcurrencyGuard
+	Delivery           DeliveryManager
+	// EmitLog, when set, is called with each chunk of agent stdout/stderr
+	// as it is produced, so it can be streamed to the orchestrator as log
+	// events (see control.EventReporter.EmitLog).
+	EmitLog func(jobID string, generation int64, message string) ([]int64, error)
 }
 
 type Result struct {
@@ -87,6 +98,9 @@ type Result struct {
 	SessionID       string            `json:"sessionId"`
 	InitialRevision string            `json:"initialRevision"`
 	FinalRevision   string            `json:"finalRevision"`
+	Committed       bool              `json:"committed"`
+	Branch          string            `json:"branch"`
+	Pushed          bool              `json:"pushed"`
 	PipelineResults []pipeline.Result `json:"pipelineResults"`
 }
 
@@ -154,6 +168,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		ResultPath:  packet.ExpectedOutput,
 		Timeout:     time.Duration(packet.TimeoutSeconds) * time.Second,
 		Environment: environment,
+		Output:      dispatcher.logOutput(lease),
 	})
 	result = Result{
 		Status:          backendResult.Status,
@@ -182,6 +197,11 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	}
 	result.FinalRevision = final.Revision
 	result.ChangedFiles = mergeChangedFiles(result.ChangedFiles, final.ChangedFiles)
+	if executeErr == nil && packet.Constraints.MayModifyFiles {
+		if deliverErr := dispatcher.deliver(ctx, workspace, packet, request.Branch, environment, &result); deliverErr != nil {
+			executeErr = deliverErr
+		}
+	}
 	if executeErr != nil {
 		result.Status = "failed"
 		if result.Summary == "" {
@@ -248,6 +268,61 @@ func (dispatcher Dispatcher) snapshot(ctx context.Context, workspace repository.
 		return repository.RevisionSummary{}, fmt.Errorf("capture repository revision: %w", err)
 	}
 	return summary, nil
+}
+
+// deliver commits the agent's changes and, when the packet permits pushing,
+// pushes the resulting revision to the configured branch. It mutates result
+// in place with the outcome so callers can report it in the terminal event.
+func (dispatcher Dispatcher) deliver(ctx context.Context, workspace repository.Workspace, packet taskpacket.Packet, branch string, environment map[string]string, result *Result) error {
+	if dispatcher.Delivery == nil {
+		return errors.New("delivery manager is required for file-modifying executions")
+	}
+	commitResult, err := dispatcher.Delivery.Commit(ctx, workspace, commitMessageFor(packet))
+	if err != nil {
+		return fmt.Errorf("commit repository changes: %w", err)
+	}
+	result.Committed = commitResult.Committed
+	if commitResult.Committed {
+		result.FinalRevision = commitResult.Revision
+	}
+	if !commitResult.Committed || !packet.Constraints.MayPush {
+		return nil
+	}
+	pushResult, err := dispatcher.Delivery.Push(ctx, workspace, branch, environment)
+	if err != nil {
+		return fmt.Errorf("push repository changes: %w", err)
+	}
+	result.Pushed = pushResult.Pushed
+	result.Branch = pushResult.Branch
+	return nil
+}
+
+func commitMessageFor(packet taskpacket.Packet) string {
+	title := packet.Issue.Title
+	if title == "" {
+		title = packet.Objective
+	}
+	return fmt.Sprintf("%s: %s (%s)", packet.Role, title, packet.Issue.ExternalID)
+}
+
+func (dispatcher Dispatcher) logOutput(lease control.Lease) io.Writer {
+	if dispatcher.EmitLog == nil {
+		return nil
+	}
+	return logForwarder{jobID: lease.JobID, generation: lease.Generation, emit: dispatcher.EmitLog}
+}
+
+type logForwarder struct {
+	jobID      string
+	generation int64
+	emit       func(jobID string, generation int64, message string) ([]int64, error)
+}
+
+func (forwarder logForwarder) Write(data []byte) (int, error) {
+	if len(data) > 0 {
+		_, _ = forwarder.emit(forwarder.jobID, forwarder.generation, string(data))
+	}
+	return len(data), nil
 }
 
 func mergeChangedFiles(primary, additional []string) []string {

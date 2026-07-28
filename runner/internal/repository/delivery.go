@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var pushEnvironmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 
 type CommitResult struct {
 	Committed bool
@@ -42,7 +45,7 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 		}
 		return CommitResult{Revision: strings.TrimSpace(revision)}, nil
 	}
-	if err := manager.git(ctx, "-C", workspace.Repository, "add", "-A"); err != nil {
+	if err := manager.git(ctx, "-C", workspace.Repository, "add", "-A", "--", ".", ":!.loop", ":!.loop/**"); err != nil {
 		return CommitResult{}, fmt.Errorf("stage repository changes: %w", err)
 	}
 	if err := manager.git(ctx, "-C", workspace.Repository, "commit", "-m", message); err != nil {
@@ -55,17 +58,36 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 	return CommitResult{Committed: true, Revision: strings.TrimSpace(revision)}, nil
 }
 
-func (manager Manager) Push(ctx context.Context, workspace Workspace, branch string) (PushResult, error) {
+func (manager Manager) Push(ctx context.Context, workspace Workspace, branch string, environment map[string]string) (PushResult, error) {
 	if err := validateWorkspace(workspace); err != nil {
 		return PushResult{}, err
 	}
 	if !safeRef(branch) {
 		return PushResult{}, errors.New("push branch is invalid")
 	}
-	if err := manager.git(ctx, "-C", workspace.Repository, "push", "--set-upstream", "origin", branch); err != nil {
+	extraEnvironment, err := pushEnvironment(environment)
+	if err != nil {
+		return PushResult{}, err
+	}
+	if err := manager.gitWithEnv(ctx, extraEnvironment, "-C", workspace.Repository, "push", "--set-upstream", "origin", branch); err != nil {
 		return PushResult{}, fmt.Errorf("push branch: %w", err)
 	}
 	return PushResult{Branch: branch, Pushed: true}, nil
+}
+
+// pushEnvironment renders resolved task environment (which may carry a push
+// credential such as GITHUB_TOKEN) as extra environment variables for the
+// "git push" subprocess, so a configured credential helper or askpass hook
+// on the runner host can authenticate the push.
+func pushEnvironment(environment map[string]string) ([]string, error) {
+	extra := make([]string, 0, len(environment))
+	for name, value := range environment {
+		if !pushEnvironmentName.MatchString(name) || strings.ContainsAny(value, "\x00\r\n") {
+			return nil, errors.New("push credential environment is invalid")
+		}
+		extra = append(extra, name+"="+value)
+	}
+	return extra, nil
 }
 
 func (manager Manager) CleanupRemoteBranch(ctx context.Context, workspace Workspace, branch string) (BranchCleanupResult, error) {

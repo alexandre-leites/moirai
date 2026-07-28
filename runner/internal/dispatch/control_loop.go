@@ -2,9 +2,11 @@ package dispatch
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
 	"time"
 
@@ -37,26 +39,20 @@ type activeExecution struct {
 }
 
 type ControlLoop struct {
-	Client     ControlClient
-	Offers     *control.OfferState
-	Reporter   *control.EventReporter
-	Dispatcher executionDispatcher
-	Logger     *slog.Logger
+	Client       ControlClient
+	Offers       *control.OfferState
+	Reporter     *control.EventReporter
+	Dispatcher   executionDispatcher
+	Logger       *slog.Logger
+	ReconnectMin time.Duration
+	ReconnectMax time.Duration
 
 	mu       sync.Mutex
 	draining bool
 	active   *activeExecution
 }
 
-func NewControlLoop(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration) (*ControlLoop, error) {
-	return NewControlLoopWithRedaction(client, dispatcher, now, leaseDuration, renewalLead, nil)
-}
-
-func NewControlLoopWithRedaction(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string) (*ControlLoop, error) {
-	return NewControlLoopWithOutbox(client, dispatcher, now, leaseDuration, renewalLead, redactionPrefixes, "")
-}
-
-func NewControlLoopWithOutbox(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string) (*ControlLoop, error) {
+func NewControlLoop(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string) (*ControlLoop, error) {
 	if client == nil || now == nil {
 		return nil, errors.New("runner control loop dependencies are required")
 	}
@@ -64,33 +60,62 @@ func NewControlLoopWithOutbox(client ControlClient, dispatcher executionDispatch
 	if err != nil {
 		return nil, err
 	}
-	reporter, err := control.NewEventReporterWithOutbox(client, defaultEventBufferSize, redactionPrefixes, outboxPath)
+	reporter, err := control.NewEventReporter(client, defaultEventBufferSize, redactionPrefixes, outboxPath)
 	if err != nil {
 		return nil, err
 	}
 	return &ControlLoop{Client: client, Offers: offers, Reporter: reporter, Dispatcher: dispatcher}, nil
 }
 
+// Run receives and handles control messages until ctx is cancelled or a
+// message handler returns an error. Reconnection of the underlying
+// transport is owned entirely by control.StreamSupervisor; Run never calls
+// Client.Disconnect itself. While the client is disconnected, Receive
+// returns control.ErrNotConnected immediately, so Run applies its own
+// jittered exponential backoff (bounded by ReconnectMin/ReconnectMax)
+// between retries instead of hot-looping.
 func (loop *ControlLoop) Run(ctx context.Context) error {
 	if err := loop.validate(); err != nil {
 		return err
 	}
+	backoff := loop.reconnectMin()
 	for {
 		message, err := loop.Client.Receive()
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			loop.Client.Disconnect()
-			if err := waitForControlReconnect(ctx); err != nil {
-				return err
+			delay := jitterReconnectDelay(backoff, loop.reconnectMax())
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
 			}
+			backoff = nextReconnectBackoff(backoff, loop.reconnectMax())
 			continue
 		}
+		backoff = loop.reconnectMin()
 		if err := loop.Handle(ctx, message); err != nil {
 			return err
 		}
 	}
+}
+
+func (loop *ControlLoop) reconnectMin() time.Duration {
+	if loop != nil && loop.ReconnectMin > 0 {
+		return loop.ReconnectMin
+	}
+	return time.Second
+}
+
+func (loop *ControlLoop) reconnectMax() time.Duration {
+	minimum := loop.reconnectMin()
+	if loop != nil && loop.ReconnectMax >= minimum {
+		return loop.ReconnectMax
+	}
+	return 60 * time.Second
 }
 
 func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.OrchestratorToRunner) error {
@@ -137,7 +162,8 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 		go loop.execute(executionContext, lease)
 		return nil
 	}
-	return errors.New("orchestrator control message is unsupported")
+	loop.logger().Warn("runner received unsupported control message, skipping", "message_type", fmt.Sprintf("%T", message.GetMessage()))
+	return nil
 }
 
 func (loop *ControlLoop) Drain() {
@@ -268,10 +294,16 @@ func terminalStatus(cancelled bool, err error, result Result) string {
 
 func terminalPayload(status string, result Result, usage map[string]any) map[string]any {
 	payload := map[string]any{
-		"status":       status,
-		"exitCode":     result.ExitCode,
-		"changedFiles": result.ChangedFiles,
-		"commandsRun":  result.CommandsRun,
+		"status":        status,
+		"exitCode":      result.ExitCode,
+		"changedFiles":  result.ChangedFiles,
+		"commandsRun":   result.CommandsRun,
+		"finalRevision": result.FinalRevision,
+		"committed":     result.Committed,
+		"pushed":        result.Pushed,
+	}
+	if result.Branch != "" {
+		payload["branch"] = result.Branch
 	}
 	for key, value := range usage {
 		payload[key] = value
@@ -315,13 +347,24 @@ func (loop *ControlLoop) validate() error {
 	return nil
 }
 
-func waitForControlReconnect(ctx context.Context) error {
-	timer := time.NewTimer(100 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
+func nextReconnectBackoff(current, maximum time.Duration) time.Duration {
+	if current >= maximum/2 {
+		return maximum
 	}
+	return current * 2
+}
+
+func jitterReconnectDelay(base, maximum time.Duration) time.Duration {
+	if base <= 1 {
+		return base
+	}
+	delta, err := rand.Int(rand.Reader, big.NewInt(int64(base/4)+1))
+	if err != nil {
+		return base
+	}
+	delay := base + time.Duration(delta.Int64())
+	if delay > maximum {
+		return maximum
+	}
+	return delay
 }
