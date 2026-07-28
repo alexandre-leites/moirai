@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,13 +18,14 @@ import (
 	"github.com/loop-engineering/runner/internal/dispatch"
 	"github.com/loop-engineering/runner/internal/health"
 	"github.com/loop-engineering/runner/internal/repository"
+	"github.com/loop-engineering/runner/internal/taskpacket"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	if handled, err := probe(os.Args[1:]); handled {
 		if err != nil {
-			slog.Error("runner probe failed")
+			slog.Error("runner probe failed", "error", err)
 			os.Exit(1)
 		}
 		fmt.Printf("{\"status\":%q}\n", os.Args[1])
@@ -32,9 +34,28 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("runner stopped")
+		slog.Error("runner stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// osEnvironmentResolver resolves a task packet's EnvironmentRefs from the
+// runner process's own environment. Operators configure the runner host or
+// container with the secret material (e.g. GITHUB_TOKEN) under the same
+// name declared in LOOP_RUNNER_ALLOWED_ENVIRONMENT; the SecretRef field is
+// carried for audit purposes only and does not select a backend here.
+type osEnvironmentResolver struct{}
+
+func (osEnvironmentResolver) Resolve(_ context.Context, references []taskpacket.EnvironmentRef) (map[string]string, error) {
+	resolved := make(map[string]string, len(references))
+	for _, reference := range references {
+		value, ok := os.LookupEnv(reference.Name)
+		if !ok || value == "" {
+			return nil, fmt.Errorf("environment reference %q is not configured on this runner", reference.Name)
+		}
+		resolved[reference.Name] = value
+	}
+	return resolved, nil
 }
 
 type reloadableStreamSettings struct {
@@ -164,19 +185,22 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create runner control client: %w", err)
 	}
 	projects := dispatch.NewProjectConcurrencyGuard()
-	loop, err := dispatch.NewControlLoopWithOutbox(
+	dispatcher := &dispatch.Dispatcher{
+		Workspaces:         repository.Manager{DataDirectory: settings.DataDir},
+		RevisionInspector:  repository.Manager{DataDirectory: settings.DataDir},
+		Delivery:           repository.Manager{DataDirectory: settings.DataDir},
+		Backend:            agentBackend(settings),
+		Environment:        osEnvironmentResolver{},
+		AllowedEnvironment: settings.AllowedEnvironment,
+		MinimumFreeBytes:   settings.MinimumFreeBytes,
+		DiskPath:           settings.DataDir,
+		AvailableBytes:     health.AvailableBytes,
+		Retention:          retentionPolicy(settings.WorkspaceRetention),
+		Projects:           projects,
+	}
+	loop, err := dispatch.NewControlLoop(
 		client,
-		dispatch.Dispatcher{
-			Workspaces:         repository.Manager{DataDirectory: settings.DataDir},
-			RevisionInspector:  repository.Manager{DataDirectory: settings.DataDir},
-			Backend:            agentBackend(settings),
-			AllowedEnvironment: settings.AllowedEnvironment,
-			MinimumFreeBytes:   settings.MinimumFreeBytes,
-			DiskPath:           settings.DataDir,
-			AvailableBytes:     health.AvailableBytes,
-			Retention:          retentionPolicy(settings.WorkspaceRetention),
-			Projects:           projects,
-		},
+		dispatcher,
 		time.Now,
 		60*time.Second,
 		15*time.Second,
@@ -186,6 +210,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create runner dispatch loop: %w", err)
 	}
+	loop.ReconnectMin = settings.ReconnectMin
+	loop.ReconnectMax = settings.ReconnectMax
+	dispatcher.EmitLog = loop.Reporter.EmitLog
 	streamSettings := newReloadableStreamSettings(settings)
 	reloadSignal := make(chan os.Signal, 1)
 	signal.Notify(reloadSignal, syscall.SIGHUP)
@@ -198,7 +225,7 @@ func run(ctx context.Context) error {
 			case <-reloadSignal:
 				next, err := config.LoadFromEnvironment()
 				if err != nil {
-					slog.Warn("runner configuration reload rejected", "runner_id", identity.RunnerID)
+					slog.Warn("runner configuration reload rejected", "runner_id", identity.RunnerID, "error", err)
 					continue
 				}
 				streamSettings.Reload(next)
@@ -206,13 +233,19 @@ func run(ctx context.Context) error {
 			}
 		}
 	}()
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	var dispatchErr atomic.Value
 	go func() {
-		if err := loop.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("runner dispatch loop stopped", "runner_id", identity.RunnerID)
+		if err := loop.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("runner dispatch loop stopped", "runner_id", identity.RunnerID, "error", err)
+			dispatchErr.Store(err)
+			cancelRun()
 		}
 	}()
 	slog.Info("runner initialized", "runner_id", identity.RunnerID, "orchestrator_endpoint", settings.OrchestratorEndpoint)
-	return control.StreamSupervisor{
+	supervisorErr := control.StreamSupervisor{
 		Client:            client,
 		Labels:            settings.Labels,
 		HeartbeatInterval: settings.HeartbeatInterval,
@@ -222,5 +255,9 @@ func run(ctx context.Context) error {
 		OnConnected:       loop.FlushEvents,
 		OnHeartbeat:       loop.Reconcile,
 		Settings:          streamSettings.Get,
-	}.Run(ctx)
+	}.Run(runCtx)
+	if stored := dispatchErr.Load(); stored != nil {
+		return fmt.Errorf("runner dispatch loop stopped: %w", stored.(error))
+	}
+	return supervisorErr
 }

@@ -60,10 +60,14 @@ func TestPrepareCreatesManagedCloneWorktreeAndTaskDirectory(t *testing.T) {
 	}
 
 	arguments := readGitCommands(t, recorded)
+	cache := filepath.Join(dataDirectory, "repositories", "project-project-1", "repo.git")
+	repositoryPath := filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository")
 	want := [][]string{
-		{"clone", "--mirror", "--", "https://github.example/owner/repository.git", filepath.Join(dataDirectory, "repositories", "project-project-1", "repo.git")},
-		{"-C", filepath.Join(dataDirectory, "repositories", "project-project-1", "repo.git"), "fetch", "--prune", "origin", "main"},
-		{"-C", filepath.Join(dataDirectory, "repositories", "project-project-1", "repo.git"), "worktree", "add", "-B", "agent/1234/run-a1b2c3", filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository"), "main"},
+		{"clone", "--mirror", "--", "https://github.example/owner/repository.git", cache},
+		{"-C", cache, "fetch", "--prune", "origin", "main"},
+		{"-C", cache, "worktree", "prune"},
+		{"-C", cache, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "main"},
+		{"-C", repositoryPath, "rev-parse", "--git-common-dir"},
 	}
 	if len(arguments) != len(want) {
 		t.Fatalf("git command count = %d, want %d: %#v", len(arguments), len(want), arguments)
@@ -89,7 +93,13 @@ func TestPrepareChecksExistingManagedCacheAndReclonesCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	commands := readGitCommands(t, recorded)
-	if len(commands) != 4 || !strings.Contains(strings.Join(commands[0], "\n"), "fsck\n--no-dangling") || commands[1][0] != "clone" {
+	if len(commands) != 6 || !strings.Contains(strings.Join(commands[0], "\n"), "fsck\n--no-dangling") || commands[1][0] != "clone" {
+		t.Fatalf("cache recovery commands = %#v", commands)
+	}
+	if commands[3][len(commands[3])-1] != "prune" || commands[4][3] != "add" {
+		t.Fatalf("cache recovery commands = %#v", commands)
+	}
+	if strings.Join(commands[5], "\n") != strings.Join([]string{"-C", filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository"), "rev-parse", "--git-common-dir"}, "\n") {
 		t.Fatalf("cache recovery commands = %#v", commands)
 	}
 }
@@ -125,9 +135,12 @@ func TestPrepareCreatesWorktreeFromExistingLocalPath(t *testing.T) {
 	}
 
 	arguments := readGitCommands(t, recorded)
+	repositoryPath := filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository")
 	want := [][]string{
 		{"-C", localRepository, "fetch", "--prune", "origin", "main"},
-		{"-C", localRepository, "worktree", "add", "-B", "agent/1234/run-a1b2c3", filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository"), "origin/main"},
+		{"-C", localRepository, "worktree", "prune"},
+		{"-C", localRepository, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "origin/main"},
+		{"-C", repositoryPath, "rev-parse", "--git-common-dir"},
 	}
 	if len(arguments) != len(want) {
 		t.Fatalf("git command count = %d, want %d: %#v", len(arguments), len(want), arguments)
@@ -268,7 +281,7 @@ func fakeGit(t *testing.T) (string, string) {
 	directory := t.TempDir()
 	recorded := filepath.Join(directory, "arguments")
 	binary := filepath.Join(directory, "git")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$LOOP_GIT_ARGS\"\nprintf '\\036' >> \"$LOOP_GIT_ARGS\"\nfor argument in \"$@\"; do if [ \"$argument\" = fsck ] && [ \"$LOOP_GIT_FAIL_FSCK\" = 1 ]; then exit 1; fi; if [ \"$argument\" = status ] && [ \"$LOOP_GIT_STATUS\" = 1 ]; then printf ' M file\\000'; fi; if [ \"$argument\" = ls-remote ] && [ \"$LOOP_GIT_REMOTE_BRANCH\" = 1 ]; then printf 'revision\\trefs/heads/agent/issue-7/run-1\\n'; fi; done\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$LOOP_GIT_ARGS\"\nprintf '\\036' >> \"$LOOP_GIT_ARGS\"\nfor argument in \"$@\"; do if [ \"$argument\" = fsck ] && [ \"$LOOP_GIT_FAIL_FSCK\" = 1 ]; then exit 1; fi; if [ \"$argument\" = status ] && [ \"$LOOP_GIT_STATUS\" = 1 ]; then printf ' M file\\000'; fi; if [ \"$argument\" = ls-remote ] && [ \"$LOOP_GIT_REMOTE_BRANCH\" = 1 ]; then printf 'revision\\trefs/heads/agent/issue-7/run-1\\n'; fi; if [ \"$argument\" = --git-common-dir ]; then printf '.git\\n'; fi; done\n"
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake git: %v", err)
 	}

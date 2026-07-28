@@ -97,10 +97,53 @@ func (manager Manager) Prepare(ctx context.Context, request PrepareRequest) (Wor
 		_ = os.RemoveAll(workspace.Root)
 		return Workspace{}, fmt.Errorf("create worktree: %w", err)
 	}
+	if err := manager.excludeLoopArtifacts(ctx, workspace.Repository); err != nil {
+		_ = os.RemoveAll(workspace.Root)
+		return Workspace{}, err
+	}
 	if err := os.MkdirAll(workspace.Loop, 0o700); err != nil {
 		return Workspace{}, fmt.Errorf("create workspace task directory: %w", err)
 	}
 	return workspace, nil
+}
+
+// excludeLoopArtifacts writes ".loop/" to the repository's shared git exclude
+// file so runner-authored artifacts (task packet, prompt, agent logs) never
+// appear in "git status" or get swept up by a later "git add -A".
+func (manager Manager) excludeLoopArtifacts(ctx context.Context, repository string) error {
+	output, err := manager.gitOutput(ctx, "-C", repository, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("resolve git common directory: %w", err)
+	}
+	commonDirectory := strings.TrimSpace(statusLine(output))
+	if commonDirectory == "" {
+		return errors.New("git common directory is empty")
+	}
+	if !filepath.IsAbs(commonDirectory) {
+		commonDirectory = filepath.Join(repository, commonDirectory)
+	}
+	excludePath := filepath.Join(commonDirectory, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o700); err != nil {
+		return fmt.Errorf("create git info directory: %w", err)
+	}
+	contents, err := os.ReadFile(excludePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read git exclude file: %w", err)
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		if strings.TrimSpace(line) == "/.loop/" {
+			return nil
+		}
+	}
+	updated := string(contents)
+	if updated != "" && !strings.HasSuffix(updated, "\n") {
+		updated += "\n"
+	}
+	updated += "/.loop/\n"
+	if err := os.WriteFile(excludePath, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("write git exclude file: %w", err)
+	}
+	return nil
 }
 
 func (manager Manager) prepareSource(ctx context.Context, root string, request PrepareRequest) (string, error) {
@@ -339,7 +382,7 @@ func changedFiles(status string) []string {
 			continue
 		}
 		path := strings.TrimSpace(entry[3:])
-		if path == "" {
+		if path == "" || isLoopArtifactPath(path) {
 			continue
 		}
 		if _, exists := seen[path]; !exists {
@@ -350,13 +393,29 @@ func changedFiles(status string) []string {
 	return files
 }
 
+func isLoopArtifactPath(path string) bool {
+	return path == ".loop" || strings.HasPrefix(path, ".loop/")
+}
+
 func (manager Manager) git(ctx context.Context, arguments ...string) error {
 	_, err := manager.gitOutput(ctx, arguments...)
 	return err
 }
 
 func (manager Manager) gitOutput(ctx context.Context, arguments ...string) (string, error) {
+	return manager.gitOutputWithEnv(ctx, nil, arguments...)
+}
+
+func (manager Manager) gitWithEnv(ctx context.Context, extraEnvironment []string, arguments ...string) error {
+	_, err := manager.gitOutputWithEnv(ctx, extraEnvironment, arguments...)
+	return err
+}
+
+func (manager Manager) gitOutputWithEnv(ctx context.Context, extraEnvironment []string, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, manager.gitBinary(), arguments...)
+	if len(extraEnvironment) > 0 {
+		command.Env = append(os.Environ(), extraEnvironment...)
+	}
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", arguments[0], err, strings.TrimSpace(string(output)))

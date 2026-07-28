@@ -34,15 +34,7 @@ type EventReporter struct {
 	sending bool
 }
 
-func NewEventReporter(client EventClient, maxPending int) (*EventReporter, error) {
-	return NewEventReporterWithRedaction(client, maxPending, nil)
-}
-
-func NewEventReporterWithRedaction(client EventClient, maxPending int, prefixes []string) (*EventReporter, error) {
-	return NewEventReporterWithOutbox(client, maxPending, prefixes, "")
-}
-
-func NewEventReporterWithOutbox(client EventClient, maxPending int, prefixes []string, outboxPath string) (*EventReporter, error) {
+func NewEventReporter(client EventClient, maxPending int, prefixes []string, outboxPath string) (*EventReporter, error) {
 	if client == nil || maxPending < 1 || !validRedactionPrefixes(prefixes) {
 		return nil, ErrEventReporterConfiguration
 	}
@@ -242,10 +234,6 @@ func validEventType(eventType string) bool {
 	}
 }
 
-func marshalEventPayload(payload map[string]any) ([]byte, error) {
-	return marshalEventPayloadWithPrefixes(payload, nil)
-}
-
 func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) ([]byte, error) {
 	if payload == nil {
 		payload = map[string]any{}
@@ -258,10 +246,6 @@ func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) 
 		return nil, errors.New("execution event payload is too large")
 	}
 	return contents, nil
-}
-
-func redactPayload(value any) any {
-	return redactPayloadWithPrefixes(value, nil)
 }
 
 func redactPayloadWithPrefixes(value any, prefixes []string) any {

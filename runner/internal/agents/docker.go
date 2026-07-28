@@ -59,7 +59,7 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 	executor.Image = backend.Image
 	executionResult, err := executor.Execute(ctx, execution.Request{ExecutionID: request.ExecutionID, Workspace: request.Workspace, Command: command, Environment: request.Environment, Timeout: request.Timeout, OnStarted: func(pid int) {
 		writeExecutionManifest(filepath.Dir(resultPath), "docker-cli", request.ExecutionID, pid)
-	}}, stdoutLog, stderrLog)
+	}}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("Docker CLI backend execution failed: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -295,6 +296,131 @@ func TestProjectConcurrencyGuardRejectsDuplicateProjectUntilReleased(t *testing.
 		t.Fatal(err)
 	}
 	secondRelease()
+}
+
+type deliveryManager struct {
+	mu           sync.Mutex
+	commitResult repository.CommitResult
+	commitErr    error
+	pushResult   repository.PushResult
+	pushErr      error
+	commits      []string
+	pushes       []string
+	pushEnv      map[string]string
+}
+
+func (manager *deliveryManager) Commit(_ context.Context, _ repository.Workspace, message string) (repository.CommitResult, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.commits = append(manager.commits, message)
+	return manager.commitResult, manager.commitErr
+}
+
+func (manager *deliveryManager) Push(_ context.Context, _ repository.Workspace, branch string, environment map[string]string) (repository.PushResult, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.pushes = append(manager.pushes, branch)
+	manager.pushEnv = environment
+	return manager.pushResult, manager.pushErr
+}
+
+func deliverableLease() control.Lease {
+	lease := validLease()
+	lease.Packet.Constraints = taskpacket.Constraints{MayModifyFiles: true, MayPush: true}
+	return lease
+}
+
+func TestDispatcherCommitsAndPushesWhenPacketPermitsModification(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{
+		commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"},
+		pushResult:   repository.PushResult{Branch: "agent/issue-7/run-1", Pushed: true},
+	}
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{result: agents.Result{Status: "completed"}}, Delivery: delivery}
+	result, err := dispatcher.Execute(context.Background(), deliverableLease())
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Committed || result.FinalRevision != "deadbeef" || !result.Pushed || result.Branch != "agent/issue-7/run-1" {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(delivery.commits) != 1 || len(delivery.pushes) != 1 || delivery.pushes[0] != "agent/issue-7/run-1" {
+		t.Fatalf("delivery calls = %#v", delivery)
+	}
+}
+
+func TestDispatcherSkipsPushWhenCommitProducesNoNewRevision(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: false, Revision: "unchanged"}}
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{result: agents.Result{Status: "completed"}}, Delivery: delivery}
+	result, err := dispatcher.Execute(context.Background(), deliverableLease())
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Committed || result.Pushed || len(delivery.pushes) != 0 {
+		t.Fatalf("result = %#v, delivery = %#v", result, delivery)
+	}
+}
+
+func TestDispatcherFailsClosedWithoutDeliveryManagerWhenModifyingFiles(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{result: agents.Result{Status: "completed"}}}
+	result, err := dispatcher.Execute(context.Background(), deliverableLease())
+	if err == nil || result.Status != "failed" {
+		t.Fatalf("Execute() = (%#v, %v)", result, err)
+	}
+}
+
+func TestDispatcherDoesNotDeliverWhenExecutionFails(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{err: errors.New("agent exited")}, Delivery: delivery}
+	if _, err := dispatcher.Execute(context.Background(), deliverableLease()); err == nil {
+		t.Fatal("Execute() succeeded despite backend failure")
+	}
+	if len(delivery.commits) != 0 {
+		t.Fatalf("delivery committed despite failed execution: %#v", delivery)
+	}
+}
+
+type streamingBackend struct {
+	chunks []string
+}
+
+func (streamingBackend) Name() string                      { return "streaming" }
+func (streamingBackend) HealthCheck(context.Context) error { return nil }
+func (streamingBackend) Cancel(string) error               { return nil }
+func (backend *streamingBackend) Execute(_ context.Context, request agents.Request) (agents.Result, error) {
+	for _, chunk := range backend.chunks {
+		if request.Output != nil {
+			_, _ = request.Output.Write([]byte(chunk))
+		}
+	}
+	return agents.Result{Status: "completed"}, nil
+}
+
+func TestDispatcherStreamsAgentOutputAsLogEvents(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	var mu sync.Mutex
+	var emitted []string
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend:    &streamingBackend{chunks: []string{"building...\n", "done\n"}},
+		EmitLog: func(jobID string, generation int64, message string) ([]int64, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			emitted = append(emitted, message)
+			return []int64{1}, nil
+		},
+	}
+	if _, err := dispatcher.Execute(context.Background(), validLease()); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(emitted, "") != "building...\ndone\n" {
+		t.Fatalf("emitted log chunks = %#v", emitted)
+	}
 }
 
 func validLease() control.Lease {

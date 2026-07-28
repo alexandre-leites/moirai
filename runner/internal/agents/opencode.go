@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,9 @@ type Request struct {
 	ResultPath  string
 	Timeout     time.Duration
 	Environment map[string]string
+	// Output, when set, receives a live copy of the agent's stdout and
+	// stderr as it is produced, in addition to the on-disk log files.
+	Output io.Writer
 }
 
 type Result struct {
@@ -120,7 +124,7 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 		OnStarted: func(pid int) {
 			writeExecutionManifest(filepath.Dir(resultPath), "opencode", request.ExecutionID, pid)
 		},
-	}, stdoutLog, stderrLog)
+	}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 
 	document, docErr := readResultDocument(resultPath, request.ExecutionID)
 	if docErr == nil {
@@ -164,6 +168,16 @@ func (backend OpenCodeBackend) supervisor() *execution.Supervisor {
 }
 
 var defaultSupervisor = execution.NewSupervisor()
+
+// streamedWriter tees agent output into the on-disk bounded log writer and,
+// when configured, a live sink so operators can observe execution progress
+// without shell access to the runner.
+func streamedWriter(log *boundedLogWriter, output io.Writer) io.Writer {
+	if output == nil {
+		return log
+	}
+	return io.MultiWriter(log, output)
+}
 
 func resultPathWithinWorkspace(workspace, path string) (string, error) {
 	if workspace == "" {

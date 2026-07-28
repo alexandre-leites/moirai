@@ -23,7 +23,7 @@ func TestCommitStagesChangesAndPushesValidatedBranch(t *testing.T) {
 	if !result.Committed {
 		t.Fatal("Commit() did not report committed changes")
 	}
-	push, err := manager.Push(context.Background(), workspace, "agent/issue-7/run-1")
+	push, err := manager.Push(context.Background(), workspace, "agent/issue-7/run-1", map[string]string{"GITHUB_TOKEN": "token-value"})
 	if err != nil || !push.Pushed {
 		t.Fatalf("Push() = %#v, %v", push, err)
 	}
@@ -32,7 +32,7 @@ func TestCommitStagesChangesAndPushesValidatedBranch(t *testing.T) {
 	for index, command := range commands {
 		joined[index] = strings.Join(command, " ")
 	}
-	if !strings.Contains(strings.Join(joined, "\n"), "add -A") || !strings.Contains(strings.Join(joined, "\n"), "commit -m loop: implement issue 7") || !strings.Contains(strings.Join(joined, "\n"), "push --set-upstream origin agent/issue-7/run-1") {
+	if !strings.Contains(strings.Join(joined, "\n"), "add -A -- . :!.loop :!.loop/**") || !strings.Contains(strings.Join(joined, "\n"), "commit -m loop: implement issue 7") || !strings.Contains(strings.Join(joined, "\n"), "push --set-upstream origin agent/issue-7/run-1") {
 		t.Fatalf("delivery commands = %#v", commands)
 	}
 }
@@ -63,7 +63,10 @@ func TestDeliveryAdaptersRejectUnsafeInputs(t *testing.T) {
 	if _, err := manager.Commit(context.Background(), workspace, "bad\nmessage"); err == nil {
 		t.Fatal("Commit() accepted unsafe message")
 	}
-	if _, err := manager.Push(context.Background(), workspace, "../unsafe"); err == nil {
+	if _, err := manager.Push(context.Background(), workspace, "../unsafe", nil); err == nil {
 		t.Fatal("Push() accepted unsafe branch")
+	}
+	if _, err := manager.Push(context.Background(), workspace, "agent/issue-7/run-1", map[string]string{"bad name": "value"}); err == nil {
+		t.Fatal("Push() accepted unsafe credential environment name")
 	}
 }
