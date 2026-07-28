@@ -21,6 +21,33 @@ jobs:
         run: python3 -m pip install -e "./orchestrator[dev]"
       - run: make test-orchestrator
 
+  test-postgres-integration:
+    runs-on: ubuntu-latest
+    env:
+      LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: loop_test
+          POSTGRES_USER: loop
+          POSTGRES_PASSWORD: loop-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U loop -d loop_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install orchestrator with dev extras
+        run: python3 -m pip install -e "./orchestrator[dev]"
+      - run: make test-postgres-integration
+
   lint:
     runs-on: ubuntu-latest
     steps:

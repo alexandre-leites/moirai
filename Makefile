@@ -3,7 +3,7 @@ VENV ?= .venv
 
 .PHONY: test lint typecheck validate compose dev-install \
         proto-lint proto-generate proto-check \
-        test-orchestrator test-runner test-api test-web \
+        test-orchestrator test-postgres-integration test-runner test-api test-web \
         build-runner build-api build-web
 
 test: test-orchestrator
@@ -18,6 +18,10 @@ dev-install:
 
 test-orchestrator: dev-install
 	PYTHONPATH=orchestrator/src $(VENV)/bin/python3 -m unittest discover -s orchestrator/tests
+
+test-postgres-integration: dev-install
+	test -n "$(LOOP_TEST_DATABASE_URL)"
+	PYTHONPATH=orchestrator/src $(VENV)/bin/python3 -m unittest discover -s orchestrator/tests -p test_postgres_integration.py -v
 
 test-runner:
 	cd runner && go test -race ./...

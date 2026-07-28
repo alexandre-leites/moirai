@@ -2,23 +2,31 @@
 
 ## Current Status
 
-- Overall status: Complete; PR preparation
-- Current phase: Core workflow correctness
-- Active implementation: None
+- Overall status: #51 implementation complete; PR preparation
+- Current phase: PostgreSQL persistence integration coverage
+- Active implementation: #51 real PostgreSQL persistence tests
 - Last updated: 2026-07-28
-- Agent/session identifier: agent/workflow-correctness
+- Agent/session identifier: agent/postgres-integration-tests
 
 ## In Progress
 
-- [ ] Monitor the workflow-correctness PR CI and merge when green.
+- [ ] Monitor the #51 PR CI and merge when green.
   - Started: 2026-07-28
-  - Relevant files: GitHub Actions / PR checks
-  - Current state: Local orchestrator validation is green; PR pending creation.
+  - Relevant files: `.github/workflows/ci.yml`, `Makefile`, `orchestrator/tests/test_postgres_integration.py`
+  - Current state: Local PostgreSQL integration validation is green; PR pending creation.
   - Remaining work: Push, create PR, resolve CI, merge.
   - Definition of done: Non-draft PR is mergeable and merged.
   - Targeted validation: GitHub Actions checks.
 
 ## Done
+
+- [x] Add real PostgreSQL persistence integration coverage for #51
+  - Completed: 2026-07-28
+  - Relevant files: `.github/workflows/ci.yml`, `Makefile`, `orchestrator/tests/test_postgres_integration.py`
+  - Behavior delivered: CI starts PostgreSQL 16, applies every migration, checks migration idempotency, and exercises `AsyncpgControlPlane` project, runner, issue, scheduling, offer, and lease persistence.
+  - Validation performed: disposable PostgreSQL 16 integration suite; substantive Ruff checks; mypy with an isolated cache.
+  - Commands executed: `make test-postgres-integration`; `.venv/bin/python3 -m ruff check --ignore EXE002 orchestrator/src orchestrator/tests`; `.venv/bin/python3 -m mypy --cache-dir /tmp/opencode/moirai-postgres-integration-mypy-cache orchestrator/src`.
+  - Notes: Local `make lint` sees a mount-only executable-bit artifact on tracked 100644 files; the GitHub checkout uses tracked modes. The default mypy cache was locked by another worktree; an isolated cache passed.
 
 - [x] Resolve core workflow correctness issues #37, #38, #39, #45, #46, #47, #58
   - Completed: 2026-07-28
@@ -39,7 +47,7 @@
 
 ## Pending Implementation
 
-- [ ] Continue next incomplete MVP requirement after this coherent workflow-correctness PR.
+- [ ] Continue the next incomplete MVP requirement after the #51 PR is merged.
 
 ## Quality Backlog
 
@@ -55,14 +63,14 @@
 
 ## Validation Status
 
-- Targeted tests: Passed — 138 tests for workflow-focused subset.
-- Service tests: Passed — 267 tests, 6 subtests.
+- Targeted tests: Passed — #51 PostgreSQL integration suite (2 tests) and prior workflow-focused subset.
+- Service tests: Passed — prior 267 tests, 6 subtests.
 - Full repository tests: Not run.
 - Build: API/runner Docker builders corrected; Compose blocked by disk exhaustion.
-- Lint: Passed — Ruff with existing executable-bit EXE002 ignored.
-- Type checks: Blocked by 83 existing generated-protobuf and unrelated strict errors; no new errors in changed workflow modules.
-- Database migrations: Unit-tested; real Compose boot blocked by disk exhaustion.
-- Docker Compose: Blocked by disk exhaustion.
+- Lint: Passed substantive Ruff checks with the mount-only executable-bit EXE002 ignored; `make lint` is blocked locally by that artifact.
+- Type checks: Passed with an isolated mypy cache; the default cache was locked by another worktree.
+- Database migrations: Passed against real PostgreSQL 16 and verified idempotent.
+- Docker Compose: CI YAML parsed; full Compose remains blocked by disk exhaustion.
 - End-to-end workflow: Passed in orchestrator fake-adapter suite.
 
 ## Known Issues
@@ -75,4 +83,4 @@
 
 ## Next Recommended Implementation
 
-Monitor and merge the workflow-correctness PR; after host disk space is available, rerun `docker compose -p moiraiworkflowcorrectness up --build -d` and the runner integration suite, then continue the next MVP requirement.
+Push and monitor the #51 PostgreSQL integration PR through green CI and mergeability, then continue the next MVP requirement.
