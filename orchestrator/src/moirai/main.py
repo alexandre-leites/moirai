@@ -100,9 +100,15 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
         project_id = await pool.fetchval("SELECT id FROM app.projects WHERE name = $1", seed_project)
     seed_labels = os.environ.get("LOOP_SEED_TOKEN_LABELS", "linux")
     labels = [label.strip() for label in seed_labels.split(",") if label.strip()]
-    token_hash = hashlib.sha256(
-        os.environ.get("LOOP_SEED_TOKEN_VALUE", "dev-registration-token").encode()
-    ).hexdigest()
+    # RUNNER_REGISTRATION_TOKEN is the single source of truth in .env / compose.yaml: it
+    # is what the runner container presents to register (LOOP_RUNNER_REGISTRATION_TOKEN),
+    # so the orchestrator must seed a token hash for that same value, not a separate,
+    # unrelated variable that happens to default to the same literal.
+    seed_token_value = os.environ.get("RUNNER_REGISTRATION_TOKEN")
+    if not seed_token_value:
+        _LOGGER.warning("RUNNER_REGISTRATION_TOKEN unset — skipping runner registration token bootstrap")
+        return
+    token_hash = hashlib.sha256(seed_token_value.encode()).hexdigest()
     existing_token = await pool.fetchval(
         "SELECT COUNT(*) FROM app.runner_registration_tokens WHERE token_hash = $1", token_hash
     )
@@ -117,7 +123,9 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
             """,
             token_id, token_hash,
             json.dumps(labels),
-            now, now + timedelta(days=3650),
+            # Matches the 15-minute TTL the API mints for interactively-created runner
+            # registration tokens (moirai.grpc.control_plane.ControlPlaneService).
+            now, now + timedelta(minutes=15),
         )
         _LOGGER.info("created seed registration token", extra={"labels": labels})
 
@@ -158,6 +166,27 @@ async def _seed_issue_if_needed(pool: Any) -> None:
         now,
     )
     _LOGGER.info("created seed issue", extra={"title": seed_title})
+
+
+async def _run_retention_reaper(
+    control_plane: Any,
+    stop_event: asyncio.Event,
+    now: Callable[[], datetime],
+    interval: timedelta,
+) -> None:
+    if interval <= timedelta():
+        raise ValueError("retention reaper interval must be positive")
+    while not stop_event.is_set():
+        try:
+            removed = await control_plane.reap_expired_data(now())
+            if any(removed.values()):
+                _LOGGER.info("reaped expired data", extra=removed)
+        except Exception as exc:
+            _LOGGER.warning("retention reaper failed: %s", str(exc))
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
+        except TimeoutError:
+            pass
 
 
 def register_services(
@@ -229,6 +258,7 @@ async def serve(
     scheduler_task: asyncio.Task[None] | None = None
     issue_sync_task: asyncio.Task[None] | None = None
     db_health_task: asyncio.Task[None] | None = None
+    reaper_task: asyncio.Task[None] | None = None
 
     supports_durability = isinstance(control_plane, AsyncpgControlPlane)
     if supports_durability:
@@ -291,6 +321,9 @@ async def serve(
         )
 
         db_health_task = asyncio.create_task(_db_health_loop(pool, health, shutdown))
+        reaper_task = asyncio.create_task(
+            _run_retention_reaper(control_plane, shutdown, lambda: datetime.now(UTC), timedelta(hours=1))
+        )
     else:
         _LOGGER.warning(
             "control plane implementation does not support durability features "
@@ -307,6 +340,8 @@ async def serve(
             await issue_sync_task
         if db_health_task is not None:
             await db_health_task
+        if reaper_task is not None:
+            await reaper_task
         await control_plane.close()
         raise RuntimeError("orchestrator gRPC endpoint could not bind")
     _install_signal_handlers(shutdown)
@@ -328,6 +363,8 @@ async def serve(
             await issue_sync_task
         if db_health_task is not None:
             await db_health_task
+        if reaper_task is not None:
+            await reaper_task
         await server.stop(grace=5)
         await control_plane.close()
 

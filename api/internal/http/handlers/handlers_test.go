@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/loop-engineering/api/internal/auth"
 	"github.com/loop-engineering/api/internal/orchestrator"
@@ -67,7 +68,8 @@ func TestDecodeJSONAcceptsValidPayload(t *testing.T) {
 }
 
 func TestRequireMutationRequiresSessionAndCSRF(t *testing.T) {
-	h := requireMutation(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	limiter := auth.NewRateLimiter(time.Minute, 60)
+	h := requireMutation(limiter, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

@@ -125,6 +125,102 @@ func (x *LoginResponse) GetUserId() string {
 	return ""
 }
 
+type WhoAmIRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WhoAmIRequest) Reset() {
+	*x = WhoAmIRequest{}
+	mi := &file_proto_control_plane_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WhoAmIRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WhoAmIRequest) ProtoMessage() {}
+
+func (x *WhoAmIRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WhoAmIRequest.ProtoReflect.Descriptor instead.
+func (*WhoAmIRequest) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{2}
+}
+
+type WhoAmIResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Username      string                 `protobuf:"bytes,2,opt,name=username,proto3" json:"username,omitempty"`
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WhoAmIResponse) Reset() {
+	*x = WhoAmIResponse{}
+	mi := &file_proto_control_plane_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WhoAmIResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WhoAmIResponse) ProtoMessage() {}
+
+func (x *WhoAmIResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WhoAmIResponse.ProtoReflect.Descriptor instead.
+func (*WhoAmIResponse) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *WhoAmIResponse) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *WhoAmIResponse) GetUsername() string {
+	if x != nil {
+		return x.Username
+	}
+	return ""
+}
+
+func (x *WhoAmIResponse) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
 type ListProjectsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -133,7 +229,7 @@ type ListProjectsRequest struct {
 
 func (x *ListProjectsRequest) Reset() {
 	*x = ListProjectsRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[2]
+	mi := &file_proto_control_plane_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -145,7 +241,7 @@ func (x *ListProjectsRequest) String() string {
 func (*ListProjectsRequest) ProtoMessage() {}
 
 func (x *ListProjectsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[2]
+	mi := &file_proto_control_plane_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -158,7 +254,7 @@ func (x *ListProjectsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListProjectsRequest.ProtoReflect.Descriptor instead.
 func (*ListProjectsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{2}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{4}
 }
 
 type Project struct {
@@ -172,7 +268,7 @@ type Project struct {
 
 func (x *Project) Reset() {
 	*x = Project{}
-	mi := &file_proto_control_plane_proto_msgTypes[3]
+	mi := &file_proto_control_plane_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -184,7 +280,7 @@ func (x *Project) String() string {
 func (*Project) ProtoMessage() {}
 
 func (x *Project) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[3]
+	mi := &file_proto_control_plane_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -197,7 +293,7 @@ func (x *Project) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Project.ProtoReflect.Descriptor instead.
 func (*Project) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{3}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Project) GetId() string {
@@ -230,7 +326,7 @@ type ListProjectsResponse struct {
 
 func (x *ListProjectsResponse) Reset() {
 	*x = ListProjectsResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[4]
+	mi := &file_proto_control_plane_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -242,7 +338,7 @@ func (x *ListProjectsResponse) String() string {
 func (*ListProjectsResponse) ProtoMessage() {}
 
 func (x *ListProjectsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[4]
+	mi := &file_proto_control_plane_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -255,7 +351,7 @@ func (x *ListProjectsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListProjectsResponse.ProtoReflect.Descriptor instead.
 func (*ListProjectsResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{4}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ListProjectsResponse) GetProjects() []*Project {
@@ -279,7 +375,7 @@ type ProjectConfiguration struct {
 
 func (x *ProjectConfiguration) Reset() {
 	*x = ProjectConfiguration{}
-	mi := &file_proto_control_plane_proto_msgTypes[5]
+	mi := &file_proto_control_plane_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -291,7 +387,7 @@ func (x *ProjectConfiguration) String() string {
 func (*ProjectConfiguration) ProtoMessage() {}
 
 func (x *ProjectConfiguration) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[5]
+	mi := &file_proto_control_plane_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -304,7 +400,7 @@ func (x *ProjectConfiguration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProjectConfiguration.ProtoReflect.Descriptor instead.
 func (*ProjectConfiguration) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{5}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ProjectConfiguration) GetName() string {
@@ -358,7 +454,7 @@ type CreateProjectRequest struct {
 
 func (x *CreateProjectRequest) Reset() {
 	*x = CreateProjectRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[6]
+	mi := &file_proto_control_plane_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +466,7 @@ func (x *CreateProjectRequest) String() string {
 func (*CreateProjectRequest) ProtoMessage() {}
 
 func (x *CreateProjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[6]
+	mi := &file_proto_control_plane_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +479,7 @@ func (x *CreateProjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateProjectRequest.ProtoReflect.Descriptor instead.
 func (*CreateProjectRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{6}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CreateProjectRequest) GetProject() *ProjectConfiguration {
@@ -402,7 +498,7 @@ type CreateProjectResponse struct {
 
 func (x *CreateProjectResponse) Reset() {
 	*x = CreateProjectResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[7]
+	mi := &file_proto_control_plane_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -414,7 +510,7 @@ func (x *CreateProjectResponse) String() string {
 func (*CreateProjectResponse) ProtoMessage() {}
 
 func (x *CreateProjectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[7]
+	mi := &file_proto_control_plane_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -427,7 +523,7 @@ func (x *CreateProjectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateProjectResponse.ProtoReflect.Descriptor instead.
 func (*CreateProjectResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{7}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CreateProjectResponse) GetProject() *Project {
@@ -447,7 +543,7 @@ type UpdateProjectRequest struct {
 
 func (x *UpdateProjectRequest) Reset() {
 	*x = UpdateProjectRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[8]
+	mi := &file_proto_control_plane_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -459,7 +555,7 @@ func (x *UpdateProjectRequest) String() string {
 func (*UpdateProjectRequest) ProtoMessage() {}
 
 func (x *UpdateProjectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[8]
+	mi := &file_proto_control_plane_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -472,7 +568,7 @@ func (x *UpdateProjectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateProjectRequest.ProtoReflect.Descriptor instead.
 func (*UpdateProjectRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{8}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *UpdateProjectRequest) GetProjectId() string {
@@ -498,7 +594,7 @@ type UpdateProjectResponse struct {
 
 func (x *UpdateProjectResponse) Reset() {
 	*x = UpdateProjectResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[9]
+	mi := &file_proto_control_plane_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -510,7 +606,7 @@ func (x *UpdateProjectResponse) String() string {
 func (*UpdateProjectResponse) ProtoMessage() {}
 
 func (x *UpdateProjectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[9]
+	mi := &file_proto_control_plane_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -523,7 +619,7 @@ func (x *UpdateProjectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateProjectResponse.ProtoReflect.Descriptor instead.
 func (*UpdateProjectResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{9}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *UpdateProjectResponse) GetProject() *Project {
@@ -543,7 +639,7 @@ type SetProjectEnabledRequest struct {
 
 func (x *SetProjectEnabledRequest) Reset() {
 	*x = SetProjectEnabledRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[10]
+	mi := &file_proto_control_plane_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -555,7 +651,7 @@ func (x *SetProjectEnabledRequest) String() string {
 func (*SetProjectEnabledRequest) ProtoMessage() {}
 
 func (x *SetProjectEnabledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[10]
+	mi := &file_proto_control_plane_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -568,7 +664,7 @@ func (x *SetProjectEnabledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetProjectEnabledRequest.ProtoReflect.Descriptor instead.
 func (*SetProjectEnabledRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{10}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SetProjectEnabledRequest) GetProjectId() string {
@@ -594,7 +690,7 @@ type SetProjectEnabledResponse struct {
 
 func (x *SetProjectEnabledResponse) Reset() {
 	*x = SetProjectEnabledResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[11]
+	mi := &file_proto_control_plane_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -606,7 +702,7 @@ func (x *SetProjectEnabledResponse) String() string {
 func (*SetProjectEnabledResponse) ProtoMessage() {}
 
 func (x *SetProjectEnabledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[11]
+	mi := &file_proto_control_plane_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -619,7 +715,7 @@ func (x *SetProjectEnabledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetProjectEnabledResponse.ProtoReflect.Descriptor instead.
 func (*SetProjectEnabledResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{11}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SetProjectEnabledResponse) GetProject() *Project {
@@ -638,7 +734,7 @@ type CreateRunnerRegistrationTokenRequest struct {
 
 func (x *CreateRunnerRegistrationTokenRequest) Reset() {
 	*x = CreateRunnerRegistrationTokenRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[12]
+	mi := &file_proto_control_plane_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +746,7 @@ func (x *CreateRunnerRegistrationTokenRequest) String() string {
 func (*CreateRunnerRegistrationTokenRequest) ProtoMessage() {}
 
 func (x *CreateRunnerRegistrationTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[12]
+	mi := &file_proto_control_plane_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +759,7 @@ func (x *CreateRunnerRegistrationTokenRequest) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use CreateRunnerRegistrationTokenRequest.ProtoReflect.Descriptor instead.
 func (*CreateRunnerRegistrationTokenRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{12}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CreateRunnerRegistrationTokenRequest) GetAllowedLabels() []string {
@@ -683,7 +779,7 @@ type CreateRunnerRegistrationTokenResponse struct {
 
 func (x *CreateRunnerRegistrationTokenResponse) Reset() {
 	*x = CreateRunnerRegistrationTokenResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[13]
+	mi := &file_proto_control_plane_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -695,7 +791,7 @@ func (x *CreateRunnerRegistrationTokenResponse) String() string {
 func (*CreateRunnerRegistrationTokenResponse) ProtoMessage() {}
 
 func (x *CreateRunnerRegistrationTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[13]
+	mi := &file_proto_control_plane_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -708,7 +804,7 @@ func (x *CreateRunnerRegistrationTokenResponse) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use CreateRunnerRegistrationTokenResponse.ProtoReflect.Descriptor instead.
 func (*CreateRunnerRegistrationTokenResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{13}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *CreateRunnerRegistrationTokenResponse) GetToken() string {
@@ -739,7 +835,7 @@ type RunnerRegistrationToken struct {
 
 func (x *RunnerRegistrationToken) Reset() {
 	*x = RunnerRegistrationToken{}
-	mi := &file_proto_control_plane_proto_msgTypes[14]
+	mi := &file_proto_control_plane_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -751,7 +847,7 @@ func (x *RunnerRegistrationToken) String() string {
 func (*RunnerRegistrationToken) ProtoMessage() {}
 
 func (x *RunnerRegistrationToken) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[14]
+	mi := &file_proto_control_plane_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -764,7 +860,7 @@ func (x *RunnerRegistrationToken) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunnerRegistrationToken.ProtoReflect.Descriptor instead.
 func (*RunnerRegistrationToken) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{14}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *RunnerRegistrationToken) GetId() string {
@@ -817,7 +913,7 @@ type ListRunnerRegistrationTokensRequest struct {
 
 func (x *ListRunnerRegistrationTokensRequest) Reset() {
 	*x = ListRunnerRegistrationTokensRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[15]
+	mi := &file_proto_control_plane_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -829,7 +925,7 @@ func (x *ListRunnerRegistrationTokensRequest) String() string {
 func (*ListRunnerRegistrationTokensRequest) ProtoMessage() {}
 
 func (x *ListRunnerRegistrationTokensRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[15]
+	mi := &file_proto_control_plane_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -842,7 +938,7 @@ func (x *ListRunnerRegistrationTokensRequest) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use ListRunnerRegistrationTokensRequest.ProtoReflect.Descriptor instead.
 func (*ListRunnerRegistrationTokensRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{15}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{17}
 }
 
 type ListRunnerRegistrationTokensResponse struct {
@@ -854,7 +950,7 @@ type ListRunnerRegistrationTokensResponse struct {
 
 func (x *ListRunnerRegistrationTokensResponse) Reset() {
 	*x = ListRunnerRegistrationTokensResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[16]
+	mi := &file_proto_control_plane_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -866,7 +962,7 @@ func (x *ListRunnerRegistrationTokensResponse) String() string {
 func (*ListRunnerRegistrationTokensResponse) ProtoMessage() {}
 
 func (x *ListRunnerRegistrationTokensResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[16]
+	mi := &file_proto_control_plane_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -879,7 +975,7 @@ func (x *ListRunnerRegistrationTokensResponse) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use ListRunnerRegistrationTokensResponse.ProtoReflect.Descriptor instead.
 func (*ListRunnerRegistrationTokensResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{16}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ListRunnerRegistrationTokensResponse) GetTokens() []*RunnerRegistrationToken {
@@ -898,7 +994,7 @@ type RevokeRunnerRegistrationTokenRequest struct {
 
 func (x *RevokeRunnerRegistrationTokenRequest) Reset() {
 	*x = RevokeRunnerRegistrationTokenRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[17]
+	mi := &file_proto_control_plane_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -910,7 +1006,7 @@ func (x *RevokeRunnerRegistrationTokenRequest) String() string {
 func (*RevokeRunnerRegistrationTokenRequest) ProtoMessage() {}
 
 func (x *RevokeRunnerRegistrationTokenRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[17]
+	mi := &file_proto_control_plane_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -923,7 +1019,7 @@ func (x *RevokeRunnerRegistrationTokenRequest) ProtoReflect() protoreflect.Messa
 
 // Deprecated: Use RevokeRunnerRegistrationTokenRequest.ProtoReflect.Descriptor instead.
 func (*RevokeRunnerRegistrationTokenRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{17}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *RevokeRunnerRegistrationTokenRequest) GetTokenId() string {
@@ -942,7 +1038,7 @@ type RevokeRunnerRegistrationTokenResponse struct {
 
 func (x *RevokeRunnerRegistrationTokenResponse) Reset() {
 	*x = RevokeRunnerRegistrationTokenResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[18]
+	mi := &file_proto_control_plane_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -954,7 +1050,7 @@ func (x *RevokeRunnerRegistrationTokenResponse) String() string {
 func (*RevokeRunnerRegistrationTokenResponse) ProtoMessage() {}
 
 func (x *RevokeRunnerRegistrationTokenResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[18]
+	mi := &file_proto_control_plane_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -967,7 +1063,7 @@ func (x *RevokeRunnerRegistrationTokenResponse) ProtoReflect() protoreflect.Mess
 
 // Deprecated: Use RevokeRunnerRegistrationTokenResponse.ProtoReflect.Descriptor instead.
 func (*RevokeRunnerRegistrationTokenResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{18}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *RevokeRunnerRegistrationTokenResponse) GetToken() *RunnerRegistrationToken {
@@ -985,7 +1081,7 @@ type ListWorkflowsRequest struct {
 
 func (x *ListWorkflowsRequest) Reset() {
 	*x = ListWorkflowsRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[19]
+	mi := &file_proto_control_plane_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -997,7 +1093,7 @@ func (x *ListWorkflowsRequest) String() string {
 func (*ListWorkflowsRequest) ProtoMessage() {}
 
 func (x *ListWorkflowsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[19]
+	mi := &file_proto_control_plane_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1010,7 +1106,7 @@ func (x *ListWorkflowsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkflowsRequest.ProtoReflect.Descriptor instead.
 func (*ListWorkflowsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{19}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{21}
 }
 
 type Workflow struct {
@@ -1025,7 +1121,7 @@ type Workflow struct {
 
 func (x *Workflow) Reset() {
 	*x = Workflow{}
-	mi := &file_proto_control_plane_proto_msgTypes[20]
+	mi := &file_proto_control_plane_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1133,7 @@ func (x *Workflow) String() string {
 func (*Workflow) ProtoMessage() {}
 
 func (x *Workflow) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[20]
+	mi := &file_proto_control_plane_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1146,7 @@ func (x *Workflow) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Workflow.ProtoReflect.Descriptor instead.
 func (*Workflow) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{20}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Workflow) GetId() string {
@@ -1090,7 +1186,7 @@ type ListWorkflowsResponse struct {
 
 func (x *ListWorkflowsResponse) Reset() {
 	*x = ListWorkflowsResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[21]
+	mi := &file_proto_control_plane_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1102,7 +1198,7 @@ func (x *ListWorkflowsResponse) String() string {
 func (*ListWorkflowsResponse) ProtoMessage() {}
 
 func (x *ListWorkflowsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[21]
+	mi := &file_proto_control_plane_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1115,7 +1211,7 @@ func (x *ListWorkflowsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListWorkflowsResponse.ProtoReflect.Descriptor instead.
 func (*ListWorkflowsResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{21}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ListWorkflowsResponse) GetWorkflows() []*Workflow {
@@ -1133,7 +1229,7 @@ type ListRunnersRequest struct {
 
 func (x *ListRunnersRequest) Reset() {
 	*x = ListRunnersRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[22]
+	mi := &file_proto_control_plane_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1145,7 +1241,7 @@ func (x *ListRunnersRequest) String() string {
 func (*ListRunnersRequest) ProtoMessage() {}
 
 func (x *ListRunnersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[22]
+	mi := &file_proto_control_plane_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,7 +1254,7 @@ func (x *ListRunnersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunnersRequest.ProtoReflect.Descriptor instead.
 func (*ListRunnersRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{22}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{24}
 }
 
 type Runner struct {
@@ -1176,7 +1272,7 @@ type Runner struct {
 
 func (x *Runner) Reset() {
 	*x = Runner{}
-	mi := &file_proto_control_plane_proto_msgTypes[23]
+	mi := &file_proto_control_plane_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1188,7 +1284,7 @@ func (x *Runner) String() string {
 func (*Runner) ProtoMessage() {}
 
 func (x *Runner) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[23]
+	mi := &file_proto_control_plane_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1201,7 +1297,7 @@ func (x *Runner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Runner.ProtoReflect.Descriptor instead.
 func (*Runner) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{23}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *Runner) GetId() string {
@@ -1262,7 +1358,7 @@ type ListRunnersResponse struct {
 
 func (x *ListRunnersResponse) Reset() {
 	*x = ListRunnersResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[24]
+	mi := &file_proto_control_plane_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1274,7 +1370,7 @@ func (x *ListRunnersResponse) String() string {
 func (*ListRunnersResponse) ProtoMessage() {}
 
 func (x *ListRunnersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[24]
+	mi := &file_proto_control_plane_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1287,7 +1383,7 @@ func (x *ListRunnersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunnersResponse.ProtoReflect.Descriptor instead.
 func (*ListRunnersResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{24}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ListRunnersResponse) GetRunners() []*Runner {
@@ -1308,7 +1404,7 @@ type SubmitHumanDecisionRequest struct {
 
 func (x *SubmitHumanDecisionRequest) Reset() {
 	*x = SubmitHumanDecisionRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[25]
+	mi := &file_proto_control_plane_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1320,7 +1416,7 @@ func (x *SubmitHumanDecisionRequest) String() string {
 func (*SubmitHumanDecisionRequest) ProtoMessage() {}
 
 func (x *SubmitHumanDecisionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[25]
+	mi := &file_proto_control_plane_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1333,7 +1429,7 @@ func (x *SubmitHumanDecisionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitHumanDecisionRequest.ProtoReflect.Descriptor instead.
 func (*SubmitHumanDecisionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{25}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *SubmitHumanDecisionRequest) GetWorkflowRunId() string {
@@ -1366,7 +1462,7 @@ type SubmitHumanDecisionResponse struct {
 
 func (x *SubmitHumanDecisionResponse) Reset() {
 	*x = SubmitHumanDecisionResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[26]
+	mi := &file_proto_control_plane_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1378,7 +1474,7 @@ func (x *SubmitHumanDecisionResponse) String() string {
 func (*SubmitHumanDecisionResponse) ProtoMessage() {}
 
 func (x *SubmitHumanDecisionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[26]
+	mi := &file_proto_control_plane_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1391,7 +1487,7 @@ func (x *SubmitHumanDecisionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitHumanDecisionResponse.ProtoReflect.Descriptor instead.
 func (*SubmitHumanDecisionResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{26}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *SubmitHumanDecisionResponse) GetWorkflow() *Workflow {
@@ -1411,7 +1507,12 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\bpassword\x18\x02 \x01(\tR\bpassword\"M\n" +
 	"\rLoginResponse\x12#\n" +
 	"\rsession_token\x18\x01 \x01(\tR\fsessionToken\x12\x17\n" +
-	"\auser_id\x18\x02 \x01(\tR\x06userId\"\x15\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\"\x0f\n" +
+	"\rWhoAmIRequest\"Y\n" +
+	"\x0eWhoAmIResponse\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1a\n" +
+	"\busername\x18\x02 \x01(\tR\busername\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\"\x15\n" +
 	"\x13ListProjectsRequest\"G\n" +
 	"\aProject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -1491,9 +1592,11 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x18\n" +
 	"\acomment\x18\x03 \x01(\tR\acomment\"T\n" +
 	"\x1bSubmitHumanDecisionResponse\x125\n" +
-	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow2\xbb\t\n" +
+	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow2\x86\n" +
+	"\n" +
 	"\fControlPlane\x12F\n" +
-	"\x05Login\x12\x1d.loop.control.v1.LoginRequest\x1a\x1e.loop.control.v1.LoginResponse\x12[\n" +
+	"\x05Login\x12\x1d.loop.control.v1.LoginRequest\x1a\x1e.loop.control.v1.LoginResponse\x12I\n" +
+	"\x06WhoAmI\x12\x1e.loop.control.v1.WhoAmIRequest\x1a\x1f.loop.control.v1.WhoAmIResponse\x12[\n" +
 	"\fListProjects\x12$.loop.control.v1.ListProjectsRequest\x1a%.loop.control.v1.ListProjectsResponse\x12^\n" +
 	"\rCreateProject\x12%.loop.control.v1.CreateProjectRequest\x1a&.loop.control.v1.CreateProjectResponse\x12^\n" +
 	"\rUpdateProject\x12%.loop.control.v1.UpdateProjectRequest\x1a&.loop.control.v1.UpdateProjectResponse\x12j\n" +
@@ -1517,72 +1620,76 @@ func file_proto_control_plane_proto_rawDescGZIP() []byte {
 	return file_proto_control_plane_proto_rawDescData
 }
 
-var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_proto_control_plane_proto_goTypes = []any{
 	(*LoginRequest)(nil),                          // 0: loop.control.v1.LoginRequest
 	(*LoginResponse)(nil),                         // 1: loop.control.v1.LoginResponse
-	(*ListProjectsRequest)(nil),                   // 2: loop.control.v1.ListProjectsRequest
-	(*Project)(nil),                               // 3: loop.control.v1.Project
-	(*ListProjectsResponse)(nil),                  // 4: loop.control.v1.ListProjectsResponse
-	(*ProjectConfiguration)(nil),                  // 5: loop.control.v1.ProjectConfiguration
-	(*CreateProjectRequest)(nil),                  // 6: loop.control.v1.CreateProjectRequest
-	(*CreateProjectResponse)(nil),                 // 7: loop.control.v1.CreateProjectResponse
-	(*UpdateProjectRequest)(nil),                  // 8: loop.control.v1.UpdateProjectRequest
-	(*UpdateProjectResponse)(nil),                 // 9: loop.control.v1.UpdateProjectResponse
-	(*SetProjectEnabledRequest)(nil),              // 10: loop.control.v1.SetProjectEnabledRequest
-	(*SetProjectEnabledResponse)(nil),             // 11: loop.control.v1.SetProjectEnabledResponse
-	(*CreateRunnerRegistrationTokenRequest)(nil),  // 12: loop.control.v1.CreateRunnerRegistrationTokenRequest
-	(*CreateRunnerRegistrationTokenResponse)(nil), // 13: loop.control.v1.CreateRunnerRegistrationTokenResponse
-	(*RunnerRegistrationToken)(nil),               // 14: loop.control.v1.RunnerRegistrationToken
-	(*ListRunnerRegistrationTokensRequest)(nil),   // 15: loop.control.v1.ListRunnerRegistrationTokensRequest
-	(*ListRunnerRegistrationTokensResponse)(nil),  // 16: loop.control.v1.ListRunnerRegistrationTokensResponse
-	(*RevokeRunnerRegistrationTokenRequest)(nil),  // 17: loop.control.v1.RevokeRunnerRegistrationTokenRequest
-	(*RevokeRunnerRegistrationTokenResponse)(nil), // 18: loop.control.v1.RevokeRunnerRegistrationTokenResponse
-	(*ListWorkflowsRequest)(nil),                  // 19: loop.control.v1.ListWorkflowsRequest
-	(*Workflow)(nil),                              // 20: loop.control.v1.Workflow
-	(*ListWorkflowsResponse)(nil),                 // 21: loop.control.v1.ListWorkflowsResponse
-	(*ListRunnersRequest)(nil),                    // 22: loop.control.v1.ListRunnersRequest
-	(*Runner)(nil),                                // 23: loop.control.v1.Runner
-	(*ListRunnersResponse)(nil),                   // 24: loop.control.v1.ListRunnersResponse
-	(*SubmitHumanDecisionRequest)(nil),            // 25: loop.control.v1.SubmitHumanDecisionRequest
-	(*SubmitHumanDecisionResponse)(nil),           // 26: loop.control.v1.SubmitHumanDecisionResponse
+	(*WhoAmIRequest)(nil),                         // 2: loop.control.v1.WhoAmIRequest
+	(*WhoAmIResponse)(nil),                        // 3: loop.control.v1.WhoAmIResponse
+	(*ListProjectsRequest)(nil),                   // 4: loop.control.v1.ListProjectsRequest
+	(*Project)(nil),                               // 5: loop.control.v1.Project
+	(*ListProjectsResponse)(nil),                  // 6: loop.control.v1.ListProjectsResponse
+	(*ProjectConfiguration)(nil),                  // 7: loop.control.v1.ProjectConfiguration
+	(*CreateProjectRequest)(nil),                  // 8: loop.control.v1.CreateProjectRequest
+	(*CreateProjectResponse)(nil),                 // 9: loop.control.v1.CreateProjectResponse
+	(*UpdateProjectRequest)(nil),                  // 10: loop.control.v1.UpdateProjectRequest
+	(*UpdateProjectResponse)(nil),                 // 11: loop.control.v1.UpdateProjectResponse
+	(*SetProjectEnabledRequest)(nil),              // 12: loop.control.v1.SetProjectEnabledRequest
+	(*SetProjectEnabledResponse)(nil),             // 13: loop.control.v1.SetProjectEnabledResponse
+	(*CreateRunnerRegistrationTokenRequest)(nil),  // 14: loop.control.v1.CreateRunnerRegistrationTokenRequest
+	(*CreateRunnerRegistrationTokenResponse)(nil), // 15: loop.control.v1.CreateRunnerRegistrationTokenResponse
+	(*RunnerRegistrationToken)(nil),               // 16: loop.control.v1.RunnerRegistrationToken
+	(*ListRunnerRegistrationTokensRequest)(nil),   // 17: loop.control.v1.ListRunnerRegistrationTokensRequest
+	(*ListRunnerRegistrationTokensResponse)(nil),  // 18: loop.control.v1.ListRunnerRegistrationTokensResponse
+	(*RevokeRunnerRegistrationTokenRequest)(nil),  // 19: loop.control.v1.RevokeRunnerRegistrationTokenRequest
+	(*RevokeRunnerRegistrationTokenResponse)(nil), // 20: loop.control.v1.RevokeRunnerRegistrationTokenResponse
+	(*ListWorkflowsRequest)(nil),                  // 21: loop.control.v1.ListWorkflowsRequest
+	(*Workflow)(nil),                              // 22: loop.control.v1.Workflow
+	(*ListWorkflowsResponse)(nil),                 // 23: loop.control.v1.ListWorkflowsResponse
+	(*ListRunnersRequest)(nil),                    // 24: loop.control.v1.ListRunnersRequest
+	(*Runner)(nil),                                // 25: loop.control.v1.Runner
+	(*ListRunnersResponse)(nil),                   // 26: loop.control.v1.ListRunnersResponse
+	(*SubmitHumanDecisionRequest)(nil),            // 27: loop.control.v1.SubmitHumanDecisionRequest
+	(*SubmitHumanDecisionResponse)(nil),           // 28: loop.control.v1.SubmitHumanDecisionResponse
 }
 var file_proto_control_plane_proto_depIdxs = []int32{
-	3,  // 0: loop.control.v1.ListProjectsResponse.projects:type_name -> loop.control.v1.Project
-	5,  // 1: loop.control.v1.CreateProjectRequest.project:type_name -> loop.control.v1.ProjectConfiguration
-	3,  // 2: loop.control.v1.CreateProjectResponse.project:type_name -> loop.control.v1.Project
-	5,  // 3: loop.control.v1.UpdateProjectRequest.project:type_name -> loop.control.v1.ProjectConfiguration
-	3,  // 4: loop.control.v1.UpdateProjectResponse.project:type_name -> loop.control.v1.Project
-	3,  // 5: loop.control.v1.SetProjectEnabledResponse.project:type_name -> loop.control.v1.Project
-	14, // 6: loop.control.v1.ListRunnerRegistrationTokensResponse.tokens:type_name -> loop.control.v1.RunnerRegistrationToken
-	14, // 7: loop.control.v1.RevokeRunnerRegistrationTokenResponse.token:type_name -> loop.control.v1.RunnerRegistrationToken
-	20, // 8: loop.control.v1.ListWorkflowsResponse.workflows:type_name -> loop.control.v1.Workflow
-	23, // 9: loop.control.v1.ListRunnersResponse.runners:type_name -> loop.control.v1.Runner
-	20, // 10: loop.control.v1.SubmitHumanDecisionResponse.workflow:type_name -> loop.control.v1.Workflow
+	5,  // 0: loop.control.v1.ListProjectsResponse.projects:type_name -> loop.control.v1.Project
+	7,  // 1: loop.control.v1.CreateProjectRequest.project:type_name -> loop.control.v1.ProjectConfiguration
+	5,  // 2: loop.control.v1.CreateProjectResponse.project:type_name -> loop.control.v1.Project
+	7,  // 3: loop.control.v1.UpdateProjectRequest.project:type_name -> loop.control.v1.ProjectConfiguration
+	5,  // 4: loop.control.v1.UpdateProjectResponse.project:type_name -> loop.control.v1.Project
+	5,  // 5: loop.control.v1.SetProjectEnabledResponse.project:type_name -> loop.control.v1.Project
+	16, // 6: loop.control.v1.ListRunnerRegistrationTokensResponse.tokens:type_name -> loop.control.v1.RunnerRegistrationToken
+	16, // 7: loop.control.v1.RevokeRunnerRegistrationTokenResponse.token:type_name -> loop.control.v1.RunnerRegistrationToken
+	22, // 8: loop.control.v1.ListWorkflowsResponse.workflows:type_name -> loop.control.v1.Workflow
+	25, // 9: loop.control.v1.ListRunnersResponse.runners:type_name -> loop.control.v1.Runner
+	22, // 10: loop.control.v1.SubmitHumanDecisionResponse.workflow:type_name -> loop.control.v1.Workflow
 	0,  // 11: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
-	2,  // 12: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
-	6,  // 13: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
-	8,  // 14: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
-	10, // 15: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
-	12, // 16: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
-	15, // 17: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
-	17, // 18: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
-	19, // 19: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
-	22, // 20: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
-	25, // 21: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
-	1,  // 22: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
-	4,  // 23: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
-	7,  // 24: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
-	9,  // 25: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
-	11, // 26: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
-	13, // 27: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
-	16, // 28: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
-	18, // 29: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
-	21, // 30: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
-	24, // 31: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
-	26, // 32: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
-	22, // [22:33] is the sub-list for method output_type
-	11, // [11:22] is the sub-list for method input_type
+	2,  // 12: loop.control.v1.ControlPlane.WhoAmI:input_type -> loop.control.v1.WhoAmIRequest
+	4,  // 13: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
+	8,  // 14: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
+	10, // 15: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
+	12, // 16: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
+	14, // 17: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
+	17, // 18: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
+	19, // 19: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
+	21, // 20: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
+	24, // 21: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
+	27, // 22: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
+	1,  // 23: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
+	3,  // 24: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
+	6,  // 25: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
+	9,  // 26: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
+	11, // 27: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
+	13, // 28: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
+	15, // 29: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
+	18, // 30: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
+	20, // 31: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
+	23, // 32: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
+	26, // 33: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
+	28, // 34: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
+	23, // [23:35] is the sub-list for method output_type
+	11, // [11:23] is the sub-list for method input_type
 	11, // [11:11] is the sub-list for extension type_name
 	11, // [11:11] is the sub-list for extension extendee
 	0,  // [0:11] is the sub-list for field type_name
@@ -1599,7 +1706,7 @@ func file_proto_control_plane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_control_plane_proto_rawDesc), len(file_proto_control_plane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   27,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

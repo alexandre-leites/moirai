@@ -72,6 +72,13 @@ class AsyncpgControlPlane:
     async def revoke_session(self, session_token: str, now: datetime) -> None:
         await self._authentication.revoke_session(session_token, now)
 
+    async def reap_expired_data(self, now: datetime) -> dict[str, int]:
+        return {
+            "sessions": await self._authentication.reap_expired_sessions(now),
+            "audit_events": await self._authentication.reap_audit_events(now),
+            "workflow_events": await self._authentication.reap_workflow_events(now),
+        }
+
     async def append_audit(
         self,
         actor_user_id: str | None,

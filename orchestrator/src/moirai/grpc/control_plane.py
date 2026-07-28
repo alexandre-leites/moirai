@@ -54,6 +54,19 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             await context.abort(grpc.StatusCode.INTERNAL, "login could not be completed")
         return control_plane_pb2.LoginResponse(session_token=session_token, user_id=user_id)
 
+    async def WhoAmI(
+        self,
+        request: control_plane_pb2.WhoAmIRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.WhoAmIResponse:
+        del request
+        session = await self._require_session(context)
+        return control_plane_pb2.WhoAmIResponse(
+            user_id=_text(_value(session, "user_id")),
+            username=_text(_value(session, "username")),
+            role=_text(_value(session, "role")),
+        )
+
     async def ListProjects(
         self,
         request: control_plane_pb2.ListProjectsRequest,

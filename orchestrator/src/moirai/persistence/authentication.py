@@ -1,22 +1,33 @@
 from __future__ import annotations
 
+import json
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from base64 import urlsafe_b64decode, urlsafe_b64encode
+from functools import lru_cache
 from hashlib import scrypt
 from hmac import compare_digest
-import json
 from secrets import token_bytes, token_urlsafe
 from typing import Any
 from uuid import uuid4
 
 from moirai.domain.control_plane import AuthenticationError
 
-
 _SCRYPT_N = 1 << 14
 _SCRYPT_R = 8
 _SCRYPT_P = 1
 _DKLEN = 32
+
+# Below this age, a session's last_seen_at is considered fresh enough that skipping the
+# write does not meaningfully harm observability, while avoiding a write transaction on
+# every authenticated request.
+_LAST_SEEN_THROTTLE = timedelta(seconds=60)
+
+# Sessions and events past this age (in addition to their own expiry/creation) are
+# permanently deleted by the periodic reaper.
+_SESSION_REAP_GRACE = timedelta(days=1)
+DEFAULT_AUDIT_EVENT_RETENTION = timedelta(days=90)
+DEFAULT_WORKFLOW_EVENT_RETENTION = timedelta(days=30)
 
 
 @dataclass(frozen=True)
@@ -128,11 +139,23 @@ class AsyncpgAuthentication:
                     """,
                     normalized,
                 )
-                if user is None or not bool(user["enabled"]) or not verify_password(
-                    password, str(user["password_hash"])
-                ):
+                # Always run the KDF, on a real hash when the user exists and on a fixed
+                # dummy hash otherwise, so a nonexistent username costs the same as a real
+                # one and cannot be distinguished by login latency (user enumeration).
+                password_hash = str(user["password_hash"]) if user is not None else _dummy_password_hash()
+                password_valid = verify_password(password, password_hash)
+                if user is None or not bool(user["enabled"]) or not password_valid:
                     raise AuthenticationError("login was rejected")
                 credentials = self._new_session(str(user["id"]), now)
+                await connection.execute(
+                    """
+                    UPDATE app.user_sessions
+                    SET revoked_at = $2
+                    WHERE user_id = $1 AND revoked_at IS NULL
+                    """,
+                    user["id"],
+                    now,
+                )
                 await connection.execute(
                     """
                     INSERT INTO app.user_sessions
@@ -168,26 +191,29 @@ class AsyncpgAuthentication:
         if not session_token or (require_csrf and not csrf_token):
             raise AuthenticationError("session is invalid")
         async with self._pool.acquire() as connection:
-            async with connection.transaction():
-                row = await connection.fetchrow(
-                    """
-                    SELECT s.id, s.user_id, s.csrf_token_hash, s.expires_at, u.username, u.role
-                    FROM app.user_sessions AS s
-                    JOIN app.users AS u ON u.id = s.user_id
-                    WHERE s.token_hash = $1
-                      AND s.revoked_at IS NULL
-                      AND s.expires_at > $2
-                      AND u.enabled = true
-                    FOR UPDATE
-                    """,
-                    _hash_token(session_token),
-                    now,
-                )
-                if row is None or (
-                    require_csrf
-                    and not compare_digest(str(row["csrf_token_hash"]), _hash_token(str(csrf_token)))
-                ):
-                    raise AuthenticationError("session is invalid")
+            # No FOR UPDATE and no write here: this runs on every authenticated request,
+            # so it must stay a plain read to avoid serializing concurrent requests for
+            # the same session behind a row lock.
+            row = await connection.fetchrow(
+                """
+                SELECT s.id, s.user_id, s.csrf_token_hash, s.expires_at, s.last_seen_at, u.username, u.role
+                FROM app.user_sessions AS s
+                JOIN app.users AS u ON u.id = s.user_id
+                WHERE s.token_hash = $1
+                  AND s.revoked_at IS NULL
+                  AND s.expires_at > $2
+                  AND u.enabled = true
+                """,
+                _hash_token(session_token),
+                now,
+            )
+            if row is None or (
+                require_csrf
+                and not compare_digest(str(row["csrf_token_hash"]), _hash_token(str(csrf_token)))
+            ):
+                raise AuthenticationError("session is invalid")
+            last_seen_at = row["last_seen_at"]
+            if last_seen_at is None or now - last_seen_at >= _LAST_SEEN_THROTTLE:
                 await connection.execute(
                     "UPDATE app.user_sessions SET last_seen_at = $2 WHERE id = $1", row["id"], now
                 )
@@ -211,6 +237,37 @@ class AsyncpgAuthentication:
             _hash_token(session_token),
             now,
         )
+
+    async def reap_expired_sessions(self, now: datetime) -> int:
+        cutoff = now - _SESSION_REAP_GRACE
+        result = await self._pool.execute(
+            """
+            DELETE FROM app.user_sessions
+            WHERE expires_at < $1 OR (revoked_at IS NOT NULL AND revoked_at < $1)
+            """,
+            cutoff,
+        )
+        return _affected_rows(result)
+
+    async def reap_audit_events(
+        self, now: datetime, retention: timedelta = DEFAULT_AUDIT_EVENT_RETENTION
+    ) -> int:
+        if retention <= timedelta():
+            raise ValueError("audit event retention must be positive")
+        result = await self._pool.execute(
+            "DELETE FROM app.audit_events WHERE created_at < $1", now - retention
+        )
+        return _affected_rows(result)
+
+    async def reap_workflow_events(
+        self, now: datetime, retention: timedelta = DEFAULT_WORKFLOW_EVENT_RETENTION
+    ) -> int:
+        if retention <= timedelta():
+            raise ValueError("workflow event retention must be positive")
+        result = await self._pool.execute(
+            "DELETE FROM app.workflow_events WHERE created_at < $1", now - retention
+        )
+        return _affected_rows(result)
 
     async def append_audit(
         self,
@@ -301,3 +358,15 @@ def _uuid_or_none(value: str | None) -> Any:
 
 def _is_unique_violation(error: Exception) -> bool:
     return getattr(error, "sqlstate", None) == "23505"
+
+
+@lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    return hash_password("this password only exists to make the KDF cost constant-time")
+
+
+def _affected_rows(result: str) -> int:
+    try:
+        return int(result.rsplit(" ", 1)[-1])
+    except (ValueError, IndexError):
+        return 0

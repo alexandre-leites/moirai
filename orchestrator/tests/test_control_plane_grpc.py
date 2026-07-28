@@ -1,5 +1,5 @@
-from datetime import UTC, datetime, timedelta
 import unittest
+from datetime import UTC, datetime, timedelta
 
 try:
     import grpc
@@ -29,9 +29,9 @@ class FakeControlPlane:
     ) -> dict[str, str]:
         del csrf_token, now, require_csrf
         if session_token == "admin-session":
-            return {"role": "admin", "user_id": "00000000-0000-0000-0000-000000000099"}
+            return {"role": "admin", "user_id": "00000000-0000-0000-0000-000000000099", "username": "admin"}
         if session_token == "viewer-session":
-            return {"role": "viewer", "user_id": "00000000-0000-0000-0000-000000000098"}
+            return {"role": "viewer", "user_id": "00000000-0000-0000-0000-000000000098", "username": "viewer"}
         raise PermissionError()
 
     async def list_projects(self) -> list[dict[str, object]]:
@@ -171,6 +171,17 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.session_token, "session-token")
         self.assertEqual(response.user_id, "user-1")
         self.assertIsNotNone(self.runner_client.Connect)
+
+    async def test_who_am_i_returns_the_authenticated_session(self) -> None:
+        response = await self.client.WhoAmI(
+            control_plane_pb2.WhoAmIRequest(), metadata=(("x-loop-session", "admin-session"),)
+        )
+        self.assertEqual(response.user_id, "00000000-0000-0000-0000-000000000099")
+        self.assertEqual(response.username, "admin")
+        self.assertEqual(response.role, "admin")
+        with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
+            await self.client.WhoAmI(control_plane_pb2.WhoAmIRequest())
+        self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
     async def test_maps_typed_responses_and_validates_runner_token_requests(self) -> None:
         projects = await self.client.ListProjects(

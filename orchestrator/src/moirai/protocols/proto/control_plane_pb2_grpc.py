@@ -19,6 +19,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.LoginRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.LoginResponse.FromString,
                 _registered_method=True)
+        self.WhoAmI = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/WhoAmI',
+                request_serializer=proto_dot_control__plane__pb2.WhoAmIRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.WhoAmIResponse.FromString,
+                _registered_method=True)
         self.ListProjects = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/ListProjects',
                 request_serializer=proto_dot_control__plane__pb2.ListProjectsRequest.SerializeToString,
@@ -75,6 +80,12 @@ class ControlPlaneServicer:
     """Missing associated documentation comment in .proto file."""
 
     def Login(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def WhoAmI(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -147,6 +158,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.Login,
                     request_deserializer=proto_dot_control__plane__pb2.LoginRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.LoginResponse.SerializeToString,
+            ),
+            'WhoAmI': grpc.unary_unary_rpc_method_handler(
+                    servicer.WhoAmI,
+                    request_deserializer=proto_dot_control__plane__pb2.WhoAmIRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.WhoAmIResponse.SerializeToString,
             ),
             'ListProjects': grpc.unary_unary_rpc_method_handler(
                     servicer.ListProjects,
@@ -226,6 +242,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/Login',
             proto_dot_control__plane__pb2.LoginRequest.SerializeToString,
             proto_dot_control__plane__pb2.LoginResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def WhoAmI(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/WhoAmI',
+            proto_dot_control__plane__pb2.WhoAmIRequest.SerializeToString,
+            proto_dot_control__plane__pb2.WhoAmIResponse.FromString,
             options,
             channel_credentials,
             insecure,

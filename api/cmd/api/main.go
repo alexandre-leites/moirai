@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/loop-engineering/api/internal/auth"
 	"github.com/loop-engineering/api/internal/config"
 	apiserver "github.com/loop-engineering/api/internal/http"
 	"github.com/loop-engineering/api/internal/http/handlers"
@@ -42,9 +43,12 @@ func main() {
 		logger.Error("server configuration error", "error", err)
 		os.Exit(1)
 	}
-	handlers.NewAuthHandlers(client, runtimeConfig.CookieSecure).RegisterRoutes(srv.Mux())
-	handlers.NewProjectHandlers(client).RegisterRoutes(srv.Mux())
-	handlers.NewRunnerTokenHandlers(client).RegisterRoutes(srv.Mux())
+	loginLimiter := auth.NewRateLimiter(time.Minute, 10, auth.WithTrustedProxies(runtimeConfig.TrustedProxies))
+	mutationLimiter := auth.NewRateLimiter(time.Minute, 60, auth.WithTrustedProxies(runtimeConfig.TrustedProxies))
+
+	handlers.NewAuthHandlers(client, runtimeConfig.CookieSecure, loginLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewProjectHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewRunnerTokenHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerHandlers(client).RegisterRoutes(srv.Mux())
 	handlers.NewWorkflowHandlers(client).RegisterRoutes(srv.Mux())
 
