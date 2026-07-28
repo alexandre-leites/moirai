@@ -35,6 +35,7 @@ func main() {
 	cfg := apiserver.DefaultConfig()
 	cfg.BindAddress = runtimeConfig.BindAddress
 	cfg.MaxRequestBodyBytes = runtimeConfig.MaxBodyBytes
+	cfg.OrchestratorHealthy = client.Healthy
 
 	srv, err := apiserver.New(cfg, logger)
 	if err != nil {

@@ -213,6 +213,37 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await sync.run(asyncio.Event(), lambda: NOW, timedelta())
 
+    async def test_run_survives_list_enabled_projects_raising_and_keeps_looping(self) -> None:
+        sync, control_plane, _ = self._sync()
+        stop_event = asyncio.Event()
+        calls = 0
+        original_list_enabled_projects = control_plane.list_enabled_projects
+
+        async def flaky_list_enabled_projects() -> list[Project]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("database connection lost")
+            stop_event.set()
+            return await original_list_enabled_projects()
+
+        control_plane.list_enabled_projects = flaky_list_enabled_projects  # type: ignore[method-assign]
+        await sync.run(stop_event, lambda: NOW, timedelta(milliseconds=1))
+        self.assertEqual(calls, 2)
+
+    async def test_run_invokes_on_run_after_each_successful_iteration(self) -> None:
+        sync, _, _ = self._sync()
+        stop_event = asyncio.Event()
+        runs = 0
+
+        def on_run() -> None:
+            nonlocal runs
+            runs += 1
+            stop_event.set()
+
+        await sync.run(stop_event, lambda: NOW, timedelta(milliseconds=1), on_run=on_run)
+        self.assertEqual(runs, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

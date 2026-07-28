@@ -640,6 +640,92 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
                 "Example", "managed_clone", None, "/repo", "main", {"linux"}, NOW
             )
 
+    def test_pool_property_exposes_the_underlying_pool(self) -> None:
+        pool = _ProjectPool()
+        control_plane = AsyncpgControlPlane(pool)
+        self.assertIs(control_plane.pool, pool)
+
+
+class _HumanDecisionConnection:
+    def __init__(self, pool: _HumanDecisionPool) -> None:
+        self.pool = pool
+
+    async def __aenter__(self) -> _HumanDecisionConnection:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def transaction(self) -> _Transaction:
+        return _Transaction()
+
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        if "FROM app.workflow_runs" in query:
+            workflow = self.pool.workflows.get(str(arguments[0]))
+            if workflow is None or workflow["status"] != "waiting_human":
+                return None
+            return dict(workflow)
+        raise AssertionError(query)
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        if "INSERT INTO app.human_approvals" in query:
+            self.pool.approvals.append(arguments)
+            return "INSERT 0 1"
+        if "INSERT INTO app.audit_events" in query:
+            self.pool.audits.append(arguments)
+            return "INSERT 0 1"
+        raise AssertionError(query)
+
+
+class _HumanDecisionPool:
+    def __init__(self) -> None:
+        self.workflows: dict[str, dict[str, object]] = {}
+        self.approvals: list[tuple[object, ...]] = []
+        self.audits: list[tuple[object, ...]] = []
+
+    def acquire(self) -> _HumanDecisionConnection:
+        return _HumanDecisionConnection(self)
+
+
+class RecordHumanDecisionTests(unittest.IsolatedAsyncioTestCase):
+    _WORKFLOW_ID = "00000000-0000-0000-0000-000000000001"
+    _PROJECT_ID = "00000000-0000-0000-0000-000000000002"
+    _ACTOR_ID = "00000000-0000-0000-0000-000000000099"
+
+    def _control_plane(self, status: str = "waiting_human") -> tuple[AsyncpgControlPlane, _HumanDecisionPool]:
+        pool = _HumanDecisionPool()
+        pool.workflows[self._WORKFLOW_ID] = {
+            "id": self._WORKFLOW_ID, "project_id": self._PROJECT_ID, "status": status,
+        }
+        return AsyncpgControlPlane(pool), pool
+
+    async def test_records_the_decision_and_an_audit_event(self) -> None:
+        control_plane, pool = self._control_plane()
+        result = await control_plane.record_human_decision(
+            self._WORKFLOW_ID, "approved", "looks good", self._ACTOR_ID, NOW
+        )
+        self.assertEqual(result["id"], self._WORKFLOW_ID)
+        self.assertEqual(result["status"], "waiting_human")
+        self.assertEqual(len(pool.approvals), 1)
+        self.assertEqual(pool.approvals[0][3], "approved")
+        self.assertEqual(len(pool.audits), 1)
+        self.assertEqual(pool.audits[0][2], "workflow.human_decision.approved")
+
+    async def test_rejects_an_unknown_decision_value(self) -> None:
+        control_plane, _ = self._control_plane()
+        with self.assertRaises(ValueError):
+            await control_plane.record_human_decision(self._WORKFLOW_ID, "maybe", None, self._ACTOR_ID, NOW)
+
+    async def test_requires_an_authenticated_actor(self) -> None:
+        control_plane, _ = self._control_plane()
+        with self.assertRaises(ValueError):
+            await control_plane.record_human_decision(self._WORKFLOW_ID, "approved", None, None, NOW)
+
+    async def test_rejects_a_workflow_not_awaiting_approval(self) -> None:
+        control_plane, _ = self._control_plane(status="merging")
+        with self.assertRaises(ValueError):
+            await control_plane.record_human_decision(self._WORKFLOW_ID, "approved", None, self._ACTOR_ID, NOW)
+
 
 if __name__ == "__main__":
     unittest.main()

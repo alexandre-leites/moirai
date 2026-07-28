@@ -1,7 +1,11 @@
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "./api";
+import type { ApiClient } from "./api";
 import { AuthProvider, useAuth } from "./auth";
+import { loadHealth } from "./health";
+import type { HealthViewState } from "./health";
 import { LoginPage } from "./login";
 import { ProjectsPage } from "./projects";
 import { TokensPage } from "./tokens";
@@ -16,6 +20,28 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function HealthIndicator({ api }: { api: ApiClient }) {
+  const [health, setHealth] = useState<HealthViewState>("checking");
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    const check = () => loadHealth(api, ctrl.signal).then(setHealth).catch(() => undefined);
+    check();
+    const interval = setInterval(check, 15_000);
+    return () => {
+      ctrl.abort();
+      clearInterval(interval);
+    };
+  }, [api]);
+
+  const label = health === "healthy" ? "Healthy" : health === "checking" ? "Checking..." : "Unavailable";
+  return (
+    <span className={`health-indicator health-indicator--${health}`} title="Orchestrator connectivity">
+      {label}
+    </span>
+  );
+}
+
 function Layout({ children }: { children: React.ReactNode }) {
   const { state, logout } = useAuth();
   return (
@@ -27,6 +53,7 @@ function Layout({ children }: { children: React.ReactNode }) {
             <Link to="/projects">Projects</Link>
             <Link to="/tokens">Tokens</Link>
             <Link to="/workflows">Workflows</Link>
+            <HealthIndicator api={api} />
             <button className="logout-btn" onClick={logout}>Logout</button>
           </nav>
         )}

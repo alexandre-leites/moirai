@@ -116,6 +116,25 @@ class FakeControlPlane:
             }
         ]
 
+    async def record_human_decision(
+        self, workflow_run_id: str, decision: str, comment: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        del now
+        if workflow_run_id != "workflow-waiting":
+            raise ValueError("workflow run is not awaiting human approval")
+        self.recorded_decision = (workflow_run_id, decision, comment, actor_user_id)
+        return {"id": workflow_run_id, "project_id": "project-1", "status": "waiting_human"}
+
+
+class _FakeWorkflowRuntime:
+    def __init__(self) -> None:
+        self.resumed_with: tuple[str, dict[str, object]] | None = None
+
+    async def run(self, workflow_run_id: str, state_updates: dict[str, object]) -> dict[str, object]:
+        self.resumed_with = (workflow_run_id, state_updates)
+        status = "merging" if state_updates.get("human_approved") else "repairing"
+        return {"project_id": "project-1", "status": status}
+
 
 @unittest.skipIf(grpc is None, "grpcio is not installed")
 class _MissingListProjects:
@@ -251,6 +270,94 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await channel.close()
             await missing_server.stop(0)
+
+
+@unittest.skipIf(grpc is None, "grpcio is not installed")
+class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.control_plane = FakeControlPlane()
+        self.workflow_runtime = _FakeWorkflowRuntime()
+        self.server = grpc.aio.server()
+        register_services(self.server, self.control_plane, now=lambda: NOW, workflow_runtime=self.workflow_runtime)
+        port = self.server.add_insecure_port("127.0.0.1:0")
+        await self.server.start()
+        self.channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        self.client = control_plane_pb2_grpc.ControlPlaneStub(self.channel)
+
+    async def asyncTearDown(self) -> None:
+        await self.channel.close()
+        await self.server.stop(0)
+
+    async def test_approval_persists_the_decision_and_resumes_the_graph_toward_merge(self) -> None:
+        response = await self.client.SubmitHumanDecision(
+            control_plane_pb2.SubmitHumanDecisionRequest(
+                workflow_run_id="workflow-waiting", decision="approved", comment="ship it",
+            ),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(
+            self.control_plane.recorded_decision,
+            ("workflow-waiting", "approved", "ship it", "00000000-0000-0000-0000-000000000099"),
+        )
+        self.assertEqual(self.workflow_runtime.resumed_with, ("workflow-waiting", {
+            "human_approved": True, "human_changes_requested": False,
+        }))
+        self.assertEqual(response.workflow.status, "merging")
+
+    async def test_requesting_changes_resumes_the_graph_toward_repair(self) -> None:
+        response = await self.client.SubmitHumanDecision(
+            control_plane_pb2.SubmitHumanDecisionRequest(
+                workflow_run_id="workflow-waiting", decision="changes_requested",
+            ),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(self.workflow_runtime.resumed_with, ("workflow-waiting", {
+            "human_approved": False, "human_changes_requested": True,
+        }))
+        self.assertEqual(response.workflow.status, "repairing")
+
+    async def test_rejects_an_invalid_decision_value(self) -> None:
+        with self.assertRaises(grpc.aio.AioRpcError) as invalid:
+            await self.client.SubmitHumanDecision(
+                control_plane_pb2.SubmitHumanDecisionRequest(workflow_run_id="workflow-waiting", decision="maybe"),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(invalid.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    async def test_requires_a_session(self) -> None:
+        with self.assertRaises(grpc.aio.AioRpcError) as unauthenticated:
+            await self.client.SubmitHumanDecision(
+                control_plane_pb2.SubmitHumanDecisionRequest(workflow_run_id="workflow-waiting", decision="approved"),
+            )
+        self.assertEqual(unauthenticated.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+
+    async def test_rejects_a_workflow_not_awaiting_approval(self) -> None:
+        with self.assertRaises(grpc.aio.AioRpcError) as failed_precondition:
+            await self.client.SubmitHumanDecision(
+                control_plane_pb2.SubmitHumanDecisionRequest(workflow_run_id="workflow-other", decision="approved"),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(failed_precondition.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+    async def test_returns_unimplemented_without_a_workflow_runtime(self) -> None:
+        server = grpc.aio.server()
+        register_services(server, self.control_plane, now=lambda: NOW)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        client = control_plane_pb2_grpc.ControlPlaneStub(channel)
+        try:
+            with self.assertRaises(grpc.aio.AioRpcError) as unimplemented:
+                await client.SubmitHumanDecision(
+                    control_plane_pb2.SubmitHumanDecisionRequest(
+                        workflow_run_id="workflow-waiting", decision="approved"
+                    ),
+                    metadata=(("x-loop-session", "admin-session"),),
+                )
+            self.assertEqual(unimplemented.exception.code(), grpc.StatusCode.UNIMPLEMENTED)
+        finally:
+            await channel.close()
+            await server.stop(0)
 
 
 if __name__ == "__main__":

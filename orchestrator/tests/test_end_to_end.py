@@ -270,7 +270,11 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = _FakeDispatcher()
         code_host = _FakeCodeHost()
         issue_tracker = _FakeIssueTracker()
-        nodes = PersistedWorkflowNodes(persistence, dispatcher, code_host=code_host, issue_tracker=issue_tracker)
+        nodes = PersistedWorkflowNodes(
+            persistence, dispatcher,
+            code_host_factory=lambda project_id: code_host,
+            issue_tracker_factory=lambda project_id: issue_tracker,
+        )
         graph = build_issue_graph(nodes.build())
 
         state: IssueWorkflowState = {

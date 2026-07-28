@@ -4,9 +4,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 import inspect
+import logging
 from typing import Any
 
 from moirai.domain.control_plane import ScheduledJob
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def _await(value: Any) -> Any:
@@ -121,12 +124,20 @@ class Scheduler:
         now: Callable[[], datetime],
         interval: timedelta,
         is_leader: Callable[[], Awaitable[bool] | bool],
+        on_tick: Callable[[], None] | None = None,
     ) -> None:
         if interval <= timedelta():
             raise ValueError("scheduler interval must be positive")
         while not stop_event.is_set():
-            if await _await(is_leader()):
-                await self.tick(now())
+            try:
+                if await _await(is_leader()):
+                    await self.tick(now())
+                if on_tick is not None:
+                    on_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("scheduler tick failed; retrying after backoff")
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
             except TimeoutError:
@@ -138,8 +149,9 @@ class Scheduler:
         now: Callable[[], datetime],
         interval: timedelta,
         leader: AsyncpgLeader,
+        on_tick: Callable[[], None] | None = None,
     ) -> None:
         try:
-            await self.run(stop_event, now, interval, leader.is_leader)
+            await self.run(stop_event, now, interval, leader.is_leader, on_tick=on_tick)
         finally:
             await leader.close()

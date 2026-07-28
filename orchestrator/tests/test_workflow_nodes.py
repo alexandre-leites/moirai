@@ -145,7 +145,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_pull_request_calls_code_host_and_stores_pr_details(self) -> None:
         code_host = _FakeCodeHost()
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {
             "workflow_run_id": "wf-1", "branch_name": "agent/42/fix", "base_branch": "main", "issue_id": "42"
         }
@@ -162,7 +162,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wait_for_checks_polls_code_host_and_sets_checks_passed(self) -> None:
         code_host = _FakeCodeHost()
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
         update = await nodes.wait_for_checks(state)
         self.assertEqual(update["status"], "waiting_github_checks")
@@ -173,7 +173,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         code_host = _FakeCodeHost(_checks_result=[
             PullRequestCheck(name="test", status=CheckStatus.FAILING),
         ])
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
         update = await nodes.wait_for_checks(state)
         self.assertFalse(update.get("checks_passed"))
@@ -184,7 +184,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_merge_calls_code_host_and_transitions(self) -> None:
         code_host = _FakeCodeHost()
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host=code_host)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42", "merge_method": "squash"}
         update = await nodes.merge(state)
         self.assertEqual(update["status"], "merging")
@@ -197,7 +197,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_complete_closes_issue_and_adds_delivered_label(self) -> None:
         issue_tracker = _FakeIssueTracker()
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, issue_tracker=issue_tracker)
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, issue_tracker_factory=lambda project_id: issue_tracker)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "issue_id": "42"}
         update = await nodes.complete(state)
         self.assertEqual(update["status"], "completed")

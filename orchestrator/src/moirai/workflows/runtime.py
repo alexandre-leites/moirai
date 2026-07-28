@@ -20,8 +20,8 @@ def build_persisted_runtime(
     pool: Any,
     now: Callable[[], datetime] | None = None,
     checkpointer: object = None,
-    code_host: Any | None = None,
-    issue_tracker: Any | None = None,
+    code_host_factory: Any | None = None,
+    issue_tracker_factory: Any | None = None,
 ) -> PersistedWorkflowRuntime:
     from .issue_graph import build_issue_graph
     from .nodes import PersistedWorkflowNodes
@@ -31,7 +31,12 @@ def build_persisted_runtime(
     interrupt_after = None
     interrupt_before = ("wait_for_human",) if checkpointer else None
     graph = build_issue_graph(
-        PersistedWorkflowNodes(persistence, persistence, code_host=code_host, issue_tracker=issue_tracker).build(),
+        PersistedWorkflowNodes(
+            persistence,
+            persistence,
+            code_host_factory=code_host_factory,
+            issue_tracker_factory=issue_tracker_factory,
+        ).build(),
         checkpointer=checkpointer,
         interrupt_after=interrupt_after,
         interrupt_before=interrupt_before,

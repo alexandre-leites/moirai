@@ -25,12 +25,37 @@ func TestServerHealthRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	for _, path := range []string{"/live", "/ready"} {
+	for _, path := range []string{"/live", "/ready", "/api/v1/health"} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		s.Mux().ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Errorf("GET %s: got %d, want %d", path, rec.Code, http.StatusOK)
+		}
+	}
+}
+
+func TestServerReadyAndHealthReflectOrchestratorState(t *testing.T) {
+	healthy := true
+	cfg := apiserver.DefaultConfig()
+	cfg.OrchestratorHealthy = func() bool { return healthy }
+	s, err := apiserver.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	for _, path := range []string{"/ready", "/api/v1/health"} {
+		rec := httptest.NewRecorder()
+		s.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s while healthy: got %d, want %d", path, rec.Code, http.StatusOK)
+		}
+	}
+	healthy = false
+	for _, path := range []string{"/ready", "/api/v1/health"} {
+		rec := httptest.NewRecorder()
+		s.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Errorf("GET %s while unhealthy: got %d, want %d", path, rec.Code, http.StatusServiceUnavailable)
 		}
 	}
 }
