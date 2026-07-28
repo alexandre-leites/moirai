@@ -19,6 +19,33 @@
   - Validation performed: 270 orchestrator tests, runner race tests, API tests, web typecheck/lint, Ruff, Mypy, and Compose rendering.
   - Commands executed: `git rebase origin/main`; `make VENV=/tmp/opencode/moirai-venv test`; Ruff and Mypy commands; `docker compose config`.
 
+- Overall status: #51 PR is green and mergeable; awaiting review/merge
+- Current phase: PostgreSQL persistence integration coverage
+- Active implementation: None
+- Last updated: 2026-07-28
+- Agent/session identifier: agent/postgres-integration-tests
+
+## In Progress
+
+- [ ] Await review and merge of #51 PR #79.
+  - Started: 2026-07-28
+  - Relevant files: GitHub Actions / PR checks
+  - Current state: PR #79 is non-draft, all CI checks passed, and GitHub reports `CLEAN`.
+  - Remaining work: Human review and merge.
+  - Definition of done: PR is merged.
+  - Targeted validation: GitHub Actions checks.
+
+## Done
+
+- [x] Add real PostgreSQL persistence integration coverage for #51
+  - Completed: 2026-07-28
+  - Relevant files: `.github/workflows/ci.yml`, `Makefile`, `orchestrator/tests/test_postgres_integration.py`
+  - Behavior delivered: CI starts PostgreSQL 16, applies every migration, checks migration idempotency, and exercises `AsyncpgControlPlane` project, runner, issue, scheduling, offer, and lease persistence.
+  - Validation performed: disposable PostgreSQL 16 integration suite; substantive Ruff checks; mypy with an isolated cache.
+  - Commands executed: `make test-postgres-integration`; `.venv/bin/python3 -m ruff check --ignore EXE002 orchestrator/src orchestrator/tests`; `.venv/bin/python3 -m mypy --cache-dir /tmp/opencode/moirai-postgres-integration-mypy-cache orchestrator/src`.
+  - Notes: Local `make lint` sees a mount-only executable-bit artifact on tracked 100644 files; the GitHub checkout uses tracked modes. The default mypy cache was locked by another worktree; an isolated cache passed.
+
+
 - [x] Resolve core workflow correctness issues #37, #38, #39, #45, #46, #47, #58
   - Completed: 2026-07-28
   - Relevant files: `orchestrator/migrations/`, `orchestrator/src/moirai/{persistence,workflows,grpc}/`, `runner/internal/`, `api/Dockerfile`, `runner/Dockerfile`
@@ -42,6 +69,9 @@
 ## Pending Implementation
 
 - [ ] Continue the next incomplete MVP requirement after current PRs merge.
+
+- [ ] Continue the next incomplete MVP requirement after the #51 PR is merged.
+
 
 ## Quality Backlog
 
@@ -78,6 +108,17 @@
 - Docker Compose: PR #74 `docker compose config` passed; fresh boot remains blocked as above.
 - End-to-end workflow: Orchestrator fake-adapter suite passed; isolated PR #74 image loaded both packaged schemas.
 
+- Targeted tests: Passed — #51 PostgreSQL integration suite (2 tests) and prior workflow-focused subset.
+- Service tests: Passed — prior 267 tests, 6 subtests.
+- Full repository tests: Not run.
+- Build: API/runner Docker builders corrected; Compose blocked by disk exhaustion.
+- Lint: Passed substantive Ruff checks with the mount-only executable-bit EXE002 ignored; `make lint` is blocked locally by that artifact.
+- Type checks: Passed with an isolated mypy cache; the default cache was locked by another worktree.
+- Database migrations: Passed against real PostgreSQL 16 and verified idempotent.
+- Docker Compose: CI YAML parsed; full Compose remains blocked by disk exhaustion.
+- End-to-end workflow: Passed in orchestrator fake-adapter suite.
+
+
 ## Known Issues
 
 - Issue: Host disk exhaustion blocks fresh Docker Compose boot and runner integration build.
@@ -93,3 +134,6 @@
 ## Next Recommended Implementation
 
 Finish rebasing and validating PR #74, then wait for its CI to establish mergeability without merging it.
+
+Await review and merge of #51 PR #79, then continue the next MVP requirement.
+
