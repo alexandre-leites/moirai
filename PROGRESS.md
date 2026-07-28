@@ -198,3 +198,7 @@ Await review and merge of #51 PR #79, then continue the next MVP requirement.
 
 Finish PR #75 review remediation, push it, and monitor CI until clean and mergeable.
 
+## Done
+
+- [x] Resolved runner reliability PR #76 conflicts with orchestrator state.
+

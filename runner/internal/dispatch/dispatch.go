@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/loop-engineering/runner/internal/agents"
@@ -181,6 +183,8 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		}
 		return result, nil
 	}
+
+	output := dispatcher.logOutput(lease)
 	backendResult, executeErr := dispatcher.Backend.Execute(ctx, agents.Request{
 		ExecutionID: packet.ExecutionID,
 		Role:        agents.Role(packet.Role),
@@ -189,8 +193,11 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		ResultPath:  packet.ExpectedOutput,
 		Timeout:     time.Duration(packet.TimeoutSeconds) * time.Second,
 		Environment: environment,
-		Output:      dispatcher.logOutput(lease),
+		Output:      output,
 	})
+	if forwarder, ok := output.(*logForwarder); ok {
+		forwarder.Close()
+	}
 	result = Result{
 		Status:          backendResult.Status,
 		ExitCode:        backendResult.ExitCode,
@@ -331,20 +338,50 @@ func (dispatcher Dispatcher) logOutput(lease control.Lease) io.Writer {
 	if dispatcher.EmitLog == nil {
 		return nil
 	}
-	return logForwarder{jobID: lease.JobID, generation: lease.Generation, emit: dispatcher.EmitLog}
+	forwarder := &logForwarder{jobID: lease.JobID, generation: lease.Generation, emit: dispatcher.EmitLog, queue: make(chan string, 128), done: make(chan struct{})}
+	go forwarder.run()
+	return forwarder
 }
 
 type logForwarder struct {
 	jobID      string
 	generation int64
 	emit       func(jobID string, generation int64, message string) ([]int64, error)
+	queue      chan string
+	done       chan struct{}
+	closed     sync.Once
+	dropped    atomic.Uint64
 }
 
-func (forwarder logForwarder) Write(data []byte) (int, error) {
-	if len(data) > 0 {
-		_, _ = forwarder.emit(forwarder.jobID, forwarder.generation, string(data))
+func (forwarder *logForwarder) Write(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	select {
+	case forwarder.queue <- string(data):
+	default:
+		forwarder.dropped.Add(1)
 	}
 	return len(data), nil
+}
+
+func (forwarder *logForwarder) Close() {
+	forwarder.closed.Do(func() {
+		close(forwarder.queue)
+		<-forwarder.done
+	})
+}
+
+func (forwarder *logForwarder) run() {
+	defer close(forwarder.done)
+	for message := range forwarder.queue {
+		if _, err := forwarder.emit(forwarder.jobID, forwarder.generation, message); err != nil {
+			forwarder.dropped.Add(1)
+		}
+	}
+	if dropped := forwarder.dropped.Load(); dropped > 0 {
+		slog.Warn("runner log events dropped", "job_id", forwarder.jobID, "lease_generation", forwarder.generation, "dropped", dropped)
+	}
 }
 
 func mergeChangedFiles(primary, additional []string) []string {

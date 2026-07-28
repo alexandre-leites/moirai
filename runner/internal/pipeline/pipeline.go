@@ -1,12 +1,15 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/loop-engineering/runner/internal/execution"
 )
 
 const maxOutputBytes = 16 * 1024
@@ -29,6 +32,32 @@ type Runner interface {
 }
 
 type LocalRunner struct{}
+
+type DockerRunner struct {
+	Executor execution.DockerExecutor
+}
+
+func (runner DockerRunner) Run(ctx context.Context, workspace string, commands []Command) ([]Result, error) {
+	results := make([]Result, 0, len(commands))
+	for index, command := range commands {
+		if err := validate(command); err != nil {
+			return results, err
+		}
+		arguments, _ := ParseCommandTemplate(command.Command)
+		var output bytes.Buffer
+		started := time.Now()
+		executionResult, err := runner.Executor.Execute(ctx, execution.Request{ExecutionID: fmt.Sprintf("pipeline-%d-%d", time.Now().UnixNano(), index), Workspace: workspace, Command: arguments, Timeout: command.Timeout}, &output, &output)
+		result := Result{Command: command.Command, ExitCode: executionResult.ExitCode, Output: truncateOutput(output.String()), Duration: time.Since(started), TimedOut: errors.Is(err, context.DeadlineExceeded)}
+		results = append(results, result)
+		if result.TimedOut {
+			return results, fmt.Errorf("pipeline command timed out: %s", command.Command)
+		}
+		if err != nil || result.ExitCode != 0 {
+			return results, fmt.Errorf("pipeline command failed with exit code %d: %s", result.ExitCode, command.Command)
+		}
+	}
+	return results, nil
+}
 
 func (LocalRunner) Run(ctx context.Context, workspace string, commands []Command) ([]Result, error) {
 	results := make([]Result, 0, len(commands))

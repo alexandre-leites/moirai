@@ -49,6 +49,9 @@ type Manager struct {
 	GitBinary         string
 	CleanupAttempts   int
 	CleanupRetryDelay time.Duration
+	LockPollInterval  time.Duration
+	GitCommitterName  string
+	GitCommitterEmail string
 	Sleep             func(time.Duration)
 }
 
@@ -289,6 +292,13 @@ func (manager Manager) cleanupWorkspaceOnce(ctx context.Context, source, workspa
 	return nil
 }
 
+func (manager Manager) lockPollInterval() time.Duration {
+	if manager.LockPollInterval > 0 {
+		return manager.LockPollInterval
+	}
+	return 25 * time.Millisecond
+}
+
 func (manager Manager) cleanupAttempts() int {
 	if manager.CleanupAttempts > 0 {
 		return manager.CleanupAttempts
@@ -463,7 +473,7 @@ func (manager Manager) lockRepository(ctx context.Context, root, key string) (fu
 			file.Close()
 			return nil, fmt.Errorf("lock repository: %w", err)
 		}
-		timer := time.NewTimer(25 * time.Millisecond)
+		timer := time.NewTimer(manager.lockPollInterval())
 		select {
 		case <-ctx.Done():
 			timer.Stop()

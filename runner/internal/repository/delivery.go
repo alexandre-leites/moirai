@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -48,7 +49,7 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 	if err := manager.git(ctx, "-C", workspace.Repository, "add", "-A", "--", ".", ":!.loop", ":!.loop/**"); err != nil {
 		return CommitResult{}, fmt.Errorf("stage repository changes: %w", err)
 	}
-	if err := manager.git(ctx, "-C", workspace.Repository, "commit", "-m", message); err != nil {
+	if err := manager.git(ctx, "-C", workspace.Repository, "-c", "user.name="+manager.committerName(), "-c", "user.email="+manager.committerEmail(), "commit", "-m", message); err != nil {
 		return CommitResult{}, fmt.Errorf("commit repository changes: %w", err)
 	}
 	revision, err := manager.gitOutput(ctx, "-C", workspace.Repository, "rev-parse", "HEAD")
@@ -87,6 +88,14 @@ func pushEnvironment(environment map[string]string) ([]string, error) {
 		}
 		extra = append(extra, name+"="+value)
 	}
+	if token := environment["GITHUB_TOKEN"]; token != "" {
+		credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+		extra = append(extra,
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
+			"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+credential,
+		)
+	}
 	return extra, nil
 }
 
@@ -110,6 +119,20 @@ func (manager Manager) CleanupRemoteBranch(ctx context.Context, workspace Worksp
 	}
 	result.Deleted = true
 	return result, nil
+}
+
+func (manager Manager) committerName() string {
+	if manager.GitCommitterName != "" {
+		return manager.GitCommitterName
+	}
+	return "moirai-runner"
+}
+
+func (manager Manager) committerEmail() string {
+	if manager.GitCommitterEmail != "" {
+		return manager.GitCommitterEmail
+	}
+	return "moirai-runner@localhost"
 }
 
 func validateWorkspace(workspace Workspace) error {

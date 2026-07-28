@@ -375,6 +375,32 @@ func TestControlLoopRecoversLeaseLossByCancellingExecution(t *testing.T) {
 	}
 }
 
+func TestControlLoopExpiresLeaseWhileControlStreamIsDisconnected(t *testing.T) {
+	client := &loopClient{}
+	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, time.Now, 20*time.Millisecond, 5*time.Millisecond, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop.ExpiryInterval = time.Millisecond
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: time.Now().Add(10 * time.Millisecond).UnixMilli()}}}); err != nil {
+		t.Fatal(err)
+	}
+	<-dispatcher.started
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = loop.Run(ctx) }()
+	select {
+	case <-dispatcher.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("disconnected control stream did not expire lease")
+	}
+}
+
 func TestTerminalPayloadCarriesRawResultOnlyWhenCompleted(t *testing.T) {
 	raw := map[string]any{"verdict": "approved", "findings": []any{}}
 	completed := terminalPayload("completed", Result{Raw: raw}, nil)

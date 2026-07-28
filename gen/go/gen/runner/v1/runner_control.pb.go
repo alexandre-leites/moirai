@@ -160,6 +160,7 @@ type RunnerToOrchestrator struct {
 	//	*RunnerToOrchestrator_OfferAccepted
 	//	*RunnerToOrchestrator_OfferRejected
 	//	*RunnerToOrchestrator_LeaseRenewal
+	//	*RunnerToOrchestrator_RunnerDraining
 	Message       isRunnerToOrchestrator_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -261,6 +262,15 @@ func (x *RunnerToOrchestrator) GetLeaseRenewal() *LeaseRenewal {
 	return nil
 }
 
+func (x *RunnerToOrchestrator) GetRunnerDraining() *RunnerDraining {
+	if x != nil {
+		if x, ok := x.Message.(*RunnerToOrchestrator_RunnerDraining); ok {
+			return x.RunnerDraining
+		}
+	}
+	return nil
+}
+
 type isRunnerToOrchestrator_Message interface {
 	isRunnerToOrchestrator_Message()
 }
@@ -285,6 +295,10 @@ type RunnerToOrchestrator_LeaseRenewal struct {
 	LeaseRenewal *LeaseRenewal `protobuf:"bytes,7,opt,name=lease_renewal,json=leaseRenewal,proto3,oneof"`
 }
 
+type RunnerToOrchestrator_RunnerDraining struct {
+	RunnerDraining *RunnerDraining `protobuf:"bytes,8,opt,name=runner_draining,json=runnerDraining,proto3,oneof"`
+}
+
 func (*RunnerToOrchestrator_Heartbeat) isRunnerToOrchestrator_Message() {}
 
 func (*RunnerToOrchestrator_Event) isRunnerToOrchestrator_Message() {}
@@ -295,6 +309,8 @@ func (*RunnerToOrchestrator_OfferRejected) isRunnerToOrchestrator_Message() {}
 
 func (*RunnerToOrchestrator_LeaseRenewal) isRunnerToOrchestrator_Message() {}
 
+func (*RunnerToOrchestrator_RunnerDraining) isRunnerToOrchestrator_Message() {}
+
 type OrchestratorToRunner struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Message:
@@ -302,6 +318,7 @@ type OrchestratorToRunner struct {
 	//	*OrchestratorToRunner_Offer
 	//	*OrchestratorToRunner_Cancel
 	//	*OrchestratorToRunner_LeaseAcknowledged
+	//	*OrchestratorToRunner_Drain
 	Message       isOrchestratorToRunner_Message `protobuf_oneof:"message"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -371,6 +388,15 @@ func (x *OrchestratorToRunner) GetLeaseAcknowledged() *LeaseAcknowledged {
 	return nil
 }
 
+func (x *OrchestratorToRunner) GetDrain() *DrainRunner {
+	if x != nil {
+		if x, ok := x.Message.(*OrchestratorToRunner_Drain); ok {
+			return x.Drain
+		}
+	}
+	return nil
+}
+
 type isOrchestratorToRunner_Message interface {
 	isOrchestratorToRunner_Message()
 }
@@ -387,11 +413,17 @@ type OrchestratorToRunner_LeaseAcknowledged struct {
 	LeaseAcknowledged *LeaseAcknowledged `protobuf:"bytes,3,opt,name=lease_acknowledged,json=leaseAcknowledged,proto3,oneof"`
 }
 
+type OrchestratorToRunner_Drain struct {
+	Drain *DrainRunner `protobuf:"bytes,4,opt,name=drain,proto3,oneof"`
+}
+
 func (*OrchestratorToRunner_Offer) isOrchestratorToRunner_Message() {}
 
 func (*OrchestratorToRunner_Cancel) isOrchestratorToRunner_Message() {}
 
 func (*OrchestratorToRunner_LeaseAcknowledged) isOrchestratorToRunner_Message() {}
+
+func (*OrchestratorToRunner_Drain) isOrchestratorToRunner_Message() {}
 
 type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -773,6 +805,86 @@ func (x *CancelExecution) GetLeaseGeneration() int64 {
 	return 0
 }
 
+type DrainRunner struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DrainRunner) Reset() {
+	*x = DrainRunner{}
+	mi := &file_proto_runner_control_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DrainRunner) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DrainRunner) ProtoMessage() {}
+
+func (x *DrainRunner) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_runner_control_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DrainRunner.ProtoReflect.Descriptor instead.
+func (*DrainRunner) Descriptor() ([]byte, []int) {
+	return file_proto_runner_control_proto_rawDescGZIP(), []int{11}
+}
+
+type RunnerDraining struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Draining      bool                   `protobuf:"varint,1,opt,name=draining,proto3" json:"draining,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunnerDraining) Reset() {
+	*x = RunnerDraining{}
+	mi := &file_proto_runner_control_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunnerDraining) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunnerDraining) ProtoMessage() {}
+
+func (x *RunnerDraining) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_runner_control_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunnerDraining.ProtoReflect.Descriptor instead.
+func (*RunnerDraining) Descriptor() ([]byte, []int) {
+	return file_proto_runner_control_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *RunnerDraining) GetDraining() bool {
+	if x != nil {
+		return x.Draining
+	}
+	return false
+}
+
 type ExecutionEvent struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	JobId           string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
@@ -787,7 +899,7 @@ type ExecutionEvent struct {
 
 func (x *ExecutionEvent) Reset() {
 	*x = ExecutionEvent{}
-	mi := &file_proto_runner_control_proto_msgTypes[11]
+	mi := &file_proto_runner_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -799,7 +911,7 @@ func (x *ExecutionEvent) String() string {
 func (*ExecutionEvent) ProtoMessage() {}
 
 func (x *ExecutionEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_runner_control_proto_msgTypes[11]
+	mi := &file_proto_runner_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -812,7 +924,7 @@ func (x *ExecutionEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecutionEvent.ProtoReflect.Descriptor instead.
 func (*ExecutionEvent) Descriptor() ([]byte, []int) {
-	return file_proto_runner_control_proto_rawDescGZIP(), []int{11}
+	return file_proto_runner_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ExecutionEvent) GetJobId() string {
@@ -872,7 +984,7 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1e\n" +
 	"\n" +
 	"credential\x18\x02 \x01(\tR\n" +
-	"credential\"\xac\x03\n" +
+	"credential\"\xf7\x03\n" +
 	"\x14RunnerToOrchestrator\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1e\n" +
 	"\n" +
@@ -882,12 +994,14 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\x05event\x18\x04 \x01(\v2\x1e.loop.runner.v1.ExecutionEventH\x00R\x05event\x12I\n" +
 	"\x0eoffer_accepted\x18\x05 \x01(\v2 .loop.runner.v1.JobOfferAcceptedH\x00R\rofferAccepted\x12I\n" +
 	"\x0eoffer_rejected\x18\x06 \x01(\v2 .loop.runner.v1.JobOfferRejectedH\x00R\rofferRejected\x12C\n" +
-	"\rlease_renewal\x18\a \x01(\v2\x1c.loop.runner.v1.LeaseRenewalH\x00R\fleaseRenewalB\t\n" +
-	"\amessage\"\xe2\x01\n" +
+	"\rlease_renewal\x18\a \x01(\v2\x1c.loop.runner.v1.LeaseRenewalH\x00R\fleaseRenewal\x12I\n" +
+	"\x0frunner_draining\x18\b \x01(\v2\x1e.loop.runner.v1.RunnerDrainingH\x00R\x0erunnerDrainingB\t\n" +
+	"\amessage\"\x97\x02\n" +
 	"\x14OrchestratorToRunner\x120\n" +
 	"\x05offer\x18\x01 \x01(\v2\x18.loop.runner.v1.JobOfferH\x00R\x05offer\x129\n" +
 	"\x06cancel\x18\x02 \x01(\v2\x1f.loop.runner.v1.CancelExecutionH\x00R\x06cancel\x12R\n" +
-	"\x12lease_acknowledged\x18\x03 \x01(\v2!.loop.runner.v1.LeaseAcknowledgedH\x00R\x11leaseAcknowledgedB\t\n" +
+	"\x12lease_acknowledged\x18\x03 \x01(\v2!.loop.runner.v1.LeaseAcknowledgedH\x00R\x11leaseAcknowledged\x123\n" +
+	"\x05drain\x18\x04 \x01(\v2\x1b.loop.runner.v1.DrainRunnerH\x00R\x05drainB\t\n" +
 	"\amessage\"7\n" +
 	"\tHeartbeat\x12\x16\n" +
 	"\x06labels\x18\x01 \x03(\tR\x06labels\x12\x12\n" +
@@ -911,7 +1025,10 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\x12expires_at_unix_ms\x18\x03 \x01(\x03R\x0fexpiresAtUnixMs\"_\n" +
 	"\x0fCancelExecution\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12)\n" +
-	"\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\"\xd3\x01\n" +
+	"\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\"\r\n" +
+	"\vDrainRunner\",\n" +
+	"\x0eRunnerDraining\x12\x1a\n" +
+	"\bdraining\x18\x01 \x01(\bR\bdraining\"\xd3\x01\n" +
 	"\x0eExecutionEvent\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n" +
 	"\fexecution_id\x18\x02 \x01(\tR\vexecutionId\x12)\n" +
@@ -935,7 +1052,7 @@ func file_proto_runner_control_proto_rawDescGZIP() []byte {
 	return file_proto_runner_control_proto_rawDescData
 }
 
-var file_proto_runner_control_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_proto_runner_control_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_proto_runner_control_proto_goTypes = []any{
 	(*RegisterRunnerRequest)(nil),  // 0: loop.runner.v1.RegisterRunnerRequest
 	(*RegisterRunnerResponse)(nil), // 1: loop.runner.v1.RegisterRunnerResponse
@@ -948,26 +1065,30 @@ var file_proto_runner_control_proto_goTypes = []any{
 	(*LeaseRenewal)(nil),           // 8: loop.runner.v1.LeaseRenewal
 	(*LeaseAcknowledged)(nil),      // 9: loop.runner.v1.LeaseAcknowledged
 	(*CancelExecution)(nil),        // 10: loop.runner.v1.CancelExecution
-	(*ExecutionEvent)(nil),         // 11: loop.runner.v1.ExecutionEvent
+	(*DrainRunner)(nil),            // 11: loop.runner.v1.DrainRunner
+	(*RunnerDraining)(nil),         // 12: loop.runner.v1.RunnerDraining
+	(*ExecutionEvent)(nil),         // 13: loop.runner.v1.ExecutionEvent
 }
 var file_proto_runner_control_proto_depIdxs = []int32{
 	4,  // 0: loop.runner.v1.RunnerToOrchestrator.heartbeat:type_name -> loop.runner.v1.Heartbeat
-	11, // 1: loop.runner.v1.RunnerToOrchestrator.event:type_name -> loop.runner.v1.ExecutionEvent
+	13, // 1: loop.runner.v1.RunnerToOrchestrator.event:type_name -> loop.runner.v1.ExecutionEvent
 	6,  // 2: loop.runner.v1.RunnerToOrchestrator.offer_accepted:type_name -> loop.runner.v1.JobOfferAccepted
 	7,  // 3: loop.runner.v1.RunnerToOrchestrator.offer_rejected:type_name -> loop.runner.v1.JobOfferRejected
 	8,  // 4: loop.runner.v1.RunnerToOrchestrator.lease_renewal:type_name -> loop.runner.v1.LeaseRenewal
-	5,  // 5: loop.runner.v1.OrchestratorToRunner.offer:type_name -> loop.runner.v1.JobOffer
-	10, // 6: loop.runner.v1.OrchestratorToRunner.cancel:type_name -> loop.runner.v1.CancelExecution
-	9,  // 7: loop.runner.v1.OrchestratorToRunner.lease_acknowledged:type_name -> loop.runner.v1.LeaseAcknowledged
-	0,  // 8: loop.runner.v1.RunnerControl.RegisterRunner:input_type -> loop.runner.v1.RegisterRunnerRequest
-	2,  // 9: loop.runner.v1.RunnerControl.Connect:input_type -> loop.runner.v1.RunnerToOrchestrator
-	1,  // 10: loop.runner.v1.RunnerControl.RegisterRunner:output_type -> loop.runner.v1.RegisterRunnerResponse
-	3,  // 11: loop.runner.v1.RunnerControl.Connect:output_type -> loop.runner.v1.OrchestratorToRunner
-	10, // [10:12] is the sub-list for method output_type
-	8,  // [8:10] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	12, // 5: loop.runner.v1.RunnerToOrchestrator.runner_draining:type_name -> loop.runner.v1.RunnerDraining
+	5,  // 6: loop.runner.v1.OrchestratorToRunner.offer:type_name -> loop.runner.v1.JobOffer
+	10, // 7: loop.runner.v1.OrchestratorToRunner.cancel:type_name -> loop.runner.v1.CancelExecution
+	9,  // 8: loop.runner.v1.OrchestratorToRunner.lease_acknowledged:type_name -> loop.runner.v1.LeaseAcknowledged
+	11, // 9: loop.runner.v1.OrchestratorToRunner.drain:type_name -> loop.runner.v1.DrainRunner
+	0,  // 10: loop.runner.v1.RunnerControl.RegisterRunner:input_type -> loop.runner.v1.RegisterRunnerRequest
+	2,  // 11: loop.runner.v1.RunnerControl.Connect:input_type -> loop.runner.v1.RunnerToOrchestrator
+	1,  // 12: loop.runner.v1.RunnerControl.RegisterRunner:output_type -> loop.runner.v1.RegisterRunnerResponse
+	3,  // 13: loop.runner.v1.RunnerControl.Connect:output_type -> loop.runner.v1.OrchestratorToRunner
+	12, // [12:14] is the sub-list for method output_type
+	10, // [10:12] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_proto_runner_control_proto_init() }
@@ -981,11 +1102,13 @@ func file_proto_runner_control_proto_init() {
 		(*RunnerToOrchestrator_OfferAccepted)(nil),
 		(*RunnerToOrchestrator_OfferRejected)(nil),
 		(*RunnerToOrchestrator_LeaseRenewal)(nil),
+		(*RunnerToOrchestrator_RunnerDraining)(nil),
 	}
 	file_proto_runner_control_proto_msgTypes[3].OneofWrappers = []any{
 		(*OrchestratorToRunner_Offer)(nil),
 		(*OrchestratorToRunner_Cancel)(nil),
 		(*OrchestratorToRunner_LeaseAcknowledged)(nil),
+		(*OrchestratorToRunner_Drain)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -993,7 +1116,7 @@ func file_proto_runner_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_runner_control_proto_rawDesc), len(file_proto_runner_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

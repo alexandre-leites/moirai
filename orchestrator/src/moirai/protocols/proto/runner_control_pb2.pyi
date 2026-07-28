@@ -29,7 +29,7 @@ class RegisterRunnerResponse(_message.Message):
     def __init__(self, runner_id: _Optional[str] = ..., credential: _Optional[str] = ...) -> None: ...
 
 class RunnerToOrchestrator(_message.Message):
-    __slots__ = ("runner_id", "credential", "heartbeat", "event", "offer_accepted", "offer_rejected", "lease_renewal")
+    __slots__ = ("runner_id", "credential", "heartbeat", "event", "offer_accepted", "offer_rejected", "lease_renewal", "runner_draining")
     RUNNER_ID_FIELD_NUMBER: _ClassVar[int]
     CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
@@ -37,6 +37,7 @@ class RunnerToOrchestrator(_message.Message):
     OFFER_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
     OFFER_REJECTED_FIELD_NUMBER: _ClassVar[int]
     LEASE_RENEWAL_FIELD_NUMBER: _ClassVar[int]
+    RUNNER_DRAINING_FIELD_NUMBER: _ClassVar[int]
     runner_id: str
     credential: str
     heartbeat: Heartbeat
@@ -44,17 +45,20 @@ class RunnerToOrchestrator(_message.Message):
     offer_accepted: JobOfferAccepted
     offer_rejected: JobOfferRejected
     lease_renewal: LeaseRenewal
-    def __init__(self, runner_id: _Optional[str] = ..., credential: _Optional[str] = ..., heartbeat: _Optional[_Union[Heartbeat, _Mapping]] = ..., event: _Optional[_Union[ExecutionEvent, _Mapping]] = ..., offer_accepted: _Optional[_Union[JobOfferAccepted, _Mapping]] = ..., offer_rejected: _Optional[_Union[JobOfferRejected, _Mapping]] = ..., lease_renewal: _Optional[_Union[LeaseRenewal, _Mapping]] = ...) -> None: ...
+    runner_draining: RunnerDraining
+    def __init__(self, runner_id: _Optional[str] = ..., credential: _Optional[str] = ..., heartbeat: _Optional[_Union[Heartbeat, _Mapping]] = ..., event: _Optional[_Union[ExecutionEvent, _Mapping]] = ..., offer_accepted: _Optional[_Union[JobOfferAccepted, _Mapping]] = ..., offer_rejected: _Optional[_Union[JobOfferRejected, _Mapping]] = ..., lease_renewal: _Optional[_Union[LeaseRenewal, _Mapping]] = ..., runner_draining: _Optional[_Union[RunnerDraining, _Mapping]] = ...) -> None: ...
 
 class OrchestratorToRunner(_message.Message):
-    __slots__ = ("offer", "cancel", "lease_acknowledged")
+    __slots__ = ("offer", "cancel", "lease_acknowledged", "drain")
     OFFER_FIELD_NUMBER: _ClassVar[int]
     CANCEL_FIELD_NUMBER: _ClassVar[int]
     LEASE_ACKNOWLEDGED_FIELD_NUMBER: _ClassVar[int]
+    DRAIN_FIELD_NUMBER: _ClassVar[int]
     offer: JobOffer
     cancel: CancelExecution
     lease_acknowledged: LeaseAcknowledged
-    def __init__(self, offer: _Optional[_Union[JobOffer, _Mapping]] = ..., cancel: _Optional[_Union[CancelExecution, _Mapping]] = ..., lease_acknowledged: _Optional[_Union[LeaseAcknowledged, _Mapping]] = ...) -> None: ...
+    drain: DrainRunner
+    def __init__(self, offer: _Optional[_Union[JobOffer, _Mapping]] = ..., cancel: _Optional[_Union[CancelExecution, _Mapping]] = ..., lease_acknowledged: _Optional[_Union[LeaseAcknowledged, _Mapping]] = ..., drain: _Optional[_Union[DrainRunner, _Mapping]] = ...) -> None: ...
 
 class Heartbeat(_message.Message):
     __slots__ = ("labels", "busy")
@@ -115,6 +119,16 @@ class CancelExecution(_message.Message):
     execution_id: str
     lease_generation: int
     def __init__(self, execution_id: _Optional[str] = ..., lease_generation: _Optional[int] = ...) -> None: ...
+
+class DrainRunner(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class RunnerDraining(_message.Message):
+    __slots__ = ("draining",)
+    DRAINING_FIELD_NUMBER: _ClassVar[int]
+    draining: bool
+    def __init__(self, draining: _Optional[bool] = ...) -> None: ...
 
 class ExecutionEvent(_message.Message):
     __slots__ = ("job_id", "execution_id", "lease_generation", "event_sequence", "type", "payload_json")

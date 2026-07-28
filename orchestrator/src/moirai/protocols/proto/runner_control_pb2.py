@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1aproto/runner_control.proto\x12\x0eloop.runner.v1\"\xa0\x01\n\x15RegisterRunnerRequest\x12\x14\n\x05token\x18\x01 \x01(\tR\x05token\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n\x06labels\x18\x03 \x03(\tR\x06labels\x12)\n\x10protocol_version\x18\x04 \x01(\tR\x0fprotocolVersion\x12\x1a\n\x08\x63\x61pacity\x18\x05 \x01(\x05R\x08\x63\x61pacity\"U\n\x16RegisterRunnerResponse\x12\x1b\n\trunner_id\x18\x01 \x01(\tR\x08runnerId\x12\x1e\n\ncredential\x18\x02 \x01(\tR\ncredential\"\xac\x03\n\x14RunnerToOrchestrator\x12\x1b\n\trunner_id\x18\x01 \x01(\tR\x08runnerId\x12\x1e\n\ncredential\x18\x02 \x01(\tR\ncredential\x12\x39\n\theartbeat\x18\x03 \x01(\x0b\x32\x19.loop.runner.v1.HeartbeatH\x00R\theartbeat\x12\x36\n\x05\x65vent\x18\x04 \x01(\x0b\x32\x1e.loop.runner.v1.ExecutionEventH\x00R\x05\x65vent\x12I\n\x0eoffer_accepted\x18\x05 \x01(\x0b\x32 .loop.runner.v1.JobOfferAcceptedH\x00R\rofferAccepted\x12I\n\x0eoffer_rejected\x18\x06 \x01(\x0b\x32 .loop.runner.v1.JobOfferRejectedH\x00R\rofferRejected\x12\x43\n\rlease_renewal\x18\x07 \x01(\x0b\x32\x1c.loop.runner.v1.LeaseRenewalH\x00R\x0cleaseRenewalB\t\n\x07message\"\xe2\x01\n\x14OrchestratorToRunner\x12\x30\n\x05offer\x18\x01 \x01(\x0b\x32\x18.loop.runner.v1.JobOfferH\x00R\x05offer\x12\x39\n\x06\x63\x61ncel\x18\x02 \x01(\x0b\x32\x1f.loop.runner.v1.CancelExecutionH\x00R\x06\x63\x61ncel\x12R\n\x12lease_acknowledged\x18\x03 \x01(\x0b\x32!.loop.runner.v1.LeaseAcknowledgedH\x00R\x11leaseAcknowledgedB\t\n\x07message\"7\n\tHeartbeat\x12\x16\n\x06labels\x18\x01 \x03(\tR\x06labels\x12\x12\n\x04\x62usy\x18\x02 \x01(\x08R\x04\x62usy\"v\n\x08JobOffer\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12(\n\x10task_packet_json\x18\x03 \x01(\tR\x0etaskPacketJson\")\n\x10JobOfferAccepted\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\"A\n\x10JobOfferRejected\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"\x90\x01\n\x0cLeaseRenewal\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12>\n\x1crequested_expires_at_unix_ms\x18\x03 \x01(\x03R\x18requestedExpiresAtUnixMs\"\x82\x01\n\x11LeaseAcknowledged\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12+\n\x12\x65xpires_at_unix_ms\x18\x03 \x01(\x03R\x0f\x65xpiresAtUnixMs\"_\n\x0f\x43\x61ncelExecution\x12!\n\x0c\x65xecution_id\x18\x01 \x01(\tR\x0b\x65xecutionId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\"\xd3\x01\n\x0e\x45xecutionEvent\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n\x0c\x65xecution_id\x18\x02 \x01(\tR\x0b\x65xecutionId\x12)\n\x10lease_generation\x18\x03 \x01(\x03R\x0fleaseGeneration\x12%\n\x0e\x65vent_sequence\x18\x04 \x01(\x03R\reventSequence\x12\x12\n\x04type\x18\x05 \x01(\tR\x04type\x12!\n\x0cpayload_json\x18\x06 \x01(\tR\x0bpayloadJson2\xcb\x01\n\rRunnerControl\x12_\n\x0eRegisterRunner\x12%.loop.runner.v1.RegisterRunnerRequest\x1a&.loop.runner.v1.RegisterRunnerResponse\x12Y\n\x07\x43onnect\x12$.loop.runner.v1.RunnerToOrchestrator\x1a$.loop.runner.v1.OrchestratorToRunner(\x01\x30\x01\x42>Z<github.com/loop-engineering/contracts/gen/runner/v1;runnerv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1aproto/runner_control.proto\x12\x0eloop.runner.v1\"\xa0\x01\n\x15RegisterRunnerRequest\x12\x14\n\x05token\x18\x01 \x01(\tR\x05token\x12\x12\n\x04name\x18\x02 \x01(\tR\x04name\x12\x16\n\x06labels\x18\x03 \x03(\tR\x06labels\x12)\n\x10protocol_version\x18\x04 \x01(\tR\x0fprotocolVersion\x12\x1a\n\x08\x63\x61pacity\x18\x05 \x01(\x05R\x08\x63\x61pacity\"U\n\x16RegisterRunnerResponse\x12\x1b\n\trunner_id\x18\x01 \x01(\tR\x08runnerId\x12\x1e\n\ncredential\x18\x02 \x01(\tR\ncredential\"\xf7\x03\n\x14RunnerToOrchestrator\x12\x1b\n\trunner_id\x18\x01 \x01(\tR\x08runnerId\x12\x1e\n\ncredential\x18\x02 \x01(\tR\ncredential\x12\x39\n\theartbeat\x18\x03 \x01(\x0b\x32\x19.loop.runner.v1.HeartbeatH\x00R\theartbeat\x12\x36\n\x05\x65vent\x18\x04 \x01(\x0b\x32\x1e.loop.runner.v1.ExecutionEventH\x00R\x05\x65vent\x12I\n\x0eoffer_accepted\x18\x05 \x01(\x0b\x32 .loop.runner.v1.JobOfferAcceptedH\x00R\rofferAccepted\x12I\n\x0eoffer_rejected\x18\x06 \x01(\x0b\x32 .loop.runner.v1.JobOfferRejectedH\x00R\rofferRejected\x12\x43\n\rlease_renewal\x18\x07 \x01(\x0b\x32\x1c.loop.runner.v1.LeaseRenewalH\x00R\x0cleaseRenewal\x12I\n\x0frunner_draining\x18\x08 \x01(\x0b\x32\x1e.loop.runner.v1.RunnerDrainingH\x00R\x0erunnerDrainingB\t\n\x07message\"\x97\x02\n\x14OrchestratorToRunner\x12\x30\n\x05offer\x18\x01 \x01(\x0b\x32\x18.loop.runner.v1.JobOfferH\x00R\x05offer\x12\x39\n\x06\x63\x61ncel\x18\x02 \x01(\x0b\x32\x1f.loop.runner.v1.CancelExecutionH\x00R\x06\x63\x61ncel\x12R\n\x12lease_acknowledged\x18\x03 \x01(\x0b\x32!.loop.runner.v1.LeaseAcknowledgedH\x00R\x11leaseAcknowledged\x12\x33\n\x05\x64rain\x18\x04 \x01(\x0b\x32\x1b.loop.runner.v1.DrainRunnerH\x00R\x05\x64rainB\t\n\x07message\"7\n\tHeartbeat\x12\x16\n\x06labels\x18\x01 \x03(\tR\x06labels\x12\x12\n\x04\x62usy\x18\x02 \x01(\x08R\x04\x62usy\"v\n\x08JobOffer\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12(\n\x10task_packet_json\x18\x03 \x01(\tR\x0etaskPacketJson\")\n\x10JobOfferAccepted\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\"A\n\x10JobOfferRejected\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"\x90\x01\n\x0cLeaseRenewal\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12>\n\x1crequested_expires_at_unix_ms\x18\x03 \x01(\x03R\x18requestedExpiresAtUnixMs\"\x82\x01\n\x11LeaseAcknowledged\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12+\n\x12\x65xpires_at_unix_ms\x18\x03 \x01(\x03R\x0f\x65xpiresAtUnixMs\"_\n\x0f\x43\x61ncelExecution\x12!\n\x0c\x65xecution_id\x18\x01 \x01(\tR\x0b\x65xecutionId\x12)\n\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\"\r\n\x0b\x44rainRunner\",\n\x0eRunnerDraining\x12\x1a\n\x08\x64raining\x18\x01 \x01(\x08R\x08\x64raining\"\xd3\x01\n\x0e\x45xecutionEvent\x12\x15\n\x06job_id\x18\x01 \x01(\tR\x05jobId\x12!\n\x0c\x65xecution_id\x18\x02 \x01(\tR\x0b\x65xecutionId\x12)\n\x10lease_generation\x18\x03 \x01(\x03R\x0fleaseGeneration\x12%\n\x0e\x65vent_sequence\x18\x04 \x01(\x03R\reventSequence\x12\x12\n\x04type\x18\x05 \x01(\tR\x04type\x12!\n\x0cpayload_json\x18\x06 \x01(\tR\x0bpayloadJson2\xcb\x01\n\rRunnerControl\x12_\n\x0eRegisterRunner\x12%.loop.runner.v1.RegisterRunnerRequest\x1a&.loop.runner.v1.RegisterRunnerResponse\x12Y\n\x07\x43onnect\x12$.loop.runner.v1.RunnerToOrchestrator\x1a$.loop.runner.v1.OrchestratorToRunner(\x01\x30\x01\x42>Z<github.com/loop-engineering/contracts/gen/runner/v1;runnerv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -37,25 +37,29 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_REGISTERRUNNERRESPONSE']._serialized_start=209
   _globals['_REGISTERRUNNERRESPONSE']._serialized_end=294
   _globals['_RUNNERTOORCHESTRATOR']._serialized_start=297
-  _globals['_RUNNERTOORCHESTRATOR']._serialized_end=725
-  _globals['_ORCHESTRATORTORUNNER']._serialized_start=728
-  _globals['_ORCHESTRATORTORUNNER']._serialized_end=954
-  _globals['_HEARTBEAT']._serialized_start=956
-  _globals['_HEARTBEAT']._serialized_end=1011
-  _globals['_JOBOFFER']._serialized_start=1013
-  _globals['_JOBOFFER']._serialized_end=1131
-  _globals['_JOBOFFERACCEPTED']._serialized_start=1133
-  _globals['_JOBOFFERACCEPTED']._serialized_end=1174
-  _globals['_JOBOFFERREJECTED']._serialized_start=1176
-  _globals['_JOBOFFERREJECTED']._serialized_end=1241
-  _globals['_LEASERENEWAL']._serialized_start=1244
-  _globals['_LEASERENEWAL']._serialized_end=1388
-  _globals['_LEASEACKNOWLEDGED']._serialized_start=1391
-  _globals['_LEASEACKNOWLEDGED']._serialized_end=1521
-  _globals['_CANCELEXECUTION']._serialized_start=1523
-  _globals['_CANCELEXECUTION']._serialized_end=1618
-  _globals['_EXECUTIONEVENT']._serialized_start=1621
-  _globals['_EXECUTIONEVENT']._serialized_end=1832
-  _globals['_RUNNERCONTROL']._serialized_start=1835
-  _globals['_RUNNERCONTROL']._serialized_end=2038
+  _globals['_RUNNERTOORCHESTRATOR']._serialized_end=800
+  _globals['_ORCHESTRATORTORUNNER']._serialized_start=803
+  _globals['_ORCHESTRATORTORUNNER']._serialized_end=1082
+  _globals['_HEARTBEAT']._serialized_start=1084
+  _globals['_HEARTBEAT']._serialized_end=1139
+  _globals['_JOBOFFER']._serialized_start=1141
+  _globals['_JOBOFFER']._serialized_end=1259
+  _globals['_JOBOFFERACCEPTED']._serialized_start=1261
+  _globals['_JOBOFFERACCEPTED']._serialized_end=1302
+  _globals['_JOBOFFERREJECTED']._serialized_start=1304
+  _globals['_JOBOFFERREJECTED']._serialized_end=1369
+  _globals['_LEASERENEWAL']._serialized_start=1372
+  _globals['_LEASERENEWAL']._serialized_end=1516
+  _globals['_LEASEACKNOWLEDGED']._serialized_start=1519
+  _globals['_LEASEACKNOWLEDGED']._serialized_end=1649
+  _globals['_CANCELEXECUTION']._serialized_start=1651
+  _globals['_CANCELEXECUTION']._serialized_end=1746
+  _globals['_DRAINRUNNER']._serialized_start=1748
+  _globals['_DRAINRUNNER']._serialized_end=1761
+  _globals['_RUNNERDRAINING']._serialized_start=1763
+  _globals['_RUNNERDRAINING']._serialized_end=1807
+  _globals['_EXECUTIONEVENT']._serialized_start=1810
+  _globals['_EXECUTIONEVENT']._serialized_end=2021
+  _globals['_RUNNERCONTROL']._serialized_start=2024
+  _globals['_RUNNERCONTROL']._serialized_end=2227
 # @@protoc_insertion_point(module_scope)

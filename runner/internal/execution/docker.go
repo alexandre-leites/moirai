@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,7 +43,12 @@ func (executor DockerExecutor) Execute(parent context.Context, request Request, 
 		return Result{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	containerName := dockerContainerName(request.ExecutionID)
-	command := executor.runCommand(containerName, workspace, request)
+	environmentFile, err := writeEnvironmentFile(request.Environment)
+	if err != nil {
+		return Result{}, err
+	}
+	defer os.Remove(environmentFile)
+	command := executor.runCommand(containerName, workspace, request, environmentFile)
 	ctx, cancel := context.WithTimeout(parent, request.Timeout)
 	defer cancel()
 	done := make(chan struct{})
@@ -105,18 +112,18 @@ func (executor DockerExecutor) validate(request Request) error {
 		return errors.New("timeout must be positive")
 	}
 	for key, value := range request.Environment {
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsAny(value, "\x00\r\n") {
 			return fmt.Errorf("invalid environment variable %q", key)
 		}
 	}
 	return nil
 }
 
-func (executor DockerExecutor) runCommand(containerName, workspace string, request Request) []string {
+func (executor DockerExecutor) runCommand(containerName, workspace string, request Request, environmentFile string) []string {
 	command := []string{executor.binary(), "run", "--rm", "--init", "--name", containerName, "--workdir", "/workspace", "--mount", "type=bind,src=" + workspace + ",dst=/workspace"}
 	network := executor.Network
 	if network == "" {
-		network = "none"
+		network = "bridge"
 	}
 	command = append(command, "--network", network)
 	if executor.CPULimit != "" {
@@ -125,16 +132,41 @@ func (executor DockerExecutor) runCommand(containerName, workspace string, reque
 	if executor.MemoryLimit != "" {
 		command = append(command, "--memory", executor.MemoryLimit)
 	}
-	keys := make([]string, 0, len(request.Environment))
-	for key := range request.Environment {
+	if environmentFile != "" {
+		command = append(command, "--env-file", environmentFile)
+	}
+	command = append(command, executor.Image)
+	return append(command, request.Command...)
+}
+
+func writeEnvironmentFile(environment map[string]string) (string, error) {
+	file, err := os.CreateTemp("", "loop-docker-env-*")
+	if err != nil {
+		return "", fmt.Errorf("create Docker environment file: %w", err)
+	}
+	path := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		os.Remove(path)
+		return "", fmt.Errorf("secure Docker environment file: %w", err)
+	}
+	keys := make([]string, 0, len(environment))
+	for key := range environment {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		command = append(command, "--env", key+"="+request.Environment[key])
+		if _, err := fmt.Fprintf(file, "%s=%s\n", key, environment[key]); err != nil {
+			file.Close()
+			os.Remove(path)
+			return "", fmt.Errorf("write Docker environment file: %w", err)
+		}
 	}
-	command = append(command, executor.Image)
-	return append(command, request.Command...)
+	if err := file.Close(); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("close Docker environment file: %w", err)
+	}
+	return path, nil
 }
 
 func (executor DockerExecutor) stopWithTimeout(containerName string) error {
@@ -151,7 +183,11 @@ func (executor DockerExecutor) stopTimeout() time.Duration {
 }
 
 func (executor DockerExecutor) stop(ctx context.Context, containerName string) error {
-	command := exec.CommandContext(ctx, executor.binary(), "stop", "--time", "5", containerName)
+	seconds := int(executor.stopTimeout().Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	command := exec.CommandContext(ctx, executor.binary(), "stop", "--time", strconv.Itoa(seconds), containerName)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error {
 		if command.Process == nil {

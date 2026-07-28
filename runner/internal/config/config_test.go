@@ -35,8 +35,18 @@ func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 		"LOOP_RUNNER_RETAIN_WORKSPACES":          "succeeded,failed",
 		"LOOP_RUNNER_AGENT_BACKEND":              "cli",
 		"LOOP_RUNNER_AGENT_BINARY":               "custom-agent",
+		"LOOP_RUNNER_AGENT_DOCKER_IMAGE":         "example/agent:1",
 		"LOOP_RUNNER_AGENT_ARGUMENTS":            "run,--safe",
+		"LOOP_RUNNER_GIT_COMMITTER_NAME":         "Moirai Bot",
+		"LOOP_RUNNER_GIT_COMMITTER_EMAIL":        "bot@example.invalid",
+		"LOOP_RUNNER_LEASE_DURATION":             "90s",
+		"LOOP_RUNNER_LEASE_RENEWAL_LEAD":         "20s",
+		"LOOP_RUNNER_EVENT_BUFFER_SIZE":          "256",
+		"LOOP_RUNNER_DOCKER_NETWORK":             "runner-net",
+		"LOOP_RUNNER_DOCKER_CPU_LIMIT":           "2",
+		"LOOP_RUNNER_DOCKER_MEMORY_LIMIT":        "1g",
 	}
+
 	config, err := Load(lookup(environment), func() (string, error) { return "hostname", nil })
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -76,6 +86,9 @@ func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 	}
 	if config.RegistrationToken != "registration-token" {
 		t.Fatalf("Load() registration token = %q", config.RegistrationToken)
+	}
+	if config.GitCommitterName != "Moirai Bot" || config.GitCommitterEmail != "bot@example.invalid" || config.LeaseDuration != 90*time.Second || config.LeaseRenewalLead != 20*time.Second || config.EventBufferSize != 256 || config.DockerNetwork != "runner-net" || config.DockerCPULimit != "2" || config.DockerMemoryLimit != "1g" {
+		t.Fatalf("Load() runner reliability settings = %#v", config)
 	}
 }
 

@@ -16,8 +16,10 @@ import (
 	"github.com/loop-engineering/runner/internal/config"
 	"github.com/loop-engineering/runner/internal/control"
 	"github.com/loop-engineering/runner/internal/dispatch"
+	"github.com/loop-engineering/runner/internal/execution"
 	"github.com/loop-engineering/runner/internal/health"
 	"github.com/loop-engineering/runner/internal/metrics"
+	"github.com/loop-engineering/runner/internal/pipeline"
 	"github.com/loop-engineering/runner/internal/repository"
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
@@ -96,12 +98,19 @@ func agentBinary(settings config.Config) string {
 	return "opencode"
 }
 
+func pipelineRunner(settings config.Config) pipeline.Runner {
+	if settings.DockerEnabled {
+		return pipeline.DockerRunner{Executor: execution.DockerExecutor{Image: settings.AgentDockerImage, CPULimit: settings.DockerCPULimit, MemoryLimit: settings.DockerMemoryLimit, Network: settings.DockerNetwork, StopTimeout: settings.DockerStopTimeout}}
+	}
+	return pipeline.LocalRunner{}
+}
+
 func agentBackend(settings config.Config) agents.Backend {
 	if settings.AgentBackend == "cli" {
 		return agents.CLIBackend{NameValue: "cli", Binary: settings.AgentBinary, Arguments: settings.AgentArguments}
 	}
 	if settings.AgentBackend == "docker" {
-		return agents.DockerCLIBackend{Image: settings.AgentDockerImage, Arguments: settings.AgentArguments}
+		return agents.DockerCLIBackend{Image: settings.AgentDockerImage, Arguments: settings.AgentArguments, Executor: execution.DockerExecutor{CPULimit: settings.DockerCPULimit, MemoryLimit: settings.DockerMemoryLimit, Network: settings.DockerNetwork, StopTimeout: settings.DockerStopTimeout}}
 	}
 	return agents.OpenCodeBackend{Arguments: settings.AgentArguments}
 }
@@ -189,11 +198,13 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create runner control client: %w", err)
 	}
 	projects := dispatch.NewProjectConcurrencyGuard()
+	repositories := repository.Manager{DataDirectory: settings.DataDir, CleanupAttempts: settings.CleanupAttempts, CleanupRetryDelay: settings.CleanupRetryDelay, LockPollInterval: settings.RepositoryLockPoll, GitCommitterName: settings.GitCommitterName, GitCommitterEmail: settings.GitCommitterEmail}
 	dispatcher := &dispatch.Dispatcher{
-		Workspaces:         repository.Manager{DataDirectory: settings.DataDir},
-		RevisionInspector:  repository.Manager{DataDirectory: settings.DataDir},
-		Delivery:           repository.Manager{DataDirectory: settings.DataDir},
+		Workspaces:         repositories,
+		RevisionInspector:  repositories,
+		Delivery:           repositories,
 		Backend:            agentBackend(settings),
+		Pipeline:           pipelineRunner(settings),
 		Environment:        osEnvironmentResolver{},
 		AllowedEnvironment: settings.AllowedEnvironment,
 		MinimumFreeBytes:   settings.MinimumFreeBytes,
@@ -202,21 +213,23 @@ func run(ctx context.Context) error {
 		Retention:          retentionPolicy(settings.WorkspaceRetention),
 		Projects:           projects,
 	}
-	loop, err := dispatch.NewControlLoopWithCapacity(
+	loop, err := dispatch.NewControlLoopWithEventBuffer(
 		client,
 		dispatcher,
 		time.Now,
-		60*time.Second,
-		15*time.Second,
+		settings.LeaseDuration,
+		settings.LeaseRenewalLead,
 		settings.RedactionPrefixes,
 		settings.EventOutboxPath(),
 		settings.Capacity,
+		settings.EventBufferSize,
 	)
 	if err != nil {
 		return fmt.Errorf("create runner dispatch loop: %w", err)
 	}
 	loop.ReconnectMin = settings.ReconnectMin
 	loop.ReconnectMax = settings.ReconnectMax
+	loop.ExpiryInterval = settings.HeartbeatInterval
 	dispatcher.EmitLog = loop.Reporter.EmitLog
 	streamSettings := newReloadableStreamSettings(settings)
 	reloadSignal := make(chan os.Signal, 1)
@@ -269,6 +282,12 @@ func run(ctx context.Context) error {
 	}.Run(runCtx)
 	if stored := dispatchErr.Load(); stored != nil {
 		return fmt.Errorf("runner dispatch loop stopped: %w", stored.(error))
+	}
+	if ctx.Err() != nil {
+		loop.Drain()
+		if err := loop.WaitForIdle(context.Background()); err != nil {
+			return fmt.Errorf("drain runner executions: %w", err)
+		}
 	}
 	return supervisorErr
 }

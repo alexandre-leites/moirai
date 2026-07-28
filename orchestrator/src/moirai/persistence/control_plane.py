@@ -634,6 +634,39 @@ class AsyncpgControlPlane:
             for record in records
         ]
 
+    async def set_runner_state(
+        self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
+    ) -> RunnerRecord:
+        if state not in {"enable", "disable", "drain", "revoke"}:
+            raise ValueError("runner state is invalid")
+        updates = {
+            "enable": (True, False, None),
+            "disable": (False, False, None),
+            "drain": (True, True, None),
+            "revoke": (False, True, now),
+        }[state]
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """UPDATE app.runners SET enabled = $2, draining = $3,
+                       revoked_at = COALESCE(revoked_at, $4), status = CASE WHEN $1 = 'revoke' THEN 'offline' ELSE status END
+                       WHERE id = $5 RETURNING id, name, enabled, draining, status, labels, last_seen_at""",
+                    state, updates[0], updates[1], updates[2], _uuid(runner_id),
+                )
+                if record is None:
+                    raise ValueError("runner is unknown")
+                if state == "revoke":
+                    await connection.execute(
+                        "UPDATE app.runner_credentials SET revoked_at = $2 WHERE runner_id = $1 AND revoked_at IS NULL",
+                        _uuid(runner_id), now,
+                    )
+                if actor_user_id is not None:
+                    await AsyncpgAuthentication._append_audit(
+                        connection, actor_user_id=_uuid(actor_user_id), action=f"runner.{state}",
+                        resource_type="runner", resource_id=runner_id, outcome="succeeded", now=now,
+                    )
+        return _runner_record(record)
+
     async def list_runners(self) -> list[RunnerRecord]:
         records = await self._pool.fetch(
             "SELECT id, name, enabled, draining, status, labels, last_seen_at FROM app.runners ORDER BY name ASC, id ASC"
@@ -1815,6 +1848,18 @@ def _labels(value: Any) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(label, str) for label in value):
         raise AuthenticationError("runner labels are invalid")
     return value
+
+
+def _runner_record(record: Any) -> RunnerRecord:
+    return {
+        "id": str(record["id"]),
+        "name": str(record["name"]),
+        "enabled": bool(record["enabled"]),
+        "draining": bool(record["draining"]),
+        "status": str(record["status"]),
+        "labels": _labels(record["labels"]),
+        "last_seen_at": record["last_seen_at"],
+    }
 
 
 def _runner(record: Any, *, connected: bool | None = None, healthy: bool | None = None) -> Runner:

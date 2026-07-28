@@ -31,6 +31,10 @@ type cancellableDispatcher interface {
 	Cancel(context.Context, control.Lease) error
 }
 
+type drainingClient interface {
+	SetDraining(bool) error
+}
+
 type activeExecution struct {
 	lease     control.Lease
 	cancel    context.CancelFunc
@@ -39,13 +43,14 @@ type activeExecution struct {
 }
 
 type ControlLoop struct {
-	Client       ControlClient
-	Offers       *control.OfferState
-	Reporter     *control.EventReporter
-	Dispatcher   executionDispatcher
-	Logger       *slog.Logger
-	ReconnectMin time.Duration
-	ReconnectMax time.Duration
+	Client         ControlClient
+	Offers         *control.OfferState
+	Reporter       *control.EventReporter
+	Dispatcher     executionDispatcher
+	Logger         *slog.Logger
+	ReconnectMin   time.Duration
+	ReconnectMax   time.Duration
+	ExpiryInterval time.Duration
 
 	mu       sync.Mutex
 	draining bool
@@ -68,6 +73,10 @@ func NewControlLoopWithOutbox(client ControlClient, dispatcher executionDispatch
 // executions concurrently (e.g. for different projects). ProjectConcurrencyGuard
 // still serializes executions that share a project's worktree.
 func NewControlLoopWithCapacity(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string, capacity int) (*ControlLoop, error) {
+	return NewControlLoopWithEventBuffer(client, dispatcher, now, leaseDuration, renewalLead, redactionPrefixes, outboxPath, capacity, defaultEventBufferSize)
+}
+
+func NewControlLoopWithEventBuffer(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string, capacity, eventBufferSize int) (*ControlLoop, error) {
 	if client == nil || now == nil {
 		return nil, errors.New("runner control loop dependencies are required")
 	}
@@ -78,7 +87,10 @@ func NewControlLoopWithCapacity(client ControlClient, dispatcher executionDispat
 	if err != nil {
 		return nil, err
 	}
-	reporter, err := control.NewEventReporter(client, defaultEventBufferSize, redactionPrefixes, outboxPath)
+	if eventBufferSize < 1 {
+		eventBufferSize = defaultEventBufferSize
+	}
+	reporter, err := control.NewEventReporter(client, eventBufferSize, redactionPrefixes, outboxPath)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +109,18 @@ func (loop *ControlLoop) Run(ctx context.Context) error {
 		return err
 	}
 	backoff := loop.reconnectMin()
+	expiryTicker := time.NewTicker(loop.expiryInterval())
+	defer expiryTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-expiryTicker.C:
+				loop.expire()
+			}
+		}
+	}()
 	for {
 		message, err := loop.Client.Receive()
 		if err != nil {
@@ -116,6 +140,10 @@ func (loop *ControlLoop) Run(ctx context.Context) error {
 		}
 		backoff = loop.reconnectMin()
 		if err := loop.Handle(ctx, message); err != nil {
+			if errors.Is(err, control.ErrNotConnected) || errors.Is(err, control.ErrStaleEventLease) {
+				loop.logger().Warn("recoverable runner control race", "error", err)
+				continue
+			}
 			return err
 		}
 	}
@@ -146,10 +174,19 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 	if offer := message.GetOffer(); offer != nil {
 		loop.logger().Info("runner received job offer", "job_id", offer.GetJobId(), "lease_generation", offer.GetLeaseGeneration())
 		if loop.Draining() {
-			return loop.Client.RejectOffer(offer.GetJobId(), "runner is draining")
+			if err := loop.Client.RejectOffer(offer.GetJobId(), "runner is draining"); err != nil {
+				loop.logger().Warn("could not reject offer while draining", "job_id", offer.GetJobId(), "error", err)
+			}
+			return nil
 		}
-		_, err := loop.Offers.Admit(offer)
-		return err
+		if _, err := loop.Offers.Admit(offer); err != nil {
+			loop.logger().Warn("could not process job offer", "job_id", offer.GetJobId(), "error", err)
+		}
+		return nil
+	}
+	if message.GetDrain() != nil {
+		loop.Drain()
+		return nil
 	}
 	if cancellation := message.GetCancel(); cancellation != nil {
 		loop.logger().Info("runner received execution cancellation", "execution_id", cancellation.GetExecutionId(), "lease_generation", cancellation.GetLeaseGeneration())
@@ -167,13 +204,18 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 		}
 		lease, ok := loop.Offers.ActiveLease(jobID)
 		if !ok {
-			return errors.New("acknowledged lease is unavailable")
+			loop.logger().Warn("acknowledged lease is unavailable", "job_id", jobID)
+			return nil
 		}
 		if err := loop.Reporter.Begin(lease); err != nil {
 			loop.Offers.Abandon(lease.JobID, lease.Generation)
+			if errors.Is(err, control.ErrStaleEventLease) {
+				loop.logger().Warn("stale execution acknowledgement", "job_id", jobID, "error", err)
+				return nil
+			}
 			return fmt.Errorf("begin execution event reporting: %w", err)
 		}
-		executionContext, cancel := context.WithCancel(ctx)
+		executionContext, cancel := context.WithCancel(context.Background())
 		loop.mu.Lock()
 		loop.active[lease.JobID] = &activeExecution{lease: lease, cancel: cancel}
 		loop.mu.Unlock()
@@ -190,8 +232,16 @@ func (loop *ControlLoop) Drain() {
 		return
 	}
 	loop.mu.Lock()
+	alreadyDraining := loop.draining
 	loop.draining = true
 	loop.mu.Unlock()
+	if !alreadyDraining {
+		if client, ok := loop.Client.(drainingClient); ok {
+			if err := client.SetDraining(true); err != nil {
+				loop.logger().Warn("report runner draining", "error", err)
+			}
+		}
+	}
 }
 
 func (loop *ControlLoop) Draining() bool {
@@ -233,15 +283,29 @@ func (loop *ControlLoop) Reconcile() error {
 	if err := loop.validate(); err != nil {
 		return err
 	}
+	loop.expire()
+	if _, err := loop.Offers.RenewDue(); err != nil {
+		return fmt.Errorf("renew active lease: %w", err)
+	}
+	return nil
+}
+
+func (loop *ControlLoop) expiryInterval() time.Duration {
+	if loop != nil && loop.ExpiryInterval > 0 {
+		return loop.ExpiryInterval
+	}
+	return time.Second
+}
+
+func (loop *ControlLoop) expire() {
+	if loop == nil || loop.Offers == nil || loop.Reporter == nil {
+		return
+	}
 	for _, expired := range loop.Offers.Expire() {
 		loop.logger().Warn("runner lease expired", "job_id", expired.JobID, "execution_id", expired.Packet.ExecutionID, "lease_generation", expired.Generation)
 		loop.cancelExpired(expired)
 		loop.Reporter.Abandon(expired.JobID, expired.Generation)
 	}
-	if _, err := loop.Offers.RenewDue(); err != nil {
-		return fmt.Errorf("renew active lease: %w", err)
-	}
-	return nil
 }
 
 func (loop *ControlLoop) FlushEvents() error {
@@ -262,6 +326,27 @@ func (loop *ControlLoop) logger() *slog.Logger {
 }
 
 // Busy reports whether the runner is at its concurrency capacity.
+func (loop *ControlLoop) WaitForIdle(ctx context.Context) error {
+	if loop == nil {
+		return nil
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		loop.mu.Lock()
+		idle := len(loop.active) == 0
+		loop.mu.Unlock()
+		if idle {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (loop *ControlLoop) Busy() bool {
 	if loop == nil || loop.Offers == nil {
 		return false

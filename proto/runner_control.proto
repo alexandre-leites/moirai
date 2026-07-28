@@ -18,6 +18,7 @@ message RunnerToOrchestrator {
     JobOfferAccepted offer_accepted = 5;
     JobOfferRejected offer_rejected = 6;
     LeaseRenewal lease_renewal = 7;
+    RunnerDraining runner_draining = 8;
   }
 }
 message OrchestratorToRunner {
@@ -25,6 +26,7 @@ message OrchestratorToRunner {
     JobOffer offer = 1;
     CancelExecution cancel = 2;
     LeaseAcknowledged lease_acknowledged = 3;
+    DrainRunner drain = 4;
   }
 }
 message Heartbeat { repeated string labels = 1; bool busy = 2; }
@@ -34,4 +36,6 @@ message JobOfferRejected { string job_id = 1; string reason = 2; }
 message LeaseRenewal { string job_id = 1; int64 lease_generation = 2; int64 requested_expires_at_unix_ms = 3; }
 message LeaseAcknowledged { string job_id = 1; int64 lease_generation = 2; int64 expires_at_unix_ms = 3; }
 message CancelExecution { string execution_id = 1; int64 lease_generation = 2; }
+message DrainRunner {}
+message RunnerDraining { bool draining = 1; }
 message ExecutionEvent { string job_id = 1; string execution_id = 2; int64 lease_generation = 3; int64 event_sequence = 4; string type = 5; string payload_json = 6; }

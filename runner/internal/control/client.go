@@ -151,6 +151,14 @@ func (c *Client) RejectOffer(jobID, reason string) error {
 	})
 }
 
+func (c *Client) SetDraining(draining bool) error {
+	return c.send(&runnerv1.RunnerToOrchestrator{
+		Message: &runnerv1.RunnerToOrchestrator_RunnerDraining{
+			RunnerDraining: &runnerv1.RunnerDraining{Draining: draining},
+		},
+	})
+}
+
 func (c *Client) RenewLease(jobID string, generation int64, expiresAt time.Time) error {
 	if jobID == "" || generation < 1 || !expiresAt.After(time.Now()) {
 		return errors.New("lease renewal is invalid")
