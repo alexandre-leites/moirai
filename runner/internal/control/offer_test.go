@@ -64,7 +64,7 @@ func TestOfferStateAdmitsOneSafeOfferAndAppliesAuthoritativeAcknowledgement(t *t
 	if len(client.accepted) != 1 || client.accepted[0] != "job-1" {
 		t.Fatalf("accepted = %#v", client.accepted)
 	}
-	if _, active := state.ActiveLease(); active {
+	if _, active := state.ActiveLease("job-1"); active {
 		t.Fatal("offer became active before acknowledgement")
 	}
 
@@ -72,7 +72,7 @@ func TestOfferStateAdmitsOneSafeOfferAndAppliesAuthoritativeAcknowledgement(t *t
 	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 2, ExpiresAtUnixMs: expiresAt.UnixMilli()}) {
 		t.Fatal("ApplyAcknowledgement() rejected matching acknowledgement")
 	}
-	lease, active := state.ActiveLease()
+	lease, active := state.ActiveLease("job-1")
 	if !active || lease.Generation != 2 || !lease.ExpiresAt.Equal(expiresAt) || lease.Packet.JobID != "job-1" {
 		t.Fatalf("active lease = %#v, %v", lease, active)
 	}
@@ -126,7 +126,7 @@ func TestOfferStateIgnoresStaleAcknowledgementsAndAbandonsLostLease(t *testing.T
 	if !state.Abandon("job-1", 3) {
 		t.Fatal("Abandon() did not clear matching active lease")
 	}
-	if _, active := state.ActiveLease(); active {
+	if _, active := state.ActiveLease("job-1"); active {
 		t.Fatal("lease remained active after abandonment")
 	}
 }
@@ -143,18 +143,18 @@ func TestOfferStateRenewsOncePerAcknowledgementAndExpires(t *testing.T) {
 		t.Fatal("ApplyAcknowledgement() rejected lease")
 	}
 	now = now.Add(44 * time.Second)
-	if renewed, err := state.RenewDue(); err != nil || renewed {
+	if renewed, err := state.RenewDue(); err != nil || len(renewed) != 0 {
 		t.Fatalf("early RenewDue() = (%v, %v)", renewed, err)
 	}
 	now = now.Add(time.Second)
 	renewed, err := state.RenewDue()
-	if err != nil || !renewed {
+	if err != nil || len(renewed) != 1 || renewed[0] != "job-1" {
 		t.Fatalf("due RenewDue() = (%v, %v)", renewed, err)
 	}
 	if len(client.renewed) != 1 || !client.renewed[0].expiresAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("renewals = %#v", client.renewed)
 	}
-	if renewed, err := state.RenewDue(); err != nil || renewed {
+	if renewed, err := state.RenewDue(); err != nil || len(renewed) != 0 {
 		t.Fatalf("duplicate RenewDue() = (%v, %v)", renewed, err)
 	}
 	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 1, ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}) {
@@ -162,10 +162,10 @@ func TestOfferStateRenewsOncePerAcknowledgementAndExpires(t *testing.T) {
 	}
 	now = now.Add(time.Minute)
 	expired := state.Expire()
-	if expired == nil || expired.JobID != "job-1" {
+	if len(expired) != 1 || expired[0].JobID != "job-1" {
 		t.Fatalf("Expire() = %#v", expired)
 	}
-	if _, active := state.ActiveLease(); active {
+	if _, active := state.ActiveLease("job-1"); active {
 		t.Fatal("expired lease remained active")
 	}
 }
@@ -188,12 +188,51 @@ func TestOfferStateAcceptsOutsideStateLock(t *testing.T) {
 	client := &offerClient{}
 	state := newOfferState(t, client, &now)
 	client.onAccept = func() {
-		if _, active := state.ActiveLease(); active {
+		if _, active := state.ActiveLease("job-1"); active {
 			t.Fatal("lease became active before acknowledgement")
 		}
 	}
 	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
 		t.Fatalf("Admit() = (%v, %v), want (true, nil)", admitted, err)
+	}
+}
+
+func TestOfferStateWithCapacityAdmitsConcurrentOffersUpToCapacity(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state, err := NewOfferStateWithCapacity(client, func() time.Time { return now }, time.Minute, 15*time.Second, 2)
+	if err != nil {
+		t.Fatalf("NewOfferStateWithCapacity() error = %v", err)
+	}
+
+	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
+		t.Fatalf("first Admit() = (%v, %v)", admitted, err)
+	}
+	if admitted, err := state.Admit(validOffer(t, "job-2", 1)); err != nil || !admitted {
+		t.Fatalf("second Admit() = (%v, %v)", admitted, err)
+	}
+	if admitted, err := state.Admit(validOffer(t, "job-3", 1)); err != nil || admitted {
+		t.Fatalf("third Admit() = (%v, %v), want rejected at capacity", admitted, err)
+	}
+	if state.ActiveCount() != 0 {
+		t.Fatalf("ActiveCount() = %d before acknowledgement", state.ActiveCount())
+	}
+
+	expiresAt := now.Add(time.Minute)
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 1, ExpiresAtUnixMs: expiresAt.UnixMilli()}) {
+		t.Fatal("ApplyAcknowledgement() rejected job-1")
+	}
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-2", LeaseGeneration: 1, ExpiresAtUnixMs: expiresAt.UnixMilli()}) {
+		t.Fatal("ApplyAcknowledgement() rejected job-2")
+	}
+	if state.ActiveCount() != 2 {
+		t.Fatalf("ActiveCount() = %d, want 2 concurrent leases", state.ActiveCount())
+	}
+	if _, active := state.ActiveLease("job-1"); !active {
+		t.Fatal("job-1 is not active")
+	}
+	if _, active := state.ActiveLease("job-2"); !active {
+		t.Fatal("job-2 is not active")
 	}
 }
 

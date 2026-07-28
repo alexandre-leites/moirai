@@ -90,8 +90,10 @@ class InMemoryControlPlane:
         return raw_token
 
     def register_runner(
-        self, token: str, name: str, labels: Iterable[str], now: datetime
+        self, token: str, name: str, labels: Iterable[str], now: datetime, capacity: int = 1
     ) -> tuple[Runner, str]:
+        if capacity < 1:
+            raise RegistrationError("runner capacity must be a positive integer")
         token_hash = self._hash(token)
         labels_set = frozenset(labels)
         with self._lock:
@@ -102,7 +104,7 @@ class InMemoryControlPlane:
                 raise RegistrationError("registration token cannot be used")
             if not labels_set.issubset(registration.allowed_labels):
                 raise RegistrationError("runner labels exceed token permissions")
-            runner = Runner(str(uuid4()), labels_set, False, True, False, False)
+            runner = Runner(str(uuid4()), labels_set, False, True, False, False, capacity=capacity)
             credential = token_urlsafe(32)
             self._tokens[token_hash] = replace(registration, used_at=now)
             self._runners[runner.id] = runner

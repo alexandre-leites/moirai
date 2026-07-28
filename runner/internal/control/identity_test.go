@@ -35,15 +35,18 @@ func TestLoadOrRegisterReusesStoredIdentityOrRegistersOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "identity", "runner.json")
 	store := IdentityStore{Path: path}
 	service := &fakeService{stream: &fakeStream{}}
-	identity, err := LoadOrRegister(context.Background(), store, service, "token", "runner", []string{"docker"})
+	identity, err := LoadOrRegister(context.Background(), store, service, "token", "runner", []string{"docker"}, 2)
 	if err != nil {
 		t.Fatalf("LoadOrRegister() registration error = %v", err)
 	}
 	if identity.RunnerID != "runner-1" || service.registration == nil {
 		t.Fatalf("LoadOrRegister() registered identity = %#v, request = %#v", identity, service.registration)
 	}
+	if service.registration.GetCapacity() != 2 {
+		t.Fatalf("LoadOrRegister() capacity = %d, want 2", service.registration.GetCapacity())
+	}
 	service.registration = nil
-	loaded, err := LoadOrRegister(context.Background(), store, service, "", "", nil)
+	loaded, err := LoadOrRegister(context.Background(), store, service, "", "", nil, 1)
 	if err != nil {
 		t.Fatalf("LoadOrRegister() stored identity error = %v", err)
 	}
@@ -54,7 +57,7 @@ func TestLoadOrRegisterReusesStoredIdentityOrRegistersOnce(t *testing.T) {
 
 func TestLoadOrRegisterRequiresTokenForMissingIdentity(t *testing.T) {
 	store := IdentityStore{Path: filepath.Join(t.TempDir(), "runner.json")}
-	if _, err := LoadOrRegister(context.Background(), store, &fakeService{}, "", "runner", nil); err == nil {
+	if _, err := LoadOrRegister(context.Background(), store, &fakeService{}, "", "runner", nil, 1); err == nil {
 		t.Fatal("LoadOrRegister() accepted a missing identity without registration token")
 	}
 }

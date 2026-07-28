@@ -52,11 +52,14 @@ class AsyncpgLeader:
     async def close(self) -> None:
         if self._connection is None:
             return
+        # _lease and _connection are always set together in is_leader().
+        lease = self._lease
+        assert lease is not None
         try:
             if self._held:
                 await self._connection.execute("SELECT pg_advisory_unlock($1)", self._lock_id)
         finally:
-            await self._lease.__aexit__(None, None, None)
+            await lease.__aexit__(None, None, None)
             self._connection = None
             self._lease = None
             self._held = False
@@ -69,21 +72,49 @@ class Scheduler:
         deliver_offer: Callable[[Any, dict[str, Any]], Awaitable[bool]],
         task_packet: Callable[[ScheduledJob], Awaitable[dict[str, Any]] | dict[str, Any]],
         offer_ttl: timedelta,
+        max_offers_per_tick: int = 50,
     ) -> None:
         if offer_ttl <= timedelta():
             raise ValueError("offer TTL must be positive")
+        if max_offers_per_tick < 1:
+            raise ValueError("max offers per tick must be positive")
         self._control_plane = control_plane
         self._deliver_offer = deliver_offer
         self._task_packet = task_packet
         self._offer_ttl = offer_ttl
+        self._max_offers_per_tick = max_offers_per_tick
 
-    async def tick(self, now: datetime) -> ScheduledJob | None:
+    async def tick(self, now: datetime) -> list[ScheduledJob]:
+        """Place offers until no candidate remains or the per-tick budget is hit.
+
+        A single fixed-interval pass previously placed at most one offer, so N
+        queued jobs and N idle runners took N intervals to fully dispatch.
+        """
         expire_offers = getattr(self._control_plane, "expire_offers", None)
         if expire_offers is not None:
             await _await(expire_offers(now))
         expire_leases = getattr(self._control_plane, "expire_leases", None)
         if expire_leases is not None:
             await _await(expire_leases(now))
+
+        placed: list[ScheduledJob] = []
+        for _ in range(self._max_offers_per_tick):
+            scheduled = await self._schedule_one(now)
+            if scheduled is None:
+                break
+            try:
+                task_packet = await _await(self._task_packet(scheduled))
+                delivered = await self._deliver_offer(scheduled.offer, task_packet)
+            except Exception as error:
+                await self._reject_offer(scheduled, now, error)
+                raise OfferDeliveryError("scheduled offer delivery failed") from error
+            if not delivered:
+                await self._reject_offer(scheduled, now)
+                break
+            placed.append(scheduled)
+        return placed
+
+    async def _schedule_one(self, now: datetime) -> ScheduledJob | None:
         schedule_execution = getattr(self._control_plane, "schedule_execution", None)
         scheduled = (
             await _await(schedule_execution(now, self._offer_ttl))
@@ -95,18 +126,7 @@ class Scheduler:
             scheduled = await _await(recover_one(now, self._offer_ttl)) if recover_one is not None else None
         if scheduled is None:
             scheduled = await _await(self._control_plane.schedule(now, self._offer_ttl))
-        if scheduled is None:
-            return None
-        try:
-            task_packet = await _await(self._task_packet(scheduled))
-            delivered = await self._deliver_offer(scheduled.offer, task_packet)
-        except Exception as error:
-            await self._reject_offer(scheduled, now, error)
-            raise OfferDeliveryError("scheduled offer delivery failed") from error
-        if delivered:
-            return scheduled
-        await self._reject_offer(scheduled, now)
-        return None
+        return scheduled
 
     async def _reject_offer(
         self, scheduled: ScheduledJob, now: datetime, delivery_error: Exception | None = None

@@ -157,7 +157,7 @@ class EndToEndExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await scheduler.tick(NOW)
 
-        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 1)
         self.assertTrue(control_plane.pool.execution_request_claimed)
         self.assertTrue(control_plane.pool.offer_created)
         self.assertEqual(control_plane.pool.execution_request_status, "dispatched")
@@ -183,7 +183,7 @@ class EndToEndExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         result = await scheduler.tick(NOW)
 
-        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 1)
         self.assertEqual(len(delivered), 1)
 
     async def test_accept_event_with_on_transition_callback(self) -> None:

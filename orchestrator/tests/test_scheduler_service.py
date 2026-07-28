@@ -105,9 +105,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         )
         scheduled = await scheduler.tick(NOW)
 
-        self.assertIsNotNone(scheduled)
-        assert scheduled is not None
-        self.assertEqual(delivered, [(scheduled.offer.job_id, {"jobId": scheduled.offer.job_id})])
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(delivered, [(scheduled[0].offer.job_id, {"jobId": scheduled[0].offer.job_id})])
 
     async def test_tick_delivers_recovery_before_scheduling_a_new_offer(self) -> None:
         control_plane = _RecoveryFirstControlPlane(self._control_plane())
@@ -121,10 +120,13 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         scheduler = Scheduler(control_plane, deliver, lambda scheduled: {"jobId": scheduled.offer.job_id}, timedelta(seconds=30))
         recovered = await scheduler.tick(NOW)
 
-        self.assertIsNotNone(recovered)
-        assert recovered is not None
-        self.assertEqual(delivered, [recovered.offer.job_id])
-        self.assertFalse(control_plane.schedule_called)
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(delivered, [recovered[0].offer.job_id])
+        # tick() now loops for more candidates after a successful placement, so
+        # the plain `schedule` stage is legitimately probed (and finds nothing)
+        # once recovery is exhausted. What matters for this test is that the
+        # one job actually delivered came from recover_one, which `delivered`
+        # already confirms above.
 
     async def test_failed_delivery_releases_offer_and_project_lock(self) -> None:
         control_plane = self._control_plane()
@@ -134,7 +136,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             return False
 
         scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
-        self.assertIsNone(await scheduler.tick(NOW))
+        self.assertEqual(await scheduler.tick(NOW), [])
         workflows, runners, locks = control_plane.snapshot()
         self.assertEqual(locks, ())
         self.assertFalse(runners[0].active_job_id)
@@ -306,6 +308,55 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         await scheduler.run(stop_event, lambda: NOW, timedelta(milliseconds=1), is_leader, on_tick=on_tick)
         self.assertEqual(ticks, 1)
 
+    async def test_tick_places_every_ready_offer_in_a_single_call(self) -> None:
+        control_plane = InMemoryControlPlane()
+        control_plane.add_project(Project("project-1", True, frozenset({"linux"})))
+        control_plane.add_project(Project("project-2", True, frozenset({"linux"})))
+        control_plane.add_project(Project("project-3", True, frozenset({"linux"})))
+        control_plane.add_issue(Issue("issue-1", "project-1", "1", 10, NOW - timedelta(days=1), NOW, True))
+        control_plane.add_issue(Issue("issue-2", "project-2", "2", 10, NOW - timedelta(days=1), NOW, True))
+        control_plane.add_issue(Issue("issue-3", "project-3", "3", 10, NOW - timedelta(days=1), NOW, True))
+        control_plane._runners["runner-1"] = Runner("runner-1", frozenset({"linux"}), True, True, False, True)
+        control_plane._runners["runner-2"] = Runner("runner-2", frozenset({"linux"}), True, True, False, True)
+        control_plane._runners["runner-3"] = Runner("runner-3", frozenset({"linux"}), True, True, False, True)
+
+        delivered: list[str] = []
+
+        async def deliver(offer: object, packet: dict[str, object]) -> bool:
+            del packet
+            delivered.append(offer.job_id)
+            return True
+
+        scheduler = Scheduler(
+            control_plane, deliver, lambda scheduled: {"jobId": scheduled.offer.job_id}, timedelta(seconds=30),
+        )
+        scheduled = await scheduler.tick(NOW)
+
+        self.assertEqual(len(scheduled), 3)
+        self.assertEqual(len(delivered), 3)
+
+    async def test_tick_stops_at_the_per_tick_budget(self) -> None:
+        control_plane = InMemoryControlPlane()
+        for index in range(5):
+            control_plane.add_project(Project(f"project-{index}", True, frozenset({"linux"})))
+            control_plane.add_issue(
+                Issue(f"issue-{index}", f"project-{index}", str(index), 10, NOW - timedelta(days=1), NOW, True)
+            )
+            control_plane._runners[f"runner-{index}"] = Runner(
+                f"runner-{index}", frozenset({"linux"}), True, True, False, True
+            )
+
+        async def deliver(offer: object, packet: dict[str, object]) -> bool:
+            del offer, packet
+            return True
+
+        scheduler = Scheduler(
+            control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30), max_offers_per_tick=2,
+        )
+        scheduled = await scheduler.tick(NOW)
+
+        self.assertEqual(len(scheduled), 2)
+
     async def test_tick_expires_prior_undelivered_offer_before_scheduling(self) -> None:
         control_plane = self._control_plane()
 
@@ -315,7 +366,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         scheduler = Scheduler(control_plane, fail_delivery, lambda scheduled: {}, timedelta(seconds=30))
         await scheduler.tick(NOW)
-        self.assertIsNone(await scheduler.tick(NOW + timedelta(seconds=31)))
+        self.assertEqual(await scheduler.tick(NOW + timedelta(seconds=31)), [])
         _, runners, locks = control_plane.snapshot()
         self.assertEqual(locks, ())
         self.assertFalse(runners[0].active_job_id)

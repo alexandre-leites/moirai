@@ -71,18 +71,22 @@ func NewGRPCService(service runnerv1.RunnerControlClient) ControlService {
 	return grpcService{client: service}
 }
 
-func Register(ctx context.Context, service ControlService, token, name string, labels []string) (Identity, error) {
+func Register(ctx context.Context, service ControlService, token, name string, labels []string, capacity int) (Identity, error) {
 	if service == nil {
 		return Identity{}, errors.New("runner control service is required")
 	}
 	if token == "" || name == "" {
 		return Identity{}, errors.New("runner registration token and name are required")
 	}
+	if capacity < 1 {
+		capacity = 1
+	}
 	response, err := service.RegisterRunner(ctx, &runnerv1.RegisterRunnerRequest{
 		Token:           token,
 		Name:            name,
 		Labels:          labels,
 		ProtocolVersion: "1.0",
+		Capacity:        int32(capacity),
 	})
 	if err != nil {
 		return Identity{}, err
@@ -93,11 +97,11 @@ func Register(ctx context.Context, service ControlService, token, name string, l
 	return Identity{RunnerID: response.GetRunnerId(), Credential: response.GetCredential()}, nil
 }
 
-func RegisterWithGRPC(ctx context.Context, service runnerv1.RunnerControlClient, token, name string, labels []string) (Identity, error) {
+func RegisterWithGRPC(ctx context.Context, service runnerv1.RunnerControlClient, token, name string, labels []string, capacity int) (Identity, error) {
 	if service == nil {
 		return Identity{}, errors.New("runner control service is required")
 	}
-	return Register(ctx, grpcService{client: service}, token, name, labels)
+	return Register(ctx, grpcService{client: service}, token, name, labels, capacity)
 }
 
 func (c *Client) Connect(ctx context.Context) error {

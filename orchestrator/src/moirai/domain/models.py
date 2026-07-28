@@ -58,6 +58,7 @@ class Runner:
     draining: bool
     healthy: bool
     active_job_id: str | None = None
+    capacity: int = 1
 
     @property
     def available(self) -> bool:

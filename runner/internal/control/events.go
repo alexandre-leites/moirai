@@ -21,6 +21,9 @@ type EventClient interface {
 	SendExecutionEvent(*runnerv1.ExecutionEvent) error
 }
 
+// EventReporter tracks execution-event sequencing for every concurrently
+// active lease on the runner, keyed by job ID. A single flat `pending` queue
+// preserves send order across leases and shares one `maxPending` budget.
 type EventReporter struct {
 	client            EventClient
 	maxPending        int
@@ -28,8 +31,8 @@ type EventReporter struct {
 	outbox            *eventOutbox
 
 	mu      sync.Mutex
-	lease   *Lease
-	next    int64
+	leases  map[string]Lease
+	next    map[string]int64
 	pending []*runnerv1.ExecutionEvent
 	sending bool
 }
@@ -38,7 +41,13 @@ func NewEventReporter(client EventClient, maxPending int, prefixes []string, out
 	if client == nil || maxPending < 1 || !validRedactionPrefixes(prefixes) {
 		return nil, ErrEventReporterConfiguration
 	}
-	reporter := &EventReporter{client: client, maxPending: maxPending, redactionPrefixes: append([]string(nil), prefixes...)}
+	reporter := &EventReporter{
+		client:            client,
+		maxPending:        maxPending,
+		redactionPrefixes: append([]string(nil), prefixes...),
+		leases:            map[string]Lease{},
+		next:              map[string]int64{},
+	}
 	if outboxPath == "" {
 		return reporter, nil
 	}
@@ -64,13 +73,12 @@ func (r *EventReporter) Begin(lease Lease) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.lease != nil && (r.lease.JobID != lease.JobID || r.lease.Generation != lease.Generation) {
+	if existing, ok := r.leases[lease.JobID]; ok && existing.Generation != lease.Generation {
 		return ErrStaleEventLease
 	}
-	if r.lease == nil {
-		copy := lease
-		r.lease = &copy
-		r.next = 0
+	if _, ok := r.leases[lease.JobID]; !ok {
+		r.leases[lease.JobID] = lease
+		r.next[lease.JobID] = 0
 	}
 	return nil
 }
@@ -78,12 +86,13 @@ func (r *EventReporter) Begin(lease Lease) error {
 func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.lease == nil || r.lease.JobID != jobID || r.lease.Generation != generation {
+	existing, ok := r.leases[jobID]
+	if !ok || existing.Generation != generation {
 		return false
 	}
-	r.lease = nil
-	r.pending = nil
-	r.next = 0
+	delete(r.leases, jobID)
+	delete(r.next, jobID)
+	r.pending = withoutJobEvents(r.pending, jobID)
 	_ = r.persistLocked()
 	return true
 }
@@ -91,11 +100,12 @@ func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 func (r *EventReporter) Finish(jobID string, generation int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.lease == nil || r.lease.JobID != jobID || r.lease.Generation != generation {
+	existing, ok := r.leases[jobID]
+	if !ok || existing.Generation != generation {
 		return false
 	}
-	r.lease = nil
-	r.next = 0
+	delete(r.leases, jobID)
+	delete(r.next, jobID)
 	return true
 }
 
@@ -109,11 +119,12 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	}
 
 	r.mu.Lock()
-	if r.lease == nil {
+	lease, ok := r.leases[jobID]
+	if !ok {
 		r.mu.Unlock()
 		return 0, ErrNoActiveEventLease
 	}
-	if r.lease.JobID != jobID || r.lease.Generation != generation {
+	if lease.Generation != generation {
 		r.mu.Unlock()
 		return 0, ErrStaleEventLease
 	}
@@ -121,20 +132,21 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 		r.mu.Unlock()
 		return 0, errors.New("execution event buffer is full")
 	}
-	previousNext := r.next
-	r.next++
+	previousNext := r.next[jobID]
+	sequence := previousNext + 1
+	r.next[jobID] = sequence
 	event := &runnerv1.ExecutionEvent{
-		JobId:           r.lease.JobID,
-		ExecutionId:     r.lease.Packet.ExecutionID,
-		LeaseGeneration: r.lease.Generation,
-		EventSequence:   r.next,
+		JobId:           lease.JobID,
+		ExecutionId:     lease.Packet.ExecutionID,
+		LeaseGeneration: lease.Generation,
+		EventSequence:   sequence,
 		Type:            eventType,
 		PayloadJson:     string(contents),
 	}
 	r.pending = append(r.pending, event)
 	if err := r.persistLocked(); err != nil {
 		r.pending = r.pending[:len(r.pending)-1]
-		r.next = previousNext
+		r.next[jobID] = previousNext
 		r.mu.Unlock()
 		return 0, err
 	}
@@ -147,6 +159,19 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 		return event.EventSequence, nil
 	}
 	return event.EventSequence, r.flush()
+}
+
+func withoutJobEvents(events []*runnerv1.ExecutionEvent, jobID string) []*runnerv1.ExecutionEvent {
+	if len(events) == 0 {
+		return events
+	}
+	kept := make([]*runnerv1.ExecutionEvent, 0, len(events))
+	for _, event := range events {
+		if event.GetJobId() != jobID {
+			kept = append(kept, event)
+		}
+	}
+	return kept
 }
 
 func (r *EventReporter) EmitLog(jobID string, generation int64, message string) ([]int64, error) {
@@ -168,7 +193,7 @@ func (r *EventReporter) EmitLog(jobID string, generation int64, message string) 
 
 func (r *EventReporter) Flush() error {
 	r.mu.Lock()
-	if r.lease == nil && len(r.pending) == 0 {
+	if len(r.leases) == 0 && len(r.pending) == 0 {
 		r.mu.Unlock()
 		return ErrNoActiveEventLease
 	}

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta
-import json
-from pathlib import PurePath
 from hashlib import sha256
+from pathlib import PurePath
 from secrets import compare_digest, token_urlsafe
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 from moirai.domain.control_plane import (
@@ -27,8 +27,27 @@ from moirai.domain.models import (
     WorkflowStatus,
 )
 from moirai.domain.scheduling import Assignment
-from moirai.persistence.authentication import AsyncpgAuthentication
-from moirai.workflows.runner_events import validate_runner_event, workflow_transition_for_terminal_event
+from moirai.persistence.authentication import (
+    AsyncpgAuthentication,
+    AuthenticatedSession,
+    SessionCredentials,
+)
+
+if TYPE_CHECKING:
+    # Deferred: grpc/protocol.py imports this module's classes back for a
+    # Protocol-conformance check, so this side must not import it at runtime.
+    from moirai.grpc.protocol import (
+        ProjectRecord,
+        RegistrationTokenRecord,
+        RunnerRecord,
+        WorkflowRecord,
+    )
+from moirai.workflows.runner_events import (
+    execution_type_from_id,
+    role_to_suffix,
+    validate_runner_event,
+    workflow_transition_for_terminal_event,
+)
 from moirai.workflows.task_packets import (
     ExecutionRole,
     build_task_packet,
@@ -59,12 +78,12 @@ class AsyncpgControlPlane:
     async def close(self) -> None:
         await self._pool.close()
 
-    async def login(self, username: str, password: str, now: datetime) -> Any:
+    async def login(self, username: str, password: str, now: datetime) -> SessionCredentials:
         return await self._authentication.login(username, password, now)
 
     async def validate_session(
         self, session_token: str, csrf_token: str | None, now: datetime, require_csrf: bool
-    ) -> Any:
+    ) -> AuthenticatedSession:
         return await self._authentication.validate_session(
             session_token, csrf_token, now, require_csrf
         )
@@ -102,7 +121,7 @@ class AsyncpgControlPlane:
         required_runner_labels: Iterable[str],
         now: datetime,
         actor_user_id: str | None = None,
-    ) -> dict[str, object]:
+    ) -> ProjectRecord:
         normalized = _project_configuration(
             name,
             repository_mode,
@@ -131,12 +150,12 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project could not be created")
-        project = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
         if actor_user_id is not None:
-            await self.append_audit(actor_user_id, "project.create", "project", str(project["id"]), "succeeded", now)
+            await self.append_audit(actor_user_id, "project.create", "project", project["id"], "succeeded", now)
         return project
 
-    async def list_projects(self) -> list[dict[str, object]]:
+    async def list_projects(self) -> list[ProjectRecord]:
         records = await self._pool.fetch(
             "SELECT id, name, enabled FROM app.projects ORDER BY name ASC, id ASC"
         )
@@ -334,7 +353,7 @@ class AsyncpgControlPlane:
         required_runner_labels: Iterable[str],
         now: datetime,
         actor_user_id: str | None = None,
-    ) -> dict[str, object]:
+    ) -> ProjectRecord:
         normalized = _project_configuration(
             name,
             repository_mode,
@@ -367,14 +386,14 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project is unknown")
-        project = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
         if actor_user_id is not None:
-            await self.append_audit(actor_user_id, "project.update", "project", str(project["id"]), "succeeded", now)
+            await self.append_audit(actor_user_id, "project.update", "project", project["id"], "succeeded", now)
         return project
 
     async def set_project_enabled(
         self, project_id: str, enabled: bool, now: datetime, actor_user_id: str | None = None
-    ) -> dict[str, object]:
+    ) -> ProjectRecord:
         record = await self._pool.fetchrow(
             """
             UPDATE app.projects SET enabled = $2, updated_at = $3 WHERE id = $1
@@ -386,9 +405,9 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project is unknown")
-        project = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
         if actor_user_id is not None:
-            await self.append_audit(actor_user_id, "project.enable" if enabled else "project.disable", "project", str(project["id"]), "succeeded", now)
+            await self.append_audit(actor_user_id, "project.enable" if enabled else "project.disable", "project", project["id"], "succeeded", now)
         return project
 
     @staticmethod
@@ -434,7 +453,7 @@ class AsyncpgControlPlane:
                 )
         return token
 
-    async def list_registration_tokens(self) -> list[dict[str, object]]:
+    async def list_registration_tokens(self) -> list[RegistrationTokenRecord]:
         records = await self._pool.fetch(
             """
             SELECT id, allowed_labels, created_at, expires_at, used_at, revoked_at
@@ -446,7 +465,7 @@ class AsyncpgControlPlane:
 
     async def revoke_registration_token(
         self, token_id: str, actor_user_id: str | None, now: datetime
-    ) -> dict[str, object]:
+    ) -> RegistrationTokenRecord:
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 record = await connection.fetchrow(
@@ -474,8 +493,10 @@ class AsyncpgControlPlane:
         return token
 
     async def register_runner(
-        self, token: str, name: str, labels: Iterable[str], now: datetime
+        self, token: str, name: str, labels: Iterable[str], now: datetime, capacity: int = 1
     ) -> tuple[Runner, str]:
+        if capacity < 1:
+            raise RegistrationError("runner capacity must be a positive integer")
         labels_set = frozenset(labels)
         credential = token_urlsafe(32)
         runner_id = uuid4()
@@ -502,13 +523,14 @@ class AsyncpgControlPlane:
                 await connection.execute(
                     """
                     INSERT INTO app.runners
-                        (id, name, enabled, draining, status, version, labels, capabilities, registered_at)
-                    VALUES ($1, $2, true, false, 'offline', '1.0', $3::jsonb, '{}'::jsonb, $4)
+                        (id, name, enabled, draining, status, version, labels, capabilities, registered_at, capacity)
+                    VALUES ($1, $2, true, false, 'offline', '1.0', $3::jsonb, '{}'::jsonb, $4, $5)
                     """,
                     runner_id,
                     name,
                     _json(sorted(labels_set)),
                     now,
+                    capacity,
                 )
                 await connection.execute(
                     """
@@ -531,7 +553,7 @@ class AsyncpgControlPlane:
                 )
                 if consumed != "UPDATE 1":
                     raise RegistrationError("registration token cannot be used")
-        return Runner(str(runner_id), labels_set, False, True, False, False), credential
+        return Runner(str(runner_id), labels_set, False, True, False, False, capacity=capacity), credential
 
     async def authenticate_runner(self, runner_id: str, credential: str, now: datetime) -> Runner:
         runner = await self._load_runner_credential(runner_id, now)
@@ -546,7 +568,7 @@ class AsyncpgControlPlane:
             UPDATE app.runners
             SET status = 'online', last_seen_at = $2
             WHERE id = $1 AND enabled = true AND revoked_at IS NULL
-            RETURNING id, labels, enabled, draining
+            RETURNING id, labels, enabled, draining, capacity
             """,
             _uuid(runner_id),
             now,
@@ -691,28 +713,46 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("scheduled job is unavailable")
-        values = {
-            "job_id": str(record["job_id"]),
-            "project_id": str(record["project_id"]),
-            "issue_external_id": str(record["external_id"]),
-            "issue_title": str(record["title"]),
-            "issue_body": str(record["body"]),
-            "repository_mode": str(record["repository_mode"]),
-            "repository_url": _optional_text(record["repository_url"]),
-            "local_repository_path": _optional_text(record["local_repository_path"]),
-            "default_branch": str(record["default_branch"]),
-        }
+        job_id = str(record["job_id"])
+        project_id = str(record["project_id"])
+        issue_external_id = str(record["external_id"])
+        issue_title = str(record["title"])
+        issue_body = str(record["body"])
+        repository_mode = str(record["repository_mode"])
+        repository_url = _optional_text(record["repository_url"])
+        local_repository_path = _optional_text(record["local_repository_path"])
+        default_branch = str(record["default_branch"])
         request_id = record.get("execution_request_id")
         role = record.get("execution_role")
         if request_id is None or role is None:
-            return build_task_packet(planner_task_execution(**values))
+            return build_task_packet(
+                planner_task_execution(
+                    job_id=job_id,
+                    project_id=project_id,
+                    issue_external_id=issue_external_id,
+                    issue_title=issue_title,
+                    issue_body=issue_body,
+                    repository_mode=repository_mode,
+                    repository_url=repository_url,
+                    local_repository_path=local_repository_path,
+                    default_branch=default_branch,
+                )
+            )
         if role not in {"planner", "developer", "reviewer", "repairer"}:
             raise ValueError("workflow execution request role is invalid")
         return build_task_packet(
             task_execution(
+                job_id=job_id,
                 execution_id=f"{request_id}-{role_to_suffix(str(role))}",
                 role=cast(ExecutionRole, str(role)),
-                **values,
+                project_id=project_id,
+                issue_external_id=issue_external_id,
+                issue_title=issue_title,
+                issue_body=issue_body,
+                repository_mode=repository_mode,
+                repository_url=repository_url,
+                local_repository_path=local_repository_path,
+                default_branch=default_branch,
             )
         )
 
@@ -744,11 +784,11 @@ class AsyncpgControlPlane:
                           SELECT 1 FROM app.project_locks AS lock
                           WHERE lock.project_id = p.id
                       )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM app.jobs AS active_job
+                      AND (
+                          SELECT COUNT(*) FROM app.jobs AS active_job
                           WHERE active_job.runner_id = r.id
                             AND active_job.status IN ('offered', 'preparing', 'running')
-                      )
+                      ) < r.capacity
                     ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at,
                              i.project_id, i.external_id, r.id
                     FOR UPDATE OF i, p, r SKIP LOCKED
@@ -850,11 +890,11 @@ class AsyncpgControlPlane:
                       AND r.draining = false
                       AND r.revoked_at IS NULL
                       AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM app.jobs AS active_job
+                      AND (
+                          SELECT COUNT(*) FROM app.jobs AS active_job
                           WHERE active_job.runner_id = r.id
                             AND active_job.status IN ('offered', 'preparing', 'running')
-                      )
+                      ) < r.capacity
                     ORDER BY request.created_at, request.id, r.id
                     FOR UPDATE OF request, j, w, i, p, r SKIP LOCKED
                     LIMIT 1
@@ -1041,11 +1081,11 @@ class AsyncpgControlPlane:
                       AND r.draining = false
                       AND r.revoked_at IS NULL
                       AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM app.jobs AS active_job
+                      AND (
+                          SELECT COUNT(*) FROM app.jobs AS active_job
                           WHERE active_job.runner_id = r.id
                             AND active_job.status IN ('offered', 'preparing', 'running')
-                      )
+                      ) < r.capacity
                     ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at, i.project_id, i.external_id, r.id
                     FOR UPDATE OF j, w, lock, i, p, r SKIP LOCKED
                     LIMIT 1
@@ -1597,7 +1637,7 @@ class AsyncpgControlPlane:
     async def _load_runner_credential(self, runner_id: str, now: datetime) -> tuple[Runner, str]:
         record = await self._pool.fetchrow(
             """
-            SELECT r.id, r.labels, r.enabled, r.draining, r.status, c.credential_hash
+            SELECT r.id, r.labels, r.enabled, r.draining, r.status, r.capacity, c.credential_hash
             FROM app.runners AS r
             JOIN app.runner_credentials AS c ON c.runner_id = r.id
             WHERE r.id = $1
@@ -1683,7 +1723,7 @@ def _json_payload(event: ExecutionEvent) -> str:
     )
 
 
-def _registration_token(record: Any) -> dict[str, object]:
+def _registration_token(record: Any) -> RegistrationTokenRecord:
     return {
         "id": str(record["id"]),
         "allowed_labels": _labels(record["allowed_labels"]),
@@ -1713,6 +1753,7 @@ def _runner(record: Any, *, connected: bool | None = None, healthy: bool | None 
         bool(record["enabled"]),
         bool(record["draining"]),
         status == "online" if healthy is None else healthy,
+        capacity=int(record.get("capacity", 1)),
     )
 
 

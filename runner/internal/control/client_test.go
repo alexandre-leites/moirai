@@ -48,12 +48,15 @@ func TestRegisterAndConnectSendsAuthenticatedLeaseMessages(t *testing.T) {
 			LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 1},
 		},
 	}}}}
-	identity, err := Register(context.Background(), service, "token", "runner", []string{"docker"})
+	identity, err := Register(context.Background(), service, "token", "runner", []string{"docker"}, 3)
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if service.registration.GetProtocolVersion() != "1.0" {
 		t.Fatalf("protocol version = %q", service.registration.GetProtocolVersion())
+	}
+	if service.registration.GetCapacity() != 3 {
+		t.Fatalf("capacity = %d, want 3", service.registration.GetCapacity())
 	}
 	client, err := NewClient(service, identity)
 	if err != nil {

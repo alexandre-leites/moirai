@@ -7,7 +7,7 @@ service RunnerControl {
   rpc Connect(stream RunnerToOrchestrator) returns (stream OrchestratorToRunner);
 }
 
-message RegisterRunnerRequest { string token = 1; string name = 2; repeated string labels = 3; string protocol_version = 4; }
+message RegisterRunnerRequest { string token = 1; string name = 2; repeated string labels = 3; string protocol_version = 4; int32 capacity = 5; }
 message RegisterRunnerResponse { string runner_id = 1; string credential = 2; }
 message RunnerToOrchestrator {
   string runner_id = 1;

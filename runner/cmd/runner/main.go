@@ -176,6 +176,7 @@ func run(ctx context.Context) error {
 		settings.RegistrationToken,
 		settings.RunnerName,
 		settings.Labels,
+		settings.Capacity,
 	)
 	if err != nil {
 		return fmt.Errorf("bootstrap runner identity: %w", err)
@@ -198,7 +199,7 @@ func run(ctx context.Context) error {
 		Retention:          retentionPolicy(settings.WorkspaceRetention),
 		Projects:           projects,
 	}
-	loop, err := dispatch.NewControlLoop(
+	loop, err := dispatch.NewControlLoopWithCapacity(
 		client,
 		dispatcher,
 		time.Now,
@@ -206,6 +207,7 @@ func run(ctx context.Context) error {
 		15*time.Second,
 		settings.RedactionPrefixes,
 		settings.EventOutboxPath(),
+		settings.Capacity,
 	)
 	if err != nil {
 		return fmt.Errorf("create runner dispatch loop: %w", err)
