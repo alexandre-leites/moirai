@@ -8,16 +8,14 @@ from moirai.code_hosts import CodeHost, GitHubCliError, checks_pass
 from moirai.issue_trackers import IssueTracker
 
 from .issue_graph import IssueWorkflowNodes, IssueWorkflowState, WorkflowUpdate
-
+from .policy import RetryBudget
 
 CodeHostFactory = Callable[[str], "CodeHost | None | Awaitable[CodeHost | None]"]
 IssueTrackerFactory = Callable[[str], "IssueTracker | None | Awaitable[IssueTracker | None]"]
 
-_MAX_PLANNING_ATTEMPTS = 2
-_MAX_IMPLEMENTATION_ATTEMPTS = 3
-_MAX_PIPELINE_REPAIR_ATTEMPTS = 3
-_MAX_REVIEW_CYCLES = 3
-_MAX_TOTAL_AGENT_EXECUTIONS = 10
+# Single source of truth for retry limits, shared with policy.py's routing
+# functions so the two can no longer drift out of sync by coincidence.
+_BUDGET = RetryBudget()
 
 
 class WorkflowPersistence(Protocol):
@@ -72,12 +70,12 @@ class PersistedWorkflowNodes:
     async def plan(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if state.get("plan_valid"):
             return await self._transition(state, "planning", {"status": "planning", "plan_valid": True})
-        if int(state.get("planning_attempts", 0)) >= _MAX_PLANNING_ATTEMPTS:
+        if int(state.get("planning_attempts", 0)) >= _BUDGET.planning_attempts:
             return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
         return await self._dispatch(state, "planner", "planning", "planning_attempts")
 
     async def implement(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("implementation_attempts", 0)) >= _MAX_IMPLEMENTATION_ATTEMPTS:
+        if int(state.get("implementation_attempts", 0)) >= _BUDGET.implementation_attempts:
             return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
         return await self._dispatch(state, "developer", "implementing", "implementation_attempts")
 
@@ -85,17 +83,17 @@ class PersistedWorkflowNodes:
         return await self._transition(state, "local_pipeline", {"status": "local_pipeline"})
 
     async def review(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("review_cycles", 0)) >= _MAX_REVIEW_CYCLES:
+        if int(state.get("review_cycles", 0)) >= _BUDGET.review_cycles:
             return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
         return await self._dispatch(state, "reviewer", "ai_review", "review_cycles")
 
     async def repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("pipeline_repair_attempts", 0)) >= _MAX_PIPELINE_REPAIR_ATTEMPTS:
+        if int(state.get("pipeline_repair_attempts", 0)) >= _BUDGET.pipeline_repair_attempts:
             return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
         return await self._dispatch(state, "repairer", "repairing", "pipeline_repair_attempts")
 
     async def push(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("ci_repair_attempts", 0)) >= _MAX_PIPELINE_REPAIR_ATTEMPTS:
+        if int(state.get("ci_repair_attempts", 0)) >= _BUDGET.ci_repair_attempts:
             return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
         return await self._dispatch(state, "developer", "pushing", "ci_repair_attempts")
 
@@ -187,10 +185,10 @@ class PersistedWorkflowNodes:
         attempt_counter: str | None,
     ) -> WorkflowUpdate:
         workflow_run_id = _workflow_run_id(state)
-        if int(state.get("total_agent_executions", 0)) >= _MAX_TOTAL_AGENT_EXECUTIONS:
-            updates: WorkflowUpdate = {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"}
-            await _await(self.persistence.transition(workflow_run_id, "blocked", updates))
-            return updates
+        if int(state.get("total_agent_executions", 0)) >= _BUDGET.total_agent_executions:
+            blocked_updates: WorkflowUpdate = {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"}
+            await _await(self.persistence.transition(workflow_run_id, "blocked", blocked_updates))
+            return blocked_updates
         existing = await _await(self.persistence.get_queued_execution_request(workflow_run_id))
         if existing is not None and existing["role"] == role:
             execution_id = existing["id"]
@@ -198,7 +196,8 @@ class PersistedWorkflowNodes:
             execution_id = await _await(self.dispatcher.dispatch(workflow_run_id, role))
         updates: WorkflowUpdate = {"status": status, "execution_id": execution_id}
         if attempt_counter is not None:
-            updates[attempt_counter] = int(state.get(attempt_counter, 0)) + 1
+            current_attempts = state.get(attempt_counter, 0)
+            updates[attempt_counter] = (current_attempts if isinstance(current_attempts, int) else 0) + 1
         updates["total_agent_executions"] = int(state.get("total_agent_executions", 0)) + 1
         await _await(self.persistence.transition(workflow_run_id, status, updates))
         return updates

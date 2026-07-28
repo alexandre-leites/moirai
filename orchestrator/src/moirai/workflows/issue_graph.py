@@ -34,7 +34,7 @@ class IssueWorkflowState(TypedDict, total=False):
 
 
 WorkflowUpdate = dict[str, object]
-WorkflowNode = Callable[[IssueWorkflowState], WorkflowUpdate | Awaitable[WorkflowUpdate]]
+WorkflowNode = Callable[[IssueWorkflowState], Awaitable[WorkflowUpdate]]
 
 
 @dataclass(frozen=True)

@@ -93,23 +93,48 @@ def validate_runner_event(
     )
 
 
-def execution_role_from_id(execution_id: str) -> str | None:
-    """Best-effort role guess from an execution ID's suffix.
+# Single source of truth for role<->execution-id-suffix mapping. `role` is a
+# real column on app.workflow_execution_requests; every other place that needs
+# a suffix or an execution type derives it from this mapping instead of
+# maintaining its own copy.
+ROLE_TO_SUFFIX = {
+    "planner": "plan",
+    "developer": "implement",
+    "reviewer": "review",
+    "repairer": "repair",
+}
+_SUFFIX_TO_ROLE = {suffix: role for role, suffix in ROLE_TO_SUFFIX.items()}
 
-    This is untrusted: a runner chooses execution_id freely, so this must
-    never be used to authorize a workflow transition. It exists only as a
-    fallback for callers (tests, the in-memory control plane) that have no
-    dispatched-request record to resolve the role from authoritatively.
-    """
-    suffix_to_role = {
-        "-plan": "planner",
-        "-implement": "developer",
-        "-review": "reviewer",
-        "-repair": "repairer",
-    }
-    for suffix, role in suffix_to_role.items():
-        if execution_id.endswith(suffix):
+# Execution types keyed by the same suffixes as ROLE_TO_SUFFIX, plus the
+# "pipeline" execution which has no associated workflow-execution-request role.
+_SUFFIX_TO_EXECUTION_TYPE = {
+    "plan": "run_planner",
+    "implement": "run_developer",
+    "review": "run_reviewer",
+    "repair": "run_repair",
+    "pipeline": "run_local_pipeline",
+}
+
+
+def role_to_suffix(role: str) -> str:
+    try:
+        return ROLE_TO_SUFFIX[role]
+    except KeyError as error:
+        raise ValueError("workflow execution request role is invalid") from error
+
+
+def execution_role_from_id(execution_id: str) -> str | None:
+    for suffix, role in _SUFFIX_TO_ROLE.items():
+        if execution_id.endswith(f"-{suffix}"):
+
             return role
+    return None
+
+
+def execution_type_from_id(execution_id: str) -> str | None:
+    for suffix, execution_type in _SUFFIX_TO_EXECUTION_TYPE.items():
+        if execution_id.endswith(f"-{suffix}"):
+            return execution_type
     return None
 
 
