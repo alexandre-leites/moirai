@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: loop
       POSTGRES_USER: loop
@@ -19,6 +20,7 @@ services:
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
+    restart: unless-stopped
     environment:
       LOOP_DATABASE_URL_FILE: /run/secrets/database_url
       LOOP_GRPC_BIND: 0.0.0.0:50051
@@ -34,7 +36,7 @@ services:
       postgres: {condition: service_healthy}
     networks: [database, control]
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('localhost',50051)); s.close()\""]
+      test: ["CMD-SHELL", "python -c \"import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json')); sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else 1)\""]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -44,6 +46,7 @@ services:
     build:
       context: .
       dockerfile: api/Dockerfile
+    restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
     depends_on:
@@ -51,7 +54,7 @@ services:
     networks: [control, public]
     ports: ["8080:8080"]
     healthcheck:
-      test: ["CMD-SHELL", "pidof api >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/ready || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -59,12 +62,13 @@ services:
 
   web:
     build: ./web
+    restart: unless-stopped
     depends_on:
       api: {condition: service_healthy}
     networks: [public]
     ports: ["3000:80"]
     healthcheck:
-      test: ["CMD-SHELL", "pidof nginx >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost/ || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -74,6 +78,7 @@ services:
     build:
       context: .
       dockerfile: runner/Dockerfile
+    restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
       LOOP_RUNNER_REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"

@@ -3,9 +3,12 @@ package orchestrator_test
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/loop-engineering/api/internal/orchestrator"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -69,5 +72,27 @@ func TestMapStatusCodeDeadlineExceeded(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("code %s: expected context.DeadlineExceeded, got %v", code, err)
 		}
+	}
+}
+
+func TestClientHealthyReflectsConnectivityState(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := grpc.NewServer()
+	go func() { _ = server.Serve(listener) }()
+	defer server.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := orchestrator.Dial(ctx, listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	if !client.Healthy() {
+		t.Error("expected a freshly dialed client to report healthy")
 	}
 }

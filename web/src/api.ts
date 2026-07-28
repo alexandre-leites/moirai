@@ -58,6 +58,7 @@ export type ApiClient = {
   revokeToken(id: string): Promise<void>;
 
   listWorkflows(signal?: AbortSignal): Promise<Workflow[]>;
+  submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<Workflow>;
 };
 
 const getCSRF = (): string | null => {
@@ -179,6 +180,20 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       const res = await fetchClient("/api/v1/workflows", { signal, credentials: "include" });
       const body: { workflows: Workflow[] } = await json(res);
       return body.workflows;
+    },
+
+    async submitWorkflowDecision(
+      id: string,
+      decision: "approved" | "changes_requested",
+      comment?: string
+    ): Promise<Workflow> {
+      const res = await fetchClient(`/api/v1/workflows/${id}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        credentials: "include",
+        body: JSON.stringify({ decision, comment: comment ?? "" }),
+      });
+      return json(res);
     },
   };
 }

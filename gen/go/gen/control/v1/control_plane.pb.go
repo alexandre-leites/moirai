@@ -1297,6 +1297,110 @@ func (x *ListRunnersResponse) GetRunners() []*Runner {
 	return nil
 }
 
+type SubmitHumanDecisionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowRunId string                 `protobuf:"bytes,1,opt,name=workflow_run_id,json=workflowRunId,proto3" json:"workflow_run_id,omitempty"`
+	Decision      string                 `protobuf:"bytes,2,opt,name=decision,proto3" json:"decision,omitempty"`
+	Comment       string                 `protobuf:"bytes,3,opt,name=comment,proto3" json:"comment,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubmitHumanDecisionRequest) Reset() {
+	*x = SubmitHumanDecisionRequest{}
+	mi := &file_proto_control_plane_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubmitHumanDecisionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubmitHumanDecisionRequest) ProtoMessage() {}
+
+func (x *SubmitHumanDecisionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubmitHumanDecisionRequest.ProtoReflect.Descriptor instead.
+func (*SubmitHumanDecisionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *SubmitHumanDecisionRequest) GetWorkflowRunId() string {
+	if x != nil {
+		return x.WorkflowRunId
+	}
+	return ""
+}
+
+func (x *SubmitHumanDecisionRequest) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *SubmitHumanDecisionRequest) GetComment() string {
+	if x != nil {
+		return x.Comment
+	}
+	return ""
+}
+
+type SubmitHumanDecisionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Workflow      *Workflow              `protobuf:"bytes,1,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SubmitHumanDecisionResponse) Reset() {
+	*x = SubmitHumanDecisionResponse{}
+	mi := &file_proto_control_plane_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SubmitHumanDecisionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SubmitHumanDecisionResponse) ProtoMessage() {}
+
+func (x *SubmitHumanDecisionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SubmitHumanDecisionResponse.ProtoReflect.Descriptor instead.
+func (*SubmitHumanDecisionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *SubmitHumanDecisionResponse) GetWorkflow() *Workflow {
+	if x != nil {
+		return x.Workflow
+	}
+	return nil
+}
+
 var File_proto_control_plane_proto protoreflect.FileDescriptor
 
 const file_proto_control_plane_proto_rawDesc = "" +
@@ -1381,7 +1485,13 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\flast_seen_at\x18\a \x01(\tR\n" +
 	"lastSeenAt\"H\n" +
 	"\x13ListRunnersResponse\x121\n" +
-	"\arunners\x18\x01 \x03(\v2\x17.loop.control.v1.RunnerR\arunners2\xc9\b\n" +
+	"\arunners\x18\x01 \x03(\v2\x17.loop.control.v1.RunnerR\arunners\"z\n" +
+	"\x1aSubmitHumanDecisionRequest\x12&\n" +
+	"\x0fworkflow_run_id\x18\x01 \x01(\tR\rworkflowRunId\x12\x1a\n" +
+	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x18\n" +
+	"\acomment\x18\x03 \x01(\tR\acomment\"T\n" +
+	"\x1bSubmitHumanDecisionResponse\x125\n" +
+	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow2\xbb\t\n" +
 	"\fControlPlane\x12F\n" +
 	"\x05Login\x12\x1d.loop.control.v1.LoginRequest\x1a\x1e.loop.control.v1.LoginResponse\x12[\n" +
 	"\fListProjects\x12$.loop.control.v1.ListProjectsRequest\x1a%.loop.control.v1.ListProjectsResponse\x12^\n" +
@@ -1392,7 +1502,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x1cListRunnerRegistrationTokens\x124.loop.control.v1.ListRunnerRegistrationTokensRequest\x1a5.loop.control.v1.ListRunnerRegistrationTokensResponse\x12\x8e\x01\n" +
 	"\x1dRevokeRunnerRegistrationToken\x125.loop.control.v1.RevokeRunnerRegistrationTokenRequest\x1a6.loop.control.v1.RevokeRunnerRegistrationTokenResponse\x12^\n" +
 	"\rListWorkflows\x12%.loop.control.v1.ListWorkflowsRequest\x1a&.loop.control.v1.ListWorkflowsResponse\x12X\n" +
-	"\vListRunners\x12#.loop.control.v1.ListRunnersRequest\x1a$.loop.control.v1.ListRunnersResponseB@Z>github.com/loop-engineering/contracts/gen/control/v1;controlv1b\x06proto3"
+	"\vListRunners\x12#.loop.control.v1.ListRunnersRequest\x1a$.loop.control.v1.ListRunnersResponse\x12p\n" +
+	"\x13SubmitHumanDecision\x12+.loop.control.v1.SubmitHumanDecisionRequest\x1a,.loop.control.v1.SubmitHumanDecisionResponseB@Z>github.com/loop-engineering/contracts/gen/control/v1;controlv1b\x06proto3"
 
 var (
 	file_proto_control_plane_proto_rawDescOnce sync.Once
@@ -1406,7 +1517,7 @@ func file_proto_control_plane_proto_rawDescGZIP() []byte {
 	return file_proto_control_plane_proto_rawDescData
 }
 
-var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_proto_control_plane_proto_goTypes = []any{
 	(*LoginRequest)(nil),                          // 0: loop.control.v1.LoginRequest
 	(*LoginResponse)(nil),                         // 1: loop.control.v1.LoginResponse
@@ -1433,6 +1544,8 @@ var file_proto_control_plane_proto_goTypes = []any{
 	(*ListRunnersRequest)(nil),                    // 22: loop.control.v1.ListRunnersRequest
 	(*Runner)(nil),                                // 23: loop.control.v1.Runner
 	(*ListRunnersResponse)(nil),                   // 24: loop.control.v1.ListRunnersResponse
+	(*SubmitHumanDecisionRequest)(nil),            // 25: loop.control.v1.SubmitHumanDecisionRequest
+	(*SubmitHumanDecisionResponse)(nil),           // 26: loop.control.v1.SubmitHumanDecisionResponse
 }
 var file_proto_control_plane_proto_depIdxs = []int32{
 	3,  // 0: loop.control.v1.ListProjectsResponse.projects:type_name -> loop.control.v1.Project
@@ -1445,31 +1558,34 @@ var file_proto_control_plane_proto_depIdxs = []int32{
 	14, // 7: loop.control.v1.RevokeRunnerRegistrationTokenResponse.token:type_name -> loop.control.v1.RunnerRegistrationToken
 	20, // 8: loop.control.v1.ListWorkflowsResponse.workflows:type_name -> loop.control.v1.Workflow
 	23, // 9: loop.control.v1.ListRunnersResponse.runners:type_name -> loop.control.v1.Runner
-	0,  // 10: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
-	2,  // 11: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
-	6,  // 12: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
-	8,  // 13: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
-	10, // 14: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
-	12, // 15: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
-	15, // 16: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
-	17, // 17: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
-	19, // 18: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
-	22, // 19: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
-	1,  // 20: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
-	4,  // 21: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
-	7,  // 22: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
-	9,  // 23: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
-	11, // 24: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
-	13, // 25: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
-	16, // 26: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
-	18, // 27: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
-	21, // 28: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
-	24, // 29: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
-	20, // [20:30] is the sub-list for method output_type
-	10, // [10:20] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	20, // 10: loop.control.v1.SubmitHumanDecisionResponse.workflow:type_name -> loop.control.v1.Workflow
+	0,  // 11: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
+	2,  // 12: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
+	6,  // 13: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
+	8,  // 14: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
+	10, // 15: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
+	12, // 16: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
+	15, // 17: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
+	17, // 18: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
+	19, // 19: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
+	22, // 20: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
+	25, // 21: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
+	1,  // 22: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
+	4,  // 23: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
+	7,  // 24: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
+	9,  // 25: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
+	11, // 26: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
+	13, // 27: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
+	16, // 28: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
+	18, // 29: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
+	21, // 30: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
+	24, // 31: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
+	26, // 32: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
+	22, // [22:33] is the sub-list for method output_type
+	11, // [11:22] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_proto_control_plane_proto_init() }
@@ -1483,7 +1599,7 @@ func file_proto_control_plane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_control_plane_proto_rawDesc), len(file_proto_control_plane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

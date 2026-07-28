@@ -7,7 +7,7 @@ RUN addgroup --system --gid 65532 loop \
 COPY pyproject.toml ./
 COPY migrations ./migrations
 COPY src ./src
-RUN pip install --no-cache-dir "psycopg[binary]>=3.2" . \
+RUN pip install --no-cache-dir . \
     && rm -rf /root/.cache
 ENV PYTHONPATH=/app/src
 EXPOSE 50051

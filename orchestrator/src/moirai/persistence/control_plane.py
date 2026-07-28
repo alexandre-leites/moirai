@@ -42,6 +42,11 @@ class AsyncpgControlPlane:
         self._pool = pool
         self._authentication = AsyncpgAuthentication(pool)
 
+    @property
+    def pool(self) -> Any:
+        """The underlying connection pool, for callers that need durability-specific setup (migrations, workflow runtime, scheduling)."""
+        return self._pool
+
     @classmethod
     async def connect(cls, database_url: str) -> AsyncpgControlPlane:
         try:
@@ -559,6 +564,60 @@ class AsyncpgControlPlane:
             }
             for record in records
         ]
+
+    async def record_human_decision(
+        self,
+        workflow_run_id: str,
+        decision: str,
+        comment: str | None,
+        actor_user_id: str | None,
+        now: datetime,
+    ) -> dict[str, object]:
+        if decision not in ("approved", "changes_requested"):
+            raise ValueError("human decision is invalid")
+        if actor_user_id is None:
+            raise ValueError("human decision requires an authenticated user")
+        approval_id = uuid4()
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                workflow = await connection.fetchrow(
+                    """
+                    SELECT id, project_id, status
+                    FROM app.workflow_runs
+                    WHERE id = $1 AND status = 'waiting_human'
+                    FOR UPDATE
+                    """,
+                    _uuid(workflow_run_id),
+                )
+                if workflow is None:
+                    raise ValueError("workflow run is not awaiting human approval")
+                await connection.execute(
+                    """
+                    INSERT INTO app.human_approvals
+                        (id, workflow_run_id, commit_sha, user_id, decision, comment, created_at)
+                    VALUES ($1, $2, '', $3, $4, $5, $6)
+                    """,
+                    approval_id,
+                    _uuid(workflow_run_id),
+                    _uuid(actor_user_id),
+                    decision,
+                    comment,
+                    now,
+                )
+                await AsyncpgAuthentication._append_audit(
+                    connection,
+                    actor_user_id=_uuid(actor_user_id),
+                    action=f"workflow.human_decision.{decision}",
+                    resource_type="workflow_run",
+                    resource_id=workflow_run_id,
+                    outcome="succeeded",
+                    now=now,
+                )
+        return {
+            "id": str(workflow["id"]),
+            "project_id": str(workflow["project_id"]),
+            "status": str(workflow["status"]),
+        }
 
     async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
         return await self._pool.fetchrow(

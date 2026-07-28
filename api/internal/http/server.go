@@ -23,6 +23,10 @@ type Config struct {
 	WriteTimeout        time.Duration
 	ShutdownTimeout     time.Duration
 	MaxRequestBodyBytes int64
+	// OrchestratorHealthy reports whether the orchestrator gRPC connection is
+	// reachable. When nil, health/readiness routes assume it is (used by tests
+	// and any caller that has not wired an orchestrator client yet).
+	OrchestratorHealthy func() bool
 }
 
 func DefaultConfig() Config {
@@ -97,8 +101,34 @@ func (s *Server) registerHealthRoutes() {
 		w.WriteHeader(http.StatusOK)
 	})
 	s.mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+		if s.orchestratorHealthy() {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		WriteError(w, http.StatusServiceUnavailable, "Service unavailable", "orchestrator is unreachable")
 	})
+	s.mux.HandleFunc("GET "+apiPathPrefix+"/health", func(w http.ResponseWriter, r *http.Request) {
+		orchestratorHealthy := s.orchestratorHealthy()
+		status := http.StatusOK
+		apiStatus := "healthy"
+		orchestratorStatus := "reachable"
+		if !orchestratorHealthy {
+			status = http.StatusServiceUnavailable
+			apiStatus = "degraded"
+			orchestratorStatus = "unreachable"
+		}
+		WriteJSON(w, status, map[string]any{
+			"status":       apiStatus,
+			"orchestrator": orchestratorStatus,
+		})
+	})
+}
+
+func (s *Server) orchestratorHealthy() bool {
+	if s.cfg.OrchestratorHealthy == nil {
+		return true
+	}
+	return s.cfg.OrchestratorHealthy()
 }
 
 func (s *Server) withMiddleware(next http.Handler) http.Handler {

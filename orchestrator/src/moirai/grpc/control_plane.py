@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 import inspect
+import logging
 from typing import Any
 
 import grpc
@@ -25,12 +26,14 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         control_plane: Any,
         now: Callable[[], datetime] | None = None,
         registration_token_ttl: timedelta = timedelta(minutes=15),
+        workflow_runtime: Any | None = None,
     ) -> None:
         if registration_token_ttl <= timedelta():
             raise ValueError("registration token TTL must be positive")
         self._control_plane = control_plane
         self._now = now or (lambda: datetime.now(UTC))
         self._registration_token_ttl = registration_token_ttl
+        self._workflow_runtime = workflow_runtime
 
     async def Login(
         self,
@@ -216,6 +219,52 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, "runners are unavailable")
         return control_plane_pb2.ListRunnersResponse(
             runners=[_runner_message(runner) for runner in _iterable(runners, "runners")]
+        )
+
+    async def SubmitHumanDecision(
+        self,
+        request: control_plane_pb2.SubmitHumanDecisionRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.SubmitHumanDecisionResponse:
+        session = await self._require_session(context)
+        decision = request.decision
+        if not request.workflow_run_id or decision not in ("approved", "changes_requested"):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "human decision request is invalid")
+        try:
+            await self._invoke(
+                "record_human_decision",
+                request.workflow_run_id,
+                decision,
+                request.comment or None,
+                _text(_value(session, "user_id")) or None,
+                self._now(),
+            )
+        except NotImplementedError:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "human approval is unavailable")
+        except ValueError:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "workflow run is not awaiting human approval"
+            )
+        if self._workflow_runtime is None:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "workflow resumption is unavailable")
+        try:
+            state = await self._workflow_runtime.run(
+                request.workflow_run_id,
+                {
+                    "human_approved": decision == "approved",
+                    "human_changes_requested": decision == "changes_requested",
+                },
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("workflow resumption after human decision failed")
+            await context.abort(grpc.StatusCode.INTERNAL, "workflow could not be resumed")
+        return control_plane_pb2.SubmitHumanDecisionResponse(
+            workflow=control_plane_pb2.Workflow(
+                id=request.workflow_run_id,
+                project_id=_text(state.get("project_id")),
+                status=_text(state.get("status")),
+                phase=_text(state.get("status")),
+            )
         )
 
     async def _require_session(

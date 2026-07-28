@@ -13,6 +13,7 @@ service ControlPlane {
   rpc RevokeRunnerRegistrationToken(RevokeRunnerRegistrationTokenRequest) returns (RevokeRunnerRegistrationTokenResponse);
   rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
   rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
+  rpc SubmitHumanDecision(SubmitHumanDecisionRequest) returns (SubmitHumanDecisionResponse);
 }
 
 message LoginRequest { string username = 1; string password = 2; }
@@ -54,3 +55,5 @@ message ListWorkflowsResponse { repeated Workflow workflows = 1; }
 message ListRunnersRequest {}
 message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; }
 message ListRunnersResponse { repeated Runner runners = 1; }
+message SubmitHumanDecisionRequest { string workflow_run_id = 1; string decision = 2; string comment = 3; }
+message SubmitHumanDecisionResponse { Workflow workflow = 1; }

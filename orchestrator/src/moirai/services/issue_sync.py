@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 from moirai.domain.issues import LabelPolicy, reconcile_labels, synchronize_issue
 from moirai.domain.models import Project
 from moirai.issue_trackers.github_cli import GitHubCliIssueTracker, GitHubRepository
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def _await(value: Any) -> Any:
@@ -174,11 +177,19 @@ class IssueSync:
         stop_event: asyncio.Event,
         now: Callable[[], datetime],
         interval: timedelta,
+        on_run: Callable[[], None] | None = None,
     ) -> None:
         if interval <= timedelta():
             raise ValueError("issue sync interval must be positive")
         while not stop_event.is_set():
-            await self.sync_all_projects(now())
+            try:
+                await self.sync_all_projects(now())
+                if on_run is not None:
+                    on_run()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("issue sync run failed; retrying after backoff")
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
             except TimeoutError:

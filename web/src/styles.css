@@ -109,6 +109,20 @@ button {
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.logout-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 13px; }
 
+.workflow-decision-actions { display: flex; gap: 8px; }
+.workflow-decision-actions button { padding: 4px 10px; font-size: 13px; }
+
+.health-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.health-indicator--healthy { color: var(--success); border-color: var(--success); }
+.health-indicator--unhealthy, .health-indicator--unavailable { color: var(--danger); border-color: var(--danger); }
+
 table {
   width: 100%;
   border-collapse: collapse;

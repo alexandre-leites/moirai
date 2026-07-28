@@ -8,28 +8,59 @@ import os
 import signal
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 logging.basicConfig(level=logging.INFO, format='%(message)s', force=True)
 _LOGGER = logging.getLogger(__name__)
 
 from .config import OrchestratorConfig
+from .health import HealthState
+
+if TYPE_CHECKING:
+    from moirai.grpc.runner_control import RunnerControlService
+
+
+class CheckpointerUnavailableError(RuntimeError):
+    pass
+
+
+_ALLOW_NO_CHECKPOINTER_ENV = "LOOP_ALLOW_NO_CHECKPOINTER"
+
+
+def _allow_no_checkpointer() -> bool:
+    return os.environ.get(_ALLOW_NO_CHECKPOINTER_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
 async def _build_checkpointer(database_url: str) -> Any | None:
+    """Builds the LangGraph checkpointer, or returns None if explicitly permitted.
+
+    Durable checkpointing (crash recovery, human-approval interrupts) depends on
+    this succeeding. A missing dependency or a database it cannot reach is
+    therefore fatal unless the caller has opted into LOOP_ALLOW_NO_CHECKPOINTER,
+    which exists for tests and other reduced-capability environments only.
+    """
+    allow_missing = _allow_no_checkpointer()
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         from psycopg_pool import AsyncConnectionPool
-
-        pg_url = database_url.replace("+asyncpg", "")
-        pool = AsyncConnectionPool(pg_url, min_size=1, max_size=5, open=False, kwargs={"autocommit": True})
+    except ModuleNotFoundError:
+        _LOGGER.exception("checkpointer dependencies are not installed")
+        if allow_missing:
+            return None
+        raise
+    pg_url = database_url.replace("+asyncpg", "")
+    pool = AsyncConnectionPool(pg_url, min_size=1, max_size=5, open=False, kwargs={"autocommit": True})
+    try:
         await pool.open()
         checkpointer = AsyncPostgresSaver(pool)
         await checkpointer.setup()
-        return checkpointer
     except Exception as exc:
-        _LOGGER.info("checkpointer unavailable: %s", str(exc))
-        return None
+        _LOGGER.exception("checkpointer database connection failed")
+        await pool.close()
+        if allow_missing:
+            return None
+        raise CheckpointerUnavailableError("checkpointer could not connect to the database") from exc
+    return checkpointer
 
 
 async def _bootstrap_initial_setup(pool: Any) -> None:
@@ -86,7 +117,7 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
             """,
             token_id, token_hash,
             json.dumps(labels),
-            now, now.replace(year=now.year + 10),
+            now, now + timedelta(days=3650),
         )
         _LOGGER.info("created seed registration token", extra={"labels": labels})
 
@@ -134,17 +165,49 @@ def register_services(
     control_plane: Any,
     now: Callable[[], Any] | None = None,
     workflow_runtime: Any | None = None,
-) -> Any:
+) -> RunnerControlService:
     from moirai.grpc.control_plane import ControlPlaneService
     from moirai.grpc.runner_control import RunnerControlService
     from proto import control_plane_pb2_grpc, runner_control_pb2_grpc
 
     control_plane_pb2_grpc.add_ControlPlaneServicer_to_server(
-        ControlPlaneService(control_plane, now=now), server
+        ControlPlaneService(control_plane, now=now, workflow_runtime=workflow_runtime), server
     )
     runner_service = RunnerControlService(control_plane, now=now, workflow_runtime=workflow_runtime)
     runner_control_pb2_grpc.add_RunnerControlServicer_to_server(runner_service, server)
     return runner_service
+
+
+async def _db_health_loop(
+    pool: Any, health: HealthState, stop_event: asyncio.Event, interval: timedelta = timedelta(seconds=15)
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await pool.fetchval("SELECT 1")
+            health.mark_db_check(True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("database health check failed")
+            health.mark_db_check(False)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
+        except TimeoutError:
+            pass
+
+
+def _log_unexpected_completion(name: str, health: HealthState, shutdown: asyncio.Event, task: asyncio.Task[None]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is None:
+        if shutdown.is_set():
+            return  # a normal, requested shutdown — the loop exited because it was told to
+        _LOGGER.error("%s task ended unexpectedly without an exception", name)
+    else:
+        _LOGGER.error("%s task ended unexpectedly", name, exc_info=error)
+    health.mark_loop_dead(name)
+    shutdown.set()
 
 
 async def serve(
@@ -160,43 +223,41 @@ async def serve(
     shutdown = stop_event or asyncio.Event()
     factory = control_plane_factory or AsyncpgControlPlane.connect
     control_plane = await factory(active_config.database_url)
-    if isinstance(control_plane, AsyncpgControlPlane):
-        from moirai.persistence.migrations import MigrationRunner
-        migrations = await MigrationRunner(control_plane._pool).run()
-        if migrations:
-            _LOGGER.info("applied migrations", extra={"migrations": migrations})
-    if isinstance(control_plane, AsyncpgControlPlane):
-        await _bootstrap_initial_setup(control_plane._pool)
-        await _seed_issue_if_needed(control_plane._pool)
+    health = HealthState()
     server = grpc.aio.server()
     workflow_runtime: Any | None = None
-    if isinstance(control_plane, AsyncpgControlPlane):
-        from moirai.code_hosts import GitHubCliCodeHost
-        from moirai.issue_trackers import GitHubCliIssueTracker, GitHubRepository
-        from moirai.workflows.runtime import build_persisted_runtime
-        repos_by_id: dict[str, GitHubRepository] = {}
-        async with control_plane._pool.acquire() as conn:
-            rows = await conn.fetch("SELECT id, repository_url FROM app.projects WHERE enabled = true")
-            for row in rows:
-                try:
-                    repos_by_id[str(row["id"])] = GitHubRepository.from_remote_url(str(row["repository_url"]))
-                except ValueError:
-                    pass
-        code_host = GitHubCliCodeHost(next(iter(repos_by_id.values()))) if repos_by_id else None
-        issue_tracker: Any = None
-        if repos_by_id:
-            repo = next(iter(repos_by_id.values()))
-            issue_tracker = GitHubCliIssueTracker(repo)
-        checkpointer = await _build_checkpointer(active_config.database_url)
-        workflow_runtime = build_persisted_runtime(
-            control_plane._pool, checkpointer=checkpointer, code_host=code_host, issue_tracker=issue_tracker,
-        )
-    runner_service = register_services(server, control_plane, workflow_runtime=workflow_runtime)
     scheduler_task: asyncio.Task[None] | None = None
     issue_sync_task: asyncio.Task[None] | None = None
-    if isinstance(control_plane, AsyncpgControlPlane):
+    db_health_task: asyncio.Task[None] | None = None
+
+    supports_durability = isinstance(control_plane, AsyncpgControlPlane)
+    if supports_durability:
+        pool = control_plane.pool
+
+        from moirai.persistence.migrations import MigrationRunner
+        migrations = await MigrationRunner(pool).run()
+        if migrations:
+            _LOGGER.info("applied migrations", extra={"migrations": migrations})
+
+        await _bootstrap_initial_setup(pool)
+        await _seed_issue_if_needed(pool)
+
         from moirai.scheduler import AsyncpgLeader, Scheduler
         from moirai.services.issue_sync import IssueSync, github_issue_tracker_for_project
+        from moirai.workflows.code_host_factory import ProjectCodeHostFactory
+        from moirai.workflows.runtime import build_persisted_runtime
+
+        code_hosts = ProjectCodeHostFactory(pool)
+        checkpointer = await _build_checkpointer(active_config.database_url)
+        health.mark_checkpointer(checkpointer is not None)
+        workflow_runtime = build_persisted_runtime(
+            pool,
+            checkpointer=checkpointer,
+            code_host_factory=code_hosts.code_host,
+            issue_tracker_factory=code_hosts.issue_tracker,
+        )
+
+        runner_service = register_services(server, control_plane, workflow_runtime=workflow_runtime)
 
         scheduler = Scheduler(
             control_plane,
@@ -204,20 +265,39 @@ async def serve(
             control_plane.build_task_packet,
             timedelta(seconds=600),
         )
-        leader = AsyncpgLeader(control_plane._pool, 712345)
+        leader = AsyncpgLeader(pool, 712345)
         scheduler_task = asyncio.create_task(
             scheduler.run_with_leader(
                 shutdown,
                 lambda: datetime.now(UTC),
                 timedelta(seconds=5),
                 leader,
+                on_tick=health.mark_scheduler_tick,
             )
         )
+        scheduler_task.add_done_callback(
+            lambda task: _log_unexpected_completion("scheduler", health, shutdown, task)
+        )
+
         issue_sync = IssueSync(control_plane, github_issue_tracker_for_project)
         await issue_sync.restore_retry_state(datetime.now(UTC))
         issue_sync_task = asyncio.create_task(
-            issue_sync.run(shutdown, lambda: datetime.now(UTC), timedelta(minutes=1))
+            issue_sync.run(
+                shutdown, lambda: datetime.now(UTC), timedelta(minutes=1), on_run=health.mark_issue_sync_run
+            )
         )
+        issue_sync_task.add_done_callback(
+            lambda task: _log_unexpected_completion("issue_sync", health, shutdown, task)
+        )
+
+        db_health_task = asyncio.create_task(_db_health_loop(pool, health, shutdown))
+    else:
+        _LOGGER.warning(
+            "control plane implementation does not support durability features "
+            "(migrations, workflow checkpointing, scheduling, issue sync) — running in reduced capacity"
+        )
+        register_services(server, control_plane)
+
     port = server.add_insecure_port(active_config.grpc_bind)
     if port == 0:
         shutdown.set()
@@ -225,6 +305,8 @@ async def serve(
             await scheduler_task
         if issue_sync_task is not None:
             await issue_sync_task
+        if db_health_task is not None:
+            await db_health_task
         await control_plane.close()
         raise RuntimeError("orchestrator gRPC endpoint could not bind")
     _install_signal_handlers(shutdown)
@@ -242,6 +324,10 @@ async def serve(
         shutdown.set()
         if scheduler_task is not None:
             await scheduler_task
+        if issue_sync_task is not None:
+            await issue_sync_task
+        if db_health_task is not None:
+            await db_health_task
         await server.stop(grace=5)
         await control_plane.close()
 

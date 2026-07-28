@@ -8,6 +8,7 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -53,6 +54,14 @@ func Dial(ctx context.Context, endpoint string) (*Client, error) {
 
 func (c *Client) Close() error {
 	return c.conn.Close()
+}
+
+// Healthy reports whether the gRPC connection to the orchestrator is usable.
+// It inspects the channel's connectivity state rather than issuing an RPC, so
+// it is cheap enough to call on every health/readiness probe.
+func (c *Client) Healthy() bool {
+	state := c.conn.GetState()
+	return state == connectivity.Ready || state == connectivity.Idle
 }
 
 func (c *Client) Login(ctx context.Context, username, password string) (*controlv1.LoginResponse, error) {
@@ -139,6 +148,18 @@ func (c *Client) ListRunners(ctx context.Context) (*controlv1.ListRunnersRespons
 
 func (c *Client) ListWorkflows(ctx context.Context) (*controlv1.ListWorkflowsResponse, error) {
 	resp, err := c.client.ListWorkflows(ctx, &controlv1.ListWorkflowsRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) SubmitHumanDecision(ctx context.Context, workflowRunID, decision, comment string) (*controlv1.SubmitHumanDecisionResponse, error) {
+	resp, err := c.client.SubmitHumanDecision(ctx, &controlv1.SubmitHumanDecisionRequest{
+		WorkflowRunId: workflowRunID,
+		Decision:      decision,
+		Comment:       comment,
+	})
 	if err != nil {
 		return nil, mapError(err)
 	}

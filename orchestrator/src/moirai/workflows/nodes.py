@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -8,6 +9,9 @@ from moirai.issue_trackers import IssueTracker
 
 from .issue_graph import IssueWorkflowNodes, IssueWorkflowState, WorkflowUpdate
 
+
+CodeHostFactory = Callable[[str], "CodeHost | None | Awaitable[CodeHost | None]"]
+IssueTrackerFactory = Callable[[str], "IssueTracker | None | Awaitable[IssueTracker | None]"]
 
 _MAX_PLANNING_ATTEMPTS = 2
 _MAX_IMPLEMENTATION_ATTEMPTS = 3
@@ -42,8 +46,8 @@ async def _await(value: Any) -> Any:
 class PersistedWorkflowNodes:
     persistence: WorkflowPersistence
     dispatcher: ExecutionDispatcher
-    code_host: CodeHost | None = None
-    issue_tracker: IssueTracker | None = None
+    code_host_factory: CodeHostFactory | None = None
+    issue_tracker_factory: IssueTrackerFactory | None = None
 
     def build(self) -> IssueWorkflowNodes:
         return IssueWorkflowNodes(
@@ -96,13 +100,14 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "developer", "pushing", "ci_repair_attempts")
 
     async def create_pull_request(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if self.code_host is None:
+        code_host = await self._resolve_code_host(state)
+        if code_host is None:
             return await self._transition(state, "pr_created", {"status": "pr_created"})
         branch = state.get("branch_name", "")
         base_branch = state.get("base_branch", "main")
         issue_id = state.get("issue_id", "")
         workflow_run_id = _workflow_run_id(state)
-        pr = await self.code_host.create_or_find_pull_request(
+        pr = await code_host.create_or_find_pull_request(
             workflow_id=workflow_run_id,
             branch=branch,
             base_branch=base_branch,
@@ -116,9 +121,10 @@ class PersistedWorkflowNodes:
         })
 
     async def wait_for_checks(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if self.code_host is None or not state.get("pull_request_id"):
+        code_host = await self._resolve_code_host(state)
+        if code_host is None or not state.get("pull_request_id"):
             return await self._transition(state, "waiting_github_checks", {"status": "waiting_github_checks"})
-        checks = await self.code_host.required_checks(state["pull_request_id"])
+        checks = await code_host.required_checks(state["pull_request_id"])
         all_passing = all(
             check.status.value in {"passing", "skipped"}
             for check in checks
@@ -140,15 +146,17 @@ class PersistedWorkflowNodes:
         return await self._transition(state, "waiting_human", updates)
 
     async def merge(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if self.code_host is not None and state.get("pull_request_id"):
+        code_host = await self._resolve_code_host(state)
+        if code_host is not None and state.get("pull_request_id"):
             method = state.get("merge_method", "squash")
-            await self.code_host.merge_pull_request(state["pull_request_id"], method)
+            await code_host.merge_pull_request(state["pull_request_id"], method)
         return await self._transition(state, "merging", {"status": "merging"})
 
     async def complete(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if self.issue_tracker is not None and state.get("issue_id"):
-            await self.issue_tracker.close_issue(state["issue_id"])
-            await self.issue_tracker.add_labels(state["issue_id"], ["agent:delivered"])
+        issue_tracker = await self._resolve_issue_tracker(state)
+        if issue_tracker is not None and state.get("issue_id"):
+            await issue_tracker.close_issue(state["issue_id"])
+            await issue_tracker.add_labels(state["issue_id"], ["agent:delivered"])
         return await self._transition(state, "completed", {"status": "completed"})
 
     async def blocked(self, state: IssueWorkflowState) -> WorkflowUpdate:
@@ -156,6 +164,16 @@ class PersistedWorkflowNodes:
         return await self._transition(
             state, "blocked", {"status": "blocked", "blocking_reason": reason}
         )
+
+    async def _resolve_code_host(self, state: IssueWorkflowState) -> CodeHost | None:
+        if self.code_host_factory is None:
+            return None
+        return await _await(self.code_host_factory(state.get("project_id", "")))
+
+    async def _resolve_issue_tracker(self, state: IssueWorkflowState) -> IssueTracker | None:
+        if self.issue_tracker_factory is None:
+            return None
+        return await _await(self.issue_tracker_factory(state.get("project_id", "")))
 
     async def _dispatch(
         self,

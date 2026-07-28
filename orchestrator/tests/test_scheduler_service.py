@@ -244,6 +244,68 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(leadership_checks, 3)
         self.assertEqual(len(workflows), 1)
 
+    async def test_run_survives_is_leader_raising_and_keeps_ticking(self) -> None:
+        control_plane = self._control_plane()
+        stop_event = asyncio.Event()
+        calls = 0
+
+        async def flaky_is_leader() -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("connection lost")
+            stop_event.set()
+            return False
+
+        async def deliver(offer: object, packet: dict[str, object]) -> bool:
+            del offer, packet
+            return True
+
+        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
+        await scheduler.run(stop_event, lambda: NOW, timedelta(milliseconds=1), flaky_is_leader)
+        self.assertEqual(calls, 2)
+
+    async def test_run_survives_tick_raising_offer_delivery_error(self) -> None:
+        control_plane = self._control_plane()
+        stop_event = asyncio.Event()
+        calls = 0
+
+        async def failing_deliver(offer: object, packet: dict[str, object]) -> bool:
+            del offer, packet
+            raise RuntimeError("delivery exploded")
+
+        async def is_leader() -> bool:
+            nonlocal calls
+            calls += 1
+            if calls >= 2:
+                stop_event.set()
+            return True
+
+        scheduler = Scheduler(control_plane, failing_deliver, lambda scheduled: {}, timedelta(seconds=30))
+        await scheduler.run(stop_event, lambda: NOW, timedelta(milliseconds=1), is_leader)
+        self.assertGreaterEqual(calls, 2)
+
+    async def test_run_invokes_on_tick_after_each_successful_iteration(self) -> None:
+        control_plane = self._control_plane()
+        stop_event = asyncio.Event()
+        ticks = 0
+
+        async def deliver(offer: object, packet: dict[str, object]) -> bool:
+            del offer, packet
+            return True
+
+        async def is_leader() -> bool:
+            stop_event.set()
+            return True
+
+        def on_tick() -> None:
+            nonlocal ticks
+            ticks += 1
+
+        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
+        await scheduler.run(stop_event, lambda: NOW, timedelta(milliseconds=1), is_leader, on_tick=on_tick)
+        self.assertEqual(ticks, 1)
+
     async def test_tick_expires_prior_undelivered_offer_before_scheduling(self) -> None:
         control_plane = self._control_plane()
 

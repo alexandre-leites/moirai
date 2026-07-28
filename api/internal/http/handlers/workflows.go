@@ -18,6 +18,7 @@ func NewWorkflowHandlers(client *orchestrator.Client) *WorkflowHandlers {
 
 func (h *WorkflowHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/workflows", auth.RequireSession(http.HandlerFunc(h.list)))
+	mux.Handle("POST /api/v1/workflows/{workflow_id}/decision", requireMutation(h.submitDecision))
 }
 
 func (h *WorkflowHandlers) list(w http.ResponseWriter, r *http.Request) {
@@ -42,4 +43,31 @@ func (h *WorkflowHandlers) list(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	apiserver.WriteJSON(w, http.StatusOK, map[string]any{"workflows": workflows})
+}
+
+func (h *WorkflowHandlers) submitDecision(w http.ResponseWriter, r *http.Request) {
+	workflowID := r.PathValue("workflow_id")
+	var body struct {
+		Decision string `json:"decision"`
+		Comment  string `json:"comment"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if body.Decision != "approved" && body.Decision != "changes_requested" {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", "decision must be approved or changes_requested")
+		return
+	}
+	resp, err := h.client.SubmitHumanDecision(requestContext(r), workflowID, body.Decision, body.Comment)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, map[string]any{
+		"id":        resp.Workflow.Id,
+		"projectId": resp.Workflow.ProjectId,
+		"status":    resp.Workflow.Status,
+		"phase":     resp.Workflow.Phase,
+	})
 }

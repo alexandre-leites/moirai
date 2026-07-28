@@ -64,6 +64,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.ListRunnersResponse.FromString,
                 _registered_method=True)
+        self.SubmitHumanDecision = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/SubmitHumanDecision',
+                request_serializer=proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.SubmitHumanDecisionResponse.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServicer:
@@ -129,6 +134,12 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SubmitHumanDecision(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -181,6 +192,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.ListRunners,
                     request_deserializer=proto_dot_control__plane__pb2.ListRunnersRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.ListRunnersResponse.SerializeToString,
+            ),
+            'SubmitHumanDecision': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitHumanDecision,
+                    request_deserializer=proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.SubmitHumanDecisionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -453,6 +469,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/ListRunners',
             proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
             proto_dot_control__plane__pb2.ListRunnersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitHumanDecision(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/SubmitHumanDecision',
+            proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.SerializeToString,
+            proto_dot_control__plane__pb2.SubmitHumanDecisionResponse.FromString,
             options,
             channel_credentials,
             insecure,
