@@ -1,12 +1,22 @@
 # Moirai Web Dashboard
 
-Management dashboard for monitoring workflows and managing projects.
+The web service is a React application built by Vite and served by nginx. Its nginx configuration serves the application on port `8080`, proxies `/api/` to the Compose `api:8080` service, and falls back to `index.html` for client-side routes.
 
-## Setup
+## Development
 
-- Install dependencies: `npm install`
-- Run development server: `npm run dev`
+```bash
+npm ci
+npm run dev
+```
 
-## Building
+The Vite development server has no API proxy configuration. Use the Compose dashboard for `/api/` proxying, or configure a development reverse proxy outside this package.
 
-- Production build: `npm run build`
+## Build and validation
+
+```bash
+npm run typecheck
+npm run lint
+npm run build
+```
+
+There are no application-specific web environment variables in the current source tree.

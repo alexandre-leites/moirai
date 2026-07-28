@@ -1,5 +1,6 @@
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from moirai.workflows.runner_events import (
     RunnerEventError,
@@ -8,6 +9,7 @@ from moirai.workflows.runner_events import (
     validate_runner_event,
     workflow_transition_for_terminal_event,
 )
+from moirai.workflows.schema_validation import SchemaNotFoundError
 
 
 class ValidateRunnerEventTests(unittest.TestCase):
@@ -197,6 +199,17 @@ class WorkflowTransitionTests(unittest.TestCase):
         transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
         assert transition is not None
         self.assertFalse(transition.state_updates.get("review_approved"))
+
+    def test_missing_result_schema_fails_closed_without_rejecting_the_event(self) -> None:
+        summary = self._summary("completed", "job-1-review", result=self._review_result("approved"))
+        with patch(
+            "moirai.workflows.runner_events.load_schema",
+            side_effect=SchemaNotFoundError("missing schema"),
+        ):
+            transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "ai_review")
+        self.assertFalse(transition.state_updates["review_approved"])
 
     def test_completed_reviewer_with_human_required_verdict_transitions_to_blocked(self) -> None:
         summary = self._summary("completed", "job-1-review", result=self._review_result("human_required"))

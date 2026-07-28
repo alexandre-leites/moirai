@@ -51,6 +51,7 @@ services:
     restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
+      LOOP_API_COOKIE_SECURE: "false"
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]

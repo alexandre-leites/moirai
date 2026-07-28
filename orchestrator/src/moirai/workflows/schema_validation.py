@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import json
 from functools import cache
-from pathlib import Path
+from importlib.resources import files
 from typing import Any
-
-_SCHEMAS_DIR = Path(__file__).resolve().parents[4] / "schemas"
 
 _TYPE_MAP: dict[str, type | tuple[type, ...]] = {
     "object": dict,
@@ -22,10 +20,9 @@ class SchemaNotFoundError(ValueError):
 
 @cache
 def load_schema(name: str) -> dict[str, Any]:
-    path = _SCHEMAS_DIR / f"{name}.schema.json"
     try:
-        contents = path.read_text("utf-8")
-    except OSError as error:
+        contents = files("moirai.workflows").joinpath("schemas", f"{name}.schema.json").read_text("utf-8")
+    except (ModuleNotFoundError, OSError) as error:
         raise SchemaNotFoundError(f"schema {name!r} could not be read") from error
     return json.loads(contents)
 

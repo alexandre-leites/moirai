@@ -9,7 +9,7 @@ from typing import Any
 
 from moirai.domain.issues import LabelPolicy, reconcile_labels, synchronize_issue
 from moirai.domain.models import Project
-from moirai.issue_trackers.github_cli import GitHubCliIssueTracker, GitHubRepository
+from moirai.issue_trackers.github_cli import CommandRunner, GitHubCliIssueTracker, GitHubRepository
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,10 +24,12 @@ class IssueSyncError(RuntimeError):
     pass
 
 
-def github_issue_tracker_for_project(project: Project) -> GitHubCliIssueTracker:
+def github_issue_tracker_for_project(
+    project: Project, command_runner: CommandRunner | None = None
+) -> GitHubCliIssueTracker:
     if project.repository_url is None:
         raise IssueSyncError(f"project {project.id} has no GitHub repository URL")
-    return GitHubCliIssueTracker(GitHubRepository.from_remote_url(project.repository_url))
+    return GitHubCliIssueTracker(GitHubRepository.from_remote_url(project.repository_url), command_runner)
 
 
 class IssueSync:

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from moirai.code_hosts import CodeHost, GitHubCliCodeHost
 from moirai.issue_trackers import GitHubRepository, IssueTracker
-from moirai.issue_trackers.github_cli import GitHubCliIssueTracker
+from moirai.issue_trackers.github_cli import CommandRunner, GitHubCliIssueTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,8 +20,14 @@ class ProjectCodeHostFactory:
     without an orchestrator restart) and explicitly invalidatable.
     """
 
-    def __init__(self, pool: Any, cache_ttl_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        command_runner: CommandRunner | None = None,
+        cache_ttl_seconds: float = 30.0,
+    ) -> None:
         self._pool = pool
+        self._command_runner = command_runner
         self._cache_ttl_seconds = cache_ttl_seconds
         self._cache: dict[str, tuple[float, GitHubRepository | None]] = {}
 
@@ -30,11 +36,11 @@ class ProjectCodeHostFactory:
 
     async def code_host(self, project_id: str) -> CodeHost | None:
         repository = await self._repository(project_id)
-        return GitHubCliCodeHost(repository) if repository is not None else None
+        return GitHubCliCodeHost(repository, self._command_runner) if repository is not None else None
 
     async def issue_tracker(self, project_id: str) -> IssueTracker | None:
         repository = await self._repository(project_id)
-        return GitHubCliIssueTracker(repository) if repository is not None else None
+        return GitHubCliIssueTracker(repository, self._command_runner) if repository is not None else None
 
     async def _repository(self, project_id: str) -> GitHubRepository | None:
         if not project_id:

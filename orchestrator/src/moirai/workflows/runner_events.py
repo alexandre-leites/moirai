@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .schema_validation import load_schema, validate
+from .schema_validation import SchemaNotFoundError, load_schema, validate
 
 VALID_EVENT_TYPES = frozenset({"started", "progress", "log", "completed", "failed", "cancelled"})
 TERMINAL_EVENT_TYPES = frozenset({"completed", "failed", "cancelled"})
@@ -163,7 +163,10 @@ def _schema_field(result: dict[str, Any] | None, schema_name: str, field: str) -
     and values outside the schema's enum)."""
     if not isinstance(result, dict):
         return None
-    schema = load_schema(schema_name)
+    try:
+        schema = load_schema(schema_name)
+    except SchemaNotFoundError:
+        return None
     if validate(result, schema):
         return None
     value = result.get(field)

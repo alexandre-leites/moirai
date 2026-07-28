@@ -1,12 +1,42 @@
 # Moirai Orchestrator
 
-Durable orchestration control plane for Moirai.
+The orchestrator is the durable gRPC control plane. It applies database migrations, owns scheduling and workflow state, synchronizes GitHub issues, and receives runner events on port `50051`.
 
-## Setup
+## Run locally
 
-- Ensure `PYTHONPATH=src` is set.
-- Install dependencies: `pip install -e .`
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+LOOP_DATABASE_URL='postgresql://loop:password@localhost/loop' PYTHONPATH=src .venv/bin/python -m moirai.main
+```
 
-## Testing
+The startup path requires PostgreSQL and durable LangGraph checkpointing. `LOOP_ALLOW_NO_CHECKPOINTER=true` is only for reduced-capability tests and development environments.
 
-Run tests using: `PYTHONPATH=src python3 -m unittest discover -s tests -v`
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LOOP_DATABASE_URL` or `LOOP_DATABASE_URL_FILE` | required | PostgreSQL connection URL. Configure exactly one. |
+| `LOOP_GRPC_BIND` | `0.0.0.0:50051` | gRPC bind host and port. |
+| `LOOP_GITHUB_TOKEN` or `LOOP_GITHUB_TOKEN_FILE` | unset | Token passed to `gh` as `GH_TOKEN` for GitHub issue, pull request, and check operations. When set, startup verifies `gh auth status`. |
+| `LOOP_INITIAL_ADMIN_USERNAME` | `admin` | Username created only when the user table is empty. |
+| `LOOP_INITIAL_ADMIN_PASSWORD` or `LOOP_INITIAL_ADMIN_PASSWORD_FILE` | unset | Initial administrator password. Without it, bootstrap skips creating the user. |
+| `RUNNER_REGISTRATION_TOKEN` | unset | Raw registration token seeded only during initial setup; it must match the runner's registration token. |
+| `LOOP_SEED_PROJECT_NAME` | `demo` | Initial project name used only during bootstrap. |
+| `LOOP_SEED_PROJECT_REPOSITORY_URL` | `https://github.com/example/demo.git` | Initial project repository URL. |
+| `LOOP_SEED_TOKEN_LABELS` | `linux` | Comma-separated labels permitted by the seeded registration token. |
+| `LOOP_SEED_ISSUE_TITLE` | unset | Optional initial issue title. |
+| `LOOP_SEED_ISSUE_BODY` | unset | Initial issue body. |
+| `LOOP_ALLOW_NO_CHECKPOINTER` | unset | Permit an unavailable checkpointer only when `true`, `yes`, or `1`; this disables durable workflow capability. |
+
+Secret values accept direct or `_FILE` forms, but not both. Secret files must be regular files no larger than 16 KiB.
+
+Planner and reviewer result schemas are package resources in `src/moirai/workflows/schemas/`, so an image built with `orchestrator/` as its Docker context contains the schemas it validates.
+
+## Validation
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests
+python3 -m ruff check src tests
+python3 -m mypy src
+```

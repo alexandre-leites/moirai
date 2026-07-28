@@ -1,0 +1,498 @@
+openapi: 3.1.0
+info:
+  title: Moirai Public API
+  version: 0.1.0
+  description: |
+    HTTP gateway for the Moirai control plane. The API uses the `loop_session`
+    cookie created by the login endpoint. Mutating authenticated requests also
+    require the `X-CSRF-Token` header to equal the `loop_csrf` cookie value.
+servers:
+  - url: http://localhost:8080
+paths:
+  /live:
+    get:
+      summary: Liveness probe
+      responses:
+        '200':
+          description: API process is alive
+  /ready:
+    get:
+      summary: Readiness probe
+      responses:
+        '200':
+          description: The orchestrator connection is reachable
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/health:
+    get:
+      summary: API and orchestrator health
+      responses:
+        '200':
+          description: Both services are healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: The API is running but the orchestrator is unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /api/v1/auth/login:
+    post:
+      summary: Create a browser session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Session cookies were set
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Login rate limit exceeded
+  /api/v1/auth/logout:
+    post:
+      summary: Clear the browser session
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      responses:
+        '204':
+          description: Session cookies cleared
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/auth/me:
+    get:
+      summary: Get the authenticated user
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/projects:
+    get:
+      summary: List projects
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Projects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Create a project
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectConfiguration'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/projects/{project_id}:
+    put:
+      summary: Replace a project configuration
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectConfiguration'
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/projects/{project_id}/enable:
+    post:
+      summary: Enable scheduling for a project
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+      responses:
+        '200':
+          description: Enabled project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/projects/{project_id}/disable:
+    post:
+      summary: Disable scheduling for a project
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+      responses:
+        '200':
+          description: Disabled project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/runner-tokens:
+    get:
+      summary: List runner registration tokens
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Registration tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens]
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunnerToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Create a runner registration token
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [allowedLabels]
+              properties:
+                allowedLabels:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Registration token; retain the token value because it is not returned by list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedRunnerToken'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/runner-tokens/{token_id}:
+    delete:
+      summary: Revoke a runner registration token
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/TokenID'
+      responses:
+        '204':
+          description: Token revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/runners:
+    get:
+      summary: List registered runners
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Runners
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runners]
+                properties:
+                  runners:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Runner'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/workflows:
+    get:
+      summary: List workflows
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Workflows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflows]
+                properties:
+                  workflows:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Workflow'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/workflows/{workflow_id}/decision:
+    post:
+      summary: Submit a required human decision
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [approved, changes_requested]
+                comment:
+                  type: string
+      responses:
+        '200':
+          description: Workflow after the decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: loop_session
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+  parameters:
+    ProjectID:
+      name: project_id
+      in: path
+      required: true
+      schema: { type: string }
+    TokenID:
+      name: token_id
+      in: path
+      required: true
+      schema: { type: string }
+    WorkflowID:
+      name: workflow_id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Authentication is required or invalid
+    Forbidden:
+      description: A CSRF token is required for this mutation
+    NotFound:
+      description: Requested resource was not found
+    ValidationError:
+      description: The control plane rejected valid JSON input
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ServiceUnavailable:
+      description: A dependent service is unavailable
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+    LoginResponse:
+      type: object
+      required: [userId]
+      properties:
+        userId: { type: string }
+    User:
+      type: object
+      required: [userId, username, role]
+      properties:
+        userId: { type: string }
+        username: { type: string }
+        role: { type: string }
+    ProjectConfiguration:
+      type: object
+      properties:
+        name: { type: string }
+        repositoryMode: { type: string }
+        repositoryUrl: { type: string }
+        localRepositoryPath: { type: string }
+        defaultBranch: { type: string }
+        requiredRunnerLabels:
+          type: array
+          items: { type: string }
+    Project:
+      type: object
+      required: [id, name, enabled]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+    RunnerToken:
+      type: object
+      required: [id, allowedLabels, expiresAt]
+      properties:
+        id: { type: string }
+        allowedLabels:
+          type: array
+          items: { type: string }
+        expiresAt: { type: string }
+        usedAt: { type: string }
+        revokedAt: { type: string }
+    CreatedRunnerToken:
+      type: object
+      required: [token, expiresAt]
+      properties:
+        token: { type: string }
+        expiresAt: { type: string }
+    Runner:
+      type: object
+      required: [id, name, enabled, draining, status, labels, lastSeenAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        draining: { type: boolean }
+        status: { type: string }
+        labels:
+          type: array
+          items: { type: string }
+        lastSeenAt: { type: string }
+    Workflow:
+      type: object
+      required: [id, projectId, status, phase]
+      properties:
+        id: { type: string }
+        projectId: { type: string }
+        status: { type: string }
+        phase: { type: string }
+    Health:
+      type: object
+      required: [status, orchestrator]
+      properties:
+        status: { type: string, enum: [healthy, degraded] }
+        orchestrator: { type: string, enum: [reachable, unreachable] }
+    Problem:
+      type: object
+      required: [status, title]
+      properties:
+        status: { type: integer }
+        title: { type: string }
+        detail: { type: string }

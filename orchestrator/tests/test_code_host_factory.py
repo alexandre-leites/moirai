@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from moirai.code_hosts import GitHubCliCodeHost
-from moirai.issue_trackers.github_cli import GitHubCliIssueTracker
+from moirai.issue_trackers.github_cli import CommandRunner, GitHubCliIssueTracker
 from moirai.workflows.code_host_factory import ProjectCodeHostFactory
 
 
@@ -34,6 +34,20 @@ class ProjectCodeHostFactoryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(code_host, GitHubCliCodeHost)
         self.assertEqual(code_host._repository.slug, "acme/widgets")
+
+    async def test_uses_the_configured_github_command_runner(self) -> None:
+        project_id = str(uuid4())
+        pool = _FakePool()
+        pool.repository_urls[project_id] = "https://github.com/acme/widgets.git"
+        runner = cast(CommandRunner, object())
+        factory = ProjectCodeHostFactory(pool, command_runner=runner)
+
+        code_host = await factory.code_host(project_id)
+        issue_tracker = await factory.issue_tracker(project_id)
+
+        assert code_host is not None and issue_tracker is not None
+        self.assertIs(code_host._runner, runner)
+        self.assertIs(issue_tracker._runner, runner)
 
     async def test_resolves_issue_tracker_from_the_projects_own_repository_url(self) -> None:
         project_id = str(uuid4())

@@ -285,12 +285,16 @@ async def serve(
 
         await _bootstrap_initial_setup(pool)
         await _seed_issue_if_needed(pool)
+        from moirai.issue_trackers.github_cli import SubprocessCommandRunner, verify_gh_ready
         from moirai.scheduler import AsyncpgLeader, Scheduler
         from moirai.services.issue_sync import IssueSync, github_issue_tracker_for_project
         from moirai.workflows.code_host_factory import ProjectCodeHostFactory
         from moirai.workflows.runtime import build_persisted_runtime
 
-        code_hosts = ProjectCodeHostFactory(pool)
+        github_runner = SubprocessCommandRunner(active_config.github_token)
+        if active_config.github_token is not None:
+            await verify_gh_ready(github_runner)
+        code_hosts = ProjectCodeHostFactory(pool, command_runner=github_runner)
         checkpointer = await _build_checkpointer(active_config.database_url)
         health.mark_checkpointer(checkpointer is not None)
         workflow_runtime = build_persisted_runtime(
@@ -322,7 +326,9 @@ async def serve(
             lambda task: _log_unexpected_completion("scheduler", health, shutdown, task)
         )
 
-        issue_sync = IssueSync(control_plane, github_issue_tracker_for_project)
+        issue_sync = IssueSync(
+            control_plane, lambda project: github_issue_tracker_for_project(project, github_runner)
+        )
         await issue_sync.restore_retry_state(datetime.now(UTC))
         issue_sync_task = asyncio.create_task(
             issue_sync.run(
