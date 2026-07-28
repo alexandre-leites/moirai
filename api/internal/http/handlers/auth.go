@@ -18,17 +18,18 @@ type AuthHandlers struct {
 	loginLimiter *auth.RateLimiter
 }
 
-func NewAuthHandlers(client *orchestrator.Client, cookieSecure bool) *AuthHandlers {
+func NewAuthHandlers(client *orchestrator.Client, cookieSecure bool, loginLimiter *auth.RateLimiter) *AuthHandlers {
 	return &AuthHandlers{
 		client:       client,
 		cookieSecure: cookieSecure,
-		loginLimiter: auth.NewRateLimiter(time.Minute, 10),
+		loginLimiter: loginLimiter,
 	}
 }
 
 func (h *AuthHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/auth/login", h.loginLimiter.Middleware(http.HandlerFunc(h.login)))
 	mux.Handle("POST /api/v1/auth/logout", auth.RequireSession(auth.RequireCSRF(http.HandlerFunc(h.logout))))
+	mux.Handle("GET /api/v1/auth/me", auth.RequireSession(http.HandlerFunc(h.me)))
 }
 
 func (h *AuthHandlers) login(w http.ResponseWriter, r *http.Request) {
@@ -75,4 +76,21 @@ func (h *AuthHandlers) logout(w http.ResponseWriter, r *http.Request) {
 	_ = r
 	auth.ClearSessionCookies(w, h.cookieSecure)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *AuthHandlers) me(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.WhoAmI(requestContext(r))
+	if err != nil {
+		if errors.Is(err, orchestrator.ErrUnauthorized) {
+			apiserver.WriteError(w, http.StatusUnauthorized, "Unauthorized", "")
+			return
+		}
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, map[string]string{
+		"userId":   resp.UserId,
+		"username": resp.Username,
+		"role":     resp.Role,
+	})
 }

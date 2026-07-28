@@ -57,6 +57,18 @@ h3 { font-size: 16px; margin-bottom: 12px; }
 .error { color: var(--danger); margin-bottom: 12px; padding: 8px; background: rgba(248,81,73,0.1); border-radius: 6px; }
 .warning { color: var(--warning); }
 
+.error-boundary {
+  max-width: 480px;
+  margin: 80px auto;
+  padding: 24px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.error-boundary h1 { font-size: 18px; margin-bottom: 8px; }
+.error-boundary p { color: var(--text-dim); margin-bottom: 16px; }
+
 .login-page {
   display: flex;
   flex-direction: column;

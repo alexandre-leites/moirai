@@ -2,11 +2,18 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 )
+
+// defaultTrustedProxies covers the private address ranges the API's immediate peer
+// occupies in the shipped Compose topology (nginx sits on an internal Docker network).
+// Operators fronting the API with a different reverse proxy, or exposing it directly to
+// untrusted networks, should set LOOP_API_TRUSTED_PROXIES explicitly (empty to disable).
+const defaultTrustedProxies = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128"
 
 type Config struct {
 	BindAddress          string
@@ -14,6 +21,7 @@ type Config struct {
 	CookieSecure         bool
 	CookieKey            string
 	MaxBodyBytes         int64
+	TrustedProxies       []*net.IPNet
 }
 
 func FromEnvironment() (Config, error) {
@@ -38,6 +46,15 @@ func FromEnvironment() (Config, error) {
 		}
 		cfg.MaxBodyBytes = parsed
 	}
+	trustedProxiesValue := defaultTrustedProxies
+	if value, ok := os.LookupEnv("LOOP_API_TRUSTED_PROXIES"); ok {
+		trustedProxiesValue = value
+	}
+	trustedProxies, err := parseTrustedProxies(trustedProxiesValue)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TrustedProxies = trustedProxies
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -58,6 +75,33 @@ func (c Config) Validate() error {
 		return errors.New("LOOP_API_COOKIE_KEY must be at least 32 printable bytes")
 	}
 	return nil
+}
+
+func parseTrustedProxies(value string) ([]*net.IPNet, error) {
+	var networks []*net.IPNet
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if !strings.Contains(entry, "/") {
+			ip := net.ParseIP(entry)
+			if ip == nil {
+				return nil, fmt.Errorf("LOOP_API_TRUSTED_PROXIES contains an invalid address: %q", entry)
+			}
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			entry = fmt.Sprintf("%s/%d", entry, bits)
+		}
+		_, network, err := net.ParseCIDR(entry)
+		if err != nil {
+			return nil, fmt.Errorf("LOOP_API_TRUSTED_PROXIES contains an invalid network: %q", entry)
+		}
+		networks = append(networks, network)
+	}
+	return networks, nil
 }
 
 func validAddress(value string) bool {

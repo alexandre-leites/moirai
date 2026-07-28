@@ -5,8 +5,12 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 ## Getting Started
 
 1. Copy `.env.example` to `.env`.
-2. Ensure required secrets are present in `secrets/`.
-3. Run `docker compose up --build`.
+2. Ensure required secrets are present in `secrets/` (`postgres_password`, `database_url`).
+3. In `.env`, set `RUNNER_REGISTRATION_TOKEN` to a freshly generated secret (e.g. `openssl
+   rand -hex 32`) and `LOOP_INITIAL_ADMIN_PASSWORD` to a real password. Neither has a
+   default — the orchestrator refuses to seed an admin user or a runner registration
+   token until both are set.
+4. Run `docker compose up --build`.
 
 ## Project Structure
 

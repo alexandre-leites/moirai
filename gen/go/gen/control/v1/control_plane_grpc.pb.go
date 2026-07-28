@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	ControlPlane_Login_FullMethodName                         = "/loop.control.v1.ControlPlane/Login"
+	ControlPlane_WhoAmI_FullMethodName                        = "/loop.control.v1.ControlPlane/WhoAmI"
 	ControlPlane_ListProjects_FullMethodName                  = "/loop.control.v1.ControlPlane/ListProjects"
 	ControlPlane_CreateProject_FullMethodName                 = "/loop.control.v1.ControlPlane/CreateProject"
 	ControlPlane_UpdateProject_FullMethodName                 = "/loop.control.v1.ControlPlane/UpdateProject"
@@ -37,6 +38,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type ControlPlaneClient interface {
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
+	WhoAmI(ctx context.Context, in *WhoAmIRequest, opts ...grpc.CallOption) (*WhoAmIResponse, error)
 	ListProjects(ctx context.Context, in *ListProjectsRequest, opts ...grpc.CallOption) (*ListProjectsResponse, error)
 	CreateProject(ctx context.Context, in *CreateProjectRequest, opts ...grpc.CallOption) (*CreateProjectResponse, error)
 	UpdateProject(ctx context.Context, in *UpdateProjectRequest, opts ...grpc.CallOption) (*UpdateProjectResponse, error)
@@ -61,6 +63,16 @@ func (c *controlPlaneClient) Login(ctx context.Context, in *LoginRequest, opts .
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LoginResponse)
 	err := c.cc.Invoke(ctx, ControlPlane_Login_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) WhoAmI(ctx context.Context, in *WhoAmIRequest, opts ...grpc.CallOption) (*WhoAmIResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WhoAmIResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_WhoAmI_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +184,7 @@ func (c *controlPlaneClient) SubmitHumanDecision(ctx context.Context, in *Submit
 // for forward compatibility.
 type ControlPlaneServer interface {
 	Login(context.Context, *LoginRequest) (*LoginResponse, error)
+	WhoAmI(context.Context, *WhoAmIRequest) (*WhoAmIResponse, error)
 	ListProjects(context.Context, *ListProjectsRequest) (*ListProjectsResponse, error)
 	CreateProject(context.Context, *CreateProjectRequest) (*CreateProjectResponse, error)
 	UpdateProject(context.Context, *UpdateProjectRequest) (*UpdateProjectResponse, error)
@@ -194,6 +207,9 @@ type UnimplementedControlPlaneServer struct{}
 
 func (UnimplementedControlPlaneServer) Login(context.Context, *LoginRequest) (*LoginResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Login not implemented")
+}
+func (UnimplementedControlPlaneServer) WhoAmI(context.Context, *WhoAmIRequest) (*WhoAmIResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method WhoAmI not implemented")
 }
 func (UnimplementedControlPlaneServer) ListProjects(context.Context, *ListProjectsRequest) (*ListProjectsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListProjects not implemented")
@@ -260,6 +276,24 @@ func _ControlPlane_Login_Handler(srv interface{}, ctx context.Context, dec func(
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlPlaneServer).Login(ctx, req.(*LoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_WhoAmI_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WhoAmIRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).WhoAmI(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_WhoAmI_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).WhoAmI(ctx, req.(*WhoAmIRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -454,6 +488,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Login",
 			Handler:    _ControlPlane_Login_Handler,
+		},
+		{
+			MethodName: "WhoAmI",
+			Handler:    _ControlPlane_WhoAmI_Handler,
 		},
 		{
 			MethodName: "ListProjects",

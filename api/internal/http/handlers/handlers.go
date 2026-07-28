@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
@@ -14,22 +13,21 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
-var mutationLimiter = auth.NewRateLimiter(time.Minute, 60)
-
 type ProjectHandlers struct {
-	client *orchestrator.Client
+	client  *orchestrator.Client
+	limiter *auth.RateLimiter
 }
 
-func NewProjectHandlers(client *orchestrator.Client) *ProjectHandlers {
-	return &ProjectHandlers{client: client}
+func NewProjectHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *ProjectHandlers {
+	return &ProjectHandlers{client: client, limiter: limiter}
 }
 
 func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/projects", auth.RequireSession(http.HandlerFunc(h.listProjects)))
-	mux.Handle("POST /api/v1/projects", requireMutation(h.createProject))
-	mux.Handle("PUT /api/v1/projects/{project_id}", requireMutation(h.updateProject))
-	mux.Handle("POST /api/v1/projects/{project_id}/enable", requireMutation(h.enableProject))
-	mux.Handle("POST /api/v1/projects/{project_id}/disable", requireMutation(h.disableProject))
+	mux.Handle("POST /api/v1/projects", requireMutation(h.limiter, h.createProject))
+	mux.Handle("PUT /api/v1/projects/{project_id}", requireMutation(h.limiter, h.updateProject))
+	mux.Handle("POST /api/v1/projects/{project_id}/enable", requireMutation(h.limiter, h.enableProject))
+	mux.Handle("POST /api/v1/projects/{project_id}/disable", requireMutation(h.limiter, h.disableProject))
 }
 
 func (h *ProjectHandlers) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -138,17 +136,18 @@ func projectPayload(p *controlv1.Project) map[string]any {
 }
 
 type RunnerTokenHandlers struct {
-	client *orchestrator.Client
+	client  *orchestrator.Client
+	limiter *auth.RateLimiter
 }
 
-func NewRunnerTokenHandlers(client *orchestrator.Client) *RunnerTokenHandlers {
-	return &RunnerTokenHandlers{client: client}
+func NewRunnerTokenHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *RunnerTokenHandlers {
+	return &RunnerTokenHandlers{client: client, limiter: limiter}
 }
 
 func (h *RunnerTokenHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/runner-tokens", auth.RequireSession(http.HandlerFunc(h.list)))
-	mux.Handle("POST /api/v1/runner-tokens", requireMutation(h.create))
-	mux.Handle("DELETE /api/v1/runner-tokens/{token_id}", requireMutation(h.revoke))
+	mux.Handle("POST /api/v1/runner-tokens", requireMutation(h.limiter, h.create))
+	mux.Handle("DELETE /api/v1/runner-tokens/{token_id}", requireMutation(h.limiter, h.revoke))
 }
 
 func (h *RunnerTokenHandlers) list(w http.ResponseWriter, r *http.Request) {
@@ -206,8 +205,8 @@ func (h *RunnerTokenHandlers) revoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func requireMutation(handler http.HandlerFunc) http.Handler {
-	return auth.RequireSession(auth.RequireCSRF(mutationLimiter.SessionMiddleware(handler)))
+func requireMutation(limiter *auth.RateLimiter, handler http.HandlerFunc) http.Handler {
+	return auth.RequireSession(auth.RequireCSRF(limiter.SessionMiddleware(handler)))
 }
 
 func requestContext(r *http.Request) context.Context {

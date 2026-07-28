@@ -1,11 +1,13 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ApiClient, Project } from "./api";
+import { useIsAdmin } from "./auth";
 
 export function ProjectsPage({ api }: { api: ApiClient }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const isAdmin = useIsAdmin();
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -18,23 +20,27 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
   return (
     <div>
       <h2>Projects</h2>
-      <button onClick={() => setShowCreate(!showCreate)}>
-        {showCreate ? "Cancel" : "New project"}
-      </button>
-      {showCreate && <CreateProjectForm api={api} onCreated={(p) => { setProjects([...projects, p]); setShowCreate(false); }} />}
+      {isAdmin && (
+        <button onClick={() => setShowCreate(!showCreate)}>
+          {showCreate ? "Cancel" : "New project"}
+        </button>
+      )}
+      {isAdmin && showCreate && <CreateProjectForm api={api} onCreated={(p) => { setProjects([...projects, p]); setShowCreate(false); }} />}
       {projects.length === 0 ? <p>No projects registered</p> : (
         <table>
-          <thead><tr><th>Name</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Status</th>{isAdmin && <th>Actions</th>}</tr></thead>
           <tbody>
             {projects.map((p) => (
               <tr key={p.id}>
                 <td>{p.name}</td>
                 <td>{p.enabled ? "Enabled" : "Disabled"}</td>
-                <td>
-                  <ToggleProject api={api} project={p} onToggled={(updated) => {
-                    setProjects(projects.map((x) => x.id === updated.id ? updated : x));
-                  }} />
-                </td>
+                {isAdmin && (
+                  <td>
+                    <ToggleProject api={api} project={p} onToggled={(updated) => {
+                      setProjects(projects.map((x) => x.id === updated.id ? updated : x));
+                    }} />
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>

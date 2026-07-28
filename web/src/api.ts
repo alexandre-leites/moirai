@@ -26,13 +26,37 @@ export type CreatedToken = {
   expiresAt: string;
 };
 
+export type CurrentUser = {
+  userId: string;
+  username: string;
+  role: string;
+};
+
+export class ApiError extends Error {
+  status: number;
+  detail?: string;
+
+  constructor(status: number, message: string, detail?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 type FetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export type ApiClient = {
+  // Registers a callback invoked whenever a request comes back 401 Unauthorized,
+  // so callers (AuthProvider) can treat "session gone" uniformly instead of every
+  // page having to interpret a thrown ApiError itself. Pass null to unregister.
+  setUnauthorizedHandler(handler: (() => void) | null): void;
+
   health(signal?: AbortSignal): Promise<HealthStatus>;
 
   login(username: string, password: string): Promise<{ userId: string }>;
   logout(): Promise<void>;
+  me(signal?: AbortSignal): Promise<CurrentUser>;
 
   listProjects(signal?: AbortSignal): Promise<Project[]>;
   createProject(data: {
@@ -61,8 +85,15 @@ export type ApiClient = {
   submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<Workflow>;
 };
 
+// CSRF_COOKIE_NAME must match auth.CSRFCookieName in api/internal/auth/session.go —
+// that is the cookie the server actually sets. See session_web_test.go for the
+// regression test guarding this constant against the two names drifting apart.
+const CSRF_COOKIE_NAME = "loop_csrf";
+
 const getCSRF = (): string | null => {
-  const match = document.cookie.match(/(?:^|;\s*)csrf=([^;]+)/);
+  const match = document.cookie.match(
+    new RegExp(`(?:^|;\\s*)${CSRF_COOKIE_NAME}=([^;]+)`)
+  );
   return match ? decodeURIComponent(match[1]) : null;
 };
 
@@ -73,11 +104,30 @@ function csrfHeaders(): Record<string, string> {
 }
 
 export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
-  const json = (res: Response) => {
-    if (!res.ok) throw new Error(`request failed: ${res.status}`);
+  let unauthorizedHandler: (() => void) | null = null;
+  const json = async (res: Response) => {
+    if (!res.ok) {
+      if (res.status === 401) unauthorizedHandler?.();
+      let title = `request failed: ${res.status}`;
+      let detail: string | undefined;
+      try {
+        const body = await res.json();
+        if (body && typeof body === "object") {
+          if (typeof body.title === "string") title = body.title;
+          if (typeof body.detail === "string" && body.detail) detail = body.detail;
+        }
+      } catch {
+        // Response body was not JSON (or was empty) — fall back to the generic message.
+      }
+      throw new ApiError(res.status, detail ? `${title}: ${detail}` : title, detail);
+    }
     return res.json();
   };
   return {
+    setUnauthorizedHandler(handler: (() => void) | null): void {
+      unauthorizedHandler = handler;
+    },
+
     async health(signal?: AbortSignal): Promise<HealthStatus> {
       const res = await fetchClient("/api/v1/health", { signal });
       return res.ok ? "healthy" : "unhealthy";
@@ -96,7 +146,13 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       await fetchClient("/api/v1/auth/logout", {
         method: "POST",
         headers: { ...csrfHeaders() },
+        credentials: "include",
       });
+    },
+
+    async me(signal?: AbortSignal): Promise<CurrentUser> {
+      const res = await fetchClient("/api/v1/auth/me", { signal, credentials: "include" });
+      return json(res);
     },
 
     async listProjects(signal?: AbortSignal): Promise<Project[]> {
