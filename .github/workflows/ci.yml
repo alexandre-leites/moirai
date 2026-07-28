@@ -143,7 +143,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Scan Node dependencies
-        run: cd web && npm ci && npm audit
+        run: cd web && npm ci && npm audit --audit-level=high
       - name: Scan filesystem, secrets, and container configuration
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
