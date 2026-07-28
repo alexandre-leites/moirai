@@ -129,8 +129,8 @@ jobs:
       - name: Scan Python dependencies
         run: |
           python3 -m venv .audit-venv
-          .audit-venv/bin/pip install ./orchestrator pip-audit
-          .audit-venv/bin/pip-audit --local
+          .audit-venv/bin/pip install -e ./orchestrator pip-audit
+          .audit-venv/bin/pip-audit --local --skip-editable
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}

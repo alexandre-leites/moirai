@@ -22,5 +22,4 @@ RUN pip install --no-cache-dir . \
     && rm -rf /root/.cache
 ENV PYTHONPATH=/app/src
 EXPOSE 50051
-USER 65532:65532
 CMD ["python", "-m", "moirai.main"]
