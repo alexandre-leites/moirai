@@ -2,21 +2,21 @@
 
 ## Current Status
 
-- Overall status: Complete; PR preparation
-- Current phase: Core workflow correctness
-- Active implementation: None
+- Overall status: In progress
+- Current phase: Public API and web operations UX
+- Active implementation: Resolve #49, #54, #56, #57, #71 (agent/web-experience, 2026-07-28)
 - Last updated: 2026-07-28
-- Agent/session identifier: agent/workflow-correctness
+- Agent/session identifier: agent/web-experience
 
 ## In Progress
 
-- [ ] Monitor the workflow-correctness PR CI and merge when green.
-  - Started: 2026-07-28
-  - Relevant files: GitHub Actions / PR checks
-  - Current state: Local orchestrator validation is green; PR pending creation.
-  - Remaining work: Push, create PR, resolve CI, merge.
-  - Definition of done: Non-draft PR is mergeable and merged.
-  - Targeted validation: GitHub Actions checks.
+- [ ] Resolve public API and web operations UX issues #49, #54, #56, #57, #71.
+  - Started: 2026-07-28 (agent/web-experience)
+  - Relevant files: `proto/control_plane.proto`, `api/`, `orchestrator/`, `web/`, `.github/workflows/ci.yml`
+  - Current state: Typed workflow/runner/queue operations and SSE are implemented across the control plane, API, and dashboard; web test setup and CI job added.
+  - Remaining work: Rebase, commit, push, open PR, and resolve CI feedback.
+  - Definition of done: Admin can operate workflows/runners from live UI; auth/deadline/error handling, test suite and CI coverage meet issue acceptance criteria.
+  - Targeted validation: Passed API `go test ./...` and `go vet ./...`; 42 relevant orchestrator tests; Ruff (with existing EXE002 ignored); web typecheck/lint/test/build (63.46% API-client statement coverage).
 
 ## Done
 

@@ -123,6 +123,43 @@ class FakeControlPlane:
             }
         ]
 
+    async def get_workflow(self, workflow_run_id: str) -> tuple[dict[str, object], list[dict[str, object]]]:
+        if workflow_run_id != "workflow-1":
+            raise ValueError("workflow run is unknown")
+        return (
+            {**(await self.list_workflows())[0], "blocking_reason": None, "planning_attempts": 1,
+             "implementation_attempts": 2, "pipeline_repair_attempts": 0, "review_cycles": 0,
+             "ci_repair_attempts": 0, "total_agent_executions": 3, "pull_request_url": None},
+            [{"id": "9", "workflow_run_id": workflow_run_id, "event_type": "workflow_transition",
+              "severity": "info", "payload_json": "{}", "created_at": NOW}],
+        )
+
+    async def retry_workflow(self, workflow_run_id: str, actor_user_id: str | None, now: datetime) -> dict[str, object]:
+        del actor_user_id, now
+        self.last_workflow_action = ("retry", workflow_run_id)
+        return {**(await self.get_workflow("workflow-1"))[0], "status": "recovering", "phase": "recovering"}
+
+    async def cancel_workflow(self, workflow_run_id: str, reason: str, actor_user_id: str | None, now: datetime) -> dict[str, object]:
+        del reason, actor_user_id, now
+        self.last_workflow_action = ("cancel", workflow_run_id)
+        return {**(await self.get_workflow("workflow-1"))[0], "status": "cancelled", "phase": "cancelled"}
+
+    async def block_workflow(self, workflow_run_id: str, reason: str, actor_user_id: str | None, now: datetime) -> dict[str, object]:
+        del reason, actor_user_id, now
+        self.last_workflow_action = ("block", workflow_run_id)
+        return {**(await self.get_workflow("workflow-1"))[0], "status": "blocked", "phase": "blocked"}
+
+    async def set_runner_state(self, runner_id: str, state: str, actor_user_id: str | None, now: datetime) -> dict[str, object]:
+        del actor_user_id, now
+        self.last_runner_action = (runner_id, state)
+        return {"id": runner_id, "name": "runner-a", "enabled": state != "revoke", "draining": state in {"drain", "revoke"}, "status": "offline", "labels": ["linux"], "last_seen_at": None}
+
+    async def list_queue(self) -> list[dict[str, object]]:
+        return [{"workflow_run_id": "workflow-1", "project_id": "project-1", "issue_id": "42", "priority": 100, "status": "preparing", "phase": "prepare_workspace", "queued_at": NOW}]
+
+    async def list_events_after(self, after_id: int) -> list[dict[str, object]]:
+        return [] if after_id else [{"id": "9", "workflow_run_id": "workflow-1", "event_type": "workflow_transition", "severity": "info", "payload_json": "{}", "created_at": NOW}]
+
     async def record_human_decision(
         self, workflow_run_id: str, decision: str, comment: str | None, actor_user_id: str | None, now: datetime
     ) -> dict[str, object]:
@@ -261,6 +298,34 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                 metadata=(("x-loop-session", "admin-session"),),
             )
         self.assertEqual(invalid.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    async def test_operations_surface_workflow_queue_and_runner_state(self) -> None:
+        metadata = (("x-loop-session", "admin-session"),)
+        detail = await self.client.GetWorkflow(
+            control_plane_pb2.GetWorkflowRequest(workflow_run_id="workflow-1"), metadata=metadata
+        )
+        self.assertEqual(detail.workflow.implementation_attempts, 2)
+        self.assertEqual(detail.events[0].id, "9")
+        retried = await self.client.RetryWorkflow(
+            control_plane_pb2.WorkflowActionRequest(workflow_run_id="workflow-1"), metadata=metadata
+        )
+        self.assertEqual(retried.workflow.status, "recovering")
+        cancelled = await self.client.CancelWorkflow(
+            control_plane_pb2.WorkflowActionRequest(workflow_run_id="workflow-1", reason="operator request"), metadata=metadata
+        )
+        self.assertEqual(cancelled.workflow.status, "cancelled")
+        runner = await self.client.SetRunnerState(
+            control_plane_pb2.SetRunnerStateRequest(runner_id="runner-1", state="drain"), metadata=metadata
+        )
+        self.assertTrue(runner.runner.draining)
+        queue = await self.client.ListQueue(control_plane_pb2.ListQueueRequest(), metadata=metadata)
+        self.assertEqual(queue.items[0].priority, 100)
+        with self.assertRaises(grpc.aio.AioRpcError) as viewer:
+            await self.client.BlockWorkflow(
+                control_plane_pb2.WorkflowActionRequest(workflow_run_id="workflow-1"),
+                metadata=(("x-loop-session", "viewer-session"),),
+            )
+        self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
 
     async def test_requires_session_and_administrator_for_control_operations(self) -> None:
         with self.assertRaises(grpc.aio.AioRpcError) as anonymous:

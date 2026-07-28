@@ -26,7 +26,7 @@ test-api:
 	cd api && go test ./...
 
 test-web:
-	cd web && npm run typecheck && npm run lint
+	cd web && npm ci && npm run typecheck && npm run lint && npm run test
 
 lint: dev-install
 	$(VENV)/bin/python3 -m ruff check orchestrator/src orchestrator/tests

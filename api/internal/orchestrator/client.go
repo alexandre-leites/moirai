@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	"google.golang.org/grpc"
@@ -14,9 +15,12 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+const defaultRPCTimeout = 15 * time.Second
+
 var (
 	ErrUnavailable  = errors.New("orchestrator unavailable")
 	ErrUnauthorized = errors.New("orchestrator rejected request: unauthorized")
+	ErrForbidden    = errors.New("orchestrator rejected request: forbidden")
 	ErrInvalidInput = errors.New("orchestrator rejected request: invalid input")
 	ErrNotFound     = errors.New("orchestrator resource not found")
 )
@@ -33,6 +37,15 @@ func WithSession(ctx context.Context, sessionToken string) context.Context {
 	return metadata.AppendToOutgoingContext(ctx, "x-loop-session", sessionToken)
 }
 
+func withDeadline(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	if _, ok := ctx.Deadline(); ok {
+		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, defaultRPCTimeout)
+	defer cancel()
+	return invoker(deadlineCtx, method, req, reply, cc, opts...)
+}
+
 func Dial(ctx context.Context, endpoint string) (*Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("orchestrator endpoint is required")
@@ -42,6 +55,7 @@ func Dial(ctx context.Context, endpoint string) (*Client, error) {
 		endpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
+		grpc.WithUnaryInterceptor(withDeadline),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial orchestrator %s: %w", endpoint, err)
@@ -174,6 +188,60 @@ func (c *Client) SubmitHumanDecision(ctx context.Context, workflowRunID, decisio
 	return resp, nil
 }
 
+func (c *Client) GetWorkflow(ctx context.Context, workflowID string) (*controlv1.GetWorkflowResponse, error) {
+	resp, err := c.client.GetWorkflow(ctx, &controlv1.GetWorkflowRequest{WorkflowRunId: workflowID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) WorkflowAction(ctx context.Context, workflowID, action, reason string) (*controlv1.WorkflowActionResponse, error) {
+	req := &controlv1.WorkflowActionRequest{WorkflowRunId: workflowID, Reason: reason}
+	var (
+		resp *controlv1.WorkflowActionResponse
+		err  error
+	)
+	switch action {
+	case "retry":
+		resp, err = c.client.RetryWorkflow(ctx, req)
+	case "cancel":
+		resp, err = c.client.CancelWorkflow(ctx, req)
+	case "block":
+		resp, err = c.client.BlockWorkflow(ctx, req)
+	default:
+		return nil, ErrInvalidInput
+	}
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error) {
+	resp, err := c.client.SetRunnerState(ctx, &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) ListQueue(ctx context.Context) (*controlv1.ListQueueResponse, error) {
+	resp, err := c.client.ListQueue(ctx, &controlv1.ListQueueRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) SubscribeEvents(ctx context.Context, afterID string) (controlv1.ControlPlane_SubscribeEventsClient, error) {
+	stream, err := c.client.SubscribeEvents(ctx, &controlv1.SubscribeEventsRequest{AfterId: afterID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return stream, nil
+}
+
 func mapError(err error) error {
 	return MapStatusError(err)
 }
@@ -187,8 +255,10 @@ func MapStatusError(err error) error {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	switch s.Code() {
-	case codes.Unauthenticated, codes.PermissionDenied:
+	case codes.Unauthenticated:
 		return fmt.Errorf("%w: %s", ErrUnauthorized, s.Message())
+	case codes.PermissionDenied:
+		return fmt.Errorf("%w: %s", ErrForbidden, s.Message())
 	case codes.InvalidArgument, codes.FailedPrecondition:
 		return fmt.Errorf("%w: %s", ErrInvalidInput, s.Message())
 	case codes.NotFound:

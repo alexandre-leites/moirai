@@ -180,6 +180,15 @@ func (w *statusRecorder) Write(value []byte) (int, error) {
 	return w.ResponseWriter.Write(value)
 }
 
+func (w *statusRecorder) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func newRequestID() string {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {

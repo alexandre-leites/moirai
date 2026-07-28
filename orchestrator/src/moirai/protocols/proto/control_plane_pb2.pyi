@@ -169,22 +169,80 @@ class ListWorkflowsRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class Workflow(_message.Message):
-    __slots__ = ("id", "project_id", "status", "phase")
+    __slots__ = ("id", "project_id", "status", "phase", "blocking_reason", "planning_attempts", "implementation_attempts", "pipeline_repair_attempts", "review_cycles", "ci_repair_attempts", "total_agent_executions", "pull_request_url")
     ID_FIELD_NUMBER: _ClassVar[int]
     PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     PHASE_FIELD_NUMBER: _ClassVar[int]
+    BLOCKING_REASON_FIELD_NUMBER: _ClassVar[int]
+    PLANNING_ATTEMPTS_FIELD_NUMBER: _ClassVar[int]
+    IMPLEMENTATION_ATTEMPTS_FIELD_NUMBER: _ClassVar[int]
+    PIPELINE_REPAIR_ATTEMPTS_FIELD_NUMBER: _ClassVar[int]
+    REVIEW_CYCLES_FIELD_NUMBER: _ClassVar[int]
+    CI_REPAIR_ATTEMPTS_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_AGENT_EXECUTIONS_FIELD_NUMBER: _ClassVar[int]
+    PULL_REQUEST_URL_FIELD_NUMBER: _ClassVar[int]
     id: str
     project_id: str
     status: str
     phase: str
-    def __init__(self, id: _Optional[str] = ..., project_id: _Optional[str] = ..., status: _Optional[str] = ..., phase: _Optional[str] = ...) -> None: ...
+    blocking_reason: str
+    planning_attempts: int
+    implementation_attempts: int
+    pipeline_repair_attempts: int
+    review_cycles: int
+    ci_repair_attempts: int
+    total_agent_executions: int
+    pull_request_url: str
+    def __init__(self, id: _Optional[str] = ..., project_id: _Optional[str] = ..., status: _Optional[str] = ..., phase: _Optional[str] = ..., blocking_reason: _Optional[str] = ..., planning_attempts: _Optional[int] = ..., implementation_attempts: _Optional[int] = ..., pipeline_repair_attempts: _Optional[int] = ..., review_cycles: _Optional[int] = ..., ci_repair_attempts: _Optional[int] = ..., total_agent_executions: _Optional[int] = ..., pull_request_url: _Optional[str] = ...) -> None: ...
+
+class WorkflowEvent(_message.Message):
+    __slots__ = ("id", "event_type", "severity", "payload_json", "created_at")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    EVENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    SEVERITY_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_JSON_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    event_type: str
+    severity: str
+    payload_json: str
+    created_at: str
+    def __init__(self, id: _Optional[str] = ..., event_type: _Optional[str] = ..., severity: _Optional[str] = ..., payload_json: _Optional[str] = ..., created_at: _Optional[str] = ...) -> None: ...
 
 class ListWorkflowsResponse(_message.Message):
     __slots__ = ("workflows",)
     WORKFLOWS_FIELD_NUMBER: _ClassVar[int]
     workflows: _containers.RepeatedCompositeFieldContainer[Workflow]
     def __init__(self, workflows: _Optional[_Iterable[_Union[Workflow, _Mapping]]] = ...) -> None: ...
+
+class GetWorkflowRequest(_message.Message):
+    __slots__ = ("workflow_run_id",)
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    def __init__(self, workflow_run_id: _Optional[str] = ...) -> None: ...
+
+class GetWorkflowResponse(_message.Message):
+    __slots__ = ("workflow", "events")
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    EVENTS_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    events: _containers.RepeatedCompositeFieldContainer[WorkflowEvent]
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ..., events: _Optional[_Iterable[_Union[WorkflowEvent, _Mapping]]] = ...) -> None: ...
+
+class WorkflowActionRequest(_message.Message):
+    __slots__ = ("workflow_run_id", "reason")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    reason: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class WorkflowActionResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
 
 class ListRunnersRequest(_message.Message):
     __slots__ = ()
@@ -213,6 +271,68 @@ class ListRunnersResponse(_message.Message):
     RUNNERS_FIELD_NUMBER: _ClassVar[int]
     runners: _containers.RepeatedCompositeFieldContainer[Runner]
     def __init__(self, runners: _Optional[_Iterable[_Union[Runner, _Mapping]]] = ...) -> None: ...
+
+class SetRunnerStateRequest(_message.Message):
+    __slots__ = ("runner_id", "state")
+    RUNNER_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    runner_id: str
+    state: str
+    def __init__(self, runner_id: _Optional[str] = ..., state: _Optional[str] = ...) -> None: ...
+
+class SetRunnerStateResponse(_message.Message):
+    __slots__ = ("runner",)
+    RUNNER_FIELD_NUMBER: _ClassVar[int]
+    runner: Runner
+    def __init__(self, runner: _Optional[_Union[Runner, _Mapping]] = ...) -> None: ...
+
+class QueueItem(_message.Message):
+    __slots__ = ("workflow_run_id", "project_id", "issue_id", "priority", "status", "phase", "queued_at")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    ISSUE_ID_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    PHASE_FIELD_NUMBER: _ClassVar[int]
+    QUEUED_AT_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    project_id: str
+    issue_id: str
+    priority: int
+    status: str
+    phase: str
+    queued_at: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., project_id: _Optional[str] = ..., issue_id: _Optional[str] = ..., priority: _Optional[int] = ..., status: _Optional[str] = ..., phase: _Optional[str] = ..., queued_at: _Optional[str] = ...) -> None: ...
+
+class ListQueueRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class ListQueueResponse(_message.Message):
+    __slots__ = ("items",)
+    ITEMS_FIELD_NUMBER: _ClassVar[int]
+    items: _containers.RepeatedCompositeFieldContainer[QueueItem]
+    def __init__(self, items: _Optional[_Iterable[_Union[QueueItem, _Mapping]]] = ...) -> None: ...
+
+class SubscribeEventsRequest(_message.Message):
+    __slots__ = ("after_id",)
+    AFTER_ID_FIELD_NUMBER: _ClassVar[int]
+    after_id: str
+    def __init__(self, after_id: _Optional[str] = ...) -> None: ...
+
+class ControlPlaneEvent(_message.Message):
+    __slots__ = ("id", "kind", "resource_id", "payload_json", "created_at")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    RESOURCE_ID_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_JSON_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    kind: str
+    resource_id: str
+    payload_json: str
+    created_at: str
+    def __init__(self, id: _Optional[str] = ..., kind: _Optional[str] = ..., resource_id: _Optional[str] = ..., payload_json: _Optional[str] = ..., created_at: _Optional[str] = ...) -> None: ...
 
 class SubmitHumanDecisionRequest(_message.Message):
     __slots__ = ("workflow_run_id", "decision", "comment")

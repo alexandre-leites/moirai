@@ -119,6 +119,7 @@ button {
 }
 
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 button.logout-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 13px; }
 
 .workflow-decision-actions { display: flex; gap: 8px; }
@@ -165,3 +166,6 @@ td { font-size: 14px; }
 .nav-list { list-style: none; }
 .nav-list li { margin-bottom: 8px; }
 .nav-list a { font-size: 16px; }
+.event-list { list-style: none; display: grid; gap: 8px; }
+.event-list li { padding: 8px; border: 1px solid var(--border); background: var(--surface); }
+.event-list code { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }

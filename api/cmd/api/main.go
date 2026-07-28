@@ -49,7 +49,9 @@ func main() {
 	handlers.NewAuthHandlers(client, runtimeConfig.CookieSecure, loginLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewProjectHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerTokenHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
-	handlers.NewRunnerHandlers(client).RegisterRoutes(srv.Mux())
+	handlers.NewRunnerHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewQueueHandlers(client).RegisterRoutes(srv.Mux())
+	handlers.NewEventHandlers(client).RegisterRoutes(srv.Mux())
 	handlers.NewWorkflowHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 
 	quit := make(chan os.Signal, 1)

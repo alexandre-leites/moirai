@@ -1,5 +1,5 @@
 import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
-import { BrowserRouter, Routes, Route, Navigate, Link } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Link, useParams } from "react-router-dom";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "./api";
 import type { ApiClient } from "./api";
@@ -9,7 +9,8 @@ import type { HealthViewState } from "./health";
 import { LoginPage } from "./login";
 import { ProjectsPage } from "./projects";
 import { TokensPage } from "./tokens";
-import { WorkflowsPage } from "./workflows";
+import { WorkflowDetailPage, WorkflowsPage } from "./workflows";
+import { QueuePage, RunnersPage } from "./operations";
 import "./styles.css";
 
 const api = createApiClient();
@@ -87,6 +88,8 @@ function Layout({ children }: { children: React.ReactNode }) {
             <Link to="/projects">Projects</Link>
             {isAdmin && <Link to="/tokens">Tokens</Link>}
             <Link to="/workflows">Workflows</Link>
+            <Link to="/queue">Queue</Link>
+            {isAdmin && <Link to="/runners">Runners</Link>}
             <HealthIndicator api={api} />
             <button className="logout-btn" onClick={logout}>Logout</button>
           </nav>
@@ -106,9 +109,16 @@ function Dashboard() {
         <li><Link to="/projects">Projects</Link></li>
         {isAdmin && <li><Link to="/tokens">Runner tokens</Link></li>}
         <li><Link to="/workflows">Workflows</Link></li>
+        <li><Link to="/queue">Global queue</Link></li>
+        {isAdmin && <li><Link to="/runners">Runners</Link></li>}
       </ul>
     </div>
   );
+}
+
+function WorkflowRoute({ api }: { api: ApiClient }) {
+  const { workflowId } = useParams();
+  return workflowId ? <WorkflowDetailPage api={api} id={workflowId} /> : <p role="alert">Workflow ID is required.</p>;
 }
 
 function App() {
@@ -122,6 +132,10 @@ function App() {
             <Route path="/projects" element={<ProtectedRoute><ProjectsPage api={api} /></ProtectedRoute>} />
             <Route path="/tokens" element={<AdminRoute><TokensPage api={api} /></AdminRoute>} />
             <Route path="/workflows" element={<ProtectedRoute><WorkflowsPage api={api} /></ProtectedRoute>} />
+            <Route path="/workflows/:workflowId" element={<ProtectedRoute><WorkflowRoute api={api} /></ProtectedRoute>} />
+            <Route path="/queue" element={<ProtectedRoute><QueuePage api={api} /></ProtectedRoute>} />
+            <Route path="/runners" element={<AdminRoute><RunnersPage api={api} /></AdminRoute>} />
+            <Route path="*" element={<p role="alert">Page not found.</p>} />
           </Routes>
         </Layout>
       </AuthProvider>

@@ -74,6 +74,41 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.SubmitHumanDecisionResponse.FromString,
                 _registered_method=True)
+        self.GetWorkflow = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/GetWorkflow',
+                request_serializer=proto_dot_control__plane__pb2.GetWorkflowRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.GetWorkflowResponse.FromString,
+                _registered_method=True)
+        self.RetryWorkflow = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/RetryWorkflow',
+                request_serializer=proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+                _registered_method=True)
+        self.CancelWorkflow = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/CancelWorkflow',
+                request_serializer=proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+                _registered_method=True)
+        self.BlockWorkflow = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/BlockWorkflow',
+                request_serializer=proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+                _registered_method=True)
+        self.SetRunnerState = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/SetRunnerState',
+                request_serializer=proto_dot_control__plane__pb2.SetRunnerStateRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.SetRunnerStateResponse.FromString,
+                _registered_method=True)
+        self.ListQueue = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/ListQueue',
+                request_serializer=proto_dot_control__plane__pb2.ListQueueRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ListQueueResponse.FromString,
+                _registered_method=True)
+        self.SubscribeEvents = channel.unary_stream(
+                '/loop.control.v1.ControlPlane/SubscribeEvents',
+                request_serializer=proto_dot_control__plane__pb2.SubscribeEventsRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ControlPlaneEvent.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServicer:
@@ -151,6 +186,48 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetWorkflow(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RetryWorkflow(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CancelWorkflow(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def BlockWorkflow(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetRunnerState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListQueue(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SubscribeEvents(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -213,6 +290,41 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.SubmitHumanDecision,
                     request_deserializer=proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.SubmitHumanDecisionResponse.SerializeToString,
+            ),
+            'GetWorkflow': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetWorkflow,
+                    request_deserializer=proto_dot_control__plane__pb2.GetWorkflowRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.GetWorkflowResponse.SerializeToString,
+            ),
+            'RetryWorkflow': grpc.unary_unary_rpc_method_handler(
+                    servicer.RetryWorkflow,
+                    request_deserializer=proto_dot_control__plane__pb2.WorkflowActionRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.WorkflowActionResponse.SerializeToString,
+            ),
+            'CancelWorkflow': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelWorkflow,
+                    request_deserializer=proto_dot_control__plane__pb2.WorkflowActionRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.WorkflowActionResponse.SerializeToString,
+            ),
+            'BlockWorkflow': grpc.unary_unary_rpc_method_handler(
+                    servicer.BlockWorkflow,
+                    request_deserializer=proto_dot_control__plane__pb2.WorkflowActionRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.WorkflowActionResponse.SerializeToString,
+            ),
+            'SetRunnerState': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetRunnerState,
+                    request_deserializer=proto_dot_control__plane__pb2.SetRunnerStateRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.SetRunnerStateResponse.SerializeToString,
+            ),
+            'ListQueue': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListQueue,
+                    request_deserializer=proto_dot_control__plane__pb2.ListQueueRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ListQueueResponse.SerializeToString,
+            ),
+            'SubscribeEvents': grpc.unary_stream_rpc_method_handler(
+                    servicer.SubscribeEvents,
+                    request_deserializer=proto_dot_control__plane__pb2.SubscribeEventsRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ControlPlaneEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -539,6 +651,195 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/SubmitHumanDecision',
             proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.SerializeToString,
             proto_dot_control__plane__pb2.SubmitHumanDecisionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetWorkflow(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/GetWorkflow',
+            proto_dot_control__plane__pb2.GetWorkflowRequest.SerializeToString,
+            proto_dot_control__plane__pb2.GetWorkflowResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RetryWorkflow(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/RetryWorkflow',
+            proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
+            proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelWorkflow(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/CancelWorkflow',
+            proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
+            proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def BlockWorkflow(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/BlockWorkflow',
+            proto_dot_control__plane__pb2.WorkflowActionRequest.SerializeToString,
+            proto_dot_control__plane__pb2.WorkflowActionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetRunnerState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/SetRunnerState',
+            proto_dot_control__plane__pb2.SetRunnerStateRequest.SerializeToString,
+            proto_dot_control__plane__pb2.SetRunnerStateResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListQueue(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/ListQueue',
+            proto_dot_control__plane__pb2.ListQueueRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ListQueueResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubscribeEvents(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/SubscribeEvents',
+            proto_dot_control__plane__pb2.SubscribeEventsRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ControlPlaneEvent.FromString,
             options,
             channel_credentials,
             insecure,

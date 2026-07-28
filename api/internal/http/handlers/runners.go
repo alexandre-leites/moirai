@@ -9,15 +9,34 @@ import (
 )
 
 type RunnerHandlers struct {
-	client *orchestrator.Client
+	client  *orchestrator.Client
+	limiter *auth.RateLimiter
 }
 
-func NewRunnerHandlers(client *orchestrator.Client) *RunnerHandlers {
-	return &RunnerHandlers{client: client}
+func NewRunnerHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *RunnerHandlers {
+	return &RunnerHandlers{client: client, limiter: limiter}
 }
 
 func (h *RunnerHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/runners", auth.RequireSession(http.HandlerFunc(h.list)))
+	mux.Handle("POST /api/v1/runners/{runner_id}/state", requireMutation(h.limiter, h.setState))
+}
+
+func (h *RunnerHandlers) setState(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		State string `json:"state"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	resp, err := h.client.SetRunnerState(requestContext(r), r.PathValue("runner_id"), body.State)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	runner := resp.Runner
+	apiserver.WriteJSON(w, http.StatusOK, map[string]any{"id": runner.Id, "name": runner.Name, "enabled": runner.Enabled, "draining": runner.Draining, "status": runner.Status, "labels": runner.Labels, "lastSeenAt": runner.LastSeenAt})
 }
 
 func (h *RunnerHandlers) list(w http.ResponseWriter, r *http.Request) {

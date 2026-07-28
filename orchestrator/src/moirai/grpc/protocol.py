@@ -50,6 +50,25 @@ class RunnerRecord(TypedDict):
     last_seen_at: datetime | None
 
 
+class WorkflowEventRecord(TypedDict):
+    id: str
+    workflow_run_id: str
+    event_type: str
+    severity: str
+    payload_json: str
+    created_at: datetime
+
+
+class QueueRecord(TypedDict):
+    workflow_run_id: str
+    project_id: str
+    issue_id: str
+    priority: int
+    status: str
+    phase: str
+    queued_at: datetime
+
+
 class ControlPlane(Protocol):
     """The control-plane surface ControlPlaneService depends on.
 
@@ -106,6 +125,26 @@ class ControlPlane(Protocol):
     ) -> RegistrationTokenRecord: ...
 
     async def list_workflows(self) -> list[WorkflowRecord]: ...
+
+    async def get_workflow(self, workflow_run_id: str) -> tuple[WorkflowRecord, list[WorkflowEventRecord]]: ...
+
+    async def retry_workflow(self, workflow_run_id: str, actor_user_id: str | None, now: datetime) -> WorkflowRecord: ...
+
+    async def cancel_workflow(
+        self, workflow_run_id: str, reason: str, actor_user_id: str | None, now: datetime
+    ) -> WorkflowRecord: ...
+
+    async def block_workflow(
+        self, workflow_run_id: str, reason: str, actor_user_id: str | None, now: datetime
+    ) -> WorkflowRecord: ...
+
+    async def set_runner_state(
+        self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
+    ) -> RunnerRecord: ...
+
+    async def list_queue(self) -> list[QueueRecord]: ...
+
+    async def list_events_after(self, after_id: int) -> list[WorkflowEventRecord]: ...
 
     async def record_human_decision(
         self,

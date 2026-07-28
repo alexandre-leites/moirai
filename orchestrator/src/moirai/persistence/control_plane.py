@@ -626,6 +626,153 @@ class AsyncpgControlPlane:
             for record in records
         ]
 
+    async def get_workflow(self, workflow_run_id: str) -> tuple[WorkflowRecord, list[dict[str, object]]]:
+        record = await self._pool.fetchrow(
+            """
+            SELECT wr.id, wr.project_id, wr.status, wr.current_phase,
+                   wr.pull_request_external_id, wr.pull_request_url, wr.blocking_reason,
+                   wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts,
+                   wr.review_cycles, wr.ci_repair_attempts, wr.total_agent_executions
+            FROM app.workflow_runs AS wr WHERE wr.id = $1
+            """,
+            _uuid(workflow_run_id),
+        )
+        if record is None:
+            raise ValueError("workflow run is unknown")
+        events = await self._pool.fetch(
+            """
+            SELECT id, workflow_run_id, event_type, severity, payload, created_at
+            FROM app.workflow_events WHERE workflow_run_id = $1
+            ORDER BY id DESC LIMIT 100
+            """,
+            _uuid(workflow_run_id),
+        )
+        return _workflow_record(record), [_workflow_event_record(event) for event in reversed(events)]
+
+    async def retry_workflow(self, workflow_run_id: str, actor_user_id: str | None, now: datetime) -> WorkflowRecord:
+        return await self._change_workflow(workflow_run_id, "retry", "manual retry", actor_user_id, now)
+
+    async def cancel_workflow(
+        self, workflow_run_id: str, reason: str, actor_user_id: str | None, now: datetime
+    ) -> WorkflowRecord:
+        return await self._change_workflow(workflow_run_id, "cancel", reason, actor_user_id, now)
+
+    async def block_workflow(
+        self, workflow_run_id: str, reason: str, actor_user_id: str | None, now: datetime
+    ) -> WorkflowRecord:
+        return await self._change_workflow(workflow_run_id, "block", reason, actor_user_id, now)
+
+    async def _change_workflow(
+        self, workflow_run_id: str, action: str, reason: str, actor_user_id: str | None, now: datetime
+    ) -> WorkflowRecord:
+        reason = reason.strip()[:500] or f"manual {action}"
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                current = await connection.fetchrow(
+                    "SELECT id, project_id, status FROM app.workflow_runs WHERE id = $1 FOR UPDATE",
+                    _uuid(workflow_run_id),
+                )
+                if current is None:
+                    raise ValueError("workflow run is unknown")
+                if action == "retry":
+                    if str(current["status"]) not in {"blocked", "failed", "cancelled"}:
+                        raise ValueError("workflow run is not retryable")
+                    await connection.execute(
+                        """UPDATE app.workflow_runs SET status = 'recovering', current_phase = 'recovering',
+                           blocking_reason = NULL, terminal_reason = NULL, completed_at = NULL, updated_at = $2
+                           WHERE id = $1""",
+                        _uuid(workflow_run_id), now,
+                    )
+                    await connection.execute(
+                        """UPDATE app.jobs SET status = 'recovering', lease_generation = lease_generation + 1,
+                           recovery_reason = 'manual_retry', finished_at = NULL
+                           WHERE workflow_run_id = $1""",
+                        _uuid(workflow_run_id),
+                    )
+                else:
+                    status = "cancelled" if action == "cancel" else "blocked"
+                    await connection.execute(
+                        """UPDATE app.workflow_runs SET status = $2, current_phase = $2, blocking_reason = $3,
+                           terminal_reason = $3, completed_at = $4, updated_at = $4 WHERE id = $1""",
+                        _uuid(workflow_run_id), status, reason, now,
+                    )
+                    await connection.execute(
+                        """UPDATE app.jobs SET status = 'cancelled', lease_generation = lease_generation + 1,
+                           recovery_reason = $2, finished_at = $3
+                           WHERE workflow_run_id = $1 AND status IN ('offered', 'preparing', 'running', 'recovering')""",
+                        _uuid(workflow_run_id), f"manual_{action}", now,
+                    )
+                    await connection.execute(
+                        "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+                        current["project_id"], _uuid(workflow_run_id),
+                    )
+                await connection.execute(
+                    """INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
+                       VALUES ($1, $2, 'warning', $3::jsonb, $4)""",
+                    _uuid(workflow_run_id), f"workflow_{action}",
+                    json.dumps({"reason": reason, "actor_user_id": actor_user_id}, separators=(",", ":")), now,
+                )
+                if actor_user_id is not None:
+                    await AsyncpgAuthentication._append_audit(
+                        connection, actor_user_id=_uuid(actor_user_id), action=f"workflow.{action}",
+                        resource_type="workflow_run", resource_id=workflow_run_id, outcome="succeeded", now=now,
+                    )
+        workflow, _ = await self.get_workflow(workflow_run_id)
+        return workflow
+
+    async def set_runner_state(
+        self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
+    ) -> RunnerRecord:
+        if state not in {"enable", "disable", "drain", "revoke"}:
+            raise ValueError("runner state is invalid")
+        updates = {
+            "enable": (True, False, None),
+            "disable": (False, False, None),
+            "drain": (True, True, None),
+            "revoke": (False, True, now),
+        }[state]
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """UPDATE app.runners SET enabled = $2, draining = $3,
+                       revoked_at = COALESCE(revoked_at, $4), status = CASE WHEN $1 = 'revoke' THEN 'offline' ELSE status END
+                       WHERE id = $5 RETURNING id, name, enabled, draining, status, labels, last_seen_at""",
+                    state, updates[0], updates[1], updates[2], _uuid(runner_id),
+                )
+                if record is None:
+                    raise ValueError("runner is unknown")
+                if state == "revoke":
+                    await connection.execute(
+                        "UPDATE app.runner_credentials SET revoked_at = $2 WHERE runner_id = $1 AND revoked_at IS NULL",
+                        _uuid(runner_id), now,
+                    )
+                if actor_user_id is not None:
+                    await AsyncpgAuthentication._append_audit(
+                        connection, actor_user_id=_uuid(actor_user_id), action=f"runner.{state}",
+                        resource_type="runner", resource_id=runner_id, outcome="succeeded", now=now,
+                    )
+        return _runner_record(record)
+
+    async def list_queue(self) -> list[dict[str, object]]:
+        records = await self._pool.fetch(
+            """SELECT wr.id AS workflow_run_id, wr.project_id, i.external_id AS issue_id, i.priority,
+                      wr.status, wr.current_phase AS phase, wr.created_at AS queued_at
+               FROM app.workflow_runs AS wr JOIN app.issues AS i ON i.id = wr.issue_id
+               WHERE wr.status NOT IN ('completed', 'blocked', 'failed', 'cancelled')
+               ORDER BY i.priority DESC, wr.created_at ASC, wr.id ASC"""
+        )
+        return [{"workflow_run_id": str(record["workflow_run_id"]), "project_id": str(record["project_id"]),
+                 "issue_id": str(record["issue_id"]), "priority": int(record["priority"]),
+                 "status": str(record["status"]), "phase": str(record["phase"]), "queued_at": record["queued_at"]}
+                for record in records]
+
+    async def list_events_after(self, after_id: int) -> list[dict[str, object]]:
+        records = await self._pool.fetch(
+            """SELECT id, workflow_run_id, event_type, severity, payload, created_at
+               FROM app.workflow_events WHERE id > $1 ORDER BY id ASC LIMIT 100""", after_id
+        )
+        return [_workflow_event_record(record) for record in records]
+
     async def record_human_decision(
         self,
         workflow_run_id: str,
@@ -1779,6 +1926,48 @@ def _registration_token(record: Any) -> RegistrationTokenRecord:
         "expires_at": record["expires_at"],
         "used_at": record["used_at"],
         "revoked_at": record["revoked_at"],
+    }
+
+
+def _workflow_record(record: Any) -> WorkflowRecord:
+    return {
+        "id": str(record["id"]),
+        "project_id": str(record["project_id"]),
+        "status": str(record["status"]),
+        "phase": str(record["current_phase"]),
+        "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
+        "pull_request_url": _optional_text(record["pull_request_url"]),
+        "blocking_reason": _optional_text(record["blocking_reason"]),
+        "planning_attempts": int(record["planning_attempts"]),
+        "implementation_attempts": int(record["implementation_attempts"]),
+        "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
+        "review_cycles": int(record["review_cycles"]),
+        "ci_repair_attempts": int(record["ci_repair_attempts"]),
+        "total_agent_executions": int(record["total_agent_executions"]),
+    }
+
+
+def _workflow_event_record(record: Any) -> dict[str, object]:
+    payload = record["payload"]
+    return {
+        "id": str(record["id"]),
+        "workflow_run_id": str(record["workflow_run_id"]),
+        "event_type": str(record["event_type"]),
+        "severity": str(record["severity"]),
+        "payload_json": json.dumps(payload, separators=(",", ":"), sort_keys=True) if not isinstance(payload, str) else payload,
+        "created_at": record["created_at"],
+    }
+
+
+def _runner_record(record: Any) -> RunnerRecord:
+    return {
+        "id": str(record["id"]),
+        "name": str(record["name"]),
+        "enabled": bool(record["enabled"]),
+        "draining": bool(record["draining"]),
+        "status": str(record["status"]),
+        "labels": _labels(record["labels"]),
+        "last_seen_at": record["last_seen_at"],
     }
 
 

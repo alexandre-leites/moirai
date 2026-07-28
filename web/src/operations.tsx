@@ -1,0 +1,15 @@
+import { useCallback, useEffect, useState } from "react";
+import type { ApiClient, QueueItem, Runner } from "./api";
+import { useControlPlaneEvents } from "./events";
+
+export function RunnersPage({ api }: { api: ApiClient }) {
+  const [runners, setRunners] = useState<Runner[]>([]); const [error, setError] = useState<string | null>(null); const [pending, setPending] = useState<string | null>(null);
+  const load = useCallback(async () => { try { setRunners(await api.listRunners()); setError(null); } catch (err) { setError(err instanceof Error ? err.message : "Could not load runners"); } }, [api]); useEffect(() => { void load(); }, [load]); useControlPlaneEvents(useCallback(() => { void load(); }, [load]));
+  const change = async (runner: Runner, state: "enable" | "disable" | "drain" | "revoke") => { setPending(runner.id); try { const updated = await api.setRunnerState(runner.id, state); setRunners(items => items.map(item => item.id === runner.id ? updated : item)); } catch (err) { setError(err instanceof Error ? err.message : "Runner action failed"); } finally { setPending(null); } };
+  return <div><h2>Runners</h2>{error && <p className="error" role="alert">{error}</p>}<table><thead><tr><th>Name</th><th>Status</th><th>Labels</th><th>Last seen</th><th>Actions</th></tr></thead><tbody>{runners.map(runner => <tr key={runner.id}><td>{runner.name}</td><td>{runner.status}{runner.draining ? " (draining)" : ""}{!runner.enabled ? " (disabled)" : ""}</td><td>{runner.labels.join(", ")}</td><td>{runner.lastSeenAt || "Never"}</td><td className="workflow-decision-actions">{runner.enabled ? <button disabled={pending === runner.id} onClick={() => void change(runner, "disable")}>Disable</button> : <button disabled={pending === runner.id} onClick={() => void change(runner, "enable")}>Enable</button>}{!runner.draining && runner.enabled && <button disabled={pending === runner.id} onClick={() => void change(runner, "drain")}>Drain</button>}<button disabled={pending === runner.id} onClick={() => void change(runner, "revoke")}>Revoke</button></td></tr>)}</tbody></table></div>;
+}
+
+export function QueuePage({ api }: { api: ApiClient }) {
+  const [items, setItems] = useState<QueueItem[]>([]); const [error, setError] = useState<string | null>(null); const load = useCallback(async () => { try { setItems(await api.listQueue()); setError(null); } catch (err) { setError(err instanceof Error ? err.message : "Could not load queue"); } }, [api]); useEffect(() => { void load(); }, [load]); useControlPlaneEvents(useCallback(() => { void load(); }, [load]));
+  return <div><h2>Global queue</h2>{error && <p className="error" role="alert">{error}</p>}<table><thead><tr><th>Workflow</th><th>Project</th><th>Issue</th><th>Priority</th><th>Phase</th></tr></thead><tbody>{items.length ? items.map(item => <tr key={item.workflowId}><td className="mono">{item.workflowId.slice(0, 12)}</td><td>{item.projectId}</td><td>{item.issueId}</td><td>{item.priority}</td><td>{item.phase}</td></tr>) : <tr><td colSpan={5}>No queued work</td></tr>}</tbody></table></div>;
+}

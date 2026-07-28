@@ -15,6 +15,13 @@ service ControlPlane {
   rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
   rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
   rpc SubmitHumanDecision(SubmitHumanDecisionRequest) returns (SubmitHumanDecisionResponse);
+  rpc GetWorkflow(GetWorkflowRequest) returns (GetWorkflowResponse);
+  rpc RetryWorkflow(WorkflowActionRequest) returns (WorkflowActionResponse);
+  rpc CancelWorkflow(WorkflowActionRequest) returns (WorkflowActionResponse);
+  rpc BlockWorkflow(WorkflowActionRequest) returns (WorkflowActionResponse);
+  rpc SetRunnerState(SetRunnerStateRequest) returns (SetRunnerStateResponse);
+  rpc ListQueue(ListQueueRequest) returns (ListQueueResponse);
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream ControlPlaneEvent);
 }
 
 message LoginRequest { string username = 1; string password = 2; }
@@ -53,10 +60,55 @@ message ListRunnerRegistrationTokensResponse { repeated RunnerRegistrationToken 
 message RevokeRunnerRegistrationTokenRequest { string token_id = 1; }
 message RevokeRunnerRegistrationTokenResponse { RunnerRegistrationToken token = 1; }
 message ListWorkflowsRequest {}
-message Workflow { string id = 1; string project_id = 2; string status = 3; string phase = 4; }
+message Workflow {
+  string id = 1;
+  string project_id = 2;
+  string status = 3;
+  string phase = 4;
+  string blocking_reason = 5;
+  int32 planning_attempts = 6;
+  int32 implementation_attempts = 7;
+  int32 pipeline_repair_attempts = 8;
+  int32 review_cycles = 9;
+  int32 ci_repair_attempts = 10;
+  int32 total_agent_executions = 11;
+  string pull_request_url = 12;
+}
+message WorkflowEvent {
+  string id = 1;
+  string event_type = 2;
+  string severity = 3;
+  string payload_json = 4;
+  string created_at = 5;
+}
 message ListWorkflowsResponse { repeated Workflow workflows = 1; }
+message GetWorkflowRequest { string workflow_run_id = 1; }
+message GetWorkflowResponse { Workflow workflow = 1; repeated WorkflowEvent events = 2; }
+message WorkflowActionRequest { string workflow_run_id = 1; string reason = 2; }
+message WorkflowActionResponse { Workflow workflow = 1; }
 message ListRunnersRequest {}
 message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; }
 message ListRunnersResponse { repeated Runner runners = 1; }
+message SetRunnerStateRequest { string runner_id = 1; string state = 2; }
+message SetRunnerStateResponse { Runner runner = 1; }
+message QueueItem {
+  string workflow_run_id = 1;
+  string project_id = 2;
+  string issue_id = 3;
+  int32 priority = 4;
+  string status = 5;
+  string phase = 6;
+  string queued_at = 7;
+}
+message ListQueueRequest {}
+message ListQueueResponse { repeated QueueItem items = 1; }
+message SubscribeEventsRequest { string after_id = 1; }
+message ControlPlaneEvent {
+  string id = 1;
+  string kind = 2;
+  string resource_id = 3;
+  string payload_json = 4;
+  string created_at = 5;
+}
 message SubmitHumanDecisionRequest { string workflow_run_id = 1; string decision = 2; string comment = 3; }
 message SubmitHumanDecisionResponse { Workflow workflow = 1; }

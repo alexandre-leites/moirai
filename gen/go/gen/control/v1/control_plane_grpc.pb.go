@@ -31,6 +31,13 @@ const (
 	ControlPlane_ListWorkflows_FullMethodName                 = "/loop.control.v1.ControlPlane/ListWorkflows"
 	ControlPlane_ListRunners_FullMethodName                   = "/loop.control.v1.ControlPlane/ListRunners"
 	ControlPlane_SubmitHumanDecision_FullMethodName           = "/loop.control.v1.ControlPlane/SubmitHumanDecision"
+	ControlPlane_GetWorkflow_FullMethodName                   = "/loop.control.v1.ControlPlane/GetWorkflow"
+	ControlPlane_RetryWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/RetryWorkflow"
+	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
+	ControlPlane_BlockWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/BlockWorkflow"
+	ControlPlane_SetRunnerState_FullMethodName                = "/loop.control.v1.ControlPlane/SetRunnerState"
+	ControlPlane_ListQueue_FullMethodName                     = "/loop.control.v1.ControlPlane/ListQueue"
+	ControlPlane_SubscribeEvents_FullMethodName               = "/loop.control.v1.ControlPlane/SubscribeEvents"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -49,6 +56,13 @@ type ControlPlaneClient interface {
 	ListWorkflows(ctx context.Context, in *ListWorkflowsRequest, opts ...grpc.CallOption) (*ListWorkflowsResponse, error)
 	ListRunners(ctx context.Context, in *ListRunnersRequest, opts ...grpc.CallOption) (*ListRunnersResponse, error)
 	SubmitHumanDecision(ctx context.Context, in *SubmitHumanDecisionRequest, opts ...grpc.CallOption) (*SubmitHumanDecisionResponse, error)
+	GetWorkflow(ctx context.Context, in *GetWorkflowRequest, opts ...grpc.CallOption) (*GetWorkflowResponse, error)
+	RetryWorkflow(ctx context.Context, in *WorkflowActionRequest, opts ...grpc.CallOption) (*WorkflowActionResponse, error)
+	CancelWorkflow(ctx context.Context, in *WorkflowActionRequest, opts ...grpc.CallOption) (*WorkflowActionResponse, error)
+	BlockWorkflow(ctx context.Context, in *WorkflowActionRequest, opts ...grpc.CallOption) (*WorkflowActionResponse, error)
+	SetRunnerState(ctx context.Context, in *SetRunnerStateRequest, opts ...grpc.CallOption) (*SetRunnerStateResponse, error)
+	ListQueue(ctx context.Context, in *ListQueueRequest, opts ...grpc.CallOption) (*ListQueueResponse, error)
+	SubscribeEvents(ctx context.Context, in *SubscribeEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ControlPlaneEvent], error)
 }
 
 type controlPlaneClient struct {
@@ -179,6 +193,85 @@ func (c *controlPlaneClient) SubmitHumanDecision(ctx context.Context, in *Submit
 	return out, nil
 }
 
+func (c *controlPlaneClient) GetWorkflow(ctx context.Context, in *GetWorkflowRequest, opts ...grpc.CallOption) (*GetWorkflowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWorkflowResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_GetWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) RetryWorkflow(ctx context.Context, in *WorkflowActionRequest, opts ...grpc.CallOption) (*WorkflowActionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkflowActionResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_RetryWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) CancelWorkflow(ctx context.Context, in *WorkflowActionRequest, opts ...grpc.CallOption) (*WorkflowActionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkflowActionResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_CancelWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) BlockWorkflow(ctx context.Context, in *WorkflowActionRequest, opts ...grpc.CallOption) (*WorkflowActionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WorkflowActionResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_BlockWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) SetRunnerState(ctx context.Context, in *SetRunnerStateRequest, opts ...grpc.CallOption) (*SetRunnerStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetRunnerStateResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_SetRunnerState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) ListQueue(ctx context.Context, in *ListQueueRequest, opts ...grpc.CallOption) (*ListQueueResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListQueueResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_ListQueue_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) SubscribeEvents(ctx context.Context, in *SubscribeEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ControlPlaneEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlPlane_ServiceDesc.Streams[0], ControlPlane_SubscribeEvents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SubscribeEventsRequest, ControlPlaneEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlPlane_SubscribeEventsClient = grpc.ServerStreamingClient[ControlPlaneEvent]
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -195,6 +288,13 @@ type ControlPlaneServer interface {
 	ListWorkflows(context.Context, *ListWorkflowsRequest) (*ListWorkflowsResponse, error)
 	ListRunners(context.Context, *ListRunnersRequest) (*ListRunnersResponse, error)
 	SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error)
+	GetWorkflow(context.Context, *GetWorkflowRequest) (*GetWorkflowResponse, error)
+	RetryWorkflow(context.Context, *WorkflowActionRequest) (*WorkflowActionResponse, error)
+	CancelWorkflow(context.Context, *WorkflowActionRequest) (*WorkflowActionResponse, error)
+	BlockWorkflow(context.Context, *WorkflowActionRequest) (*WorkflowActionResponse, error)
+	SetRunnerState(context.Context, *SetRunnerStateRequest) (*SetRunnerStateResponse, error)
+	ListQueue(context.Context, *ListQueueRequest) (*ListQueueResponse, error)
+	SubscribeEvents(*SubscribeEventsRequest, grpc.ServerStreamingServer[ControlPlaneEvent]) error
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -240,6 +340,27 @@ func (UnimplementedControlPlaneServer) ListRunners(context.Context, *ListRunners
 }
 func (UnimplementedControlPlaneServer) SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitHumanDecision not implemented")
+}
+func (UnimplementedControlPlaneServer) GetWorkflow(context.Context, *GetWorkflowRequest) (*GetWorkflowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) RetryWorkflow(context.Context, *WorkflowActionRequest) (*WorkflowActionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RetryWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) CancelWorkflow(context.Context, *WorkflowActionRequest) (*WorkflowActionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) BlockWorkflow(context.Context, *WorkflowActionRequest) (*WorkflowActionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BlockWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) SetRunnerState(context.Context, *SetRunnerStateRequest) (*SetRunnerStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetRunnerState not implemented")
+}
+func (UnimplementedControlPlaneServer) ListQueue(context.Context, *ListQueueRequest) (*ListQueueResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListQueue not implemented")
+}
+func (UnimplementedControlPlaneServer) SubscribeEvents(*SubscribeEventsRequest, grpc.ServerStreamingServer[ControlPlaneEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method SubscribeEvents not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -478,6 +599,125 @@ func _ControlPlane_SubmitHumanDecision_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_GetWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).GetWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_GetWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).GetWorkflow(ctx, req.(*GetWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_RetryWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkflowActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).RetryWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_RetryWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).RetryWorkflow(ctx, req.(*WorkflowActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_CancelWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkflowActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).CancelWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_CancelWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).CancelWorkflow(ctx, req.(*WorkflowActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_BlockWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WorkflowActionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).BlockWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_BlockWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).BlockWorkflow(ctx, req.(*WorkflowActionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_SetRunnerState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetRunnerStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).SetRunnerState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_SetRunnerState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).SetRunnerState(ctx, req.(*SetRunnerStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_ListQueue_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListQueueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ListQueue(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ListQueue_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ListQueue(ctx, req.(*ListQueueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_SubscribeEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SubscribeEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ControlPlaneServer).SubscribeEvents(m, &grpc.GenericServerStream[SubscribeEventsRequest, ControlPlaneEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlPlane_SubscribeEventsServer = grpc.ServerStreamingServer[ControlPlaneEvent]
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -533,7 +773,37 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "SubmitHumanDecision",
 			Handler:    _ControlPlane_SubmitHumanDecision_Handler,
 		},
+		{
+			MethodName: "GetWorkflow",
+			Handler:    _ControlPlane_GetWorkflow_Handler,
+		},
+		{
+			MethodName: "RetryWorkflow",
+			Handler:    _ControlPlane_RetryWorkflow_Handler,
+		},
+		{
+			MethodName: "CancelWorkflow",
+			Handler:    _ControlPlane_CancelWorkflow_Handler,
+		},
+		{
+			MethodName: "BlockWorkflow",
+			Handler:    _ControlPlane_BlockWorkflow_Handler,
+		},
+		{
+			MethodName: "SetRunnerState",
+			Handler:    _ControlPlane_SetRunnerState_Handler,
+		},
+		{
+			MethodName: "ListQueue",
+			Handler:    _ControlPlane_ListQueue_Handler,
+		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "SubscribeEvents",
+			Handler:       _ControlPlane_SubscribeEvents_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/control_plane.proto",
 }

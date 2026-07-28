@@ -1040,5 +1040,33 @@ class ListWorkflowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow["total_agent_executions"], 6)
 
 
+class _OperationsReadPool:
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        assert "FROM app.workflow_runs" in query
+        return {
+            "id": arguments[0], "project_id": "00000000-0000-0000-0000-000000000002", "status": "blocked",
+            "current_phase": "blocked", "pull_request_external_id": None, "pull_request_url": None,
+            "blocking_reason": "operator input required", "planning_attempts": 1, "implementation_attempts": 2,
+            "pipeline_repair_attempts": 0, "review_cycles": 1, "ci_repair_attempts": 0, "total_agent_executions": 4,
+        }
+
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        if "FROM app.workflow_events" in query:
+            return [{"id": 7, "workflow_run_id": arguments[0], "event_type": "workflow_block", "severity": "warning", "payload": {"reason": "operator input required"}, "created_at": NOW}]
+        assert "FROM app.workflow_runs AS wr JOIN app.issues" in query
+        return [{"workflow_run_id": "00000000-0000-0000-0000-000000000001", "project_id": "00000000-0000-0000-0000-000000000002", "issue_id": "42", "priority": 100, "status": "planning", "phase": "plan", "queued_at": NOW}]
+
+
+class OperationsReadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_workflow_and_queue_expose_durable_operations_data(self) -> None:
+        control_plane = AsyncpgControlPlane(_OperationsReadPool())
+        workflow, events = await control_plane.get_workflow("00000000-0000-0000-0000-000000000001")
+        self.assertEqual(workflow["implementation_attempts"], 2)
+        self.assertEqual(events[0]["payload_json"], '{"reason":"operator input required"}')
+        queue = await control_plane.list_queue()
+        self.assertEqual(queue[0]["priority"], 100)
+        self.assertEqual(queue[0]["queued_at"], NOW)
+
+
 if __name__ == "__main__":
     unittest.main()
