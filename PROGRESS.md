@@ -2,23 +2,22 @@
 
 ## Current Status
 
-- Overall status: Complete; PR #74 rebasing onto current main
+- Overall status: Complete; PR #74 rebased onto current main and awaiting CI
 - Current phase: Resolve GitHub issues #40 and #70
-- Active implementation: Rebase conflict resolution, session agent/docs-contracts, 2026-07-28
+- Active implementation: None
 - Last updated: 2026-07-28
 - Agent/session identifier: agent/docs-contracts
 
 ## In Progress
 
-- [ ] Rebase PR #74 onto `origin/main`
-  - Started: 2026-07-28
-  - Relevant files: `PROGRESS.md`
-  - Current state: Resolving the shared progress-log add/add conflict.
-  - Remaining work: Continue rebase, validate, push, and monitor CI.
-  - Definition of done: PR #74 is mergeable with successful CI.
-  - Targeted validation: Orchestrator, API, runner, web, and CI checks.
-
 ## Done
+
+- [x] Rebase PR #74 onto `origin/main`
+  - Completed: 2026-07-28
+  - Relevant files: `PROGRESS.md`, orchestrator workflow files, and runner-event tests
+  - Behavior delivered: Preserved #40/#70 schema packaging, fail-closed validation, GitHub token wiring, OpenAPI, and documentation alongside main's workflow-correctness changes.
+  - Validation performed: 270 orchestrator tests, runner race tests, API tests, web typecheck/lint, Ruff, Mypy, and Compose rendering.
+  - Commands executed: `git rebase origin/main`; `make VENV=/tmp/opencode/moirai-venv test`; Ruff and Mypy commands; `docker compose config`.
 
 - [x] Resolve core workflow correctness issues #37, #38, #39, #45, #46, #47, #58
   - Completed: 2026-07-28
