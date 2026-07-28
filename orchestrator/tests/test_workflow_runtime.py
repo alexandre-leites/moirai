@@ -6,8 +6,13 @@ from moirai.workflows.runtime import PersistedWorkflowRuntime, build_persisted_r
 
 
 class _Checkpoints:
-    def __init__(self, checkpoint: tuple[int, dict[str, object]] | None = None) -> None:
+    def __init__(
+        self,
+        checkpoint: tuple[int, dict[str, object]] | None = None,
+        seed: dict[str, object] | None = None,
+    ) -> None:
         self.current = checkpoint
+        self.seed = seed or {}
         self.saved: list[tuple[str, dict[str, object]]] = []
 
     async def latest_checkpoint(self, workflow_run_id: str) -> tuple[int, dict[str, object]] | None:
@@ -17,6 +22,10 @@ class _Checkpoints:
     async def checkpoint(self, workflow_run_id: str, state: dict[str, object]) -> int:
         self.saved.append((workflow_run_id, state))
         return len(self.saved)
+
+    async def load_state(self, workflow_run_id: str) -> dict[str, object]:
+        del workflow_run_id
+        return dict(self.seed)
 
 
 class _TransitioningCheckpoints(_Checkpoints):
@@ -71,11 +80,32 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"status": "planning", "workflow_run_id": "workflow-1"})
         self.assertEqual(checkpoints.saved, [("workflow-1", result)])
 
+    async def test_seeds_durable_project_and_approval_state_before_invocation(self) -> None:
+        checkpoints = _Checkpoints(seed={"project_id": "project-1", "issue_id": "42", "human_approval_required": True})
+        graph = _Graph({"status": "waiting_human"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+        await runtime.run("workflow-1", {"status": "waiting_github_checks"})
+        state = graph.calls[0][0]
+        self.assertEqual(state["project_id"], "project-1")
+        self.assertEqual(state["issue_id"], "42")
+        self.assertTrue(state["human_approval_required"])
+
+    async def test_terminal_state_is_checkpointed_without_reentering_the_graph(self) -> None:
+        checkpoints = _Checkpoints(seed={"status": "cancelled"})
+        graph = _Graph({"status": "planning"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+        result = await runtime.run("workflow-1", {"status": "cancelled"})
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(graph.calls, [])
+
     async def test_resumes_from_latest_checkpoint(self) -> None:
-        checkpoints = _Checkpoints((3, {"status": "implementing", "planning_attempts": 1}))
+        checkpoints = _Checkpoints(
+            (3, {"status": "implementing", "planning_attempts": 1}),
+            seed={"status": "implementing"},
+        )
         graph = _Graph({"status": "local_pipeline"})
         runtime = PersistedWorkflowRuntime(graph, checkpoints)
-        await runtime.run("workflow-1", {"status": "offered"})
+        await runtime.run("workflow-1", {})
         self.assertEqual(graph.calls[0][0]["status"], "implementing")
         self.assertEqual(graph.calls[0][0]["planning_attempts"], 1)
 
@@ -119,6 +149,14 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ("workflow-1", "failed", {"status": "failed", "blocking_reason": result["blocking_reason"]}),
         ])
         self.assertEqual(checkpoints.saved, [("workflow-1", result)])
+
+    async def test_transient_storage_error_is_re_raised_for_outbox_retry(self) -> None:
+        checkpoints = _TransitioningCheckpoints()
+        runtime = PersistedWorkflowRuntime(_FailingGraph(ConnectionError("database unavailable")), checkpoints)
+        with self.assertRaisesRegex(ConnectionError, "database unavailable"):
+            await runtime.run("workflow-1", {"status": "implementing"})
+        self.assertEqual(checkpoints.transitions, [])
+        self.assertEqual(checkpoints.saved, [])
 
     async def test_node_exception_without_transition_support_still_fails_gracefully(self) -> None:
         checkpoints = _Checkpoints()

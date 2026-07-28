@@ -35,6 +35,7 @@ class GateState:
     pipeline_passed: bool = False
     review_approved: bool = False
     checks_passed: bool = False
+    checks_pending: bool = False
     human_approval_required: bool = False
     human_approved: bool = False
     planning_attempts: int = 0
@@ -72,6 +73,8 @@ def route_after_review(state: GateState, budget: RetryBudget) -> WorkflowRoute:
 def route_after_checks(state: GateState, budget: RetryBudget) -> WorkflowRoute:
     if not state.pipeline_passed or not state.review_approved:
         return WorkflowRoute.BLOCKED
+    if state.checks_pending:
+        return WorkflowRoute.WAIT_FOR_CHECKS
     if state.checks_passed:
         if state.human_approval_required and not state.human_approved:
             return WorkflowRoute.WAIT_FOR_HUMAN

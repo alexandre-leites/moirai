@@ -20,6 +20,7 @@ type Role string
 const (
 	RolePlanner   Role = "planner"
 	RoleDeveloper Role = "developer"
+	RolePipeline  Role = "pipeline"
 	RoleReviewer  Role = "reviewer"
 	RoleRepairer  Role = "repairer"
 )
@@ -116,7 +117,7 @@ func (packet Packet) Validate() error {
 		return errors.New("task packet must not permit merge")
 	}
 	switch packet.Role {
-	case RolePlanner, RoleReviewer:
+	case RolePlanner, RolePipeline, RoleReviewer:
 		if packet.Constraints.MayModifyFiles || packet.Constraints.MayPush {
 			return errors.New("task packet role cannot modify or push")
 		}

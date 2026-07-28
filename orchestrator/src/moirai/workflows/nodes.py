@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from moirai.code_hosts import CodeHost, GitHubCliError, checks_pass
+from moirai.code_hosts import ChecksResult, CodeHost, GitHubCliError, checks_result
 from moirai.issue_trackers import IssueTracker
 
 from .issue_graph import IssueWorkflowNodes, IssueWorkflowState, WorkflowUpdate
@@ -80,7 +80,9 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "developer", "implementing", "implementation_attempts")
 
     async def pipeline(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        return await self._transition(state, "local_pipeline", {"status": "local_pipeline"})
+        if state.get("pipeline_passed") is True:
+            return await self._transition(state, "local_pipeline", {"status": "local_pipeline", "pipeline_passed": True})
+        return await self._dispatch(state, "pipeline", "local_pipeline", None)
 
     async def review(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if int(state.get("review_cycles", 0)) >= _BUDGET.review_cycles:
@@ -93,9 +95,7 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "repairer", "repairing", "pipeline_repair_attempts")
 
     async def push(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("ci_repair_attempts", 0)) >= _BUDGET.ci_repair_attempts:
-            return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
-        return await self._dispatch(state, "developer", "pushing", "ci_repair_attempts")
+        return await self._dispatch(state, "developer", "pushing", None)
 
     async def create_pull_request(self, state: IssueWorkflowState) -> WorkflowUpdate:
         code_host = await self._resolve_code_host(state)
@@ -125,9 +125,11 @@ class PersistedWorkflowNodes:
         if code_host is None or not state.get("pull_request_id"):
             return await self._transition(state, "waiting_github_checks", {"status": "waiting_github_checks"})
         checks = await code_host.required_checks(state["pull_request_id"])
+        outcome = checks_result(checks)
         return await self._transition(state, "waiting_github_checks", {
             "status": "waiting_github_checks",
-            "checks_passed": checks_pass(checks),
+            "checks_passed": outcome is ChecksResult.PASSED,
+            "checks_pending": outcome is ChecksResult.PENDING,
         })
 
     async def wait_for_human(self, state: IssueWorkflowState) -> WorkflowUpdate:
@@ -146,7 +148,9 @@ class PersistedWorkflowNodes:
         if code_host is not None and state.get("pull_request_id"):
             method = state.get("merge_method", "squash")
             try:
-                await code_host.merge_pull_request(state["pull_request_id"], method)
+                pull_request = await code_host.get_pull_request(state["pull_request_id"])
+                if pull_request.state.lower() != "merged":
+                    await code_host.merge_pull_request(state["pull_request_id"], method)
             except GitHubCliError as error:
                 return await self._transition(state, "blocked", {
                     "status": "blocked",

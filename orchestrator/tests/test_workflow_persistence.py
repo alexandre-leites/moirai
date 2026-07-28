@@ -29,6 +29,21 @@ class _Connection:
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.queries.append(query)
+        if "JOIN app.issues AS i" in query:
+            return {
+                "id": args[0], "project_id": "00000000-0000-0000-0000-000000000002",
+                "status": "waiting_github_checks", "branch_name": None,
+                "planning_attempts": 1, "implementation_attempts": 2,
+                "pipeline_repair_attempts": 0, "review_cycles": 1,
+                "ci_repair_attempts": 0, "total_agent_executions": 4,
+                "blocking_reason": None, "pull_request_external_id": "42",
+                "pull_request_url": "https://github.com/example/repo/pull/42",
+                "external_id": "42", "human_approval_required": True,
+                "default_branch": "main", "configuration": {"merge_method": "squash"},
+                "job_id": "00000000-0000-0000-0000-000000000003",
+            }
+        if "UPDATE app.workflow_runs" in query and self.known:
+            return {"id": args[0], "project_id": "00000000-0000-0000-0000-000000000002"}
         return {"id": args[0]} if self.known else None
 
     async def fetchval(self, query: str, *args: object) -> int:
@@ -73,6 +88,10 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         await self.store.transition(WORKFLOW_ID, "planning", {"status": "planning"})
         self.assertTrue(any("UPDATE app.workflow_runs" in query for query in self.pool.connection.queries))
         self.assertTrue(any("INSERT INTO app.workflow_events" in query for query in self.pool.connection.queries))
+
+    async def test_terminal_transition_releases_its_project_lock_transactionally(self) -> None:
+        await self.store.transition(WORKFLOW_ID, "completed", {"status": "completed"})
+        self.assertTrue(any("DELETE FROM app.project_locks" in query for query in self.pool.connection.queries))
 
     async def test_transition_persists_durable_columns_present_in_updates(self) -> None:
         await self.store.transition(
@@ -124,6 +143,16 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         version = await self.store.checkpoint(WORKFLOW_ID, {"status": "planning", "planning_attempts": 1})
         self.assertEqual(version, 1)
         self.assertTrue(any("workflow_checkpoints" in query for query in self.pool.connection.queries))
+
+    async def test_load_state_seeds_project_issue_branch_merge_and_approval_fields(self) -> None:
+        state = await self.store.load_state(WORKFLOW_ID)
+        self.assertEqual(state["project_id"], "00000000-0000-0000-0000-000000000002")
+        self.assertEqual(state["issue_id"], "42")
+        self.assertEqual(state["branch_name"], "agent/42/00000000")
+        self.assertEqual(state["base_branch"], "main")
+        self.assertEqual(state["merge_method"], "squash")
+        self.assertTrue(state["human_approval_required"])
+        self.assertTrue(any("branch_name = $2" in query for query in self.pool.connection.queries))
 
     async def test_latest_checkpoint_restores_json_state_and_rejects_invalid_state(self) -> None:
         self.pool.checkpoint = {"version": 3, "state": '{"status":"planning"}'}

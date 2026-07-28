@@ -48,12 +48,18 @@ class AsyncpgWorkflowPersistence:
         if status in _TERMINAL_STATUSES:
             params.append(now)
             set_clauses.append(f"completed_at = COALESCE(completed_at, ${len(params)})")
-        query = f"UPDATE app.workflow_runs SET {', '.join(set_clauses)} WHERE id = $1 RETURNING id"
+        query = f"UPDATE app.workflow_runs SET {', '.join(set_clauses)} WHERE id = $1 RETURNING id, project_id"
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 changed = await connection.fetchrow(query, *params)
                 if changed is None:
                     raise ValueError("workflow run is unknown")
+                if status in _TERMINAL_STATUSES:
+                    await connection.execute(
+                        "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+                        changed["project_id"],
+                        _uuid(workflow_run_id),
+                    )
                 await connection.execute(
                     """
                     INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
@@ -82,6 +88,74 @@ class AsyncpgWorkflowPersistence:
                         str(updates.get("pull_request_state") or "open"),
                     )
 
+
+    async def load_state(self, workflow_run_id: str) -> dict[str, object]:
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    SELECT wr.id, wr.project_id, wr.status, wr.branch_name, wr.planning_attempts,
+                           wr.implementation_attempts, wr.pipeline_repair_attempts, wr.review_cycles,
+                           wr.ci_repair_attempts, wr.total_agent_executions, wr.blocking_reason,
+                           wr.pull_request_external_id, wr.pull_request_url, i.external_id,
+                           i.human_approval_required, p.default_branch, p.configuration,
+                           j.id AS job_id
+                    FROM app.workflow_runs AS wr
+                    JOIN app.issues AS i ON i.id = wr.issue_id
+                    JOIN app.projects AS p ON p.id = wr.project_id
+                    LEFT JOIN app.jobs AS j ON j.workflow_run_id = wr.id
+                    WHERE wr.id = $1
+                    FOR UPDATE OF wr
+                    """,
+                    _uuid(workflow_run_id),
+                )
+                if record is None:
+                    raise ValueError("workflow run is unknown")
+                if str(record["status"]) in _TERMINAL_STATUSES:
+                    await connection.execute(
+                        "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+                        record["project_id"],
+                        _uuid(workflow_run_id),
+                    )
+                branch_name = _optional_text(record["branch_name"])
+                if branch_name is None:
+                    job_id = record["job_id"]
+                    if job_id is None:
+                        raise ValueError("workflow run has no job")
+                    branch_name = f"agent/{record['external_id']}/{str(job_id)[:8]}"
+                    await connection.execute(
+                        "UPDATE app.workflow_runs SET branch_name = $2, updated_at = $3 WHERE id = $1",
+                        _uuid(workflow_run_id),
+                        branch_name,
+                        self._now(),
+                    )
+        configuration = record["configuration"]
+        if isinstance(configuration, str):
+            configuration = json.loads(configuration)
+        if not isinstance(configuration, dict):
+            configuration = {}
+        merge_method = configuration.get("merge_method", "squash")
+        if merge_method not in {"merge", "rebase", "squash"}:
+            merge_method = "squash"
+        return {
+            "workflow_run_id": workflow_run_id,
+            "project_id": str(record["project_id"]),
+            "issue_id": str(record["external_id"]),
+            "status": str(record["status"]),
+            "branch_name": branch_name,
+            "base_branch": str(record["default_branch"]),
+            "human_approval_required": bool(record["human_approval_required"]),
+            "merge_method": merge_method,
+            "planning_attempts": int(record["planning_attempts"]),
+            "implementation_attempts": int(record["implementation_attempts"]),
+            "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
+            "review_cycles": int(record["review_cycles"]),
+            "ci_repair_attempts": int(record["ci_repair_attempts"]),
+            "total_agent_executions": int(record["total_agent_executions"]),
+            "blocking_reason": _optional_text(record["blocking_reason"]),
+            "pull_request_id": _optional_text(record["pull_request_external_id"]),
+            "pull_request_url": _optional_text(record["pull_request_url"]),
+        }
 
     async def latest_checkpoint(self, workflow_run_id: str) -> tuple[int, dict[str, object]] | None:
         record = await self._pool.fetchrow(
@@ -186,6 +260,10 @@ class AsyncpgWorkflowPersistence:
                     now,
                 )
         return str(execution_id)
+
+
+def _optional_text(value: object) -> str | None:
+    return None if value is None else str(value)
 
 
 def _uuid(value: str) -> Any:

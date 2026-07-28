@@ -26,6 +26,12 @@ class CheckStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ChecksResult(StrEnum):
+    PENDING = "pending"
+    PASSED = "passed"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class PullRequest:
     external_id: str
@@ -43,6 +49,22 @@ class PullRequestCheck:
     required: bool = True
 
 
+def checks_result(checks: Sequence[PullRequestCheck]) -> ChecksResult:
+    if not checks:
+        return ChecksResult.PENDING
+    pending = False
+    for check in checks:
+        if check.status is CheckStatus.PASSING:
+            continue
+        if check.status is CheckStatus.SKIPPED and not check.required:
+            continue
+        if check.status is CheckStatus.PENDING:
+            pending = True
+            continue
+        return ChecksResult.FAILED
+    return ChecksResult.PENDING if pending else ChecksResult.PASSED
+
+
 def checks_pass(checks: Sequence[PullRequestCheck]) -> bool:
     """The single pass/fail policy for a pull request's checks, shared by
     the workflow's wait_for_checks gate and merge_pull_request's own guard
@@ -52,15 +74,7 @@ def checks_pass(checks: Sequence[PullRequestCheck]) -> bool:
     CI having passed). A skipped check passes only if it is not required;
     a skipped required check does not pass.
     """
-    if not checks:
-        return False
-    for check in checks:
-        if check.status is CheckStatus.PASSING:
-            continue
-        if check.status is CheckStatus.SKIPPED and not check.required:
-            continue
-        return False
-    return True
+    return checks_result(checks) is ChecksResult.PASSED
 
 
 class GitHubCliCodeHost:
@@ -94,6 +108,18 @@ class GitHubCliCodeHost:
         if not payload:
             return None
         return self._pull_request_from_json(payload[0])
+
+    async def get_pull_request(self, pull_request_id: str) -> PullRequest:
+        payload = await self._json(
+            "pr",
+            "view",
+            pull_request_id,
+            "--repo",
+            self._repository.slug,
+            "--json",
+            "number,url,state,headRefName,headRefOid",
+        )
+        return self._pull_request_from_json(payload)
 
     async def create_or_find_pull_request(
         self,

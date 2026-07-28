@@ -3,10 +3,20 @@ from typing import Protocol
 
 from moirai.issue_trackers.github_cli import GitHubCliError
 
-from .github_cli import CheckStatus, GitHubCliCodeHost, PullRequest, PullRequestCheck, checks_pass
+from .github_cli import (
+    ChecksResult,
+    CheckStatus,
+    GitHubCliCodeHost,
+    PullRequest,
+    PullRequestCheck,
+    checks_pass,
+    checks_result,
+)
 
 
 class CodeHost(Protocol):
+    async def get_pull_request(self, pull_request_id: str) -> PullRequest: ...
+
     async def create_or_find_pull_request(
         self,
         workflow_id: str,
@@ -25,10 +35,12 @@ class CodeHost(Protocol):
 
 __all__ = [
     "CheckStatus",
+    "ChecksResult",
     "CodeHost",
     "GitHubCliCodeHost",
     "GitHubCliError",
     "PullRequest",
     "PullRequestCheck",
     "checks_pass",
+    "checks_result",
 ]

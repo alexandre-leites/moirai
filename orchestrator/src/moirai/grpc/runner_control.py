@@ -277,15 +277,8 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             ) from error
 
     async def _advance_workflow(self, workflow_run_id: str, new_status: str, state_updates: dict[str, object]) -> None:
-        # Only registered as an on_transition callback when workflow_runtime is set.
         assert self._workflow_runtime is not None
-        try:
-            await self._workflow_runtime.run(workflow_run_id, state_updates)
-        except Exception:
-            import logging
-            logging.getLogger("runner_control").exception(
-                "workflow advancement after runner event failed"
-            )
+        await self._workflow_runtime.run(workflow_run_id, {"status": new_status, **state_updates})
 
     async def _send_lease_acknowledgement(self, runner_id: str, lease: Any) -> None:
         expires_at = lease.expires_at

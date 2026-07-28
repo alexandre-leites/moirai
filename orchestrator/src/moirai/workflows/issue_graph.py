@@ -31,6 +31,7 @@ class IssueWorkflowState(TypedDict, total=False):
     pipeline_passed: bool
     review_approved: bool
     checks_passed: bool
+    checks_pending: bool
     human_approval_required: bool
     human_approved: bool
     human_changes_requested: bool
@@ -101,9 +102,9 @@ def route_review(
 
 def route_checks(
     state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
-) -> Literal["wait_for_human", "merge", "repair", "blocked"]:
+) -> Literal["wait_for_checks", "wait_for_human", "merge", "repair", "blocked"]:
     return cast(
-        Literal["wait_for_human", "merge", "repair", "blocked"],
+        Literal["wait_for_checks", "wait_for_human", "merge", "repair", "blocked"],
         route_after_checks(_gate_state(state), budget).value,
     )
 
@@ -169,6 +170,7 @@ def build_issue_graph(
         "wait_for_checks",
         lambda state: route_checks(state, budget),
         {
+            "wait_for_checks": END,
             "wait_for_human": "wait_for_human",
             "merge": "merge",
             "repair": "repair",
@@ -198,6 +200,7 @@ def _gate_state(state: IssueWorkflowState) -> GateState:
         pipeline_passed=state.get("pipeline_passed", False),
         review_approved=state.get("review_approved", False),
         checks_passed=state.get("checks_passed", False),
+        checks_pending=state.get("checks_pending", False),
         human_approval_required=state.get("human_approval_required", False),
         human_approved=state.get("human_approved", False),
         planning_attempts=state.get("planning_attempts", 0),

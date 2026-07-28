@@ -34,6 +34,7 @@ class _FakeCodeHost:
     merged_prs: list[tuple[str, str]] = None
     _checks_result: list[PullRequestCheck] = None
     merge_error: GitHubCliError | None = None
+    pull_request_state: str = "open"
 
     def __post_init__(self) -> None:
         if self.created_prs is None:
@@ -54,6 +55,9 @@ class _FakeCodeHost:
         if self._checks_result is not None:
             return self._checks_result
         return [PullRequestCheck(name="test", status=CheckStatus.PASSING)]
+
+    async def get_pull_request(self, pull_request_id: str) -> PullRequest:
+        return PullRequest(external_id=pull_request_id, url="https://github.com/org/repo/pull/42", state=self.pull_request_state, head_branch="agent/42/fix", head_commit="abc123")
 
     async def enable_auto_merge(self, pull_request_id: str, method: str) -> None:
         pass
@@ -109,17 +113,18 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(update["execution_id"], f"workflow-1-{role}")
         self.assertEqual([role for _, role in self.dispatcher.dispatches], ["planner", "developer", "reviewer", "repairer"])
 
-    async def test_pipeline_persists_local_pipeline_phase_without_dispatch(self) -> None:
+    async def test_pipeline_dispatches_a_dedicated_pipeline_execution(self) -> None:
         update = await self.nodes.pipeline(self.state)
-        self.assertEqual(update, {"status": "local_pipeline"})
-        self.assertEqual(self.dispatcher.dispatches, [])
+        self.assertEqual(update["status"], "local_pipeline")
+        self.assertEqual(update["execution_id"], "workflow-1-pipeline")
+        self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "pipeline")])
 
     async def test_push_and_blocked_persist_deterministic_terminal_states(self) -> None:
         push = await self.nodes.push(self.state)
         blocked = await self.nodes.blocked({"workflow_run_id": "workflow-1"})
         self.assertEqual(push["status"], "pushing")
         self.assertEqual(push["execution_id"], "workflow-1-developer")
-        self.assertEqual(push["ci_repair_attempts"], 1)
+        self.assertNotIn("ci_repair_attempts", push)
         self.assertEqual(push["total_agent_executions"], 1)
         self.assertEqual(blocked, {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
 
@@ -171,6 +176,14 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(update.get("checks_passed"))
         self.assertEqual(code_host.checked_prs, ["42"])
 
+    async def test_wait_for_checks_marks_pending_checks_without_consuming_repair_budget(self) -> None:
+        code_host = _FakeCodeHost(_checks_result=[PullRequestCheck(name="test", status=CheckStatus.PENDING)])
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
+        update = await nodes.wait_for_checks({"workflow_run_id": "wf-1", "pull_request_id": "42"})
+        self.assertTrue(update["checks_pending"])
+        self.assertFalse(update["checks_passed"])
+        self.assertNotIn("ci_repair_attempts", update)
+
     async def test_wait_for_checks_reports_failing_checks(self) -> None:
         code_host = _FakeCodeHost(_checks_result=[
             PullRequestCheck(name="test", status=CheckStatus.FAILING),
@@ -216,6 +229,13 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         update = await nodes.merge(state)
         self.assertEqual(update["status"], "merging")
         self.assertEqual(code_host.merged_prs, [("42", "squash")])
+
+    async def test_merge_treats_an_already_merged_pull_request_as_success(self) -> None:
+        code_host = _FakeCodeHost(pull_request_state="MERGED")
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
+        update = await nodes.merge({"workflow_run_id": "wf-1", "pull_request_id": "42"})
+        self.assertEqual(update, {"status": "merging"})
+        self.assertEqual(code_host.merged_prs, [])
 
     async def test_merge_without_code_host_uses_fallback(self) -> None:
         state: IssueWorkflowState = {"workflow_run_id": "wf-1"}

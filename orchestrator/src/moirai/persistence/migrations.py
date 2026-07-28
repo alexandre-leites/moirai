@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+
+def _is_legacy_checksum(value: str) -> bool:
+    return len(value) != 64 or any(character not in "0123456789abcdef" for character in value.lower())
 
 
 class MigrationRunner:
@@ -29,25 +34,29 @@ class MigrationRunner:
         if not self.MIGRATIONS_DIR.is_dir():
             return []
         entries: list[tuple[int, str, str, str]] = []
+        versions: set[int] = set()
         for path in sorted(self.MIGRATIONS_DIR.iterdir()):
             if not path.is_file() or path.suffix != ".sql":
                 continue
-            m = self._FILENAME_PATTERN.match(path.name)
-            if not m:
+            match = self._FILENAME_PATTERN.match(path.name)
+            if not match:
                 continue
-            version = int(m.group(1))
-            name = m.group(2)
+            version = int(match.group(1))
+            if version in versions:
+                raise ValueError(f"duplicate migration version: {version}")
+            versions.add(version)
+            name = match.group(2)
             contents = path.read_text("utf-8")
-            checksum = str(hash(contents))
+            checksum = sha256(contents.encode("utf-8")).hexdigest()
             entries.append((version, name, checksum, contents))
-        entries.sort(key=lambda x: x[0])
+        entries.sort(key=lambda entry: entry[0])
         return entries
 
-    async def _applied_versions(self, conn: Any) -> set[int]:
+    async def _applied_versions(self, conn: Any) -> dict[int, str]:
         rows = await conn.fetch(
             f"SELECT version, checksum FROM {self.TRACKING_TABLE} ORDER BY version"
         )
-        return {r["version"] for r in rows}
+        return {int(row["version"]): str(row["checksum"]) for row in rows}
 
     async def run(self) -> list[str]:
         migrations = await self._discover_migrations()
@@ -58,12 +67,20 @@ class MigrationRunner:
             applied = await self._applied_versions(conn)
             results: list[str] = []
             for version, name, checksum, contents in migrations:
-                if version in applied:
+                previous_checksum = applied.get(version)
+                if previous_checksum is not None:
+                    if previous_checksum != checksum:
+                        if _is_legacy_checksum(previous_checksum):
+                            await conn.execute(
+                                f"UPDATE {self.TRACKING_TABLE} SET checksum = $2 WHERE version = $1",
+                                version,
+                                checksum,
+                            )
+                        else:
+                            raise ValueError(f"migration checksum mismatch: {version:03d}_{name}")
                     continue
                 async with conn.transaction():
-                    for statement in self._split_statements(contents):
-                        if statement.strip():
-                            await conn.execute(statement)
+                    await conn.execute(contents)
                     await conn.execute(
                         f"INSERT INTO {self.TRACKING_TABLE} (version, name, checksum) VALUES ($1, $2, $3)",
                         version,

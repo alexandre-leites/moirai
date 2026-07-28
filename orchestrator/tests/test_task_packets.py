@@ -2,6 +2,7 @@ import unittest
 from typing import cast
 
 from moirai.workflows.task_packets import (
+    PipelineCommand,
     RepositorySource,
     TaskExecutionRequest,
     build_task_packet,
@@ -59,6 +60,20 @@ class TaskPacketTests(unittest.TestCase):
         self.assertEqual(packet["executionId"], "request-1-implement")
         self.assertEqual(packet["role"], "developer")
         self.assertEqual(packet["constraints"], {"mayModifyFiles": True, "mayPush": True, "mayMerge": False})
+
+    def test_pipeline_packet_is_read_only_and_carries_configured_commands(self) -> None:
+        packet = build_task_packet(
+            TaskExecutionRequest(
+                job_id="job-1", execution_id="request-1-pipeline", role="pipeline",
+                objective="Run local pipeline", issue_external_id="42", issue_title="Title", issue_body="Body",
+                repository=RepositorySource(project_id="project-1", mode="managed_clone", default_branch="main", branch="agent/42/job-1", url="https://example.test/repository.git"),
+                timeout_seconds=600, may_modify_files=False, may_push=False, may_merge=False,
+                pipeline=(PipelineCommand("make test", 300),),
+            )
+        )
+        self.assertEqual(packet["role"], "pipeline")
+        self.assertEqual(packet["pipeline"], [{"command": "make test", "timeoutSeconds": 300}])
+        self.assertEqual(packet["constraints"], {"mayModifyFiles": False, "mayPush": False, "mayMerge": False})
 
     def test_factory_rejects_invalid_repository_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "repository URL"):
