@@ -47,11 +47,15 @@ func requestIDFromContext(ctx context.Context) string {
 	return requestID
 }
 
-func WithSession(ctx context.Context, sessionToken string) context.Context {
+func WithSession(ctx context.Context, sessionToken string, csrfToken ...string) context.Context {
 	if sessionToken == "" {
 		return ctx
 	}
-	return metadata.AppendToOutgoingContext(ctx, "x-loop-session", sessionToken)
+	md := metadata.Pairs("x-loop-session", sessionToken)
+	if len(csrfToken) > 0 && csrfToken[0] != "" {
+		md.Append("x-loop-csrf", csrfToken[0])
+	}
+	return metadata.NewOutgoingContext(ctx, md)
 }
 
 func Dial(ctx context.Context, endpoint string) (*Client, error) {
