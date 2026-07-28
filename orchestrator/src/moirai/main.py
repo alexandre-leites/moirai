@@ -320,7 +320,11 @@ async def serve(
 
         await _bootstrap_initial_setup(pool)
         await _seed_issue_if_needed(pool)
-        from moirai.issue_trackers.github_cli import GitHubCliUnavailableError, SubprocessCommandRunner, verify_gh_ready
+        from moirai.issue_trackers.github_cli import (
+            GitHubCliUnavailableError,
+            SubprocessCommandRunner,
+            verify_gh_ready,
+        )
         from moirai.scheduler import AsyncpgLeader, Scheduler
         from moirai.services.issue_sync import IssueSync, github_issue_tracker_for_project
         from moirai.workflows.code_host_factory import ProjectCodeHostFactory
