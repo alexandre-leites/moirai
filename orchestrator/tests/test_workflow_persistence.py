@@ -142,6 +142,21 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)
         self.assertIn("last_progress_at", update_query)
 
+    async def test_terminal_probe_outcomes_reopen_or_close_provider_circuits(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "blocked",
+            {"status": "blocked", "blocking_reason": "probe failed"},
+        )
+        blocked_queries = "\n".join(self.pool.connection.queries)
+        self.assertIn("state = 'half_open' THEN 'open'", blocked_queries)
+        self.assertIn("UPDATE app.provider_circuit_state", blocked_queries)
+        self.pool.connection.queries.clear()
+        await self.store.transition(WORKFLOW_ID, "completed", {"status": "completed"})
+        completed_queries = "\n".join(self.pool.connection.queries)
+        self.assertIn("probe_workflow_run_id = NULL", completed_queries)
+        self.assertIn("UPDATE app.provider_circuit_state", completed_queries)
+
     async def test_transition_omits_columns_not_present_in_updates(self) -> None:
         await self.store.transition(WORKFLOW_ID, "planning", {"status": "planning"})
         update_query = next(q for q in self.pool.connection.queries if "UPDATE app.workflow_runs" in q)

@@ -59,9 +59,12 @@ from moirai.workflows.task_packets import (
 
 
 class AsyncpgControlPlane:
-    def __init__(self, pool: Any) -> None:
+    def __init__(self, pool: Any, circuit_probe_cooldown: timedelta = timedelta(minutes=5)) -> None:
+        if circuit_probe_cooldown <= timedelta():
+            raise ValueError("circuit probe cooldown must be positive")
         self._pool = pool
         self._authentication = AsyncpgAuthentication(pool)
+        self._circuit_probe_cooldown = circuit_probe_cooldown
 
     @property
     def pool(self) -> Any:
@@ -830,6 +833,49 @@ class AsyncpgControlPlane:
             )
         )
 
+    async def _claim_circuit_probes(
+        self,
+        connection: Any,
+        project_id: Any,
+        provider: str,
+        workflow_id: UUID,
+        now: datetime,
+    ) -> bool:
+        circuits = (
+            ("app.project_circuit_state", "project_id", project_id),
+            ("app.provider_circuit_state", "provider", provider),
+        )
+        locked: list[tuple[str, str, Any, Any]] = []
+        for table, key, value in circuits:
+            record = await connection.fetchrow(
+                f"SELECT state, opened_at FROM {table} WHERE {key} = $1 FOR UPDATE", value
+            )
+            locked.append((table, key, value, record))
+        for _, _, _, record in locked:
+            if record is None or str(record["state"]) == "closed":
+                continue
+            if str(record["state"]) == "half_open":
+                return False
+            opened_at = record["opened_at"]
+            if not isinstance(opened_at, datetime) or opened_at + self._circuit_probe_cooldown > now:
+                return False
+        for table, key, value, record in locked:
+            if record is None or str(record["state"]) == "closed":
+                continue
+            claimed = await connection.execute(
+                f"""
+                UPDATE {table}
+                SET state = 'half_open', probe_workflow_run_id = $2, updated_at = $3
+                WHERE {key} = $1 AND state = 'open' AND probe_workflow_run_id IS NULL
+                """,
+                value,
+                workflow_id,
+                now,
+            )
+            if claimed != "UPDATE 1":
+                return False
+        return True
+
     async def schedule(self, now: datetime, offer_ttl: timedelta) -> ScheduledJob | None:
         if offer_ttl <= timedelta():
             raise ValueError("offer_ttl must be positive")
@@ -841,7 +887,7 @@ class AsyncpgControlPlane:
             async with connection.transaction():
                 candidate = await connection.fetchrow(
                     """
-                    SELECT i.id AS issue_id, i.project_id, i.external_id, i.priority,
+                    SELECT i.id AS issue_id, i.project_id, i.provider, i.external_id, i.priority,
                            i.external_created_at, i.last_synced_at,
                            p.enabled, p.configuration, r.id AS runner_id, r.labels,
                            r.enabled AS runner_enabled, r.draining, r.status
@@ -860,11 +906,13 @@ class AsyncpgControlPlane:
                        )
                        AND NOT EXISTS (
                            SELECT 1 FROM app.project_circuit_state AS circuit
-                           WHERE circuit.project_id = p.id AND circuit.state = 'open'
+                           WHERE circuit.project_id = p.id
+                             AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > $1))
                        )
                        AND NOT EXISTS (
                            SELECT 1 FROM app.provider_circuit_state AS circuit
-                           WHERE circuit.provider = i.provider AND circuit.state = 'open'
+                           WHERE circuit.provider = i.provider
+                             AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > $1))
                        )
                        AND (
                            SELECT COUNT(*) FROM app.jobs AS active_job
@@ -875,9 +923,18 @@ class AsyncpgControlPlane:
                              i.project_id, i.external_id, r.id
                     FOR UPDATE OF i, p, r SKIP LOCKED
                     LIMIT 1
-                    """
+                    """,
+                    now - self._circuit_probe_cooldown,
                 )
                 if candidate is None:
+                    return None
+                if not await self._claim_circuit_probes(
+                    connection,
+                    candidate["project_id"],
+                    str(candidate["provider"]),
+                    workflow_id,
+                    now,
+                ):
                     return None
                 await connection.execute(
                     """

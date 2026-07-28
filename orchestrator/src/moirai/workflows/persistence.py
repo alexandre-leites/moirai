@@ -65,7 +65,9 @@ class AsyncpgWorkflowPersistence:
                         changed["project_id"],
                         _uuid(workflow_run_id),
                     )
-                    await self._update_project_circuit(connection, changed["project_id"], status, updates, now)
+                    await self._update_project_circuit(
+                        connection, changed["project_id"], workflow_run_id, status, updates, now
+                    )
                 await connection.execute(
                     """
                     INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
@@ -96,19 +98,35 @@ class AsyncpgWorkflowPersistence:
 
 
     async def _update_project_circuit(
-        self, connection: Any, project_id: Any, status: str, updates: dict[str, object], now: datetime
+        self,
+        connection: Any,
+        project_id: Any,
+        workflow_run_id: str,
+        status: str,
+        updates: dict[str, object],
+        now: datetime,
     ) -> None:
         if status == "completed":
             await connection.execute(
                 """
                 INSERT INTO app.project_circuit_state
-                    (project_id, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
-                VALUES ($1, 'closed', 0, NULL, NULL, $2)
+                    (project_id, state, consecutive_failures, last_failure_reason, opened_at, probe_workflow_run_id, updated_at)
+                VALUES ($1, 'closed', 0, NULL, NULL, NULL, $2)
                 ON CONFLICT (project_id) DO UPDATE
                 SET state = 'closed', consecutive_failures = 0, last_failure_reason = NULL,
-                    opened_at = NULL, updated_at = EXCLUDED.updated_at
+                    opened_at = NULL, probe_workflow_run_id = NULL, updated_at = EXCLUDED.updated_at
                 """,
                 project_id,
+                now,
+            )
+            await connection.execute(
+                """
+                UPDATE app.provider_circuit_state
+                SET state = 'closed', consecutive_failures = 0, last_failure_reason = NULL,
+                    opened_at = NULL, probe_workflow_run_id = NULL, updated_at = $2
+                WHERE probe_workflow_run_id = $1
+                """,
+                _uuid(workflow_run_id),
                 now,
             )
             return
@@ -118,24 +136,39 @@ class AsyncpgWorkflowPersistence:
         await connection.execute(
             """
             INSERT INTO app.project_circuit_state
-                (project_id, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
-            VALUES ($1, 'closed', 1, $2, NULL, $3)
+                (project_id, state, consecutive_failures, last_failure_reason, opened_at, probe_workflow_run_id, updated_at)
+            VALUES ($1, 'closed', 1, $2, NULL, NULL, $3)
             ON CONFLICT (project_id) DO UPDATE
             SET consecutive_failures = CASE
                     WHEN app.project_circuit_state.last_failure_reason = EXCLUDED.last_failure_reason
                     THEN app.project_circuit_state.consecutive_failures + 1 ELSE 1 END,
                 state = CASE
+                    WHEN app.project_circuit_state.state = 'half_open' THEN 'open'
                     WHEN app.project_circuit_state.last_failure_reason = EXCLUDED.last_failure_reason
                      AND app.project_circuit_state.consecutive_failures >= 2 THEN 'open' ELSE 'closed' END,
                 opened_at = CASE
+                    WHEN app.project_circuit_state.state = 'half_open' THEN EXCLUDED.updated_at
                     WHEN app.project_circuit_state.last_failure_reason = EXCLUDED.last_failure_reason
                      AND app.project_circuit_state.consecutive_failures >= 2 THEN EXCLUDED.updated_at ELSE NULL END,
+                probe_workflow_run_id = NULL,
                 last_failure_reason = EXCLUDED.last_failure_reason,
                 updated_at = EXCLUDED.updated_at
             """,
             project_id,
             reason,
             now,
+        )
+        await connection.execute(
+            """
+            UPDATE app.provider_circuit_state
+            SET state = 'open', opened_at = $2, probe_workflow_run_id = NULL,
+                consecutive_failures = consecutive_failures + 1,
+                last_failure_reason = $3, updated_at = $2
+            WHERE probe_workflow_run_id = $1
+            """,
+            _uuid(workflow_run_id),
+            now,
+            reason,
         )
 
     async def load_state(self, workflow_run_id: str) -> dict[str, object]:

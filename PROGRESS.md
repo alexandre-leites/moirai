@@ -2,21 +2,21 @@
 
 ## Current Status
 
-- Overall status: Complete; PR preparation
+- Overall status: Complete; PR follow-up preparation
 - Current phase: Workflow quality and recovery
-- Active implementation: PR preparation — agent/workflow-quality
+- Active implementation: PR #80 CI monitoring — agent/workflow-quality
 - Last updated: 2026-07-28
 - Agent/session identifier: agent/workflow-quality
 
 ## In Progress
 
-- [ ] Create and monitor the workflow quality/recovery PR
-  - Started: 2026-07-28
-  - Relevant files: GitHub pull request and CI checks
-  - Current state: Implementation and local service validation are complete.
-  - Remaining work: Commit, push, create non-draft PR, and resolve CI.
-  - Definition of done: Required checks are green and the PR is mergeable.
-  - Targeted validation: GitHub Actions checks.
+- [x] Implement bounded half-open circuit recovery for PR #80
+  - Completed: 2026-07-28
+  - Relevant files: `orchestrator/migrations/006_circuit_half_open_probes.sql`, `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/workflows/persistence.py`, `orchestrator/tests/`
+  - Behavior delivered: Timed cooldown-gated transition to `half_open` state; project/provider circuit lock on probe ownership; probe outcome correctly closes or reopens circuits; atomicity ensures concurrent probes cannot claim the same circuit.
+  - Validation performed: 278 orchestrator tests, 6 subtests; focused circuit probe recovery and state tests; full runner suite; Ruff.
+  - Commands executed: `/tmp/opencode/moirai-workflow-venv/bin/pytest -q`; `/tmp/opencode/moirai-workflow-venv/bin/ruff check --ignore EXE002 src tests`; `go test ./...`.
+  - Notes: Circuit logic verified transactionally in both control-plane scheduling and persistent workflow outcomes.
 
 ## Done
 

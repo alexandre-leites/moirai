@@ -16,7 +16,7 @@ docker compose up --build
 ## Workflow recovery guarantees
 
 - Terminal runner events persist a diff hash and outcome fingerprint. Four identical terminal outcomes block the workflow instead of retrying indefinitely.
-- Three consecutive blocked workflows with the same project failure reason open that project's circuit. Reconciliation closes it after a delivered workflow; provider failures use the same durable circuit state.
+- Three consecutive blocked workflows with the same project failure reason open that project's circuit. After a five-minute cooldown, one durable half-open probe is allowed; its delivery closes the circuit and a blocked probe reopens it. Provider failures use the same durable circuit state.
 - Task packets carry acceptance criteria, prior failures, revision and diff context. Reviewer prompts are independently generated and exclude developer plans or reasoning.
 - Issue reconciliation revisits terminal workflows so `agent:blocked` and `agent:delivered` labels converge after retries or restarts.
 
