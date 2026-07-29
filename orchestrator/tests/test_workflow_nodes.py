@@ -542,6 +542,9 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["status"], "merging")
         self.assertEqual(update["merge_verification_attempts"], 1)
         self.assertEqual(code_host.merged_prs, [("42", "squash")])
+        # The stale pre-merge read is not written back: "open" is no longer
+        # something this path knows, so the durable record is left alone.
+        self.assertNotIn("pull_request_state", update)
         self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "merge")
 
     async def test_merge_waits_when_the_pull_request_cannot_be_read_at_all(self) -> None:

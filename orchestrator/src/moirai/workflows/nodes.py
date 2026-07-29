@@ -270,9 +270,12 @@ class PersistedWorkflowNodes:
                 # The merge may well have landed -- this only says the
                 # confirming read failed. Blocking here would strand a merged
                 # pull request on a transient GitHub hiccup, so the run waits
-                # and re-reads instead.
+                # and re-reads instead. The pre-merge read is deliberately not
+                # passed on: writing its `open` state back would assert
+                # something this branch has just established it does not know,
+                # and the durable record is better left as it was.
                 return await self._merge_unverified(
-                    state, f"merge could not be confirmed: {error}", pull_request
+                    state, f"merge could not be confirmed: {error}"
                 )
         if pull_request.merged:
             return await self._transition(state, "merging", {
