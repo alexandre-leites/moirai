@@ -152,6 +152,20 @@ class WorkflowTransitionTests(unittest.TestCase):
     def _review_result(self, verdict: str) -> dict[str, Any]:
         return {"verdict": verdict, "acceptanceCriteria": [], "findings": []}
 
+    def test_terminal_events_clear_the_awaiting_execution_gate(self) -> None:
+        """The suspended graph only advances when the gate the dispatching node
+        set is cleared; every terminal transition has to carry that clear."""
+        for summary, status, role in (
+            (self._summary("completed", "job-1-plan", result=self._planner_result("ready")), "planning", "planner"),
+            (self._summary("completed", "job-1-implement"), "implementing", "developer"),
+            (self._summary("failed", "job-1-pipeline", exit_code=1), "local_pipeline", "pipeline"),
+            (self._summary("failed", "job-1-repair", exit_code=1), "repairing", "repairer"),
+            (self._summary("cancelled", "job-1-plan"), "planning", "planner"),
+        ):
+            transition = workflow_transition_for_terminal_event(summary, status, role=role)
+            assert transition is not None
+            self.assertIs(transition.state_updates["awaiting_execution"], False)
+
     def test_completed_planner_with_ready_verdict_transitions_to_implementing(self) -> None:
         summary = self._summary("completed", "job-1-plan", result=self._planner_result("ready"))
         transition = workflow_transition_for_terminal_event(summary, "planning", role="planner")

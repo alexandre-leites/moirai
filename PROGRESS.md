@@ -485,8 +485,26 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
     - `LOOP_SEED_PROJECT_NAME=""` disables seed-project bootstrap; `compose.yaml` uses `${LOOP_SEED_PROJECT_NAME-demo}`.
   - Validation: `make test-orchestrator` (301 tests, OK), `make test-postgres-integration` (2 tests, OK), `make lint`, `make typecheck`, `make compose`.
 
-## Issue #91 — Offer expiry must not cancel in-flight workflows (finding F4)
+## Issue #88 — Event-driven issue workflow (platform review finding F1)
 
+### Done
+
+- [x] Suspend the LangGraph issue workflow after every execution dispatch
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/runner_events.py`, `orchestrator/src/moirai/workflows/runtime.py`, `orchestrator/tests/test_end_to_end.py`, `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_runtime.py`, `orchestrator/tests/test_runner_events.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `README.md`, `PROJECT.md`, `orchestrator/README.md`
+  - Behavior delivered:
+    - `_dispatch` sets `awaiting_execution` on the graph state; `suspend_after_dispatch` wraps the outgoing edge of every dispatching node (`plan`, `implement`, `pipeline`, `review`, `repair`, `push`) so the invocation ends at `END` while an execution is pending.
+    - `workflow_transition_for_terminal_event` clears `awaiting_execution` on every terminal transition, so `PersistedWorkflowRuntime.run` resumes the graph from that same edge.
+    - `_dispatch` replay guard: a node re-entered while its own request is still `queued` reuses that request.
+    - Checkpointer decision: production requires one. Without a checkpointer the runtime leaves a suspended run untouched and logs a warning.
+  - Validation: `make test-orchestrator` (298 tests, OK), `make lint`, `make typecheck`, `make compose`.
+
+### Decisions
+
+- Decision: Suspend with a conditional edge to `END` rather than langgraph's static `interrupt_after`.
+- Decision: Clear `awaiting_execution` in `workflow_transition_for_terminal_event`, not in `PersistedWorkflowRuntime.run`.
+
+## Issue #91 — Offer expiry must not cancel in-flight workflows (finding F4)
 ### Done
 
 - [x] Offer expiry and rejection no longer cancel in-flight workflow runs
