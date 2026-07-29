@@ -17,6 +17,24 @@ class LabelPolicy:
     human_approval: str = "agent:human-approval"
     priority_prefix: str = "agent-priority:"
     default_priority: int = 0
+    # Every label the platform owns starts with this prefix. Reconciliation may
+    # only delete labels inside it; everything else on the issue (triage labels
+    # and `agent-priority:N`, which is user input read by the scheduler) belongs
+    # to humans and must survive every sync pass.
+    managed_prefix: str = "agent:"
+
+    def __post_init__(self) -> None:
+        if not self.managed_prefix:
+            raise ValueError("managed label prefix must not be empty")
+        for label in (self.ready, self.running, self.blocked, self.delivered, self.human_approval):
+            if not label.startswith(self.managed_prefix):
+                raise ValueError(
+                    f"state label {label!r} is outside the managed namespace {self.managed_prefix!r}"
+                )
+        if self.priority_prefix.startswith(self.managed_prefix):
+            raise ValueError(
+                "priority labels are user input and must stay outside the managed namespace"
+            )
 
 
 @dataclass(frozen=True)
@@ -79,10 +97,21 @@ def synchronize_issue(
     )
 
 
-def reconcile_labels(current: Iterable[str], desired: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def reconcile_labels(
+    current: Iterable[str], desired: Iterable[str], *, managed_prefix: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Diff the agent-managed label namespace against the issue's labels.
+
+    Removals are restricted to labels starting with ``managed_prefix`` so a
+    reconciliation pass never deletes triage labels, user priority labels, or
+    anything else a human applied to the issue.
+    """
+    if not managed_prefix:
+        raise ValueError("managed label prefix must not be empty")
     current_set = frozenset(current)
     desired_set = frozenset(desired)
-    return tuple(sorted(desired_set - current_set)), tuple(sorted(current_set - desired_set))
+    managed_current = frozenset(label for label in current_set if label.startswith(managed_prefix))
+    return tuple(sorted(desired_set - current_set)), tuple(sorted(managed_current - desired_set))
 
 
 def _is_integer(value: str) -> bool:
