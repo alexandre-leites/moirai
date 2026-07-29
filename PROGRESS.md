@@ -2322,11 +2322,11 @@ CI had been red on `main` itself since `3ba81c2` ("Change CI runner to self-host
   - Relevant files: `.github/workflows/ci.yml`.
   - Behavior delivered: `3ba81c2` moved every job to `runs-on: [self-hosted, linux]`. Those runners (`github-runner1`, `github-runner2`, runner v2.336.0) are Debian 13 (trixie), and `actions/setup-python` publishes no prebuilt CPython for that platform. Each affected job died in under ten seconds with `##[error]The version '3.12' with architecture 'x64' was not found for debian 13.` The four jobs that never touched `setup-python` (`runner`, `api`, `build-web`) were unaffected throughout, which is what isolated the cause.
     Replaced `actions/setup-python` with `astral-sh/setup-uv` (v9.0.0, SHA `c771a70e6277c0a99b617c7a806ffedaca235ff9`) pinned to uv `0.11.33`, followed by `uv python install "$PYTHON_VERSION"` and prepending the resulting interpreter directory to `$GITHUB_PATH` under `UV_PYTHON_PREFERENCE: only-managed`. uv fetches `python-build-standalone` CPython, which is distro-independent. The workflow's contract with the `Makefile` — "there is a suitable `python3` on `PATH`" — is unchanged, so no job's behaviour changed.
-  - Validation performed: run `30470376318` on PR #160. CI logs confirm the venv is genuinely 3.12 (`.venv/lib/python3.12/site-packages`, `cp312` wheels), not the host's system 3.13.5.
+  - Validation performed: run `30471380437` on PR #160. CI logs confirm the venv is genuinely 3.12 (`.venv/lib/python3.12/site-packages`, `cp312` wheels), not the host's system 3.13.5.
   - Commands executed:
     - `gh api repos/alexandre-leites/moirai/actions/runs/30461468403/jobs` — established the failing set on `c67a881`.
     - `gh api repos/alexandre-leites/moirai/actions/jobs/90608340039/logs` — the `lint` log carrying the verbatim `setup-python` error.
-    - `gh api repos/alexandre-leites/moirai/actions/runs/30470376318/jobs` — the green result.
+    - `gh api repos/alexandre-leites/moirai/actions/runs/30471380437/jobs` — the green result.
   - Notes: `PYTHON_VERSION` remains `3.12`, matching `requires-python = ">=3.12"`, `[tool.mypy] python_version = "3.12"` and ruff's `target-version = "py312"`.
 
 - [x] Removed a dead `pip install` step that PEP 668 turned into a hard failure
@@ -2380,17 +2380,17 @@ The review separately confirmed by experiment that the deleted install step was 
 
 ## Validation Status
 
-- Targeted tests: Passed — `make test-orchestrator`, locally (`Ran 449 tests`, `OK (skipped=30)`) and in CI job `90638757510`.
+- Targeted tests: Passed — `make test-orchestrator`, locally (`Ran 449 tests`, `OK (skipped=30)`) and in CI job `90642201723`.
 - Service tests: Not applicable — no service code changed; this is a CI-configuration fix only.
-- Full repository tests: Partially — the seven jobs that can run on these runners all pass in run `30470376318`. `test-postgres-integration` and `compose-smoke` cannot execute at all (see Known Issues).
-- Build: Passed — `build-web` (job `90638757684`).
-- Lint: Passed — `make lint` locally and CI job `90638757494` (`All checks passed!`).
-- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-ci-fix` locally and CI job `90638757312` (`Success: no issues found in 48 source files`).
+- Full repository tests: Partially — the seven jobs that can run on these runners all pass in run `30471380437`. `test-postgres-integration` and `compose-smoke` cannot execute at all (see Known Issues).
+- Build: Passed — `build-web` (job `90642201904`).
+- Lint: Passed — `make lint` locally and CI job `90642201802` (`All checks passed!`).
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-ci-fix` locally and CI job `90642202104` (`Success: no issues found in 48 source files`).
 - Database migrations: Not applicable — no schema change.
 - Docker Compose: **Not run — blocked.** `compose-smoke` cannot reach the Docker daemon on either runner.
 - End-to-end workflow: Not run — out of scope for a CI-configuration fix.
 
-Final per-job status on run `30470376318`, read from `gh api repos/alexandre-leites/moirai/actions/runs/30470376318/jobs`:
+Final per-job status on run `30471380437`, read from `gh api repos/alexandre-leites/moirai/actions/runs/30471380437/jobs`:
 
 | job | on `c67a881` | on this branch |
 | --- | --- | --- |
@@ -2410,7 +2410,7 @@ Final per-job status on run `30470376318`, read from `gh api repos/alexandre-lei
 - Issue: the runner user cannot reach the Docker socket, so `compose-smoke` and `test-postgres-integration` cannot run at all.
   - Severity: P1 — two real gates are dark. The Compose stack and the Postgres integration suite are currently unverified by CI on every branch.
   - Impact: `test-postgres-integration` dies during job initialization, before any step executes, because its `services:` container cannot be created. `compose-smoke` dies at `docker compose config`. Neither failure has anything to do with `setup-python`; both predate and outlast this fix.
-  - Evidence: `##[error]Value cannot be null. (Parameter 'network')`, preceded by `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` (job `90638757513`). The on-runner probe (job `90637745398`) showed why: the runner process is `uid=1000(runner) gid=1000(runner) groups=1000(runner)`, `/var/run/docker.sock` is `srw-rw---- root:docker` mode `0660`, and `getent group docker` returns `docker:x:991:` — the group exists with **no members**. There is also no escape hatch: `sudo -n true` fails with `sudo: a password is required`, `/run/user/*/docker.sock` does not exist, and `podman` is not installed.
+  - Evidence: `##[error]Value cannot be null. (Parameter 'network')`, preceded by `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` (job `90642201874`). The on-runner probe (job `90637745398`) showed why: the runner process is `uid=1000(runner) gid=1000(runner) groups=1000(runner)`, `/var/run/docker.sock` is `srw-rw---- root:docker` mode `0660`, and `getent group docker` returns `docker:x:991:` — the group exists with **no members**. There is also no escape hatch: `sudo -n true` fails with `sudo: a password is required`, `/run/user/*/docker.sock` does not exist, and `podman` is not installed.
   - Suggested resolution: **runner-side, not repo-side.** On each of `github-runner1` and `github-runner2`: `sudo usermod -aG docker runner`, then restart the runner service (`sudo systemctl restart 'actions.runner.*'`) — supplementary group membership only takes effect for a newly-spawned process. No repository change can substitute: `services:` containers are created by the runner process itself before any step runs, so workflow-level `env:`, `DOCKER_HOST` or a `sudo` wrapper cannot reach that code path.
 
 - Issue: the two self-hosted runners are the only capacity available; GitHub-hosted runners cannot be used as a fallback.
