@@ -45,18 +45,11 @@
 
 set -euo pipefail
 
-MAX_AGENTS="${MAX_AGENTS:-5}"
-REAP_AFTER_MIN="${REAP_AFTER_MIN:-90}"
-STARTUP_GRACE_MIN="${STARTUP_GRACE_MIN:-10}"
-
-# Validate the tunables up front. These are hand-edited in env.sh, and a typo would otherwise
-# surface as an opaque arithmetic/unbound-variable crash in the middle of a pass.
+# Remember which tunables the caller set explicitly, BEFORE any default is applied. An
+# explicit environment value must outrank the persisted registry value below.
 for _v in MAX_AGENTS REAP_AFTER_MIN STARTUP_GRACE_MIN; do
-  if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
-    echo "FATAL: $_v must be a non-negative integer, got '${!_v}'" >&2; exit 3
-  fi
+  if [ -n "${!_v:-}" ]; then eval "_explicit_$_v=1"; else eval "_explicit_$_v=0"; fi
 done
-[ "$MAX_AGENTS" -ge 1 ] || { echo "FATAL: MAX_AGENTS must be at least 1" >&2; exit 3; }
 
 for dep in flock find stat date git; do
   command -v "$dep" >/dev/null 2>&1 || { echo "FATAL: required tool '$dep' not found" >&2; exit 3; }
@@ -76,6 +69,42 @@ LOOP_DIR="${LOOP_DIR:-$REPO/.claude/issue-loop}"
 WORKTREE_DIR="${WORKTREE_DIR:-$REPO/.claude/worktrees}"
 INFLIGHT="$LOOP_DIR/inflight"
 LOCK="$LOOP_DIR/run.lock"
+TUNABLES="$LOOP_DIR/tunables"
+
+# The ceiling MUST live on disk beside the registry, not only in the environment.
+#
+# Sub-agents invoke this helper by absolute path to `touch`/`reacquire` their lease. They are
+# separate agents with their own shells and have never sourced env.sh, so an exported
+# MAX_AGENTS does not reach them — they would silently fall back to the built-in default. That
+# is not theoretical: a ceiling of 2 was breached to 3 exactly this way, when a finished agent
+# woke from a stale waiter, ran `reacquire`, saw the default ceiling of 5, and took a slot the
+# loop had already handed to someone else. The flock was never the weak point; the ceiling
+# VALUE was, because only the parent knew it.
+#
+# Reading it back from the registry makes every invocation agree regardless of environment.
+# Precedence: explicit environment > persisted registry value > built-in default.
+if [ -r "$TUNABLES" ]; then
+  while IFS='=' read -r _k _val; do
+    case "$_k" in
+      MAX_AGENTS|REAP_AFTER_MIN|STARTUP_GRACE_MIN)
+        _e="_explicit_$_k"
+        [ "${!_e}" = "1" ] || eval "$_k=\$_val" ;;
+    esac
+  done < "$TUNABLES"
+fi
+
+MAX_AGENTS="${MAX_AGENTS:-5}"
+REAP_AFTER_MIN="${REAP_AFTER_MIN:-90}"
+STARTUP_GRACE_MIN="${STARTUP_GRACE_MIN:-10}"
+
+# Validate the tunables. A typo would otherwise surface as an opaque arithmetic or
+# unbound-variable crash in the middle of a pass.
+for _v in MAX_AGENTS REAP_AFTER_MIN STARTUP_GRACE_MIN; do
+  if ! [[ "${!_v}" =~ ^[0-9]+$ ]]; then
+    echo "FATAL: $_v must be a non-negative integer, got '${!_v}'" >&2; exit 3
+  fi
+done
+[ "$MAX_AGENTS" -ge 1 ] || { echo "FATAL: MAX_AGENTS must be at least 1" >&2; exit 3; }
 
 mkdir -p "$INFLIGHT"
 [ -e "$LOCK" ] || : > "$LOCK"

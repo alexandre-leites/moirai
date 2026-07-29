@@ -78,6 +78,25 @@ done
 EOF
 ```
 
+**Then persist the tunables to disk — this is mandatory, not bookkeeping:**
+
+```bash
+printf 'MAX_AGENTS=%s\nREAP_AFTER_MIN=%s\nSTARTUP_GRACE_MIN=%s\n' \
+  "$MAX_AGENTS" "$REAP_AFTER_MIN" "$STARTUP_GRACE_MIN" > "$LOOP_DIR/tunables"
+```
+
+`env.sh` is sourced only by the loop. Sub-agents call the helper by absolute path to `touch`
+and `reacquire` their own leases, in their own shells, having never sourced it — so an
+*exported* `MAX_AGENTS` never reaches them and they fall back to the built-in default of 5.
+Skip this write and the ceiling silently applies only to the parent.
+
+This is not hypothetical. A ceiling of 2 was breached to 3 exactly this way: a finished agent
+woke from a stale background waiter, ran `reacquire`, saw the default ceiling of 5 instead of
+the configured 2, and took a slot the loop had already handed to another issue. The `flock` was
+never the weak point — the ceiling *value* was, because only the parent knew it. The helper now
+reads `$LOOP_DIR/tunables` back on every invocation, so writing it is what makes the ceiling
+real for everyone.
+
 The trailing `:` is **required**, not decoration. Without it the last statement in `env.sh` is the
 `for` loop, which exits non-zero when the final `[ -x ... ]` test fails — so under `set -e`, or in
 any `. env.sh && ...` chain, sourcing would silently abort the call before the FATAL check below
