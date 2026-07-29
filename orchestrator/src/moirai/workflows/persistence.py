@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from moirai.persistence.circuits import reopen_probe_circuits
+
+_LOGGER = logging.getLogger(__name__)
 
 _VALID_ROLES = frozenset({"planner", "developer", "pipeline", "reviewer", "repairer"})
 
@@ -427,29 +430,34 @@ def _optional_value(value: object) -> str | None:
 def _merged_at(updates: dict[str, object], now: datetime) -> datetime | None:
     """When the pull request merged, as a timestamp the column can hold.
 
-    Non-NULL only for an update that reports a merge, so no timestamp can ever
+    Non-NULL only when `pull_request_merged` is True, so no timestamp can ever
     be written for a pull request nobody said had merged -- the reported
-    timestamp is read *after* that test, never as a substitute for it.
+    timestamp is read *after* that test, never as a substitute for it. One
+    authority for "this merged", not two: the boolean is set from a
+    `PullRequest` the code host reported merged, and gating on the `state`
+    string as well would let a second, weaker signal write the column.
 
     The code host reports an ISO-8601 string, so it is parsed here rather than
     handed to asyncpg as text. A merge the code host confirmed but timestamped
     unusably or not at all still gets a timestamp -- `now` -- because the
     alternative is a merged pull request whose `merged_at` stays NULL, which is
-    precisely the state this column exists to rule out. A pull request that is
-    not merged gets NULL, and the COALESCE in the upsert keeps that from
-    erasing an earlier merge.
+    precisely the state this column exists to rule out. Anything else gets
+    NULL, and the COALESCE in the upsert keeps that from erasing an earlier
+    merge.
     """
-    if (
-        updates.get("pull_request_merged") is not True
-        and str(updates.get("pull_request_state") or "") != "merged"
-    ):
+    if updates.get("pull_request_merged") is not True:
         return None
     reported = _optional_value(updates.get("pull_request_merged_at"))
     if reported is None:
+        _LOGGER.warning("code host confirmed a merge without a timestamp; stamping the local clock")
         return now
     try:
         parsed = datetime.fromisoformat(reported)
     except ValueError:
+        _LOGGER.warning(
+            "code host reported an unparseable merge timestamp; stamping the local clock",
+            extra={"reported_merged_at": reported},
+        )
         return now
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 

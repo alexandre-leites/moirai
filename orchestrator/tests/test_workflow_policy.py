@@ -94,11 +94,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         gate state -- including the passing checks and human approval that got
         the run to the merge node -- keeps waiting."""
         self.assertEqual(route_after_merge(GateState(pull_request_merged=True)), WorkflowRoute.COMPLETE)
-        self.assertEqual(route_after_merge(GateState()), WorkflowRoute.MERGE)
+        self.assertEqual(route_after_merge(GateState()), WorkflowRoute.BLOCKED)
         approved = GateState(
             pipeline_passed=True, review_approved=True, checks_passed=True, human_approved=True
         )
-        self.assertEqual(route_after_merge(approved), WorkflowRoute.MERGE)
+        self.assertEqual(route_after_merge(approved), WorkflowRoute.BLOCKED)
 
 
 if __name__ == "__main__":

@@ -58,20 +58,37 @@ class PullRequest:
     merged_at: str | None = None
     merge_commit: str | None = None
 
+    def __post_init__(self) -> None:
+        # An invariant, not a convention. `merged` is an exact comparison, and
+        # normalising only inside this module's JSON parser would mean any
+        # other construction site -- another CodeHost implementation, a test
+        # double passing GitHub's own `MERGED` -- silently landed on the "did
+        # not merge" side of it.
+        object.__setattr__(self, "state", self.state.strip().lower())
+
     @property
     def merged(self) -> bool:
-        return self.state == "merged"
+        """Merged, on any of the three things the code host can say about it.
+
+        Not `state == "merged"` alone. The merge timestamp and merge commit are
+        fetched precisely because one signal is not enough, and the direction of
+        the remaining doubt matters: reporting a merged pull request as unmerged
+        blocks a delivered change, while the reverse cannot happen -- GitHub
+        populates neither field until a merge exists.
+        """
+        return self.state == "merged" or self.merged_at is not None or self.merge_commit is not None
 
     @property
     def closed(self) -> bool:
         """Closed without being merged.
 
-        GitHub reports a merged pull request as `MERGED`, never as `CLOSED`,
-        so the two are genuinely disjoint outcomes and the workflow must not
+        GitHub reports a merged pull request as `MERGED`, never as `CLOSED`, so
+        the two are genuinely disjoint outcomes and the workflow must not
         collapse them: one is delivery, the other is a human rejecting the
-        change while the run was waiting.
+        change while the run was waiting. `merged` still wins if a payload ever
+        claims both, because the evidence of a merge outranks a state string.
         """
-        return self.state == "closed"
+        return self.state == "closed" and not self.merged
 
 
 @dataclass(frozen=True)
@@ -122,20 +139,40 @@ def checks_pass(checks: Sequence[PullRequestCheck]) -> bool:
 _ZERO_TIMESTAMP_PREFIX = "0001-01-01"
 
 
-def _optional_string(value: object) -> str | None:
-    if not isinstance(value, str):
+def _optional_text(field: str, value: object) -> str | None:
+    """A non-empty string, or None -- and a log line if it was neither.
+
+    Absent is normal (an unmerged pull request has no merge commit). Present
+    but not a string is not, and swallowing it silently would discard exactly
+    the merge evidence the workflow gates on, so it is reported rather than
+    quietly turned into "no merge".
+    """
+    if value is None:
         return None
-    text = value.strip()
-    if not text or text.startswith(_ZERO_TIMESTAMP_PREFIX):
+    if not isinstance(value, str):
+        _LOGGER.warning("GitHub CLI reported %s as %s", field, type(value).__name__)
+        return None
+    return value.strip() or None
+
+
+def _optional_timestamp(field: str, value: object) -> str | None:
+    text = _optional_text(field, value)
+    if text is None or text.startswith(_ZERO_TIMESTAMP_PREFIX):
         return None
     return text
 
 
 def _commit_oid(value: object) -> object:
-    """The SHA out of `gh`'s commit object, which is null on an unmerged pull request."""
+    """The SHA out of `gh`'s commit object.
+
+    Null on an unmerged pull request, `{"oid": ...}` on a merged one, and a
+    bare SHA string in the shapes that mirror the REST API's
+    `merge_commit_sha`. All three are accepted: losing the commit to an
+    unexpected wrapper would silently empty the column migration 008 exists for.
+    """
     if isinstance(value, dict):
         return value.get("oid")
-    return None
+    return value
 
 
 class GitHubCliCodeHost:
@@ -351,11 +388,11 @@ class GitHubCliCodeHost:
             return PullRequest(
                 external_id=str(value["number"]),
                 url=str(value["url"]),
-                state=str(value["state"]).strip().lower(),
+                state=str(value["state"]),
                 head_branch=str(value["headRefName"]),
                 head_commit=str(value["headRefOid"]),
-                merged_at=_optional_string(value.get("mergedAt")),
-                merge_commit=_optional_string(_commit_oid(value.get("mergeCommit"))),
+                merged_at=_optional_timestamp("mergedAt", value.get("mergedAt")),
+                merge_commit=_optional_text("mergeCommit", _commit_oid(value.get("mergeCommit"))),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise GitHubCliError("GitHub CLI pull request item is missing required fields") from error

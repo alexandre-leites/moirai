@@ -78,8 +78,8 @@ class IssueGraphRouteTests(unittest.TestCase):
         -- is reachable only once the code host has confirmed the merge, and a
         merge the node reported as blocked keeps its own reason."""
         self.assertEqual(route_merge({"status": "merging", "pull_request_merged": True}), "complete")
-        self.assertEqual(route_merge({"status": "merging", "pull_request_merged": False}), "merge")
-        self.assertEqual(route_merge({"status": "merging"}), "merge")
+        self.assertEqual(route_merge({"status": "merging", "pull_request_merged": False}), "blocked")
+        self.assertEqual(route_merge({"status": "merging"}), "blocked")
         self.assertEqual(
             route_merge({"status": "blocked", "blocking_reason": "closed without being merged"}),
             "blocked",

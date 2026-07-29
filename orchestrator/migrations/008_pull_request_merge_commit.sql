@@ -16,3 +16,11 @@
 -- column is there, and the statement takes no table rewrite because the column
 -- has no default.
 ALTER TABLE app.pull_requests ADD COLUMN IF NOT EXISTS merge_commit TEXT;
+
+-- `state` is now normalised to lower case at the code-host adapter boundary,
+-- because a column that spells one state two ways is a column nothing can
+-- query. Rows written before that change hold GitHub's own `OPEN`/`CLOSED`/
+-- `MERGED`, and leaving them would produce exactly the split this normalisation
+-- exists to prevent. The predicate makes the statement a no-op on a re-run and
+-- on any database that never held mixed-case rows.
+UPDATE app.pull_requests SET state = lower(state) WHERE state <> lower(state);

@@ -12,6 +12,10 @@ def _request(identifier: str, role: str, created: bool = False) -> dict[str, Any
     return {"id": identifier, "role": role, "attempt": 1, "created": created}
 
 
+async def _no_sleep(seconds: float) -> None:
+    """The merge node's confirmation pause, without the wall clock."""
+
+
 class _Persistence:
     def __init__(self, open_request: dict[str, Any] | None = None) -> None:
         self.transitions: list[tuple[str, str, dict[str, object]]] = []
@@ -53,6 +57,10 @@ class _FakeCodeHost:
     # 1-based index of the get_pull_request call that fails, modelling a GitHub
     # hiccup at a chosen point in the read/merge/re-read sequence.
     read_error_on_call: int | None = None
+    # Every read from this one onwards fails: a code host that stays unreadable.
+    read_error_from_call: int | None = None
+    # The read on which a merge that landed asynchronously becomes visible.
+    merged_after_reads: int | None = None
     reads: int = 0
 
     def __post_init__(self) -> None:
@@ -79,6 +87,10 @@ class _FakeCodeHost:
         self.reads += 1
         if self.read_error_on_call == self.reads:
             raise GitHubCliError("gh: could not read pull request")
+        if self.read_error_from_call is not None and self.reads >= self.read_error_from_call:
+            raise GitHubCliError("gh: could not read pull request")
+        if self.merged_after_reads is not None and self.reads >= self.merged_after_reads:
+            self.pull_request_state = "merged"
         merged = self.pull_request_state == "merged"
         return PullRequest(
             external_id=pull_request_id,
@@ -351,9 +363,12 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             (self.nodes.wait_for_checks, "waiting_github_checks", {}),
             (self.nodes.wait_for_human, "waiting_human", {"human_approved": False}),
             # Merge is the exception: with no code host there is nothing to
-            # confirm the merge against, so it waits rather than reporting a
-            # merge it never saw.
-            (self.nodes.merge, "merging", {"merge_verification_attempts": 1, "pull_request_merged": False}),
+            # confirm the merge against, and an unverified merge must not
+            # deliver, so it blocks rather than falling through to `complete`.
+            (self.nodes.merge, "blocked", {
+                "blocking_reason":
+                    "no code host is configured for this project, so no merge can be verified",
+            }),
             (self.nodes.complete, "completed", {}),
         ):
             expected = {"status": status, **extra_fields}
@@ -361,7 +376,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, expected)
             self.assertEqual(result["status"], status)
         self.assertEqual([status for _, status, _ in self.persistence.transitions[-5:]], [
-            "pr_created", "waiting_github_checks", "waiting_human", "merging", "completed",
+            "pr_created", "waiting_github_checks", "waiting_human", "blocked", "completed",
         ])
 
     async def test_nodes_reject_missing_workflow_id_before_side_effects(self) -> None:
@@ -491,9 +506,11 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code_host.reads, 1)
         self.assertIs(update["pull_request_merged"], True)
 
-    async def test_merge_that_is_not_confirmed_delivers_nothing_and_stays_re_enterable(self) -> None:
-        """`gh pr merge` returning cleanly is not a merge: an unconfirmed merge
-        must not close the issue or label it delivered."""
+    async def test_an_unconfirmed_merge_delivers_nothing_and_ends_somewhere_visible(self) -> None:
+        """`gh pr merge` returning cleanly is not a merge. An unconfirmed merge
+        must not close the issue or label it delivered -- and must not leave the
+        run non-terminal either, because a non-terminal run keeps the project
+        lock and stops every other workflow on the project."""
         code_host = _FakeCodeHost(merge_result_state=None)
         issue_tracker = _FakeIssueTracker()
         nodes = PersistedWorkflowNodes(
@@ -501,22 +518,63 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             self.dispatcher,
             code_host_factory=lambda project_id: code_host,
             issue_tracker_factory=lambda project_id: issue_tracker,
+            sleep=_no_sleep,
         )
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "issue_id": "42", "pull_request_id": "42"}
 
         update = await nodes.merge(state)
 
-        self.assertEqual(update["status"], "merging")
-        self.assertIs(update["pull_request_merged"], False)
-        self.assertEqual(update["merge_verification_attempts"], 1)
-        self.assertEqual(update["pull_request_state"], "open")
-        self.assertEqual(update["pull_request_merged_at"], "")
-        # The edge maps "merge" to END: the run parks, re-enterable.
-        self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "merge")
+        self.assertEqual(update["status"], "blocked")
+        reason = str(update["blocking_reason"])
+        self.assertIn(f"not confirmed after {RetryBudget().merge_verification_attempts} checks", reason)
+        self.assertIn("still reports the pull request open", reason)
+        self.assertNotIn("pull_request_merged", update)
         self.assertEqual(issue_tracker.closed_issues, [])
         self.assertEqual(issue_tracker.added_labels, [])
+        self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "blocked")
+
+    async def test_the_verification_budget_is_spent_inside_one_entry(self) -> None:
+        """The bound has to be reachable without anything re-entering the node:
+        nothing in the orchestrator re-enters a parked graph, so a budget spent
+        across entries would never be spent at all."""
+        budget = RetryBudget()
+        code_host = _FakeCodeHost(merge_result_state=None)
+        pauses: list[float] = []
+
+        async def _record(seconds: float) -> None:
+            pauses.append(seconds)
+
+        nodes = PersistedWorkflowNodes(
+            self.persistence, self.dispatcher,
+            code_host_factory=lambda project_id: code_host, sleep=_record,
+        )
+
+        await nodes.merge({"workflow_run_id": "wf-1", "pull_request_id": "42"})
+
+        # One pre-merge read plus one read per check in the budget.
+        self.assertEqual(code_host.reads, budget.merge_verification_attempts + 1)
+        self.assertEqual(len(pauses), budget.merge_verification_attempts - 1)
+
+    async def test_a_merge_confirmed_on_a_later_check_still_completes(self) -> None:
+        """The pause exists for GitHub's read-after-write lag; a merge that
+        shows up on the second read is a merge."""
+        code_host = _FakeCodeHost(merge_result_state=None, merged_after_reads=3)
+        nodes = PersistedWorkflowNodes(
+            self.persistence, self.dispatcher,
+            code_host_factory=lambda project_id: code_host, sleep=_no_sleep,
+        )
+        state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
+
+        update = await nodes.merge(state)
+
+        self.assertIs(update["pull_request_merged"], True)
+        self.assertEqual(update["pull_request_merge_commit"], "def456")
+        self.assertEqual(code_host.merged_prs, [("42", "squash")])
+        self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "complete")
 
     async def test_merge_blocks_a_pull_request_closed_without_being_merged(self) -> None:
+        """Closed and merged are disjoint outcomes, and closed gets its own
+        reason: no amount of waiting turns it into a delivery."""
         code_host = _FakeCodeHost(pull_request_state="closed")
         nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
@@ -529,63 +587,61 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["pull_request_state"], "closed")
         self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "blocked")
 
-    async def test_merge_waits_rather_than_blocking_when_the_confirming_read_fails(self) -> None:
-        """A GitHub hiccup on the read that follows the merge says nothing
-        about whether the merge landed. Blocking there would strand a pull
-        request that really did merge."""
+    async def test_a_failed_confirming_read_costs_a_check_rather_than_the_merge(self) -> None:
+        """A read that fails says nothing about whether the merge landed, so it
+        must not be read as "not merged": the next check decides."""
         code_host = _FakeCodeHost(read_error_on_call=2)
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
+        nodes = PersistedWorkflowNodes(
+            self.persistence, self.dispatcher,
+            code_host_factory=lambda project_id: code_host, sleep=_no_sleep,
+        )
         state: IssueWorkflowState = {"workflow_run_id": "wf-1", "pull_request_id": "42"}
 
         update = await nodes.merge(state)
 
-        self.assertEqual(update["status"], "merging")
-        self.assertEqual(update["merge_verification_attempts"], 1)
+        self.assertIs(update["pull_request_merged"], True)
         self.assertEqual(code_host.merged_prs, [("42", "squash")])
-        # The stale pre-merge read is not written back: "open" is no longer
-        # something this path knows, so the durable record is left alone.
-        self.assertNotIn("pull_request_state", update)
-        self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "merge")
+        self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "complete")
 
-    async def test_merge_waits_when_the_pull_request_cannot_be_read_at_all(self) -> None:
+    async def test_a_merge_no_read_ever_confirms_blocks_without_guessing_the_record(self) -> None:
+        code_host = _FakeCodeHost(read_error_from_call=2)
+        nodes = PersistedWorkflowNodes(
+            self.persistence, self.dispatcher,
+            code_host_factory=lambda project_id: code_host, sleep=_no_sleep,
+        )
+
+        update = await nodes.merge({"workflow_run_id": "wf-1", "pull_request_id": "42"})
+
+        self.assertEqual(update["status"], "blocked")
+        self.assertIn("could not be re-read", str(update["blocking_reason"]))
+        self.assertEqual(code_host.merged_prs, [("42", "squash")])
+        # Nothing is written back: the pre-merge `open` reading is no longer
+        # something this path knows to be true.
+        self.assertNotIn("pull_request_id", update)
+
+    async def test_merge_blocks_when_the_pull_request_cannot_be_read_at_all(self) -> None:
         code_host = _FakeCodeHost(read_error_on_call=1)
         nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
 
         update = await nodes.merge({"workflow_run_id": "wf-1", "pull_request_id": "42"})
 
-        self.assertEqual(update["status"], "merging")
-        self.assertEqual(code_host.merged_prs, [])
-        self.assertNotIn("pull_request_id", update)
-
-    async def test_merge_blocks_once_the_verification_budget_is_spent(self) -> None:
-        """Waiting is bounded: a pull request that never merges must not
-        re-enter the node forever."""
-        budget = RetryBudget()
-        code_host = _FakeCodeHost(merge_result_state=None)
-        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
-        state = cast(IssueWorkflowState, {
-            "workflow_run_id": "wf-1",
-            "pull_request_id": "42",
-            "merge_verification_attempts": budget.merge_verification_attempts - 1,
-        })
-
-        update = await nodes.merge(state)
-
         self.assertEqual(update["status"], "blocked")
-        reason = str(update["blocking_reason"])
-        self.assertIn(f"not confirmed after {budget.merge_verification_attempts} attempts", reason)
-        self.assertIn("still reports it open", reason)
-        self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **update})), "blocked")
+        self.assertIn("could not be read", str(update["blocking_reason"]))
+        self.assertEqual(code_host.merged_prs, [])
 
-    async def test_merge_without_code_host_waits_instead_of_delivering(self) -> None:
+    async def test_merge_without_a_code_host_blocks_and_says_which_of_the_two_is_missing(self) -> None:
         """No adapter means no verification, and an unverified merge is not a
-        merge -- the run waits rather than completing on nothing."""
-        update = await self.nodes.merge({"workflow_run_id": "wf-1"})
-        self.assertEqual(
-            update,
-            {"status": "merging", "merge_verification_attempts": 1, "pull_request_merged": False},
-        )
-        self.assertEqual(route_merge(cast(IssueWorkflowState, update)), "merge")
+        merge -- but the run must end somewhere a human can act on, with the
+        actual cause rather than one message covering six of them."""
+        no_code_host = await self.nodes.merge({"workflow_run_id": "wf-1", "pull_request_id": "42"})
+        no_pull_request = await PersistedWorkflowNodes(
+            self.persistence, self.dispatcher, code_host_factory=lambda project_id: _FakeCodeHost(),
+        ).merge({"workflow_run_id": "wf-1"})
+
+        self.assertEqual(no_code_host["status"], "blocked")
+        self.assertIn("no code host is configured", str(no_code_host["blocking_reason"]))
+        self.assertEqual(no_pull_request["status"], "blocked")
+        self.assertIn("no pull request to merge", str(no_pull_request["blocking_reason"]))
 
     async def test_merge_transitions_to_blocked_when_code_host_refuses(self) -> None:
         code_host = _FakeCodeHost(merge_error=GitHubCliError("refusing to merge pull request"))
