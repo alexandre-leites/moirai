@@ -84,6 +84,10 @@ async def _build_checkpointer(database_url: str) -> Any | None:
 # in milliseconds, so anything older than this really has lost its driver.
 _WORKFLOW_MAINTENANCE_INTERVAL = timedelta(seconds=30)
 _WORKFLOW_STALL_AFTER = timedelta(minutes=2)
+# Recovering a run can call out to the graph runtime (and through it to
+# GitHub), so one tick takes a bounded bite rather than serialising an
+# unbounded backlog behind the loop's own interval.
+_WORKFLOW_STALL_BATCH = 20
 
 _DEFAULT_SEED_PROJECT_NAME = "demo"
 _DEFAULT_SEED_REPOSITORY_URL = "https://github.com/example/demo.git"
@@ -447,6 +451,12 @@ async def serve(
                     maintenance_leader,
                 )
             )
+            # Without this the only recovery loop in the process could die
+            # silently, leaving the orchestrator reporting healthy while every
+            # stalled run stayed stalled.
+            workflow_maintenance_task.add_done_callback(
+                lambda task: _log_unexpected_completion("workflow_maintenance", health, shutdown, task)
+            )
     else:
         _LOGGER.warning(
             "control plane implementation does not support durability features "
@@ -516,12 +526,16 @@ async def _run_workflow_maintenance_loop(
        transitions committed but never invoked, e.g. after a crash).
     2. Close execution requests that can never be executed or reported on, so
        the runs holding them stop looking busy.
-    3. Re-enter the graph for runs whose status says an execution should be in
-       flight while nothing is (see persistence/control_plane.py's
-       accept_event).
+    3. Repair runs whose status says an execution should be in flight while
+       nothing is: re-queue the lost execution, or replay the transition that
+       was committed but never invoked (see persistence/control_plane.py's
+       recover_stalled_workflow_run).
 
     Arm 2 has to run before arm 3: a leaked `dispatched` request is exactly
     what makes arm 3's detector unable to see the run (issue #94).
+
+    Arm 3 can call out to the graph runtime, which reaches GitHub, so one run's
+    failure must not cost the rest of the batch their turn.
     """
     try:
         while not stop_event.is_set():
@@ -537,18 +551,27 @@ async def _run_workflow_maintenance_loop(
                             "closed orphaned execution requests", extra={"requests": orphaned}
                         )
                     stalled = await control_plane.find_stalled_workflow_runs(
-                        current, _WORKFLOW_STALL_AFTER
+                        current, _WORKFLOW_STALL_AFTER, _WORKFLOW_STALL_BATCH
                     )
-                    for workflow_run_id in stalled:
-                        if await control_plane.recover_stalled_workflow_run(
-                            workflow_run_id, on_transition
-                        ):
-                            _LOGGER.info(
-                                "recovered stalled workflow run",
-                                extra={"workflow_run_id": workflow_run_id},
-                            )
                 except Exception:
                     _LOGGER.exception("workflow maintenance loop iteration failed")
+                    stalled = ()
+                for workflow_run_id in stalled:
+                    try:
+                        recovered = await control_plane.recover_stalled_workflow_run(
+                            workflow_run_id, on_transition, current
+                        )
+                    except Exception:
+                        _LOGGER.exception(
+                            "stalled workflow run recovery failed",
+                            extra={"workflow_run_id": workflow_run_id},
+                        )
+                        continue
+                    if recovered:
+                        _LOGGER.info(
+                            "recovered stalled workflow run",
+                            extra={"workflow_run_id": workflow_run_id},
+                        )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
             except TimeoutError:

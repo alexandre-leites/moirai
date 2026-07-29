@@ -67,6 +67,11 @@ NON_PROGRESS_OUTCOME_LIMIT = 4
 # work in flight, so nothing may resurrect it.
 _TERMINAL_WORKFLOW_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
 
+# Execution-request status meaning "nothing will ever execute or report on this
+# row". It is the signal recover_stalled_workflow_run reads to tell a lost
+# execution (re-run the phase) from a delivered one (advance the graph).
+_ORPHANED_REQUEST_STATUS = "orphaned"
+
 # Result-document keys that identify a single attempt rather than its content.
 # Both are required or emitted per execution, so they must never take part in
 # an outcome identity.
@@ -2163,7 +2168,7 @@ class AsyncpgControlPlane:
         rows = await self._pool.fetch(
             """
             UPDATE app.workflow_execution_requests AS req
-            SET status = 'orphaned'
+            SET status = 'orphaned'  -- keep in step with _ORPHANED_REQUEST_STATUS
             WHERE req.status IN ('queued', 'dispatched')
               AND (
                   EXISTS (
@@ -2187,7 +2192,9 @@ class AsyncpgControlPlane:
         )
         return len(rows)
 
-    async def find_stalled_workflow_runs(self, now: datetime, stale_after: timedelta) -> tuple[str, ...]:
+    async def find_stalled_workflow_runs(
+        self, now: datetime, stale_after: timedelta, limit: int = 50
+    ) -> tuple[str, ...]:
         """Workflow runs whose status says an agent execution should be in
         flight but which have no queued/dispatched execution request and no
         job that could still deliver one -- the symptom of a crash between
@@ -2227,8 +2234,10 @@ class AsyncpgControlPlane:
                     AND j.status IN ('offered', 'preparing', 'running', 'recovering')
               )
             ORDER BY wr.updated_at, wr.id
+            LIMIT $2
             """,
             now - stale_after,
+            limit,
         )
         return tuple(str(row["id"]) for row in rows)
 
@@ -2236,34 +2245,116 @@ class AsyncpgControlPlane:
         self,
         workflow_run_id: str,
         on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
+        now: datetime,
     ) -> bool:
-        """Re-enters the graph runtime for a stalled run using its last
-        checkpoint, so the suspended node's outgoing edge re-evaluates and
-        dispatch logic (idempotently) resumes progress.
+        """Repairs one stalled run, in the one way its own history justifies.
 
-        `awaiting_execution` is cleared because the detector's own predicate
-        established that nothing is in flight: the flag is what suspends the
-        graph on the edge out of a dispatching node (issue #88), so leaving it
-        set would make every recovery attempt route straight back to END and
-        the run would stay stalled forever. No other state is invented -- the
-        gates the lost execution would have produced stay as they were, so the
-        graph re-runs the phase rather than advancing past it on a verdict
-        nobody reported.
+        A stalled run is one of two things, and the distinction matters because
+        the graph is an event-driven state machine: it is suspended on the edge
+        out of a dispatching node, and the only thing that legitimately moves it
+        forward is the terminal event for the execution it queued (issue #88).
+
+        *The execution was lost* -- the last request was closed as `orphaned`,
+        meaning no runner will ever report it. The phase has to run again, so a
+        fresh `queued` request is written for the same role and the graph is
+        left suspended exactly where it is. `schedule_execution` offers it, the
+        runner runs it, and its terminal event resumes the graph through the
+        normal path. Nothing is advanced on a verdict nobody produced: three of
+        the six dispatching nodes (`implement`, `repair`, `push`) have
+        unconditional outgoing edges, so merely clearing `awaiting_execution`
+        there would *skip* the lost phase -- for `push` that means creating a
+        pull request for a branch that was never pushed, then merging it.
+
+        *The transition was committed but never handed to the graph* -- the
+        last request was closed by its own terminal event
+        (`completed`/`failed`/`cancelled`), so the execution really did report
+        and `accept_event` really did commit the new status; only the graph
+        invocation was lost (a crash, or an outbox row stuck mid-drain). Here
+        advancing is exactly right, and `awaiting_execution` is cleared because
+        the detector has already established nothing is in flight -- without
+        that the resumed graph routes straight back to END. The state updates
+        that rode on the outbox row are not replayed, so a gate the lost
+        invocation would have set stays as it was and the phase is re-run
+        rather than skipped; that is safe, and bounded by the same retry
+        budgets.
 
         Returns False when the run disappeared or reached a terminal status
         between detection and recovery.
         """
-        record = await self._pool.fetchrow(
-            "SELECT status FROM app.workflow_runs WHERE id = $1",
-            _uuid(workflow_run_id),
-        )
-        if record is None:
-            return False
-        status = str(record["status"])
-        if status in _TERMINAL_WORKFLOW_STATUSES:
-            return False
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    SELECT wr.status, request.role, request.status AS request_status,
+                           request.next_attempt
+                    FROM app.workflow_runs AS wr
+                    LEFT JOIN LATERAL (
+                        SELECT r.role, r.status,
+                               (
+                                   SELECT MAX(a.attempt) + 1
+                                   FROM app.workflow_execution_requests AS a
+                                   WHERE a.workflow_run_id = wr.id AND a.role = r.role
+                               ) AS next_attempt
+                        FROM app.workflow_execution_requests AS r
+                        WHERE r.workflow_run_id = wr.id
+                        ORDER BY r.created_at DESC, r.id DESC
+                        LIMIT 1
+                    ) AS request ON true
+                    WHERE wr.id = $1
+                    FOR UPDATE OF wr
+                    """,
+                    _uuid(workflow_run_id),
+                )
+                if record is None:
+                    return False
+                status = str(record["status"])
+                if status in _TERMINAL_WORKFLOW_STATUSES:
+                    return False
+                if record["request_status"] == _ORPHANED_REQUEST_STATUS:
+                    await self._requeue_lost_execution(
+                        connection, workflow_run_id, str(record["role"]),
+                        int(record["next_attempt"]), now,
+                    )
+                    return True
         await on_transition(workflow_run_id, status, {"awaiting_execution": False})
         return True
+
+    async def _requeue_lost_execution(
+        self, connection: Any, workflow_run_id: str, role: str, attempt: int, now: datetime
+    ) -> None:
+        await connection.execute(
+            """
+            INSERT INTO app.workflow_execution_requests
+                (id, workflow_run_id, role, attempt, status, created_at)
+            VALUES ($1, $2, $3, $4, 'queued', $5)
+            """,
+            uuid4(),
+            _uuid(workflow_run_id),
+            role,
+            attempt,
+            now,
+        )
+        # The attempt counters were already charged when the node dispatched
+        # the execution that was lost, so the replacement deliberately spends
+        # no further budget: it delivers the attempt that was already paid for.
+        await connection.execute(
+            "UPDATE app.workflow_runs SET updated_at = $2 WHERE id = $1",
+            _uuid(workflow_run_id),
+            now,
+        )
+        await connection.execute(
+            """
+            INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
+            VALUES ($1, 'execution_requeued', 'warning', $2::jsonb, $3)
+            """,
+            _uuid(workflow_run_id),
+            json.dumps(
+                {"role": role, "attempt": attempt, "reason": "execution_lost"},
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            now,
+        )
 
     async def _load_runner_credential(self, runner_id: str, now: datetime) -> tuple[Runner, str]:
         record = await self._pool.fetchrow(

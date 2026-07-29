@@ -45,11 +45,22 @@ One elected instance runs a 30-second maintenance loop (`main._run_workflow_main
 
 1. Drain `app.workflow_transition_outbox` — at-least-once delivery for transitions committed by `accept_event` but never invoked.
 2. Close orphaned execution requests, so runs holding a dead row stop looking busy.
-3. Re-enter the graph for stalled runs: a run whose status says an agent execution should be in flight, untouched for longer than the stall window (2 minutes), with no open execution request and no job in `offered`, `preparing`, `running`, or `recovering`.
+3. Repair stalled runs: a run whose status says an agent execution should be in flight, untouched for longer than the stall window (2 minutes), with no open execution request and no job in `offered`, `preparing`, `running`, or `recovering`. At most 20 per tick, each isolated from the others' failures.
 
-Arm 3 clears `awaiting_execution` when it re-enters the graph — the detector has already established that nothing is in flight, and the flag is what suspends the graph on the edge out of a dispatching node. Nothing else is invented: the gates the lost execution would have produced are left as they were, so the graph re-runs the phase (bounded by the same retry budgets) instead of advancing past it on a verdict nobody reported.
+Arm 3 does one of two things, decided by how the run's most recent execution request was closed:
 
-Runs parked on an external event rather than an execution — `pr_created`, `waiting_github_checks`, `waiting_human`, `merging` — are deliberately not recovered this way: re-entering the graph for one would resolve a pending human-approval interrupt as "not approved". Unanswered offers (`offered`) and lease expiry (jobs in `recovering`) have their own owners, `expire_offers` and `recover_one`.
+| Last request | What happened | Repair |
+| --- | --- | --- |
+| `orphaned` | The execution was lost — no runner will ever report it. | Write a fresh `queued` request for the **same role** and leave the graph suspended. `schedule_execution` re-offers it, and its terminal event resumes the graph through the normal path. |
+| `completed` / `failed` / `cancelled` | The execution reported and `accept_event` committed the new status; only the graph invocation was lost. | Re-enter the graph with `awaiting_execution` cleared, so the suspended edge can move. |
+
+The distinction is load-bearing, not tidiness. Three of the six dispatching nodes (`implement`, `repair`, `push`) have **unconditional** outgoing edges, so clearing `awaiting_execution` on a run whose execution was lost would not re-run the phase — it would *skip* it. On `push` that means creating a pull request for a branch that was never pushed, and then merging it.
+
+The re-queued attempt spends no additional retry budget: the counters were charged when the node dispatched the execution that was lost, so the replacement delivers an attempt that was already paid for.
+
+The advancing branch does not replay the state updates that rode on the outbox row, so a gate the lost invocation would have set (`plan_valid`, `pipeline_passed`, `review_approved`) stays as it was and the graph re-runs that phase rather than advancing on a verdict it never saw. That is safe and bounded by the same retry budgets, but it does cost one repeated execution; making it exact depends on replaying stuck outbox rows ([#96](https://github.com/alexandre-leites/moirai/issues/96)).
+
+Runs parked on something other than an execution — `waiting_github_checks` and `waiting_human` (a GitHub check or a human decision), `pr_created` and `merging` (transient statuses on unconditional edges) — are deliberately not recovered this way. A run held at the `wait_for_human` interrupt carries the DB status `waiting_github_checks`, and re-entering its graph would run `wait_for_human` with no decision recorded, which `route_after_human_response` resolves as "not approved" and blocks the run. Unanswered offers (`offered`) and lease expiry (jobs in `recovering`) have their own owners, `expire_offers` and `recover_one`.
 
 ## Gate ownership
 

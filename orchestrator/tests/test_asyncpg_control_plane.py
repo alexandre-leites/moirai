@@ -1186,20 +1186,34 @@ class _OutboxConnection:
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         return None
 
+    def transaction(self) -> _Transaction:
+        return _Transaction()
+
     async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
         self.pool.calls.append((query, arguments))
         rows = self.pool.pending_rows
         self.pool.pending_rows = []
         return rows
 
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        return await self.pool.fetchrow(query, *arguments)
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        return await self.pool.execute(query, *arguments)
+
 
 class _OutboxPool:
-    def __init__(self, workflow_status: str = "implementing") -> None:
+    def __init__(
+        self,
+        workflow_status: str = "implementing",
+        last_request: dict[str, object] | None = None,
+    ) -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.pending_rows: list[dict[str, object]] = []
         self.stalled_rows: list[dict[str, object]] = []
         self.orphaned_rows: list[dict[str, object]] = []
         self.workflow_status = workflow_status
+        self.last_request = last_request or {"role": None, "request_status": None, "next_attempt": None}
 
     def acquire(self) -> _OutboxConnection:
         return _OutboxConnection(self)
@@ -1216,7 +1230,7 @@ class _OutboxPool:
 
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
         self.calls.append((query, arguments))
-        return {"status": self.workflow_status}
+        return {"status": self.workflow_status, **self.last_request}
 
 
 class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
@@ -1275,40 +1289,74 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
         # A job handed to recover_one is not stalled work.
         self.assertIn("'offered', 'preparing', 'running', 'recovering'", query)
 
-    async def test_recover_stalled_workflow_run_clears_the_suspension_flag(self) -> None:
-        """The detector already established nothing is in flight, so the
-        `awaiting_execution` gate that suspends the graph on the edge out of a
-        dispatching node is stale: without clearing it the resumed graph routes
-        straight back to END and the run stays stalled (issue #94)."""
-        pool = _OutboxPool()
-        control_plane = AsyncpgControlPlane(pool)
+    RUN_ID = "00000000-0000-0000-0000-000000000001"
+
+    async def _recover(self, pool: _OutboxPool) -> tuple[bool, list[tuple[str, str, dict[str, object]]]]:
         delivered: list[tuple[str, str, dict[str, object]]] = []
 
         async def on_transition(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
             delivered.append((workflow_run_id, new_status, updates))
 
-        recovered = await control_plane.recover_stalled_workflow_run(
-            "00000000-0000-0000-0000-000000000001", on_transition
+        recovered = await AsyncpgControlPlane(pool).recover_stalled_workflow_run(
+            self.RUN_ID, on_transition, NOW
         )
+        return recovered, delivered
+
+    async def test_recover_stalled_workflow_run_clears_the_suspension_flag(self) -> None:
+        """A request closed by its own terminal event means the execution
+        reported and only the graph invocation was lost, so the graph is
+        re-entered. `awaiting_execution` has to be cleared: it is what suspends
+        the graph on the edge out of a dispatching node, so leaving it set
+        would route the resumed graph straight back to END (issue #94)."""
+        pool = _OutboxPool(
+            last_request={"role": "planner", "request_status": "completed", "next_attempt": 2}
+        )
+
+        recovered, delivered = await self._recover(pool)
+
         self.assertTrue(recovered)
-        self.assertEqual(
-            delivered,
-            [("00000000-0000-0000-0000-000000000001", "implementing", {"awaiting_execution": False})],
+        self.assertEqual(delivered, [(self.RUN_ID, "implementing", {"awaiting_execution": False})])
+        self.assertFalse(
+            any("INSERT INTO app.workflow_execution_requests" in query for query, _ in pool.calls)
+        )
+
+    async def test_recover_stalled_workflow_run_requeues_a_lost_execution(self) -> None:
+        """An orphaned request means no runner will ever report that execution.
+        Re-entering the graph would let the unconditional edges out of
+        `implement`, `repair` and `push` fire, skipping the phase nobody ran --
+        for `push`, that opens and merges a pull request for a branch that was
+        never pushed. The phase is queued again instead, and the graph stays
+        suspended waiting for it."""
+        pool = _OutboxPool(
+            last_request={"role": "developer", "request_status": "orphaned", "next_attempt": 2}
+        )
+
+        recovered, delivered = await self._recover(pool)
+
+        self.assertTrue(recovered)
+        self.assertEqual(delivered, [])
+        insert = next(
+            arguments for query, arguments in pool.calls
+            if "INSERT INTO app.workflow_execution_requests" in query
+        )
+        self.assertEqual(insert[2:5], ("developer", 2, NOW))
+        self.assertTrue(
+            any("'execution_requeued'" in query for query, _ in pool.calls)
         )
 
     async def test_recover_stalled_workflow_run_skips_a_run_that_became_terminal(self) -> None:
-        pool = _OutboxPool(workflow_status="blocked")
-        control_plane = AsyncpgControlPlane(pool)
-        delivered: list[tuple[str, str, dict[str, object]]] = []
-
-        async def on_transition(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
-            delivered.append((workflow_run_id, new_status, updates))
-
-        recovered = await control_plane.recover_stalled_workflow_run(
-            "00000000-0000-0000-0000-000000000001", on_transition
+        pool = _OutboxPool(
+            workflow_status="blocked",
+            last_request={"role": "planner", "request_status": "orphaned", "next_attempt": 2},
         )
+
+        recovered, delivered = await self._recover(pool)
+
         self.assertFalse(recovered)
         self.assertEqual(delivered, [])
+        self.assertFalse(
+            any("INSERT INTO app.workflow_execution_requests" in query for query, _ in pool.calls)
+        )
 
     async def test_close_orphaned_execution_requests_reports_the_rows_it_closed(self) -> None:
         pool = _OutboxPool()

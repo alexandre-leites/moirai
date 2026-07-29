@@ -525,16 +525,23 @@ _PLANNER_READY: dict[str, Any] = {
 }
 
 
-class _AlwaysLeader:
+class _SingleIterationLeader:
     """Stands in for AsyncpgLeader: the maintenance loop's recovery arm only
-    runs on the elected instance, and this test *is* that instance."""
+    runs on the elected instance, and this test *is* that instance.
 
-    def __init__(self) -> None:
+    Stopping the loop as soon as it claims leadership bounds it to exactly one
+    iteration, so every assertion downstream is literally "within one
+    interval".
+    """
+
+    def __init__(self, stop_event: Any) -> None:
+        self._stop_event = stop_event
         self.iterations = 0
         self.closed = False
 
     async def is_leader(self) -> bool:
         self.iterations += 1
+        self._stop_event.set()
         return True
 
     async def close(self) -> None:
@@ -560,6 +567,7 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._disable_seeded_projects)
         await MigrationRunner(self.pool).run()
         self.control_plane = AsyncpgControlPlane(self.pool)
+        self._checkpointer: Any = None
 
     async def _disable_seeded_projects(self) -> None:
         await self.pool.execute("UPDATE app.projects SET enabled = false")
@@ -582,13 +590,22 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.pool.execute("DELETE FROM app.runners WHERE id = $1", UUID(runner_id))
 
     async def _runtime(self) -> Any:
-        """The production workflow runtime, on a checkpointer that survives the
-        simulated crash exactly as the durable Postgres one would."""
+        """The production workflow runtime.
+
+        One checkpointer for the whole test, deliberately: it stands in for the
+        durable Postgres saver, which survives the simulated crash. A fresh
+        saver per call would leave the recovering runtime with an empty thread,
+        so `ainvoke(None, config)` would replay the graph from START instead of
+        resuming the suspended edge -- and the resume path is what these tests
+        exist to exercise.
+        """
         from langgraph.checkpoint.memory import InMemorySaver
 
         from moirai.workflows.runtime import build_persisted_runtime
 
-        return build_persisted_runtime(self.pool, checkpointer=InMemorySaver())
+        if self._checkpointer is None:
+            self._checkpointer = InMemorySaver()
+        return build_persisted_runtime(self.pool, checkpointer=self._checkpointer)
 
     @staticmethod
     def _advance(runtime: Any) -> Any:
@@ -702,74 +719,111 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 on_transition=on_transition,
             )
 
-    async def _request_statuses(self, workflow_run_id: str) -> list[tuple[str, str]]:
+    async def _implementing_run(self) -> tuple[str, str, str]:
+        """Drives a run one phase further: the planner reported, the graph
+        resumed and queued the developer execution, and that execution has been
+        placed on a runner.
+
+        Returns (workflow_run_id, job_id, runner_id).
+        """
+        workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+        runtime = await self._runtime()
+        await self._deliver_planner_result(
+            job_id, runner_id, request_id, on_transition=self._advance(runtime)
+        )
+        self.assertEqual(await self._run_status(workflow_run_id), "implementing")
+        offered = await self.control_plane.schedule_execution(_NOW, timedelta(minutes=5))
+        assert offered is not None
+        self.assertEqual(offered.offer.job_id, job_id)
+        await self.control_plane.accept_offer(job_id, runner_id, _NOW)
+        return workflow_run_id, job_id, runner_id
+
+    async def _run_status(self, workflow_run_id: str) -> str:
+        status = await self.pool.fetchval(
+            "SELECT status FROM app.workflow_runs WHERE id = $1", UUID(workflow_run_id)
+        )
+        return str(status)
+
+    async def _request_statuses(self, workflow_run_id: str) -> list[tuple[str, int, str]]:
+        """Every execution request for the run as (role, attempt, status).
+
+        Ordered by the schema's own identity for a request -- `(role, attempt)`
+        -- rather than by `created_at`, because the fixture drives the control
+        plane on a fixed test clock while the workflow persistence layer
+        timestamps its own writes with the wall clock.
+        """
         rows = await self.pool.fetch(
             """
-            SELECT role, status FROM app.workflow_execution_requests
-            WHERE workflow_run_id = $1 ORDER BY created_at, id
+            SELECT role, attempt, status FROM app.workflow_execution_requests
+            WHERE workflow_run_id = $1 ORDER BY role, attempt
             """,
             UUID(workflow_run_id),
         )
-        return [(str(row["role"]), str(row["status"])) for row in rows]
+        return [(str(row["role"]), int(row["attempt"]), str(row["status"])) for row in rows]
 
     async def _run_maintenance_once(
-        self, on_transition: Any, now: datetime, timeout: float = 10.0
-    ) -> tuple[list[tuple[str, str, dict[str, object]]], _AlwaysLeader]:
-        """Runs the real maintenance loop until it recovers something, then
-        stops it. The leader's iteration count proves recovery happened within
-        a single interval."""
+        self, on_transition: Any, now: datetime
+    ) -> tuple[list[tuple[str, str, dict[str, object]]], _SingleIterationLeader]:
+        """Runs exactly one iteration of the real maintenance loop.
+
+        `_SingleIterationLeader` stops the loop the moment it claims
+        leadership, so the iteration runs to completion and the loop then
+        exits: everything asserted afterwards happened within one interval.
+        """
         import asyncio
 
         from moirai.main import _run_workflow_maintenance_loop
 
         stop_event = asyncio.Event()
-        finished = asyncio.Event()
-        leader = _AlwaysLeader()
+        leader = _SingleIterationLeader(stop_event)
         recovered: list[tuple[str, str, dict[str, object]]] = []
 
         async def recording(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
             recovered.append((workflow_run_id, new_status, dict(updates)))
-            try:
-                if on_transition is not None:
-                    await on_transition(workflow_run_id, new_status, updates)
-            finally:
-                finished.set()
+            await on_transition(workflow_run_id, new_status, updates)
 
-        task = asyncio.create_task(
+        await asyncio.wait_for(
             _run_workflow_maintenance_loop(
                 self.control_plane,
                 recording,
                 stop_event,
                 lambda: now,
-                timedelta(milliseconds=20),
+                timedelta(milliseconds=1),
                 leader,
-            )
+            ),
+            timeout=30,
         )
-        try:
-            await asyncio.wait_for(finished.wait(), timeout)
-        except TimeoutError:
-            pass
-        finally:
-            stop_event.set()
-            await task
+        self.assertEqual(leader.iterations, 1)
+        self.assertTrue(leader.closed)
         return recovered, leader
+
+    async def _lose_the_job(self, job_id: str) -> None:
+        """The runner's job goes away without the execution request being
+        requeued -- the leak that pins a run outside the stall detector."""
+        await self.pool.execute(
+            "UPDATE app.jobs SET status = 'cancelled', finished_at = $2 WHERE id = $1",
+            UUID(job_id),
+            _NOW,
+        )
 
     async def test_terminal_event_closes_the_dispatched_execution_request(self) -> None:
         """Acceptance criterion 1: once a phase's execution reports terminal,
         no queued/dispatched request row remains for that phase."""
         workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
-        self.assertEqual(await self._request_statuses(workflow_run_id), [("planner", "dispatched")])
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id), [("planner", 1, "dispatched")]
+        )
         runtime = await self._runtime()
 
-        await self._deliver_planner_result(job_id, runner_id, request_id, on_transition=self._advance(runtime))
+        await self._deliver_planner_result(
+            job_id, runner_id, request_id, on_transition=self._advance(runtime)
+        )
 
-        statuses = await self._request_statuses(workflow_run_id)
-        self.assertEqual(statuses[0], ("planner", "completed"))
         # The planner phase left nothing schedulable behind; the developer
         # request the resumed graph queued is the only open row.
         self.assertEqual(
-            [role for role, status in statuses if status in ("queued", "dispatched")],
-            ["developer"],
+            await self._request_statuses(workflow_run_id),
+            [("developer", 1, "queued"), ("planner", 1, "completed")],
         )
         self.assertEqual(
             await self.control_plane.find_stalled_workflow_runs(
@@ -783,33 +837,46 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         transition and invoking the graph runtime is repaired by the
         maintenance loop within one interval."""
         workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+        runtime = await self._runtime()
 
         # The crash: accept_event commits the transition and the outbox row,
-        # then the process dies. The outbox row is left mid-drain
-        # ('processing'), which the drain arm never retries, so recovery can
-        # only come from the stalled-run arm.
+        # then the process dies before invoking the graph. The outbox row is
+        # left mid-drain ('processing'), which the drain arm never retries, so
+        # recovery can only come from the stalled-run arm.
         await self._deliver_planner_result(job_id, runner_id, request_id, on_transition=None)
         await self.pool.execute(
             "UPDATE app.workflow_transition_outbox SET status = 'processing' WHERE workflow_run_id = $1",
             UUID(workflow_run_id),
         )
-        run = await self.pool.fetchrow(
-            "SELECT status FROM app.workflow_runs WHERE id = $1", UUID(workflow_run_id)
+        self.assertEqual(await self._run_status(workflow_run_id), "implementing")
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id), [("planner", 1, "completed")]
         )
-        assert run is not None
-        self.assertEqual(str(run["status"]), "implementing")
+        self.assertEqual(
+            await self.control_plane.find_stalled_workflow_runs(
+                _NOW + timedelta(hours=1), timedelta(seconds=30)
+            ),
+            (workflow_run_id,),
+        )
 
-        runtime = await self._runtime()
-        recovered, leader = await self._run_maintenance_once(
+        recovered, _ = await self._run_maintenance_once(
             self._advance(runtime), _NOW + timedelta(hours=1)
         )
 
-        self.assertEqual([entry[0] for entry in recovered], [workflow_run_id])
-        self.assertEqual(leader.iterations, 1)
-        # Recovery re-entered the graph, which queued fresh work: the run is no
-        # longer stalled.
-        self.assertIn(
-            "queued", [status for _, status in await self._request_statuses(workflow_run_id)]
+        # The execution reported, so the graph is re-entered rather than the
+        # phase re-queued, and the suspension flag is cleared so the resumed
+        # edge can actually move.
+        self.assertEqual(
+            recovered, [(workflow_run_id, "implementing", {"awaiting_execution": False})]
+        )
+        # `plan_valid` rode on the outbox row that was never drained, so the
+        # resumed `plan` edge routes back into the planning phase and queues a
+        # second planner attempt rather than advancing on a verdict the graph
+        # never saw. The run is making progress again, bounded by
+        # `planning_attempts` -- which is what recovery has to guarantee.
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id),
+            [("planner", 1, "completed"), ("planner", 2, "queued")],
         )
         self.assertEqual(
             await self.control_plane.find_stalled_workflow_runs(
@@ -818,26 +885,69 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
 
-    async def test_maintenance_loop_closes_an_execution_request_whose_job_is_gone(self) -> None:
+    async def test_lost_planner_execution_is_requeued_rather_than_left_dispatched(self) -> None:
         """A dispatched request whose job was released without requeueing it
-        would pin the run out of the stall detector forever."""
+        pins the run outside the stall detector forever."""
         workflow_run_id, job_id, _, _ = await self._planning_run()
-        await self.pool.execute(
-            "UPDATE app.jobs SET status = 'cancelled', finished_at = $2 WHERE id = $1",
-            UUID(job_id),
-            _NOW,
+        await self._lose_the_job(job_id)
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id), [("planner", 1, "dispatched")]
         )
-        self.assertEqual(await self._request_statuses(workflow_run_id), [("planner", "dispatched")])
-
         runtime = await self._runtime()
+
         recovered, _ = await self._run_maintenance_once(
             self._advance(runtime), _NOW + timedelta(hours=1)
         )
 
-        self.assertEqual([entry[0] for entry in recovered], [workflow_run_id])
+        self.assertEqual(recovered, [])
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id),
+            [("planner", 1, "orphaned"), ("planner", 2, "queued")],
+        )
+        self.assertEqual(
+            await self.control_plane.find_stalled_workflow_runs(
+                _NOW + timedelta(hours=2), timedelta(seconds=30)
+            ),
+            (),
+        )
+
+    async def test_lost_execution_never_advances_the_graph_past_its_phase(self) -> None:
+        """The `implement` node's outgoing edge is unconditional, so recovering
+        a lost developer execution by clearing `awaiting_execution` and
+        resuming would dispatch the *pipeline* -- skipping the implementation
+        nobody ran. (The same shape on `push` would open and merge a pull
+        request for a branch that was never pushed.)"""
+        workflow_run_id, job_id, _ = await self._implementing_run()
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id),
+            [("developer", 1, "dispatched"), ("planner", 1, "completed")],
+        )
+        await self._lose_the_job(job_id)
+        runtime = await self._runtime()
+
+        recovered, _ = await self._run_maintenance_once(
+            self._advance(runtime), _NOW + timedelta(hours=1)
+        )
+
         statuses = await self._request_statuses(workflow_run_id)
-        self.assertEqual(statuses[0], ("planner", "orphaned"))
-        self.assertIn("queued", [status for _, status in statuses])
+        self.assertNotIn("pipeline", [role for role, _, _ in statuses])
+        self.assertEqual(
+            statuses,
+            [
+                ("developer", 1, "orphaned"),
+                ("developer", 2, "queued"),
+                ("planner", 1, "completed"),
+            ],
+        )
+        # The graph was not re-entered at all: it stays suspended where it is,
+        # waiting for the developer execution that has just been queued again.
+        self.assertEqual(recovered, [])
+        self.assertEqual(
+            await self.control_plane.find_stalled_workflow_runs(
+                _NOW + timedelta(hours=2), timedelta(seconds=30)
+            ),
+            (),
+        )
 
 
 if __name__ == "__main__":
