@@ -80,6 +80,10 @@ class IssueWorkflowNodes:
     pipeline: WorkflowNode
     review: WorkflowNode
     repair: WorkflowNode
+    # Same repairer role and phase as `repair`; separate node so the failing-
+    # checks gate spends `ci_repair_attempts` instead of the local pipeline's
+    # repair budget.
+    ci_repair: WorkflowNode
     push: WorkflowNode
     create_pull_request: WorkflowNode
     wait_for_checks: WorkflowNode
@@ -109,9 +113,9 @@ def route_review(
 
 def route_checks(
     state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
-) -> Literal["wait_for_checks", "wait_for_human", "merge", "repair", "blocked"]:
+) -> Literal["wait_for_checks", "wait_for_human", "merge", "ci_repair", "blocked"]:
     return cast(
-        Literal["wait_for_checks", "wait_for_human", "merge", "repair", "blocked"],
+        Literal["wait_for_checks", "wait_for_human", "merge", "ci_repair", "blocked"],
         route_after_checks(_gate_state(state), budget).value,
     )
 
@@ -178,6 +182,7 @@ def build_issue_graph(
     graph.add_node("pipeline", nodes.pipeline)
     graph.add_node("review", nodes.review)
     graph.add_node("repair", nodes.repair)
+    graph.add_node("ci_repair", nodes.ci_repair)
     graph.add_node("push", nodes.push)
     graph.add_node("create_pull_request", nodes.create_pull_request)
     graph.add_node("wait_for_checks", nodes.wait_for_checks)
@@ -212,6 +217,15 @@ def build_issue_graph(
         suspend_after_dispatch(lambda state: "pipeline"),
         {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
     )
+    # A CI repair rejoins the workflow exactly where a local repair does: the
+    # repaired tree gets its own local pipeline verdict, then AI review, push
+    # and a fresh round of checks on the same pull request. It is a separate
+    # node only so it spends `ci_repair_attempts`.
+    graph.add_conditional_edges(
+        "ci_repair",
+        suspend_after_dispatch(lambda state: "pipeline"),
+        {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+    )
     graph.add_conditional_edges(
         "push",
         suspend_after_dispatch(lambda state: "create_pull_request"),
@@ -225,7 +239,7 @@ def build_issue_graph(
             "wait_for_checks": END,
             "wait_for_human": "wait_for_human",
             "merge": "merge",
-            "repair": "repair",
+            "ci_repair": "ci_repair",
             "blocked": "blocked",
         },
     )

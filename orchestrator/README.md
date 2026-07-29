@@ -20,7 +20,7 @@ The consequence is that a seeded row deleted by hand is re-created on the next s
 
 ## Workflow execution model
 
-The issue workflow is an event-driven state machine, not a run-to-completion function. Every node that queues an agent execution (`plan`, `implement`, `pipeline`, `review`, `repair`, `push`) sets `awaiting_execution` and its outgoing edge ends the graph invocation. The gates the downstream nodes read (`plan_valid`, `pipeline_passed`, `review_approved`) only exist once that execution reports back, so continuing would route on stale defaults, queue phantom executions, and exhaust the retry budget before any agent ran.
+The issue workflow is an event-driven state machine, not a run-to-completion function. Every node that queues an execution (`plan`, `implement`, `pipeline`, `review`, `repair`, `ci_repair`, `push` — `pipeline` runs the project's commands rather than an agent, but suspends the same way) sets `awaiting_execution` and its outgoing edge ends the graph invocation. The gates the downstream nodes read (`plan_valid`, `pipeline_passed`, `review_approved`) only exist once that execution reports back, so continuing would route on stale defaults, queue phantom executions, and exhaust the retry budget before any agent ran.
 
 The runner's terminal event clears `awaiting_execution` (`workflows/runner_events.py`), and `PersistedWorkflowRuntime.run` resumes the graph from the same edge with `aupdate_state` + `ainvoke(None, config)`. One terminal event therefore advances the workflow by at most one queued execution.
 
@@ -41,12 +41,36 @@ No role's exit code is ever read as another role's verdict. Each gate is decided
 
 That strictness is deliberate: the local pipeline is the platform's deterministic completion gate. Inferring it from the developer's exit code, as the orchestrator used to, skipped the deterministic checks in exactly the case they exist for — the agent believing it succeeded — and let a repaired tree inherit the verdict of the pipeline run that preceded the repair.
 
-The pipeline execution does not spend `total_agent_executions`: it runs the project's commands, not an agent. It is bounded instead by the phases that lead into it, since the `pipeline` node is reachable only from `implement` and `repair`, both of which dispatch a counted agent execution first. An exhausted agent budget still blocks at the `pipeline` node rather than paying for a verdict that has nowhere to route.
+The pipeline execution does not spend `total_agent_executions`: it runs the project's commands, not an agent. It is bounded instead by the phases that lead into it, since the `pipeline` node is reachable only from `implement`, `repair` and `ci_repair`, each of which dispatches a counted agent execution first. An exhausted agent budget still blocks at the `pipeline` node rather than paying for a verdict that has nowhere to route.
 
 Two caveats about what the gate is worth today, neither of them in the orchestrator:
 
 - The commands come from `app.project_pipeline_steps` (`required = true`, in `position` order), which nothing in this repository writes yet ([#114](https://github.com/alexandre-leites/moirai/issues/114)). A project with no required steps has an empty gate: the execution reports success without running anything.
 - The runner rebuilds the workspace from the default branch for every execution (`repository.Manager.Prepare` runs `git worktree add -B <agent-branch> … <default-branch>`, which force-resets the branch), so a pipeline execution currently validates the base branch rather than the implementation it follows ([#136](https://github.com/alexandre-leites/moirai/issues/136)).
+
+## Retry budgets
+
+`RetryBudget` (`workflows/policy.py`) is the single source of truth for the bounds, and each counter has exactly one node that increments it. The node a repair is dispatched from is the only record of *why* it was dispatched, so the two repair sources are two nodes rather than one:
+
+| Counter | Default | Incremented by | Dispatched when |
+| --- | --- | --- | --- |
+| `planning_attempts` | 2 | `plan` | the planner has not produced a valid plan yet |
+| `implementation_attempts` | 3 | `implement` | the plan is valid |
+| `review_cycles` | 3 | `review` | the local pipeline passed |
+| `pipeline_repair_attempts` | 3 | `repair` | the local pipeline failed, AI review requested changes, or a human requested changes |
+| `ci_repair_attempts` | 3 | `ci_repair` | the pull request's required GitHub checks failed |
+| `total_agent_executions` | 10 | every dispatch of an agent role | any of the above, plus `push` |
+
+`repair` and `ci_repair` dispatch the same `repairer` role and report the same `repairing` phase — the runner does identical work and `runner_events.py` translates their terminal events identically, back to `local_pipeline` so the repaired tree earns a fresh pipeline verdict. Only the budget differs. A CI repair is a real agent run, so it spends `total_agent_executions` like any other repair.
+
+The counters are independent by construction: a run that exhausted its local repair budget can still *dispatch* a CI repair (it will still block at the `pipeline` node if the repaired tree fails locally), and a CI failure can no longer make a later local-pipeline failure block with a misleading reason.
+
+`ci_repair_attempts` is nonetheless not the bound that stops a CI loop under the shipped defaults, because one CI cycle — `ci_repair` → `pipeline` → `review` → `push` → `create_pull_request` → `wait_for_checks` — costs three agent runs *and* one `review_cycles` unit:
+
+- `review_cycles = 3` allows at most two CI cycles on top of the first review, whatever the other budgets say.
+- `total_agent_executions = 10` allows two CI cycles only for a run that reached its pull request on the cheapest path (4 agent runs); a run that took one local repair reaches the pull request at 7 and affords one.
+
+So `ci_repair_attempts` behaves as a configuration knob that becomes operative when those two budgets are raised, and as a correct attribution of what a workflow spent in either case. `RetryBudget` is not wired to configuration today: `build_persisted_runtime` constructs the graph and the nodes with the defaults. Sizing the budgets so the CI bound can bind is a separate, deliberate decision — it is not made here, because picking numbers that make one gate reachable is how the accounting drifted in the first place.
 
 ## Operations
 
