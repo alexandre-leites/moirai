@@ -39,7 +39,8 @@ Compose reads passwords, tokens, and registration credentials only from the file
 - Terminal runner events persist an outcome identity: a diff hash for successes, a failure fingerprint for failures. Both are scoped to the execution's role, so a zero-diff planner success is never mistaken for a zero-diff pipeline success, and each kind is only ever compared with its own kind. The failure fingerprint is the stable one the runner emits, so identical failures still match when durations differ. Four identical terminal outcomes for the same role block the workflow instead of retrying indefinitely.
 - Three consecutive blocked workflows with the same project failure reason open that project's circuit. After a five-minute cooldown, one durable half-open probe is allowed; its delivery closes the circuit and a blocked probe reopens it. Provider failures use the same durable circuit state.
 - Task packets carry acceptance criteria, prior failures, revision and diff context. Reviewer prompts are independently generated and exclude developer plans or reasoning.
-- Issue reconciliation revisits terminal workflows so `agent:blocked` and `agent:delivered` labels converge after retries or restarts.
+- Issue reconciliation revisits terminal workflows so `agent:blocked` and `agent:delivered` labels converge after retries or restarts. Each issue is reconciled against its newest workflow run, so historical runs cannot flip a converged terminal label.
+- Reconciliation only adds and removes labels in the `agent:*` namespace. Triage labels and the user-supplied `agent-priority:N` label are never deleted by a sync pass. See [issue label ownership](orchestrator/README.md#issue-label-ownership).
 
 The API is published at `http://localhost:8080`; the dashboard is published at `http://localhost:3000`. Compose disables the API secure-cookie setting only because this development topology terminates no TLS.
 

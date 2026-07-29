@@ -289,14 +289,21 @@ class AsyncpgControlPlane:
             now,
         )
 
-    async def list_active_workflows_for_project(self, project_id: str) -> list[dict[str, object]]:
+    async def list_latest_workflow_runs_for_project(self, project_id: str) -> list[dict[str, object]]:
+        """Return the newest workflow run per issue, ordered by issue.
+
+        Label reconciliation needs exactly one authoritative run per issue.
+        Returning every historical run made the terminal label depend on row
+        order, so a stale `blocked` run could overwrite `agent:delivered`.
+        """
         records = await self._pool.fetch(
             """
-            SELECT wr.id, wr.status, i.external_id, i.id AS issue_id, i.labels
+            SELECT DISTINCT ON (wr.issue_id)
+                   wr.id, wr.status, wr.created_at, i.external_id, i.id AS issue_id
             FROM app.workflow_runs wr
             JOIN app.issues i ON i.id = wr.issue_id
             WHERE wr.project_id = $1
-            ORDER BY wr.id ASC
+            ORDER BY wr.issue_id ASC, wr.created_at DESC, wr.id DESC
             """,
             _uuid(project_id),
         )
@@ -304,6 +311,7 @@ class AsyncpgControlPlane:
             {
                 "id": str(record["id"]),
                 "status": str(record["status"]),
+                "created_at": record["created_at"],
                 "external_id": str(record["external_id"]),
                 "issue_id": str(record["issue_id"]),
             }
