@@ -1453,7 +1453,7 @@ func TestControlLoopReportsRecoverableWorkAfterAPipelineFailure(t *testing.T) {
 		Delivery:           delivery,
 		Environment:        environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}},
 		AllowedEnvironment: []string{"GITHUB_TOKEN"},
-		Pipeline: pipelineRunner{
+		Pipeline: &pipelineRunner{
 			results: []pipeline.Result{{Command: "go test ./...", ExitCode: 1, Output: "--- FAIL: TestThing\n"}},
 			err:     errors.New("pipeline command failed with exit code 1: go test ./..."),
 		},
