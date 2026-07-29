@@ -57,6 +57,33 @@ from moirai.workflows.task_packets import (
     task_execution,
 )
 
+# Number of identical terminal outcomes that blocks a workflow. README's
+# "Workflow recovery guarantees" documents four; `non_progress_attempts`
+# counts *repeats*, so it is 0 for the first outcome of a run and N-1 once
+# N identical outcomes have been observed.
+NON_PROGRESS_OUTCOME_LIMIT = 4
+
+# Result-document keys that identify a single attempt rather than its content.
+# Both are required or emitted per execution, so they must never take part in
+# an outcome identity.
+_VOLATILE_RESULT_KEYS = frozenset({"executionId", "sessionId"})
+
+# Kept byte-identical to the runner's dispatch.FailureFingerprint, including
+# the ordering, which is load-bearing: markers truncate the message in place
+# and the first matching category wins.
+_FINGERPRINT_SECRET_MARKERS = ("token", "secret", "credential", "password", "authorization")
+_FINGERPRINT_CATEGORIES = (
+    "workspace",
+    "repository",
+    "git",
+    "pipeline",
+    "agent",
+    "executor",
+    "disk",
+    "environment",
+)
+_FINGERPRINT_MESSAGE_LINES = 5
+
 
 class AsyncpgControlPlane:
     def __init__(self, pool: Any, circuit_probe_cooldown: timedelta = timedelta(minutes=5)) -> None:
@@ -1523,16 +1550,24 @@ class AsyncpgControlPlane:
                 transition = workflow_transition_for_terminal_event(
                     summary, current_workflow_status, role=resolved_role
                 )
-                progress_updates = await self._record_progress_evidence(connection, job, summary, event.payload, now)
-                non_progress_attempts = progress_updates.get("non_progress_attempts", 0)
-                if isinstance(non_progress_attempts, int) and non_progress_attempts >= 4:
+                progress_updates = await self._record_progress_evidence(
+                    connection, job, summary, event.payload, now, resolved_role
+                )
+                repeats = progress_updates.get("non_progress_attempts", 0)
+                # The stored counter is 0 for the first outcome of a run, so a
+                # run of N identical outcomes stores N-1.
+                identical_outcomes = repeats + 1 if isinstance(repeats, int) else 0
+                if identical_outcomes >= NON_PROGRESS_OUTCOME_LIMIT:
                     transition = WorkflowTransition(
                         new_status="blocked",
                         state_updates={
                             **(transition.state_updates if transition is not None else {}),
                             **progress_updates,
                             "status": "blocked",
-                            "blocking_reason": "workflow stopped after four identical execution outcomes",
+                            "blocking_reason": (
+                                f"workflow stopped after {NON_PROGRESS_OUTCOME_LIMIT} "
+                                "identical execution outcomes"
+                            ),
                         },
                     )
 
@@ -1685,39 +1720,37 @@ class AsyncpgControlPlane:
         summary: Any,
         payload: dict[str, Any],
         now: datetime,
+        role: str | None,
     ) -> dict[str, object]:
+        """Records the identity of a terminal outcome and counts how many times
+        it has repeated.
+
+        A terminal outcome is either a success, identified by a diff hash, or a
+        failure, identified by a failure fingerprint. Both identities are scoped
+        by the execution's role, and each is only ever compared with the stored
+        identity of its own kind -- a failure is never measured against a diff
+        hash. The two columns therefore hold the last outcome *per kind*: a
+        success does not erase the failure a later failure must be compared
+        with, and vice versa.
+        """
         if not summary.terminal:
             return {}
-        diff_hash = (
-            sha256(json.dumps(sorted(summary.changed_files), separators=(",", ":")).encode("utf-8")).hexdigest()
-            if summary.succeeded
-            else None
-        )
-        fingerprint = sha256(
-            json.dumps(
-                {
-                    "event_type": summary.event_type,
-                    "exit_code": summary.exit_code,
-                    "changed_files": sorted(summary.changed_files),
-                    "result": summary.result,
-                    "payload": payload,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
-        current = diff_hash or fingerprint
-        previous = _optional_text(job.get("last_diff_hash")) or _optional_text(
-            job.get("last_failure_fingerprint")
-        )
-        same_outcome = previous == current
+        scope = role or "unknown"
+        diff_hash: str | None = None
+        fingerprint: str | None = None
+        if summary.succeeded:
+            diff_hash = current = _success_outcome_hash(scope, summary)
+            previous = _stored_outcome(job.get("last_diff_hash"))
+        else:
+            fingerprint = current = _failure_outcome_hash(scope, summary, payload)
+            previous = _stored_outcome(job.get("last_failure_fingerprint"))
+        same_outcome = previous is not None and previous == current
         attempts = int(job.get("non_progress_attempts") or 0) + 1 if same_outcome else 0
         await connection.execute(
             """
             UPDATE app.workflow_runs
-            SET last_diff_hash = $2,
-                last_failure_fingerprint = $3,
+            SET last_diff_hash = COALESCE($2, last_diff_hash),
+                last_failure_fingerprint = COALESCE($3, last_failure_fingerprint),
                 non_progress_attempts = $4,
                 last_progress_at = CASE WHEN $5 THEN $6 ELSE last_progress_at END,
                 updated_at = $6
@@ -1730,12 +1763,19 @@ class AsyncpgControlPlane:
             not same_outcome,
             now,
         )
-        return {
-            "last_diff_hash": diff_hash or "",
-            "last_failure_fingerprint": fingerprint,
+        # Only the column this outcome actually wrote is reported, so replaying
+        # these updates through the workflow persistence layer cannot clear the
+        # other kind's identity. "No diff" has one encoding -- SQL NULL -- so
+        # the key is absent rather than "".
+        updates: dict[str, object] = {
             "non_progress_attempts": attempts,
             "progressed": not same_outcome,
         }
+        if diff_hash is not None:
+            updates["last_diff_hash"] = diff_hash
+        else:
+            updates["last_failure_fingerprint"] = fingerprint
+        return updates
 
     async def _resolve_dispatched_execution(
         self, connection: Any, workflow_run_id: str, job_id: str, execution_id: str
@@ -1993,6 +2033,104 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _runner_failure_fingerprint(component: str, message: str) -> str:
+    """Port of the runner's `dispatch.FailureFingerprint`
+    (runner/internal/dispatch/fingerprint.go), so both ends of the protocol
+    agree on one definition of "the same failure".
+
+    The runner already sends this value as `failureFingerprint` on `failed`
+    events; this reproduces it for terminal events that carry none (older
+    runners, `cancelled` events), and any value it returns is therefore
+    directly comparable with a runner-supplied one.
+    """
+    normalized = message.lower()
+    for marker in _FINGERPRINT_SECRET_MARKERS:
+        index = normalized.find(marker)
+        if index >= 0:
+            normalized = normalized[:index] + marker
+    for category in _FINGERPRINT_CATEGORIES:
+        if category in normalized:
+            component = category
+            break
+    digest = sha256(f"{component}\n{normalized}".encode()).hexdigest()
+    return f"{component}:{digest[:16]}"
+
+
+def _failure_message(summary: Any, payload: dict[str, Any]) -> str:
+    """The most specific human-readable failure text a terminal payload
+    carries, truncated to its first few lines so that trailing volatile
+    detail cannot destabilise the fingerprint."""
+    for key in ("error", "summary", "message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            lines = value.strip().splitlines()[:_FINGERPRINT_MESSAGE_LINES]
+            return "\n".join(lines)
+    return f"{summary.event_type} exit={summary.exit_code}"
+
+
+def _stable_result(result: Any) -> dict[str, Any] | None:
+    """The agent result document without its per-attempt identifiers. Those
+    change on every execution, so leaving them in would make two identical
+    outcomes look different."""
+    if not isinstance(result, dict):
+        return None
+    return {key: value for key, value in result.items() if key not in _VOLATILE_RESULT_KEYS}
+
+
+def _success_outcome_hash(role: str, summary: Any) -> str:
+    """Identity of a successful terminal outcome. Scoped by role so a zero-diff
+    planner success can never collide with a zero-diff pipeline or reviewer
+    success, and keyed on the result document so two attempts that produced
+    different plans or review findings count as progress."""
+    return sha256(
+        json.dumps(
+            {
+                "kind": "success",
+                "role": role,
+                "changed_files": sorted(summary.changed_files),
+                "exit_code": summary.exit_code,
+                "result": _stable_result(summary.result),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+
+
+def _failure_outcome_hash(role: str, summary: Any, payload: dict[str, Any]) -> str:
+    """Identity of a failed or cancelled terminal outcome. Built from the
+    runner's own stable fingerprint when it sent one, otherwise from the same
+    algorithm applied to the failure text -- never from the raw payload, whose
+    durations and counters differ on every execution."""
+    supplied = payload.get("failureFingerprint")
+    core = (
+        supplied.strip()
+        if isinstance(supplied, str) and supplied.strip()
+        else _runner_failure_fingerprint("execution", _failure_message(summary, payload))
+    )
+    return sha256(
+        json.dumps(
+            {
+                "kind": "failure",
+                "role": role,
+                "event_type": summary.event_type,
+                "exit_code": summary.exit_code,
+                "fingerprint": core,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _stored_outcome(value: Any) -> str | None:
+    """Reads a stored outcome hash, treating the legacy empty-string encoding
+    of "no diff" as the absent value it was always meant to be."""
+    text = _optional_text(value)
+    return text if text else None
 
 
 def _json(values: list[str]) -> str:

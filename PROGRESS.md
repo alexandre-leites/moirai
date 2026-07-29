@@ -515,6 +515,109 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
 
 ---
 
+# Non-progress fingerprinting (issue #101, finding F14, 2026-07-29)
+
+## Current Status
+
+- Overall status: Complete, awaiting review.
+- Current phase: P3 hardening from the 2026-07-29 platform review.
+- Active implementation: none — issue #101 finished (session `issue-101`, 2026-07-29).
+- Last updated: 2026-07-29
+- Agent/session identifier: `issue-101`
+
+## Done
+
+- [x] Fix non-progress fingerprinting: cross-phase collisions and unstable failure fingerprints (issue #101, finding F14)
+  - Completed: 2026-07-29
+  - Relevant files:
+    - `orchestrator/src/moirai/persistence/control_plane.py` (`_record_progress_evidence`, the
+      non-progress comparison in `accept_event`, and the new outcome-identity helpers)
+    - `orchestrator/src/moirai/workflows/persistence.py` (`transition` durable-column writer)
+    - `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_workflow_persistence.py`
+    - `README.md` ("Workflow recovery guarantees")
+  - Behavior delivered:
+    - A terminal outcome now has a *kind-scoped, role-scoped* identity. Successes are
+      identified by a diff hash over `(role, sorted changed files, exit code, result document
+      minus per-attempt identifiers)`; failures and cancellations by a fingerprint over
+      `(role, event type, exit code, stable failure fingerprint)`. Every zero-diff success no
+      longer collides on `sha256("[]")` across phases.
+    - The failure identity is the runner's own `failureFingerprint` when the payload carries
+      one, so volatile fields (`durationMs`, counters) can no longer make two identical
+      failures hash differently. When no fingerprint is supplied (older runners, `cancelled`
+      events) the orchestrator derives one with `_runner_failure_fingerprint`, a byte-exact
+      port of the runner's `dispatch.FailureFingerprint`, applied to the first five lines of
+      the failure text. The two ends now share one definition; no runner change was required.
+    - Comparison is like-with-like: a success is only ever compared with `last_diff_hash`, a
+      failure only with `last_failure_fingerprint`. The SQL writer uses
+      `COALESCE($n, column)` so recording one kind never erases the other kind's identity,
+      which is what previously let an intervening success hide a repeated failure.
+    - Blocking now happens at the documented threshold: `NON_PROGRESS_OUTCOME_LIMIT = 4`
+      identical outcomes (the counter stores repeats, so the code compares `repeats + 1`).
+      Previously five outcomes were required.
+    - "No diff" has exactly one encoding, SQL NULL. `_record_progress_evidence` reports only
+      the column it actually wrote instead of `"" `, and `AsyncpgWorkflowPersistence.transition`
+      normalises an empty string to NULL for both outcome-identity columns. `_stored_outcome`
+      reads legacy `""` rows as absent.
+  - Validation performed:
+    - Defects reproduced first: the seven new behavioural tests in `NonProgressEvidenceTests`
+      were written against the unmodified detector and all seven failed
+      (`FAILED (failures=7)`; e.g. `test_zero_diff_successes_from_different_phases_do_not_collide`
+      → `AssertionError: 1 != 0`, `test_identical_failures_survive_volatile_payload_fields`
+      → `AssertionError: 0 != 1`, `test_four_identical_failures_block_at_the_documented_threshold`
+      → `AssertionError: 0 != 1`, `test_healthy_plan_implement_pipeline_review_never_increments`
+      → `AssertionError: 1 != 0`). All seven pass after the fix.
+    - `test_transition_stores_an_empty_outcome_hash_as_null` likewise failed first with
+      `AssertionError: '' is not None`.
+    - The Python fingerprint port was cross-checked against the Go implementation itself by
+      running `dispatch.FailureFingerprint` over six messages in a scratch copy of `runner/`;
+      output was byte-identical, including PR #128's published value
+      `agent:42051f1c5fc5560d`. Those values are pinned in
+      `FailureFingerprintDefinitionTests.test_matches_the_runner_implementation`.
+  - Commands executed:
+    - `make test-orchestrator` — OK, 299 tests, 2 skipped.
+    - `make lint` — `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-101` — `Success: no issues found in 47 source files`.
+    - `make test-runner` — all packages `ok` (runner untouched; run to confirm the fingerprint
+      contract this change depends on still holds).
+  - Notes:
+    - `MYPY_CACHE` was overridden because the Makefile default `/tmp/moirai-mypy-cache` is
+      shared across every worktree and `make typecheck` deletes it; concurrent agents were
+      active in sibling worktrees.
+    - No migration was needed: both columns and the counter already exist and keep their
+      meaning.
+
+## Decisions
+
+- Decision: The documented threshold wins — four identical terminal outcomes block, and the code was changed to match the README rather than the README changed to match the code.
+  - Context: README's "Workflow recovery guarantees" promised four identical outcomes; the code blocked at `non_progress_attempts >= 4` with a counter that starts at 0 and only increments on the *second* identical outcome, so five outcomes were actually required.
+  - Alternatives considered: (a) relax the README to "five"; (b) redefine the column to count outcomes rather than repeats so `>= 4` becomes literally correct.
+  - Reason: The published guarantee is the contract, and four is the more useful bound given the retry budget usually preempts the detector. (b) would have silently changed the meaning of an existing persisted column for every other reader.
+  - Consequences: `NON_PROGRESS_OUTCOME_LIMIT = 4` is the single source of truth for both the comparison and the `blocking_reason` text; `non_progress_attempts` keeps its existing "repeats since the run started" meaning, so 0 still means "no repetition" and no migration or backfill is needed.
+
+- Decision: Zero-diff successes still count toward non-progress, but a zero-diff is no longer an identity on its own.
+  - Context: The issue asked whether zero-diff successes should count at all, noting that the pending evidence-gate work reclassifies a zero-diff developer "success" as a failure. Planner, pipeline and reviewer executions legitimately never change files, so under the old changed-files-only hash they all collided.
+  - Alternatives considered: (a) count only failures and ignore successes entirely; (b) count successes only for mutating roles (developer, repairer); (c) keep counting all successes but widen the identity.
+  - Reason: (a) would discard the genuinely useful signal of a reviewer returning the same findings or a planner returning the same rejected plan four times in a row — a real stuck loop. (b) hard-codes a role policy that the evidence gate is about to make redundant. (c) removes the false positives (role and result document are in the hash) while keeping the true positives.
+  - Consequences: A repeated identical *same-role* success still blocks; a healthy plan → implement → pipeline → review sequence never increments the counter, which is covered by `test_healthy_plan_implement_pipeline_review_never_increments`. When the evidence gate lands, a zero-diff developer success simply arrives as a `failed` event and is handled by the failure path with no further change here.
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed — `orchestrator.tests.test_asyncpg_control_plane` (41) and `orchestrator.tests.test_workflow_persistence` (15).
+- Service tests: Passed — `make test-orchestrator`, 299 tests, 2 skipped.
+- Full repository tests: Not run (`make test-api` / `make test-web` not exercised; no Go API or web sources changed).
+- Build: Not run.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-101`.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run.
+- End-to-end workflow: Not run against a live stack. The terminal-event path is covered in-process by `NonProgressEvidenceTests`, which replays whole runner-event sequences through `accept_event` against a stateful fake that reproduces the progress columns.
+- Runner tests: Passed — `make test-runner` (runner unchanged).
+
+## Next Recommended Implementation
+
+Continue the P3 hardening track from `docs/reviews/2026-07-29-platform-review.md`: F15 (runner lifecycle hardening, issue #102) and F16 (bootstrap `NameError`, issue #103) are both unblocked and independent of this change.
 ## Label reconciliation data loss and nondeterministic terminal labels (issue #99, F12, 2026-07-29)
 
 ### Done
