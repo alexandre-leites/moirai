@@ -76,6 +76,31 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 	return PushResult{Branch: branch, Pushed: true}, nil
 }
 
+// PushWorkInProgress publishes the workspace's current HEAD to a dedicated
+// remote branch so the work a failed run produced survives the workspace. It
+// deliberately differs from Push: no upstream is set and the local branch is not
+// named, so the deliverable agent branch is never advanced by a failed run.
+//
+// The remote ref is owned by one execution, so the push is forced: an execution
+// redelivered after a crash must be able to replace its own earlier remains
+// rather than fail on a non-fast-forward.
+func (manager Manager) PushWorkInProgress(ctx context.Context, workspace Workspace, branch string, environment map[string]string) (PushResult, error) {
+	if err := validateWorkspace(workspace); err != nil {
+		return PushResult{}, err
+	}
+	if !safeRef(branch) {
+		return PushResult{}, errors.New("work-in-progress push branch is invalid")
+	}
+	extraEnvironment, err := credentialEnvironment(environment)
+	if err != nil {
+		return PushResult{}, err
+	}
+	if err := manager.gitWithEnv(ctx, extraEnvironment, "-C", workspace.Repository, "push", "--force", "origin", "HEAD:refs/heads/"+branch); err != nil {
+		return PushResult{}, fmt.Errorf("push work-in-progress branch: %w", err)
+	}
+	return PushResult{Branch: branch, Pushed: true}, nil
+}
+
 // credentialEnvironment renders the resolved task environment (which may carry
 // a code-host credential such as GITHUB_TOKEN) as extra environment variables
 // for a Git subprocess. When a GitHub token is present it also configures the

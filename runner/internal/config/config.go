@@ -42,6 +42,9 @@ type Config struct {
 	RedactionPrefixes    []string
 	DockerEnabled        bool
 	WorkspaceRetention   []string
+	RetentionMaxAge      time.Duration
+	RetentionMaxCount    int
+	PushWorkInProgress   bool
 	AgentBackend         string
 	AgentBinary          string
 	AgentArguments       []string
@@ -111,6 +114,8 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		RepositoryLockPoll:   25 * time.Millisecond,
 		CleanupAttempts:      3,
 		CleanupRetryDelay:    250 * time.Millisecond,
+		RetentionMaxAge:      72 * time.Hour,
+		RetentionMaxCount:    10,
 		TLSCAFile:            envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CA_FILE"),
 		TLSClientCertFile:    envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE"),
 		TLSClientKeyFile:     envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE"),
@@ -156,6 +161,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		{"LOOP_RUNNER_DOCKER_STOP_TIMEOUT", &config.DockerStopTimeout},
 		{"LOOP_RUNNER_REPOSITORY_LOCK_POLL", &config.RepositoryLockPoll},
 		{"LOOP_RUNNER_CLEANUP_RETRY_DELAY", &config.CleanupRetryDelay},
+		{"LOOP_RUNNER_RETENTION_MAX_AGE", &config.RetentionMaxAge},
 	} {
 		if *value.target, err = durationEnv(lookupEnv, value.key, *value.target); err != nil {
 			return Config{}, err
@@ -170,6 +176,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		{"LOOP_RUNNER_LOG_CHUNK_BYTES", &config.LogChunkBytes},
 		{"LOOP_RUNNER_MAX_LOG_BYTES", &config.MaxLogBytes},
 		{"LOOP_RUNNER_CLEANUP_ATTEMPTS", &config.CleanupAttempts},
+		{"LOOP_RUNNER_RETENTION_MAX_WORKSPACES", &config.RetentionMaxCount},
 	} {
 		if *value.target, err = intEnv(lookupEnv, value.key, *value.target); err != nil {
 			return Config{}, err
@@ -182,6 +189,9 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		return Config{}, err
 	}
 	if config.DockerEnabled, err = boolEnv(lookupEnv, "LOOP_RUNNER_DOCKER_ENABLED", false); err != nil {
+		return Config{}, err
+	}
+	if config.PushWorkInProgress, err = boolEnv(lookupEnv, "LOOP_RUNNER_PUSH_WORK_IN_PROGRESS", true); err != nil {
 		return Config{}, err
 	}
 	if config.MinimumFreeBytes, err = uint64Env(lookupEnv, "LOOP_RUNNER_MINIMUM_FREE_BYTES", config.MinimumFreeBytes); err != nil {
@@ -242,6 +252,9 @@ func (c Config) Validate() error {
 	}
 	if c.EventBufferSize < 1 || c.EventPayloadBytes < 1 || c.LogChunkBytes < 1 || c.MaxLogBytes < 1 || c.CleanupAttempts < 1 {
 		return errors.New("runner sizing configuration is invalid")
+	}
+	if len(c.WorkspaceRetention) > 0 && (c.RetentionMaxAge <= 0 || c.RetentionMaxCount < 1) {
+		return errors.New("runner workspace retention must be bounded by an age and a workspace count")
 	}
 	if hasUnsafeText(c.DockerNetwork) || hasUnsafeText(c.DockerCPULimit) && c.DockerCPULimit != "" || hasUnsafeText(c.DockerMemoryLimit) && c.DockerMemoryLimit != "" {
 		return errors.New("runner Docker configuration is invalid")
@@ -386,8 +399,17 @@ func parseAgentArguments(value string) ([]string, error) {
 	return result, nil
 }
 
+// parseWorkspaceRetention selects which terminal outcomes keep their workspace.
+// The default keeps failed runs: the previous attempt's worktree, terminal
+// result, and agent logs are the substrate a retry repairs, and deleting them
+// makes every retry repeat the first attempt's mistakes. Retention is bounded by
+// LOOP_RUNNER_RETENTION_MAX_AGE and LOOP_RUNNER_RETENTION_MAX_WORKSPACES, and
+// "none" opts out of retention altogether.
 func parseWorkspaceRetention(value string) ([]string, error) {
 	if value == "" {
+		return []string{"failed"}, nil
+	}
+	if value == "none" {
 		return nil, nil
 	}
 	retention := strings.Split(value, ",")

@@ -147,9 +147,13 @@ func checkPrerequisites(settings config.Config) error {
 	return nil
 }
 
-func retentionPolicy(values []string) dispatch.RetentionPolicy {
-	policy := dispatch.RetentionPolicy{}
-	for _, value := range values {
+func retentionPolicy(settings config.Config) dispatch.RetentionPolicy {
+	policy := dispatch.RetentionPolicy{
+		MaxAge:        settings.RetentionMaxAge,
+		MaxWorkspaces: settings.RetentionMaxCount,
+		Directory:     settings.DataDir,
+	}
+	for _, value := range settings.WorkspaceRetention {
 		switch value {
 		case "succeeded":
 			policy.KeepSucceeded = true
@@ -215,8 +219,14 @@ func run(ctx context.Context) error {
 		MinimumFreeBytes:   settings.MinimumFreeBytes,
 		DiskPath:           settings.DataDir,
 		AvailableBytes:     health.AvailableBytes,
-		Retention:          retentionPolicy(settings.WorkspaceRetention),
+		Retention:          retentionPolicy(settings),
+		PushWorkInProgress: settings.PushWorkInProgress,
 		Projects:           projects,
+	}
+	// Retained workspaces age while the runner is idle, so the age bound is also
+	// applied once at startup rather than only before the next execution.
+	if err := dispatcher.SweepRetainedWorkspaces(ctx); err != nil {
+		slog.Warn("could not fully sweep retained workspaces at startup", "error", err)
 	}
 	loop, err := dispatch.NewControlLoopWithEventBuffer(
 		client,
