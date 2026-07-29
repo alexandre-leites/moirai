@@ -81,7 +81,7 @@ func (dispatcher *staticDispatcher) Execute(context.Context, control.Lease) (Res
 func TestControlLoopDispatchesAcknowledgedLeaseAndReportsTerminalResult(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
-	dispatcher := &staticDispatcher{result: Result{Status: "completed", ExitCode: 0, Summary: "token should not leave runner", ChangedFiles: []string{"main.go"}, CommandsRun: []string{"go test ./..."}}}
+	dispatcher := &staticDispatcher{result: Result{Status: "completed", ExitCode: 0, Summary: "implemented the endpoint", ChangedFiles: []string{"main.go"}, CommandsRun: []string{"go test ./..."}}}
 	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
@@ -112,8 +112,8 @@ func TestControlLoopDispatchesAcknowledgedLeaseAndReportsTerminalResult(t *testi
 	if client.events[0].GetType() != "started" || client.events[1].GetType() != "completed" {
 		t.Fatalf("event types = %q, %q", client.events[0].GetType(), client.events[1].GetType())
 	}
-	if client.events[1].GetPayloadJson() == "" || contains(client.events[1].GetPayloadJson(), "token should not leave runner") {
-		t.Fatalf("terminal payload leaked result summary: %s", client.events[1].GetPayloadJson())
+	if client.events[1].GetPayloadJson() == "" {
+		t.Fatal("terminal event carried no payload")
 	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(client.events[1].GetPayloadJson()), &payload); err != nil {
@@ -122,12 +122,51 @@ func TestControlLoopDispatchesAcknowledgedLeaseAndReportsTerminalResult(t *testi
 	if payload["durationMs"] == nil || payload["changedFileCount"] != float64(1) || payload["commandCount"] != float64(1) || payload["pipelineCommandCount"] != float64(0) {
 		t.Fatalf("terminal usage payload = %#v", payload)
 	}
+	if payload["summary"] != "implemented the endpoint" {
+		t.Fatalf("terminal payload dropped the agent's summary: %#v", payload)
+	}
+}
+
+// TestControlLoopRedactsSecretsInTheForwardedAgentAccount: the agent's summary
+// and remaining work now cross the wire (issue #97), so the reporter's
+// redaction has to cover them the same way it covers the result document an
+// agent has always been able to write a credential into.
+func TestControlLoopRedactsSecretsInTheForwardedAgentAccount(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	dispatcher := &staticDispatcher{result: Result{
+		Status:        "blocked",
+		Summary:       "could not authenticate with ghp_abcdef1234567890",
+		RemainingWork: []string{"rotate loopsecret_zzz9"},
+	}}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, []string{"loopsecret_"}, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	contents := client.events[1].GetPayloadJson()
+	if contains(contents, "ghp_abcdef1234567890") || contains(contents, "loopsecret_zzz9") {
+		t.Fatalf("terminal payload leaked a credential: %s", contents)
+	}
+	if !contains(contents, "could not authenticate with") || !contains(contents, "rotate") {
+		t.Fatalf("redaction destroyed the agent's explanation: %s", contents)
+	}
 }
 
 func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}
-	dispatcher := &staticDispatcher{result: Result{ExitCode: 1, Summary: "credential=unsafe"}, err: context.DeadlineExceeded}
+	dispatcher := &staticDispatcher{result: Result{ExitCode: 1, Summary: "the agent timed out"}, err: context.DeadlineExceeded}
 	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
 	if err != nil {
 		t.Fatalf("NewControlLoop() error = %v", err)
@@ -154,8 +193,14 @@ func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
-	if len(client.events) != 2 || client.events[1].GetType() != "failed" || contains(client.events[1].GetPayloadJson(), "unsafe") {
+	if len(client.events) != 2 || client.events[1].GetType() != "failed" {
 		t.Fatalf("failure events = %#v", client.events)
+	}
+	// The executor's own error is the cause of a failing run, not the agent's
+	// account of it, so the error field names the timeout rather than the
+	// summary a partially finished agent happened to leave behind.
+	if !contains(client.events[1].GetPayloadJson(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("failure payload = %s", client.events[1].GetPayloadJson())
 	}
 }
 
@@ -471,22 +516,306 @@ func TestControlLoopExpiresLeaseWhileControlStreamIsDisconnected(t *testing.T) {
 	}
 }
 
-func TestTerminalPayloadCarriesRawResultOnlyWhenCompleted(t *testing.T) {
-	raw := map[string]any{"verdict": "approved", "findings": []any{}}
-	completed := terminalPayload("completed", Result{Raw: raw}, nil)
-	result, ok := completed["result"].(map[string]any)
-	if !ok || result["verdict"] != "approved" {
-		t.Fatalf("terminalPayload(completed) result = %#v", completed["result"])
+// TestTerminalPayloadCarriesTheAgentAccountForEveryOutcome pins issue #97's
+// core contract: the agent's own account of what happened — the result
+// document, its summary, and what it says still has to be done — travels with
+// every terminal outcome, not only with a success.
+func TestTerminalPayloadCarriesTheAgentAccountForEveryOutcome(t *testing.T) {
+	raw := map[string]any{"status": "blocked", "summary": "needs a credential"}
+	account := Result{Raw: raw, Summary: "needs a credential", RemainingWork: []string{"obtain DEPLOY_KEY"}}
+	for _, status := range []string{"completed", "failed", "blocked"} {
+		payload := terminalPayload(status, account, nil)
+		result, ok := payload["result"].(map[string]any)
+		if !ok || result["summary"] != "needs a credential" {
+			t.Fatalf("terminalPayload(%s) result = %#v", status, payload["result"])
+		}
+		if payload["summary"] != "needs a credential" {
+			t.Fatalf("terminalPayload(%s) summary = %#v", status, payload["summary"])
+		}
+		remaining, ok := payload["remainingWork"].([]string)
+		if !ok || len(remaining) != 1 || remaining[0] != "obtain DEPLOY_KEY" {
+			t.Fatalf("terminalPayload(%s) remainingWork = %#v", status, payload["remainingWork"])
+		}
 	}
 
-	failed := terminalPayload("failed", Result{Raw: raw}, nil)
-	if _, present := failed["result"]; present {
-		t.Fatalf("terminalPayload(failed) should not carry result: %#v", failed)
+	// A cancelled run reached no outcome of its own, so it reports none. This
+	// also keeps repeated cancellations identifiable: the orchestrator derives
+	// their fingerprint from a stable `cancelled exit=N` text precisely when no
+	// `error` or `summary` is present, and an interrupted agent's summary varies
+	// from run to run.
+	cancelled := terminalPayload("cancelled", account, nil)
+	for _, key := range []string{"result", "summary", "remainingWork"} {
+		if _, present := cancelled[key]; present {
+			t.Fatalf("cancelled terminal payload carried %q: %#v", key, cancelled)
+		}
 	}
 
-	noRaw := terminalPayload("completed", Result{}, nil)
-	if _, present := noRaw["result"]; present {
-		t.Fatalf("terminalPayload(completed) with no raw document should omit result: %#v", noRaw)
+	empty := terminalPayload("completed", Result{}, nil)
+	for _, key := range []string{"result", "summary", "remainingWork"} {
+		if _, present := empty[key]; present {
+			t.Fatalf("terminalPayload with nothing to report carried %q: %#v", key, empty)
+		}
+	}
+}
+
+// TestTerminalPayloadBoundsTheAgentAccount keeps the newly forwarded fields
+// inside the reduced-payload budget. `summary` and `remainingWork` are written
+// by the agent and are therefore unbounded at the source; the reduced retry
+// keeps both, so they have to be bounded where they are built rather than only
+// where they are re-emitted.
+//
+// The fill is deliberately hostile in the way real agent output is: raw byte
+// length is the wrong budget because Go's encoder spends six bytes on each `<`,
+// `>`, `&`, and control byte, and invalid UTF-8 expands too. Filling with
+// characters that encode 1:1 would let a raw-measured bound pass this test and
+// still lose the terminal event in production.
+func TestTerminalPayloadBoundsTheAgentAccount(t *testing.T) {
+	for _, fill := range []struct {
+		name string
+		text string
+	}{
+		{name: "plain", text: strings.Repeat("s", 32*1024)},
+		{name: "angle brackets", text: strings.Repeat("<div>", 8*1024)},
+		{name: "invalid utf-8", text: strings.Repeat("blocked on\xff\xfe", 4096)},
+		{name: "ansi escapes", text: strings.Repeat("\x1b[31mFAIL\x1b[0m\n", 2048)},
+	} {
+		t.Run(fill.name, func(t *testing.T) {
+			remaining := make([]string, 200)
+			for index := range remaining {
+				remaining[index] = fill.text
+			}
+			payload := terminalPayload("blocked", Result{
+				Summary:              fill.text,
+				RemainingWork:        remaining,
+				LogTail:              fill.text,
+				WorkInProgressCommit: "cafebabe",
+				WorkInProgressBranch: "wip/execution-1",
+				Raw:                  map[string]any{"status": "blocked", "transcript": fill.text},
+			}, executionUsage(time.Now(), Result{}))
+			// `error` and `failureFingerprint` are attached by execute, not by
+			// terminalPayload, and `error` is the largest contributor on the
+			// failure path — a bounding test that omits it proves nothing.
+			payload["blocked"] = true
+			payload["failureFingerprint"] = "execution:0123456789abcdef"
+			payload["error"] = fill.text
+
+			if summary, ok := payload["summary"].(string); !ok || jsonEncodedSize(summary) > maxTerminalPayloadFieldBytes {
+				t.Fatalf("summary encodes to %d bytes", jsonEncodedSize(summary))
+			}
+			items, ok := payload["remainingWork"].([]string)
+			if !ok || len(items) > maxTerminalPayloadListItems+1 {
+				t.Fatalf("remainingWork = %#v", payload["remainingWork"])
+			}
+			total := 0
+			for _, item := range items {
+				total += jsonEncodedSize(item)
+			}
+			if total > maxTerminalPayloadListBytes+jsonEncodedSize(truncationMarker)+32 {
+				t.Fatalf("remainingWork encodes to %d bytes", total)
+			}
+
+			// The whole reduced payload has to stay inside the encoded event
+			// limit, which is the only thing the retry exists to get under.
+			reduced := minimalTerminalPayload(payload)
+			if reduced == nil {
+				t.Fatal("minimalTerminalPayload() did not reduce an oversized agent account")
+			}
+			encoded, err := json.Marshal(reduced)
+			if err != nil {
+				t.Fatalf("encode reduced payload: %v", err)
+			}
+			if len(encoded) > maxEncodedEventPayloadBytes {
+				t.Fatalf("reduced payload is %d encoded bytes, over the %d-byte event limit", len(encoded), maxEncodedEventPayloadBytes)
+			}
+			if _, present := reduced["result"]; present {
+				t.Fatalf("reduced payload kept the unbounded result document: %#v", reduced)
+			}
+		})
+	}
+}
+
+// maxEncodedEventPayloadBytes mirrors control.maxExecutionEventPayloadBytes,
+// which is unexported. TestReducedTerminalPayloadIsAcceptedByTheEventReporter
+// pins the two together against the real reporter.
+const maxEncodedEventPayloadBytes = 16 * 1024
+
+// TestReducedTerminalPayloadIsAcceptedByTheEventReporter is the end-to-end
+// guard: a blocked agent whose every text field is hostile still gets its
+// outcome delivered, because the reduced retry fits the reporter's real limit.
+// Before the fields were measured as JSON encodes them, this payload was
+// rejected twice and the run's outcome was logged as lost.
+func TestReducedTerminalPayloadIsAcceptedByTheEventReporter(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	// Every byte here costs six encoded, so a raw-measured 2 KiB bound on
+	// `error` alone already spends 12 KiB of the 16 KiB event budget.
+	hostile := strings.Repeat("<", 32*1024)
+	remaining := make([]string, 50)
+	for index := range remaining {
+		remaining[index] = hostile
+	}
+	dispatcher := &staticDispatcher{result: Result{
+		Status:        "blocked",
+		Summary:       hostile,
+		RemainingWork: remaining,
+		LogTail:       hostile,
+		Raw:           map[string]any{"status": "blocked", "transcript": hostile},
+	}}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	terminal := client.events[1]
+	if terminal.GetType() != "failed" {
+		t.Fatalf("terminal event = %#v, want the outcome to survive a hostile payload", terminal)
+	}
+	if len(terminal.GetPayloadJson()) > maxEncodedEventPayloadBytes {
+		t.Fatalf("delivered payload is %d bytes", len(terminal.GetPayloadJson()))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(terminal.GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	// The block survives the reduction; only its detail is shed.
+	if payload["status"] != "blocked" || payload["blocked"] != true {
+		t.Fatalf("the reduced payload lost the block: %#v", payload)
+	}
+	if summary, _ := payload["summary"].(string); summary == "" {
+		t.Fatalf("the reduced payload lost the agent's summary: %#v", payload)
+	}
+	if remainingWork, _ := payload["remainingWork"].([]any); len(remainingWork) == 0 {
+		t.Fatalf("the reduced payload lost the remaining work: %#v", payload)
+	}
+}
+
+// TestMinimalTerminalPayloadKeepsTheBlockedExplanation: the reduced retry runs
+// exactly when a payload was too large, which is when a verbose agent blocked.
+// Shedding the explanation there would leave the orchestrator with the
+// anonymous failure this issue exists to remove.
+func TestMinimalTerminalPayloadKeepsTheBlockedExplanation(t *testing.T) {
+	reduced := minimalTerminalPayload(map[string]any{
+		"status":        "blocked",
+		"blocked":       true,
+		"summary":       "needs a credential",
+		"remainingWork": []string{"obtain DEPLOY_KEY"},
+		"result":        map[string]any{"status": "blocked"},
+	})
+	if reduced == nil {
+		t.Fatal("minimalTerminalPayload() did not reduce a payload carrying a result document")
+	}
+	if reduced["status"] != "blocked" || reduced["blocked"] != true || reduced["summary"] != "needs a credential" {
+		t.Fatalf("reduced payload lost the block: %#v", reduced)
+	}
+	remaining, ok := reduced["remainingWork"].([]string)
+	if !ok || len(remaining) != 1 {
+		t.Fatalf("reduced payload lost the remaining work: %#v", reduced)
+	}
+	if _, present := reduced["result"]; present {
+		t.Fatalf("reduced payload kept the unbounded result document: %#v", reduced)
+	}
+}
+
+// TestControlLoopReportsAnAgentReportedBlockDistinctlyFromAFailure is the
+// end-to-end shape of issue #97 on the wire.
+func TestControlLoopReportsAnAgentReportedBlockDistinctlyFromAFailure(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	dispatcher := &staticDispatcher{result: Result{
+		Status:        "blocked",
+		ExitCode:      0,
+		Summary:       "the deployment credential is missing",
+		RemainingWork: []string{"obtain DEPLOY_KEY"},
+		Raw:           map[string]any{"status": "blocked", "summary": "the deployment credential is missing"},
+	}}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	terminal := client.events[1]
+	// The wire vocabulary is unchanged (orchestrator VALID_EVENT_TYPES): the
+	// block is a refinement of the `failed` event, carried in the payload.
+	if terminal.GetType() != "failed" {
+		t.Fatalf("terminal event type = %q, want failed", terminal.GetType())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(terminal.GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	if payload["status"] != "blocked" || payload["blocked"] != true {
+		t.Fatalf("terminal payload does not report the block: %#v", payload)
+	}
+	if payload["summary"] != "the deployment credential is missing" {
+		t.Fatalf("terminal payload summary = %#v", payload["summary"])
+	}
+	remaining, ok := payload["remainingWork"].([]any)
+	if !ok || len(remaining) != 1 || remaining[0] != "obtain DEPLOY_KEY" {
+		t.Fatalf("terminal payload remainingWork = %#v", payload["remainingWork"])
+	}
+	result, ok := payload["result"].(map[string]any)
+	if !ok || result["status"] != "blocked" {
+		t.Fatalf("terminal payload result document = %#v", payload["result"])
+	}
+	if fingerprint, _ := payload["failureFingerprint"].(string); fingerprint == "" {
+		t.Fatalf("terminal payload lost its failure fingerprint: %#v", payload)
+	}
+}
+
+// TestControlLoopReportsAProcessFailureAsAFailureEvenWhenTheDocumentSaysBlocked:
+// a crashed process's own claim about why it stopped is not evidence. Only a
+// cleanly finished agent gets to report a block.
+func TestControlLoopReportsAProcessFailureAsAFailureEvenWhenTheDocumentSaysBlocked(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	dispatcher := &staticDispatcher{
+		result: Result{Status: "blocked", ExitCode: 3, Summary: "needs a credential"},
+		err:    errors.New("execute agent: exit status 3"),
+	}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(client.events[1].GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	if payload["status"] != "failed" {
+		t.Fatalf("terminal payload status = %#v, want failed", payload["status"])
+	}
+	if _, marked := payload["blocked"]; marked {
+		t.Fatalf("a process failure was reported as an agent block: %#v", payload)
 	}
 }
 
@@ -900,8 +1229,11 @@ func TestTerminalPayloadReportsRetainedWorkSeparatelyFromDelivery(t *testing.T) 
 	// The orchestrator rejects a payload with more than 32 fields
 	// (runner_events.MAX_PAYLOAD_FIELDS), so terminal payload growth is bounded
 	// on the receiving side as well as by the encoded byte limit.
-	full := terminalPayload("failed", Result{WorkInProgressCommit: "cafebabe", WorkInProgressBranch: "wip/execution-1", LogTail: "tail", Branch: "agent/issue-7/run-1"}, executionUsage(time.Now(), Result{}))
-	full["failureFingerprint"], full["error"] = "fingerprint", "boom"
+	full := terminalPayload("blocked", Result{
+		WorkInProgressCommit: "cafebabe", WorkInProgressBranch: "wip/execution-1", LogTail: "tail", Branch: "agent/issue-7/run-1",
+		Raw: map[string]any{"status": "blocked"}, Summary: "needs a credential", RemainingWork: []string{"obtain DEPLOY_KEY"},
+	}, executionUsage(time.Now(), Result{}))
+	full["failureFingerprint"], full["error"], full["blocked"] = "fingerprint", "boom", true
 	if len(full) > 24 {
 		t.Fatalf("terminal payload carries %d fields, leaving too little headroom under the orchestrator's limit", len(full))
 	}
@@ -959,21 +1291,52 @@ func TestMinimalTerminalPayloadReducesOnlyWhenSomethingChanges(t *testing.T) {
 		t.Fatal("minimalTerminalPayload() did not reduce an oversized error field")
 	}
 	text := reduced["error"].(string)
-	if len(text) > maxTerminalPayloadFieldBytes+len(truncationMarker) || !contains(text, truncationMarker) {
-		t.Fatalf("truncated error field = %d bytes, marker present = %v", len(text), contains(text, truncationMarker))
+	if jsonEncodedSize(text) > maxTerminalPayloadFieldBytes || !contains(text, truncationMarker) {
+		t.Fatalf("truncated error field = %d encoded bytes, marker present = %v", jsonEncodedSize(text), contains(text, truncationMarker))
 	}
 }
 
-func TestTruncateUTF8StopsOnARuneBoundary(t *testing.T) {
+func TestBoundedAgentTextStopsOnARuneBoundary(t *testing.T) {
 	value := strings.Repeat("a", 5) + "界界界"
-	for limit := 5; limit <= len(value); limit++ {
-		truncated := truncateUTF8(value, limit)
-		if len(truncated) > limit {
-			t.Fatalf("truncateUTF8(%d) = %d bytes", limit, len(truncated))
+	for budget := 5; budget <= jsonEncodedSize(value)+len(truncationMarker); budget++ {
+		bounded := boundedAgentText(value, budget)
+		if jsonEncodedSize(bounded) > budget && bounded != truncationMarker {
+			t.Fatalf("boundedAgentText(%d) = %d encoded bytes", budget, jsonEncodedSize(bounded))
 		}
-		if !utf8.ValidString(truncated) {
-			t.Fatalf("truncateUTF8(%d) split a rune: %q", limit, truncated)
+		if !utf8.ValidString(bounded) {
+			t.Fatalf("boundedAgentText(%d) split a rune: %q", budget, bounded)
 		}
+	}
+	if bounded := boundedAgentText(value, 4096); bounded != value {
+		t.Fatalf("boundedAgentText() altered text that fits: %q", bounded)
+	}
+}
+
+// TestBoundedAgentTextSanitisesBeforeMeasuring: agent prose reaches the payload
+// through the same hazards as a log tail — terminal escapes, control bytes, and
+// invalid UTF-8 — and all three cost far more encoded than raw.
+func TestBoundedAgentTextSanitisesBeforeMeasuring(t *testing.T) {
+	bounded := boundedAgentText("\x1b[31mblocked\x1b[0m on \x00credentials\xff", maxTerminalPayloadFieldBytes)
+	if bounded != "blocked on credentials" {
+		t.Fatalf("boundedAgentText() = %q", bounded)
+	}
+	if !utf8.ValidString(bounded) {
+		t.Fatalf("boundedAgentText() left invalid UTF-8: %q", bounded)
+	}
+}
+
+// TestBoundedListDropsBlankEntries: an agent that writes `remainingWork: ["",
+// ""]` has reported nothing, and empty strings on the wire only look like data.
+func TestBoundedListDropsBlankEntries(t *testing.T) {
+	if bounded := boundedList([]string{"", "   ", "\x1b[0m"}); bounded != nil {
+		t.Fatalf("boundedList(blank) = %#v, want nil", bounded)
+	}
+	if bounded := boundedList(nil); bounded != nil {
+		t.Fatalf("boundedList(nil) = %#v, want nil", bounded)
+	}
+	bounded := boundedList([]string{"", "obtain DEPLOY_KEY", "  "})
+	if len(bounded) != 1 || bounded[0] != "obtain DEPLOY_KEY" {
+		t.Fatalf("boundedList() = %#v", bounded)
 	}
 }
 

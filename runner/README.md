@@ -97,6 +97,16 @@ Every agent execution must write the result document named by the task packet's 
 
 Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `docker` — reports a `failed` terminal event when the document is missing or invalid, naming the missing evidence (for example `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`). A process that fails outright reports the process failure instead, so the orchestrator receives distinct failure fingerprints for "the agent crashed" and "the agent claimed nothing".
 
+**An agent-reported block is not a crash.** An agent that finishes cleanly and writes `status: blocked` stopped deliberately and said why, so its account crosses the wire intact rather than being flattened into an anonymous failure:
+
+- The terminal event type stays `failed` — the vocabulary is a shared contract with the orchestrator (`VALID_EVENT_TYPES`), the transport, and `app.jobs.status` — and the payload carries `status: "blocked"` with `blocked: true`.
+- The result document (`result`), the agent's `summary`, and its `remainingWork` are attached to every terminal payload for an outcome the agent itself reached — `completed`, `failed`, and `blocked` alike, where previously only `completed` carried the document. A `cancelled` run reached no outcome of its own and still reports none; that also keeps repeated cancellations identifiable, since the orchestrator fingerprints them from a stable `cancelled exit=N` text derived only when no `error` or `summary` is present.
+- `summary` is bounded to 2 KiB and `remainingWork` to 20 entries / 2 KiB of agent text, measured *as JSON encodes it* and sanitised of terminal escapes, control bytes, and invalid UTF-8 first — the same rule and the same helpers as `logTail` below, for the same reason. Truncation is marked. This is what lets the reduced-payload retry keep them while dropping the unbounded `result` document.
+- A failing *process* never reports a block, whatever its document claims: a crashed agent's account of why it stopped is not evidence. Its executor error is reported instead.
+- An agent result that is not `completed` skips the packet's pipeline commands, since a pipeline verdict would replace the agent's status, reason, and remaining work with a generic failure.
+
+The orchestrator routes the block to the terminal `blocked` status with `blocking_reason` composed from the agent's summary and remaining work, clearing the gate the reporting role owns (`workflows/runner_events.py`).
+
 ## Failed Work and Workspace Retention
 
 Iterative repair needs the previous attempt's work, so a run that does not complete is not discarded.
@@ -105,10 +115,10 @@ Iterative repair needs the previous attempt's work, so a run that does not compl
 
 | Outcome | Commit | Anchored locally | Pushed | Terminal payload |
 | --- | --- | --- | --- | --- |
-| `completed` | delivery message, on the packet's branch | — | `origin/<branch>`, upstream set, when `mayPush` | `branch`, `pushed: true` |
-| `failed` | `wip(failed): …` | `refs/moirai-wip/<executionId>` | `wip/<executionId>` when `mayPush` and `LOOP_RUNNER_PUSH_WORK_IN_PROGRESS` | `wipBranch`, `wipCommit`, `wipPushed`, `logTail` |
-| `blocked` | `wip(blocked): …` | as `failed` | as `failed` | as `failed` |
-| cancelled / abandoned | none — the context is already cancelled | — | — | `status: cancelled` |
+| `completed` | delivery message, on the packet's branch | — | `origin/<branch>`, upstream set, when `mayPush` | `branch`, `pushed: true`, `summary`, `remainingWork`, `result` |
+| `failed` | `wip(failed): …` | `refs/moirai-wip/<executionId>` | `wip/<executionId>` when `mayPush` and `LOOP_RUNNER_PUSH_WORK_IN_PROGRESS` | `wipBranch`, `wipCommit`, `wipPushed`, `logTail`, `error`, `failureFingerprint`, `summary`, `remainingWork`, `result` |
+| `blocked` | `wip(blocked): …` | as `failed` | as `failed` | as `failed`, plus `status: blocked` and `blocked: true` |
+| cancelled / abandoned | none — the context is already cancelled | — | — | `status: cancelled` and the usage counters only — no agent account |
 
 Only a completed run writes to the packet's branch, so a non-delivery can never be mistaken for a delivery. A failed or blocked run publishes to a per-execution `wip/<executionId>` ref instead, which cannot collide with the branch the next attempt re-creates from the base revision. That ref is force-pushed: it belongs to exactly one execution, which must be able to replace its own earlier remains after a redelivery.
 
@@ -116,7 +126,7 @@ The local `refs/moirai-wip/<executionId>` anchor is what makes the commit durabl
 
 `logTail` is a sanitised excerpt of the failing pipeline command's output, or of the agent's log, bounded to 2 KiB *as JSON encodes it* rather than raw, since `<`, `>`, and `&` cost six bytes each in the encoded payload.
 
-Note that pipeline commands currently reach the runner only on `role=pipeline` packets, which may not modify files and so have nothing to retain; in practice the paths above are exercised by a failing or blocked `developer`/`repairer` execution. A developer packet carrying pipeline commands is valid and handled (the pipeline failure then retains the agent's diff), but the orchestrator does not build that shape today.
+Note that pipeline commands currently reach the runner only on `role=pipeline` packets, which may not modify files and so have nothing to retain; in practice the paths above are exercised by a failing or blocked `developer`/`repairer` execution. A developer packet carrying pipeline commands is valid and handled (the pipeline failure then retains the agent's diff), but the orchestrator does not build that shape today. The pipeline runs only after a *completed* agent result: a failed or blocked agent has nothing worth validating, and its outcome must not be overwritten by the pipeline's.
 
 **Retention.** `LOOP_RUNNER_RETAIN_WORKSPACES` defaults to `failed`, keeping the worktree, `terminal-result.json`, and the agent's `*.stdout.log` / `*.stderr.log`. Retention is bounded, because keeping everything would eventually fill the disk:
 
@@ -136,7 +146,7 @@ Execution events are queued in a bounded in-memory buffer (`LOOP_RUNNER_EVENT_BU
 - When the buffer is full, a terminal event evicts the oldest queued lower-priority event (`log` and `progress` first, then `started`) instead of being rejected. Log and progress events are never allowed to evict anything.
 - Lease expiry discards a job's queued log and progress events but keeps its terminal events, still fenced by their lease generation, and keeps the expired lease just long enough for the still-running execution to report its outcome. Each expired generation is retained separately, so a job that is re-offered at the next generation does not displace the outcome still owed by the superseded execution.
 - The effective buffer size is raised to twice `LOOP_RUNNER_CAPACITY` when configured lower, covering each running execution plus one whose lease expired while it was still winding down. This is a floor, not a guarantee.
-- A terminal event that cannot be queued is retried once stripped to its classification fields (`status`, `exitCode`, `error`, `failureFingerprint`, `durationMs`, `branch`), each truncated to 2 KiB, so neither an oversized result document nor an agent that dumps its stderr into the returned error costs the run its outcome — only its detail.
+- A terminal event that cannot be queued is retried once stripped to its classification fields (`status`, `exitCode`, `error`, `failureFingerprint`, `durationMs`, `branch`, the work-in-progress pointers, and the block fields `blocked`/`summary`/`remainingWork`), each re-bounded to 2 KiB *as JSON encodes it*, so neither an oversized result document nor an agent that dumps its stderr into the returned error costs the run its outcome — only its detail. Measuring raw bytes here would not be enough: three 2 KiB raw fields of `<`, `>`, or `&` encode to 36 KiB and the reduced event would be rejected too, losing the outcome the reduction exists to save. The block fields are kept because they are bounded; the raw `result` document is dropped because nothing bounds it.
 - A terminal event that still cannot be queued is logged at `ERROR` with `msg="terminal execution event lost"` plus the job, execution, lease generation, and reason. One that is queued but not yet delivered is logged at `WARN` and retried from the outbox.
 
 The orchestrator remains authoritative: it fences every event on the lease generation. Note that it currently *rejects* an event whose lease has expired — `expire_leases` bumps the generation, so a terminal event reported after expiry is discarded and the control stream is aborted. The runner still records and offers the outcome; accepting it as recovery evidence is tracked as the orchestrator half of #93.

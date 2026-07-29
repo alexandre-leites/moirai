@@ -82,6 +82,90 @@ func TestEventReporterRedactsKnownSecretValuesWithinStrings(t *testing.T) {
 	}
 }
 
+// TestEventReporterRedactsNativeStringLists covers the shape terminal payloads
+// actually use: they are built in Go, so their string lists are []string and
+// never reach the []any arm of the redactor.
+func TestEventReporterRedactsNativeStringLists(t *testing.T) {
+	client := &eventClient{}
+	reporter, err := NewEventReporter(client, 4, []string{"internal_"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "completed", map[string]any{
+		"remainingWork": []string{"rotate internal_abcdefghijklmnop", "rotate ghp_abcdefghijklmnop"},
+		"commandsRun":   []string{"deploy --key sk-abcdefgh"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload := client.events[0].PayloadJson
+	for _, secret := range []string{"internal_abcdefghijklmnop", "ghp_abcdefghijklmnop", "sk-abcdefgh"} {
+		if strings.Contains(payload, secret) {
+			t.Fatalf("secret leaked from a string list in %s", payload)
+		}
+	}
+	if !strings.Contains(payload, "rotate ") {
+		t.Fatalf("redaction destroyed the surrounding text in %s", payload)
+	}
+}
+
+// TestEventReporterLeavesOrdinaryPathsAndCommandsIntact: a secret prefix that
+// continues an identifier is part of a longer word, not a credential. `sk-`
+// occurs inside `task-`, `disk-`, and `risk-`, and terminal payloads now carry
+// the changed-file and command lists those appear in.
+func TestEventReporterLeavesOrdinaryPathsAndCommandsIntact(t *testing.T) {
+	client := &eventClient{}
+	reporter := newEventReporter(t, client, 4)
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "completed", map[string]any{
+		"changedFiles": []string{"internal/task-queue/main.go", "docs/risk-register.md", "src/disk-usage.ts"},
+		"commandsRun":  []string{"make task-build"},
+		"error":        "scripts/task-runner.py exited 1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload := client.events[0].PayloadJson
+	if strings.Contains(payload, "[REDACTED]") {
+		t.Fatalf("ordinary paths and commands were corrupted by redaction: %s", payload)
+	}
+	for _, kept := range []string{"internal/task-queue/main.go", "docs/risk-register.md", "src/disk-usage.ts", "make task-build", "scripts/task-runner.py"} {
+		if !strings.Contains(payload, kept) {
+			t.Fatalf("redaction mangled %q in %s", kept, payload)
+		}
+	}
+}
+
+// TestEventReporterStillRedactsSecretsAtTokenBoundaries pins the other side of
+// the boundary rule: a credential preceded by punctuation is still a credential.
+func TestEventReporterStillRedactsSecretsAtTokenBoundaries(t *testing.T) {
+	client := &eventClient{}
+	reporter := newEventReporter(t, client, 4)
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "failed", map[string]any{
+		"error": `GITHUB_TOKEN=ghp_abcdefghijklmnop curl -H "Authorization: Bearer sk-abcdefgh" (glpat-zyxwvutsrq)`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload := client.events[0].PayloadJson
+	for _, secret := range []string{"ghp_abcdefghijklmnop", "sk-abcdefgh", "glpat-zyxwvutsrq"} {
+		if strings.Contains(payload, secret) {
+			t.Fatalf("secret at a token boundary leaked in %s", payload)
+		}
+	}
+	if strings.Count(payload, "[REDACTED]") != 3 {
+		t.Fatalf("expected three redactions in %s", payload)
+	}
+}
+
 func TestEventReporterSplitsUTF8LogsIntoOrderedPayloads(t *testing.T) {
 	client := &eventClient{}
 	reporter := newEventReporter(t, client, 8)

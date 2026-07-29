@@ -591,6 +591,9 @@ func TestDispatcherRetainsWorkInProgressWithoutDeliveringWhenExecutionFails(t *t
 			if len(delivery.pushes) != 0 || result.Pushed || result.Branch != "" {
 				t.Fatalf("failed execution delivered to the agent branch: result = %#v, pushes = %#v", result, delivery.pushes)
 			}
+			if test.backend.result.Status == "blocked" && (result.Status != "blocked" || result.Summary != "needs a decision") {
+				t.Fatalf("a blocked agent result was flattened by the dispatcher: %#v", result)
+			}
 			if len(delivery.commits) != 1 || !strings.HasPrefix(delivery.commits[0], "wip(") {
 				t.Fatalf("work in progress commit messages = %#v", delivery.commits)
 			}
@@ -601,6 +604,44 @@ func TestDispatcherRetainsWorkInProgressWithoutDeliveringWhenExecutionFails(t *t
 				t.Fatalf("work in progress pushes = %#v", delivery.workInProgressPushes)
 			}
 		})
+	}
+}
+
+// TestDispatcherSkipsThePipelineWhenTheAgentReportedABlock: the pipeline
+// verdict would overwrite the agent's status with a generic `failed`, erasing
+// the reason and the remaining work the block exists to carry. An agent that
+// stopped without delivering has nothing worth validating anyway.
+func TestDispatcherSkipsThePipelineWhenTheAgentReportedABlock(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
+	lease := deliverableLease()
+	lease.Packet.Pipeline = []taskpacket.PipelineCommand{{Command: "go test ./...", TimeoutSeconds: 5}}
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend: &backend{result: agents.Result{
+			Status:        "blocked",
+			Summary:       "needs a decision on the schema",
+			RemainingWork: []string{"decide the schema"},
+		}},
+		Delivery: delivery,
+		Pipeline: pipelineRunner{
+			results: []pipeline.Result{{Command: "go test ./...", ExitCode: 1}},
+			err:     errors.New("pipeline command failed with exit code 1: go test ./..."),
+		},
+	}
+
+	result, err := dispatcher.Execute(context.Background(), lease)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a blocked result rather than a failure", err)
+	}
+	if result.Status != "blocked" || result.Summary != "needs a decision on the schema" {
+		t.Fatalf("the pipeline overwrote the agent's block: %#v", result)
+	}
+	if len(result.RemainingWork) != 1 || result.RemainingWork[0] != "decide the schema" {
+		t.Fatalf("remaining work = %#v", result.RemainingWork)
+	}
+	if len(result.PipelineResults) != 0 {
+		t.Fatalf("the pipeline ran for a blocked agent result: %#v", result.PipelineResults)
 	}
 }
 
