@@ -16,9 +16,17 @@ const mounted: Array<{ root: Root; container: HTMLElement }> = [];
  * requests) cannot bleed into the next. Register it with `afterEach(unmountAll)`.
  */
 export async function unmountAll(): Promise<void> {
-  for (const { root, container } of mounted.splice(0)) {
-    await act(async () => root.unmount());
-    container.remove();
+  // One entry at a time, and each one is detached from the document even if its
+  // unmount throws. Draining the whole array up front would strand every
+  // remaining root — still mounted, still polling, and no longer reachable by a
+  // later `afterEach` — which is the exact bleed this function exists to stop.
+  while (mounted.length > 0) {
+    const [entry] = mounted.splice(-1, 1);
+    try {
+      await act(async () => entry.root.unmount());
+    } finally {
+      entry.container.remove();
+    }
   }
 }
 
@@ -143,9 +151,17 @@ export function deferred<T>(): {
     settleWith = res;
     failWith = rej;
   });
+  // Mark the original as handled. A test that rejects a deferred whose promise
+  // nothing consumed would otherwise fail the run with an unhandled rejection
+  // that vitest attributes to whichever test happened to be in flight — red CI
+  // pointing at the wrong file. A real consumer's own handler is unaffected.
+  promise.catch(() => undefined);
   return {
     promise,
-    resolve: (value: T) => act(async () => settleWith(value)),
+    resolve: (value: T) =>
+      act(async () => {
+        settleWith(value);
+      }),
     reject: (reason: unknown) =>
       act(async () => {
         failWith(reason);

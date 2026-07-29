@@ -33,12 +33,12 @@ type Stub = {
   setProjectEnabled?: ApiClient["setProjectEnabled"];
 };
 
-function stubApi(stub: Stub) {
+function stubApi(stub: Stub, role = "admin") {
   const created: CreateData[] = [];
   const toggled: Toggle[] = [];
   const api = {
     setUnauthorizedHandler: () => undefined,
-    me: async (): Promise<CurrentUser> => ({ userId: "u-1", username: "ada", role: "admin" }),
+    me: async (): Promise<CurrentUser> => ({ userId: "u-1", username: "ada", role }),
     listProjects: stub.listProjects ?? (async () => []),
     createProject:
       stub.createProject ??
@@ -56,13 +56,23 @@ function stubApi(stub: Stub) {
   return { api, created, toggled };
 }
 
-/** Mounts the page with no auth context, which is what a non-admin sees. */
-function mountAsViewer(api: ApiClient): Promise<HTMLElement> {
+/**
+ * Mounts the page with no auth context at all — the default context value,
+ * which is what renders while `GET /auth/me` is still in flight. This is *not*
+ * a stand-in for a signed-in non-admin: that user has a session whose role is
+ * simply not "admin", and the two are observably different. `mountWithSession`
+ * with a non-admin role is the one that covers the privilege gate.
+ */
+function mountWithoutSession(api: ApiClient): Promise<HTMLElement> {
   return mount(<ProjectsPage api={api} />);
 }
 
-/** Mounts the page inside a real AuthProvider whose session carries the admin role. */
-function mountAsAdmin(api: ApiClient): Promise<HTMLElement> {
+/**
+ * Mounts the page inside a real `AuthProvider`, so the role comes from a
+ * genuine `GET /auth/me` response (see `stubApi`'s `role` argument) rather than
+ * from a hand-built context.
+ */
+function mountWithSession(api: ApiClient): Promise<HTMLElement> {
   return mount(
     <AuthProvider api={api}>
       <ProjectsPage api={api} />
@@ -83,7 +93,7 @@ describe("ProjectsPage loading and listing", () => {
   it("shows a loading line before the first response, not an empty table", async () => {
     const pending = deferred<Project[]>();
     const { api } = stubApi({ listProjects: () => pending.promise });
-    const container = await mountAsViewer(api);
+    const container = await mountWithoutSession(api);
 
     expect(container.textContent).toContain("Loading projects...");
     expect(container.querySelector("table")).toBeNull();
@@ -95,7 +105,7 @@ describe("ProjectsPage loading and listing", () => {
 
   it("shows an explicit empty state when nothing is registered", async () => {
     const { api } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsViewer(api);
+    const container = await mountWithoutSession(api);
 
     expect(container.textContent).toContain("No projects registered");
     expect(container.querySelector("table")).toBeNull();
@@ -108,7 +118,7 @@ describe("ProjectsPage loading and listing", () => {
         project({ id: "p-2", name: "ledger", enabled: false }),
       ],
     });
-    const container = await mountAsViewer(api);
+    const container = await mountWithoutSession(api);
 
     expect(container.querySelectorAll("tbody tr")).toHaveLength(2);
     expect(row(container, "billing").textContent).toContain("Enabled");
@@ -128,7 +138,7 @@ describe("ProjectsPage loading and listing", () => {
         throw new ApiError(503, "orchestrator unavailable");
       },
     });
-    const container = await mountAsViewer(api);
+    const container = await mountWithoutSession(api);
 
     expect(container.textContent).toContain("No projects registered");
     expect(container.textContent).not.toContain("Loading projects...");
@@ -137,37 +147,55 @@ describe("ProjectsPage loading and listing", () => {
 });
 
 describe("ProjectsPage admin controls", () => {
-  it("offers a viewer no create or toggle control at all", async () => {
-    const { api } = stubApi({ listProjects: async () => [project()] });
-    const container = await mountAsViewer(api);
+  it("offers a signed-in non-admin no create or toggle control at all", async () => {
+    // The privilege gate, tested against a real session whose role is not
+    // "admin" — not against the absence of a session. `useIsAdmin` is
+    // `state?.role === "admin"`; weakening it to `state !== null` would hand a
+    // viewer the create form and the enable/disable toggles, and only this
+    // test would notice.
+    const { api } = stubApi({ listProjects: async () => [project()] }, "viewer");
+    const container = await mountWithSession(api);
 
+    expect(container.textContent).toContain("billing"); // the page did render
     expect(buttons(container, /New project/)).toHaveLength(0);
-    expect(container.textContent).not.toContain("Actions");
+    expect(Array.from(container.querySelectorAll("th")).map((th) => th.textContent)).toEqual([
+      "Name",
+      "Status",
+    ]);
     expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("offers no controls while the session is still resolving", async () => {
+    const { api } = stubApi({ listProjects: async () => [project()] });
+    const container = await mountWithoutSession(api);
+
+    expect(container.textContent).toContain("billing");
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+    expect(container.textContent).not.toContain("Actions");
   });
 
   it("offers an admin the create control and a per-row toggle", async () => {
     const { api } = stubApi({ listProjects: async () => [project()] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
 
-    expect(button(container, /New project/)).toBeDefined();
+    expect(button(container, /New project/).textContent).toBe("New project");
     expect(Array.from(container.querySelectorAll("th")).map((th) => th.textContent)).toEqual([
       "Name",
       "Status",
       "Actions",
     ]);
-    expect(button(row(container, "billing"), /Disable/)).toBeDefined();
+    expect(button(row(container, "billing"), /Disable/).textContent).toBe("Disable");
   });
 
   it("toggles a project through the API and renders the state the server returned", async () => {
     const { api, toggled } = stubApi({ listProjects: async () => [project({ enabled: true })] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
 
     await click(button(row(container, "billing"), /Disable/));
 
     expect(toggled).toEqual([{ id: "p-1", enabled: false }]);
     expect(row(container, "billing").textContent).toContain("Disabled");
-    expect(button(row(container, "billing"), /Enable/)).toBeDefined();
+    expect(button(row(container, "billing"), /Enable/).textContent).toBe("Enable");
   });
 
   it("disables the toggle while its request is in flight", async () => {
@@ -176,7 +204,7 @@ describe("ProjectsPage admin controls", () => {
       listProjects: async () => [project()],
       setProjectEnabled: () => pending.promise,
     });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
 
     await click(button(row(container, "billing"), /Disable/));
     expect(button(row(container, "billing"), /\.\.\./).disabled).toBe(true);
@@ -192,7 +220,7 @@ describe("ProjectsPage admin controls", () => {
         throw new ApiError(403, "forbidden");
       },
     });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
 
     await click(button(row(container, "billing"), /Disable/));
 
@@ -209,7 +237,7 @@ describe("ProjectsPage creation", () => {
 
   it("opens and closes the create form from the same control", async () => {
     const { api } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
 
     expect(container.querySelector("form")).toBeNull();
     await click(button(container, /New project/));
@@ -220,9 +248,26 @@ describe("ProjectsPage creation", () => {
     expect(container.querySelector("form")).toBeNull();
   });
 
+  it("creates from the Create button, not only from a synthetic form event", async () => {
+    // Every other test in this file dispatches `submit` at the <form>, which
+    // succeeds even if the button is not a submit control. Clicking the real
+    // button is what proves an operator can actually create a project:
+    // changing `type="submit"` to `type="button"` leaves the form with no way
+    // to submit at all, and only this test fails.
+    const { api, created } = stubApi({ listProjects: async () => [] });
+    const container = await mountWithSession(api);
+    const createForm = await openCreateForm(container);
+
+    await typeInto(field(createForm, /^Name/), "ledger");
+    await click(button(createForm, /^Create$/));
+
+    expect(created).toHaveLength(1);
+    expect(created[0].name).toBe("ledger");
+  });
+
   it("refuses to create a project with no name, without calling the API", async () => {
     const { api, created } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await submitForm(createForm);
@@ -233,7 +278,7 @@ describe("ProjectsPage creation", () => {
 
   it("sends a managed clone with its repository URL and trims the name", async () => {
     const { api, created } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "  billing  ");
@@ -254,7 +299,7 @@ describe("ProjectsPage creation", () => {
 
   it("sends a local path instead of a URL once the mode is switched", async () => {
     const { api, created } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "ledger");
@@ -272,7 +317,7 @@ describe("ProjectsPage creation", () => {
 
   it("splits the comma-separated runner labels and drops the blanks", async () => {
     const { api, created } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "billing");
@@ -284,7 +329,7 @@ describe("ProjectsPage creation", () => {
 
   it("falls back to main when the default branch is cleared", async () => {
     const { api, created } = stubApi({ listProjects: async () => [] });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "billing");
@@ -299,7 +344,7 @@ describe("ProjectsPage creation", () => {
       listProjects: async () => [project({ id: "p-1", name: "billing" })],
       createProject: async () => project({ id: "p-2", name: "ledger", enabled: false }),
     });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "ledger");
@@ -324,7 +369,7 @@ describe("ProjectsPage creation", () => {
         );
       },
     });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "ledger");
@@ -341,7 +386,7 @@ describe("ProjectsPage creation", () => {
   it("locks the submit control while the creation is in flight", async () => {
     const pending = deferred<Project>();
     const { api } = stubApi({ listProjects: async () => [], createProject: () => pending.promise });
-    const container = await mountAsAdmin(api);
+    const container = await mountWithSession(api);
     const createForm = await openCreateForm(container);
 
     await typeInto(field(createForm, /^Name/), "ledger");

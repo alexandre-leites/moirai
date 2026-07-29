@@ -3,14 +3,19 @@
 // jsdom, not node: the CSRF token is read out of `document.cookie`, so the
 // header assertions below need a document with a real cookie jar.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, createApiClient } from "./api";
+import { ApiError, createApiClient, type ApiClient } from "./api";
 
 type Call = { url: string; init?: RequestInit };
 
-/** The header value a request carried, or undefined when it sent no headers. */
+/**
+ * The header value a request carried, or undefined when it sent none. Goes
+ * through `Headers` so the assertions are about the header the server sees, not
+ * about the casing or container the client happened to build it with — HTTP
+ * header names are case-insensitive, and switching `api.ts` to `new Headers()`
+ * is a refactor that must not redden these tests.
+ */
 function header(call: Call, name: string): string | undefined {
-  const headers = call.init?.headers as Record<string, string> | undefined;
-  return headers?.[name];
+  return new Headers(call.init?.headers).get(name) ?? undefined;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -111,11 +116,29 @@ describe("createApiClient CSRF handling", () => {
     expect(header(calls[0], "x-csrf-token")).toBe("a/b+c");
   });
 
-  it("does not put the CSRF header on reads", async () => {
+  it("sends the session cookie but no CSRF header on every read", async () => {
+    // The CSRF header belongs on state-changing requests only, but
+    // `credentials: "include"` belongs on all of them: drop it from a read and
+    // the console reads as permanently logged out wherever the API is not
+    // same-origin, with no error to show for it.
     setCookie("loop_csrf", "token-abc");
-    const { calls, fetchClient } = recorder(() => jsonResponse({ projects: [] }));
-    await createApiClient(fetchClient).listProjects();
-    expect(header(calls[0], "x-csrf-token")).toBeUndefined();
+    const reads: Array<[string, (api: ApiClient) => Promise<unknown>]> = [
+      ["me", (api) => api.me()],
+      ["listProjects", (api) => api.listProjects()],
+      ["listWorkflows", (api) => api.listWorkflows()],
+      ["listTokens", (api) => api.listTokens()],
+      ["listRunners", (api) => api.listRunners()],
+    ];
+
+    for (const [name, read] of reads) {
+      const { calls, fetchClient } = recorder(() =>
+        jsonResponse({ projects: [], workflows: [], tokens: [], runners: [] })
+      );
+      await read(createApiClient(fetchClient));
+      expect(calls[0].init?.credentials, `${name} did not send the session cookie`).toBe("include");
+      expect(header(calls[0], "x-csrf-token"), `${name} sent a CSRF header`).toBeUndefined();
+      expect(calls[0].init?.method, `${name} was not a GET`).toBeUndefined();
+    }
   });
 
   it("does not put the CSRF header on login, which runs before any session exists", async () => {

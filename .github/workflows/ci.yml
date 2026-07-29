@@ -150,9 +150,12 @@ jobs:
 
   # Own job rather than a step of build-web, so a failing vitest suite or an
   # eslint error is reported as itself instead of as "the web build broke", and
-  # so the two run in parallel. `make test-web` is `npm ci && npm run typecheck
-  # && npm run lint && npm test`: any one of the four exiting non-zero fails the
-  # chain, and therefore this job.
+  # so the two can run concurrently when the self-hosted pool has the capacity.
+  # `make test-web` is `cd web && npm ci && npm run typecheck && npm run lint &&
+  # npm test`: any one of those exiting non-zero fails the chain, and therefore
+  # this job. Note `npm run lint` is `eslint .` with no `--max-warnings`, so it
+  # gates eslint *errors* only; the ten warnings in the quality backlog do not
+  # fail this job today.
   test-web:
     runs-on: [self-hosted, linux]
     steps:

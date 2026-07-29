@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ApiError, type ApiClient, type CurrentUser } from "./api";
 import { AuthProvider } from "./auth";
 import { LoginPage } from "./login";
-import { button, deferred, field, form, mount, submitForm, typeInto, unmountAll } from "./test-dom";
+import { button, click, deferred, field, form, mount, submitForm, typeInto, unmountAll } from "./test-dom";
 
 afterEach(unmountAll);
 
@@ -11,8 +11,10 @@ type Attempt = { username: string; password: string };
 
 /**
  * The page is mounted inside a real `AuthProvider` rather than a hand-rolled
- * context value, so the test exercises the wiring the operator actually uses:
- * LoginPage -> AuthProvider.login -> api.login followed by api.me.
+ * context value, so what is exercised here is `LoginPage -> AuthProvider.login`
+ * and the `api.login` call it makes. What `AuthProvider` then does with the
+ * result — the follow-up `api.me` and the session state it establishes — is
+ * not observable from this page, and is covered in `auth.test.tsx`.
  */
 function authApi(onLogin?: (attempt: Attempt) => Promise<{ userId: string }>) {
   const attempts: Attempt[] = [];
@@ -107,6 +109,21 @@ describe("LoginPage", () => {
 
     expect(attempts).toEqual([{ username: "ada", password: "lovelace" }]);
     expect(container.querySelector(".error")).toBeNull();
+  });
+
+  it("submits from the Sign in button, not only from a synthetic form event", async () => {
+    // Every other test here dispatches `submit` at the <form>, which succeeds
+    // even if the button is not a submit control. Clicking the real button is
+    // what proves an operator can sign in at all: changing `type="submit"` to
+    // `type="button"` leaves the form unsubmittable, and only this test fails.
+    const { api, attempts } = authApi();
+    const container = await mountLogin(api);
+
+    await typeInto(field(container, /^Username/), "ada");
+    await typeInto(field(container, /^Password/), "lovelace");
+    await click(button(container, /^Sign in$/));
+
+    expect(attempts).toEqual([{ username: "ada", password: "lovelace" }]);
   });
 
   it("clears the validation error once the fields are filled in", async () => {
