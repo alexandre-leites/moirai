@@ -2311,7 +2311,7 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 ## Current Status
 
-- Overall status: Implemented and validated locally. Pull request opened against `main`; not merged, because CI is red repo-wide for a pre-existing reason (see Known Issues).
+- Overall status: Implemented and validated locally. Pull request [#164](https://github.com/alexandre-leites/moirai/pull/164) opened against `main` and deliberately left unmerged. `origin/main` was merged into the branch after PR #160 landed; both `PROGRESS.md` session entries were kept.
 - Current phase: Autonomy roadmap L1 from `docs/reviews/2026-07-29-platform-review.md`.
 - Active implementation: complete — agent `issue-104`, 2026-07-29.
 - Last updated: 2026-07-29.
@@ -2408,11 +2408,11 @@ The review also confirmed, by execution rather than by reading, five things this
 
 ## Known Issues
 
-- Issue: CI is red repo-wide and this branch cannot be merged on a green run.
-  - Severity: P1 for the repository, none for this change.
-  - Impact: six jobs fail in under ten seconds at `actions/setup-python` with "The version '3.12' with architecture 'x64' was not found for debian 13". The identical six jobs fail the same way on `main`'s own HEAD, so it is not caused by this branch.
-  - Evidence: introduced by `3ba81c2` ("Change CI runner to self-hosted Linux"); `fix/ci-self-hosted-python` (PR #160) owns the repair.
-  - Suggested resolution: merge PR #160, then re-run this pull request's checks. This branch was validated locally with the Makefile targets recorded above.
+- Issue: two CI jobs are expected to stay red for a reason unrelated to this change.
+  - Severity: P2 for the repository, none for this change.
+  - Impact: CI had been red repo-wide since `3ba81c2` ("Change CI runner to self-hosted Linux"), with six jobs failing in under ten seconds at `actions/setup-python` ("The version '3.12' with architecture 'x64' was not found for debian 13") — on `main`'s own HEAD as much as on any branch. PR #160 merged during this session and fixed four of the six. Per its own `PROGRESS.md` entry, `compose-smoke` and `test-postgres-integration` remain blocked on Docker group membership for the self-hosted runners, which cannot be changed from this repository.
+  - Evidence: PR #160 (`fix/ci-self-hosted-python`), merged as `fc8f6fe`; its session entry in this file records the remaining two jobs and why.
+  - Suggested resolution: none here. This branch was validated locally with the Makefile targets recorded above, and its own CI run is judged on the jobs that can pass.
 
 - Issue: the loop guard's diff component cannot distinguish two different edits to the same file.
   - Severity: P3.
