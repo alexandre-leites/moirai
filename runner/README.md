@@ -99,7 +99,7 @@ Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `
 
 ## Workspace Preparation
 
-Every execution gets a fresh workspace at `workspaces/job-<jobId>`: the previous one is removed when its execution ends, and the next execution of the same job may be leased by another runner. The directory is therefore not what carries a job's work from one execution to the next — the execution branch is. Every execution of a job shares one branch name (`agent/<issueExternalId>/<jobId>`), and preparation re-creates the workspace from that branch's tip, looked for in this order:
+Every execution gets a fresh workspace at `workspaces/job-<jobId>`: the previous one is removed when its execution ends, and the next execution of the same job may be leased by another runner. The directory is therefore not what carries a job's work from one execution to the next — the execution branch is. Every execution of a job shares one branch name (`agent/<issueExternalId>/<first 8 characters of jobId>`, built by the orchestrator's task-packet builder for every role), and preparation re-creates the workspace from that branch's tip, looked for in this order:
 
 1. the branch as published on the remote, found with `git ls-remote` and fetched — the one state of the job every runner can see, so it decides the tip;
 2. otherwise the branch in this runner's own repository, which is where an execution that could not push leaves its work;

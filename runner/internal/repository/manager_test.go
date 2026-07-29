@@ -676,6 +676,40 @@ func TestPrepareResumesAnExistingPathJobFromItsExecutionBranch(t *testing.T) {
 	}
 }
 
+// TestPrepareResumesAJobWhosePreviousWorkspaceWasNeverCleanedUp pins the
+// ordering: the workspace of a crashed or retained execution leaves a worktree
+// registration claiming the execution branch, and Git refuses to fetch into a
+// branch a worktree claims — even one whose directory is gone. Pruning has to
+// happen before the branch is resolved, not merely before it is checked out.
+func TestPrepareResumesAJobWhosePreviousWorkspaceWasNeverCleanedUp(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+
+	if _, err := manager.Prepare(context.Background(), request); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	// No Cleanup: the registration of that worktree survives into the next
+	// preparation, which removes only its directory.
+	runRealGit(t, origin, "checkout", "-q", "-b", request.Branch)
+	if err := os.WriteFile(filepath.Join(origin, "delivered.go"), []byte("package delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "delivered.go")
+	runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+	published := realGitRevision(t, origin, "refs/heads/"+request.Branch)
+	runRealGit(t, origin, "checkout", "-q", "main")
+
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() over a stale worktree registration error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, workspace); got != published {
+		t.Fatalf("resumed HEAD = %q, want the published execution branch %q", got, published)
+	}
+}
+
 // TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch is why the
 // execution branch is fetched with an explicit destination: a checkout cloned
 // with --single-branch has no configured refspec that would bring that branch
