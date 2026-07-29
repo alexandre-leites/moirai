@@ -1360,6 +1360,60 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("status = 'processed'" in query for query, _ in pool.calls))
         self.assertFalse(any("attempts = attempts + 1" in query for query, _ in pool.calls))
 
+    async def test_completing_an_outbox_row_is_fenced_on_the_claim_it_took(self) -> None:
+        """A delivery that outlives its own lease has had the row reclaimed by
+        another drainer. Completing or releasing it on `id` alone would knock
+        the current holder's claim out from under it and hand the same
+        transition to a third drainer."""
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def on_transition(*_args: object) -> None:
+            return None
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=on_transition,
+        )
+
+        complete, arguments = next(
+            (query, arguments) for query, arguments in pool.calls
+            if "status = 'processed'" in query
+        )
+        self.assertIn("AND status = 'processing' AND processing_started_at = $2", complete)
+        self.assertEqual(arguments[1], NOW)
+
+    async def test_releasing_a_failed_outbox_row_is_fenced_on_the_claim_it_took(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def failing(*_args: object) -> None:
+            raise RuntimeError("graph runtime unavailable")
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=failing,
+        )
+
+        release, arguments = next(
+            (query, arguments) for query, arguments in pool.calls
+            if "attempts = attempts + 1" in query
+        )
+        self.assertIn("AND status = 'processing' AND processing_started_at = $2", release)
+        self.assertEqual(arguments[1], NOW)
+
     def _request_status_writes(self, pool: _EventPool) -> list[tuple[object, ...]]:
         return [
             arguments

@@ -551,21 +551,38 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_replaying_a_transition_is_identical_to_delivering_it_once(self) -> None:
         """Issue #96: the transition outbox is at-least-once, so every delivery
         may happen twice. The second one must change nothing an observer can
-        see -- counters, execution requests, workflow status, graph position."""
+        see -- counters, execution requests, workflow status, transitions
+        written -- and must enter no node.
+
+        The last part needs the log: a node the replay walks onto finds another
+        phase's request open and suspends without writing anything, so the
+        counters and request rows alone cannot tell that it ran. `_reuse` logs
+        that as the invariant violation it is, which is what makes this test
+        fail if the runtime's replay gate is removed."""
         for claimed in (False, True):
             with self.subTest(request_claimed_by_the_scheduler=claimed):
                 workflow = _EventDrivenWorkflow()
                 await workflow.start()
-                await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+                state = await workflow.deliver("planner", "plan", result=_PLANNER_READY)
                 counters = dict(workflow.store.durable)
                 roles = list(workflow.store.roles)
+                requests = [dict(request) for request in workflow.store.requests]
+                transitions = len(workflow.store.transitions)
                 pending = await workflow.pending_nodes()
 
-                await workflow.replay_last(claimed=claimed)
+                with self.assertNoLogs("moirai.workflows.nodes", "ERROR"):
+                    replayed = await workflow.replay_last(claimed=claimed)
 
                 self.assertEqual(workflow.store.roles, roles)
                 self.assertEqual(workflow.store.durable, counters)
+                self.assertEqual(len(workflow.store.transitions), transitions)
                 self.assertEqual(await workflow.pending_nodes(), pending)
+                self.assertEqual(replayed["status"], state["status"])
+                self.assertIs(replayed["awaiting_execution"], True)
+                self.assertEqual(
+                    [request["role"] for request in workflow.store.requests],
+                    [request["role"] for request in requests],
+                )
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_a_replayed_transition_never_skips_the_pipeline_gate(self) -> None:

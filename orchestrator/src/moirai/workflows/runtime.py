@@ -96,20 +96,30 @@ class PersistedWorkflowRuntime:
                 terminal_state = {**state_updates, "workflow_run_id": workflow_run_id}
                 await self._checkpoints.checkpoint(workflow_run_id, terminal_state)
                 return terminal_state
-            if state_updates.get("awaiting_execution") is not True and await self._execution_in_flight(
+            if state_updates.get("awaiting_execution") is False and await self._execution_in_flight(
                 workflow_run_id
             ):
-                # The caller is clearing the suspension gate for an execution
-                # that has already reported, yet this run still has one open --
-                # so this is a transition being delivered a second time (the
-                # outbox is at-least-once). Advancing would walk the graph one
+                # This caller is delivering a runner transition: only those
+                # clear the suspension gate (`runner_events` puts
+                # `awaiting_execution: False` on every terminal transition, and
+                # the stalled-run repair passes it explicitly). Yet the run
+                # still has an execution open, so the transition has already
+                # been applied and is being delivered a second time -- the
+                # outbox is at-least-once. Advancing would walk the graph one
                 # node past the execution it is actually waiting on: a phase
                 # whose gates nobody has produced yet would be entered, and the
                 # terminal event that eventually arrives would resume from that
                 # wrong edge and skip the phase entirely. Re-assert the gate
                 # instead, so the replay ends exactly where the first delivery
-                # did. Nothing can wedge here: the only ways a request stays
-                # open are an execution that is genuinely running and one the
+                # did.
+                #
+                # Testing for `is False` rather than "not True" keeps every
+                # other entry point out of it. A human decision arrives with no
+                # `awaiting_execution` key at all and has nothing to do with
+                # the outbox, so it must not be gated on an execution request.
+                #
+                # Nothing can wedge here: the only ways a request stays open
+                # are an execution that is genuinely running and one the
                 # maintenance loop will close as `orphaned`.
                 state_updates["awaiting_execution"] = True
             if self._has_checkpointer:

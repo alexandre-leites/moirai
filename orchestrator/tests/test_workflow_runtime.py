@@ -190,6 +190,28 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result["awaiting_execution"], True)
         self.assertEqual(result["status"], "implementing")
 
+    async def test_the_replay_gate_only_applies_to_callers_clearing_the_gate(self) -> None:
+        """Only a runner transition clears `awaiting_execution`, and only those
+        can be replayed by the outbox. A human decision arrives with no such
+        key and has nothing to do with an execution request, so it must not be
+        held back by one -- otherwise an approval would be silently dropped by
+        a request the maintenance loop has not closed yet."""
+        checkpoints = _Checkpoints(
+            (2, {"status": "waiting_github_checks"}),
+            seed={"status": "waiting_github_checks"},
+            open_request={"id": "request-1", "role": "developer", "attempt": 1, "created": False},
+        )
+        graph = _Graph({"status": "merging"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run(
+            "workflow-1", {"human_approved": True, "human_changes_requested": False}
+        )
+
+        self.assertEqual(len(graph.calls), 1)
+        self.assertNotIn("awaiting_execution", graph.calls[0][0])
+        self.assertEqual(result["status"], "merging")
+
     async def test_an_open_request_never_holds_back_a_terminal_run(self) -> None:
         """A terminal run is already finished; the maintenance loop closes the
         request it leaked. Consulting the gate first would only delay the
