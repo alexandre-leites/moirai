@@ -2,8 +2,10 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,9 +77,82 @@ printf '%s' '{"protocolVersion":"1.0","executionId":"execution-1","status":"comp
 	}
 }
 
-func TestOpenCodeBackendFallsBackOnMissingResult(t *testing.T) {
+// A clean exit without usable evidence must never be reported as success: the
+// agent may have ended its reasoning loop early, refused, or crashed its own
+// logic while still exiting 0.
+func TestOpenCodeBackendFailsWhenResultDocumentIsMissingOrInvalid(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		agent string
+	}{
+		{name: "missing document", agent: "mkdir -p .loop\n"},
+		{name: "malformed json", agent: "mkdir -p .loop\nprintf '%s' '{\"protocolVersion\":' > .loop/result.json\n"},
+		{name: "wrong execution id", agent: `mkdir -p .loop
+printf '%s' '{"protocolVersion":"1.0","executionId":"execution-other","status":"completed","summary":"implemented"}' > .loop/result.json
+`},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			binary := writeFakeOpenCode(t, workspace, testCase.agent)
+			backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+			result, err := backend.Execute(context.Background(), Request{
+				ExecutionID: "execution-1",
+				Workspace:   workspace,
+				Prompt:      "implement the task",
+				Timeout:     time.Second,
+			})
+			if !errors.Is(err, ErrNoResultEvidence) {
+				t.Fatalf("Execute() error = %v, want ErrNoResultEvidence", err)
+			}
+			if result.Status != "failed" {
+				t.Fatalf("Status = %q, want failed", result.Status)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+			}
+			if !strings.Contains(err.Error(), filepath.Join(".loop", "result.json")) {
+				t.Fatalf("error %q does not name the missing evidence", err)
+			}
+			if result.Summary != err.Error() {
+				t.Fatalf("Summary = %q, want %q", result.Summary, err)
+			}
+			if strings.Contains(err.Error(), workspace) {
+				t.Fatalf("error %q leaks the absolute workspace path", err)
+			}
+		})
+	}
+}
+
+// The failure fingerprint is derived from the error text, so two executions
+// that fail the same way must produce identical text across workspaces.
+func TestOpenCodeBackendMissingResultFailureTextIsStableAcrossWorkspaces(t *testing.T) {
+	messages := make([]string, 0, 2)
+	for range 2 {
+		workspace := t.TempDir()
+		binary := writeFakeOpenCode(t, workspace, "mkdir -p .loop\n")
+		backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+		_, err := backend.Execute(context.Background(), Request{
+			ExecutionID: "execution-1",
+			Workspace:   workspace,
+			Prompt:      "implement the task",
+			Timeout:     time.Second,
+		})
+		if err == nil {
+			t.Fatal("Execute() error = nil, want a failure")
+		}
+		messages = append(messages, err.Error())
+	}
+	if messages[0] != messages[1] {
+		t.Fatalf("failure text differs across workspaces: %q vs %q", messages[0], messages[1])
+	}
+}
+
+// A failing process keeps reporting the process failure so the orchestrator can
+// tell it apart from an agent that exited cleanly with nothing to show.
+func TestOpenCodeBackendReportsProcessFailureRatherThanMissingEvidence(t *testing.T) {
 	workspace := t.TempDir()
 	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+exit 3
 `)
 	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
 	result, err := backend.Execute(context.Background(), Request{
@@ -86,11 +161,32 @@ func TestOpenCodeBackendFallsBackOnMissingResult(t *testing.T) {
 		Prompt:      "implement the task",
 		Timeout:     time.Second,
 	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if err == nil || errors.Is(err, ErrNoResultEvidence) {
+		t.Fatalf("Execute() error = %v, want the process failure", err)
 	}
-	if result.Status != "completed" {
-		t.Fatalf("Status = %q, want completed", result.Status)
+	if result.Status != "failed" || result.ExitCode != 3 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestOpenCodeBackendKeepsDocumentStatusWhenProcessFails(t *testing.T) {
+	workspace := t.TempDir()
+	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+printf '%s' '{"protocolVersion":"1.0","executionId":"execution-1","status":"blocked","summary":"needs credentials"}' > .loop/result.json
+exit 3
+`)
+	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+	result, err := backend.Execute(context.Background(), Request{
+		ExecutionID: "execution-1",
+		Workspace:   workspace,
+		Prompt:      "implement the task",
+		Timeout:     time.Second,
+	})
+	if err == nil || errors.Is(err, ErrNoResultEvidence) {
+		t.Fatalf("Execute() error = %v, want the process failure", err)
+	}
+	if result.Status != "blocked" || result.Summary != "needs credentials" || result.ExitCode != 3 {
+		t.Fatalf("unexpected result: %#v", result)
 	}
 }
 

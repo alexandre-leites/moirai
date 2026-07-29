@@ -468,3 +468,47 @@ Record only validation that was actually run.
 
 Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce it in this worktree, make a focused fix, rerun the relevant checks, and update this record before the next commit.
 
+---
+
+# Issue #89 — Runner: a missing or invalid result document must not be reported as success
+
+- Overall status: Complete; awaiting PR review
+- Current phase: 2026-07-29 platform review remediation (finding F2)
+- Active implementation: None
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/issue-89
+
+## Done
+
+- [x] Stop the opencode backend from reporting success without result evidence
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/agents/opencode.go`, `runner/internal/agents/opencode_test.go`, `runner/README.md`
+  - Behavior delivered:
+    - `OpenCodeBackend.Execute` no longer discards `readResultDocument`'s error. When the process exits 0 but the result document is missing or invalid, it returns `status="failed"` and an error wrapping the new exported sentinel `agents.ErrNoResultEvidence`, e.g. `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`. The summary carries the same text, so the persisted `terminal-result.json` names the missing evidence too.
+    - A valid document keeps its own status, summary, changed files, commands, remaining work, session ID, and raw payload — unchanged from before, including the case where the process exits non-zero.
+    - "Process failed" and "no result evidence" stay distinguishable in the failure fingerprint: when the process itself fails, the executor error is still returned (`ErrNoResultEvidence` is not used), so the two paths hash differently downstream in `dispatch.FailureFingerprint`. Measured end to end: `agent:42051f1c5fc5560d` (exit 0, no document) vs `agent:68daef1c6e1313c9` (exit 3).
+    - Failure text is free of absolute workspace paths (`readResultDocument` reports a missing file without the path; `workspaceRelativePath` renders `.loop/result.json`), so repeated no-evidence failures produce one stable fingerprint instead of a new one per workspace.
+  - Validation performed:
+    - `make test-runner` — pass (all runner packages, race detector).
+    - `cd runner && gofmt -l .` — no output.
+    - `cd runner && go vet ./...` — clean.
+    - `cd runner && go build ./...` — clean.
+    - New unit tests in `runner/internal/agents/opencode_test.go`: exit 0 + missing document, exit 0 + malformed JSON, exit 0 + wrong `executionId` (all three assert `failed`, `errors.Is(err, ErrNoResultEvidence)`, evidence named, no absolute path leak), exit 0 + valid document still `completed` (`TestOpenCodeBackendReadsValidatedResult`), non-zero exit + valid document keeps the document status while returning the process error, non-zero exit + missing document reports the process failure rather than `ErrNoResultEvidence`, and failure text stability across two workspaces.
+    - Temporary end-to-end harness (real `OpenCodeBackend` + `Dispatcher` + `ControlLoop`, deleted after use) confirmed the emitted terminal event: `type=failed`, `"error":"execute agent: agent exited 0 without a valid result document (.loop/result.json): agent result was not written"`, `"exitCode":0`, `"failureFingerprint":"agent:42051f1c5fc5560d"`.
+  - Commands executed: `make test-runner`; `cd runner && gofmt -l .`; `cd runner && go vet ./...`; `cd runner && go build ./...`; `cd runner && go test -race ./internal/agents/ -v`.
+  - Notes: Re-prompting/continuation stays out of scope (issue #104). `runner/internal/dispatch/control_loop.go` and `runner/internal/control/` were not touched; concurrent agents own those files.
+
+## Decisions
+
+- Decision: Carry the "no result evidence" classification in the returned error rather than in `dispatch.FailureFingerprint`'s category table.
+  - Context: The fingerprint is computed from the error text in `control_loop.go`, which is owned by a concurrent agent.
+  - Alternatives considered: Adding a dedicated fingerprint category for missing result documents.
+  - Reason: Keeping the change inside `runner/internal/agents/` avoids a conflict on shared dispatch files, and a stable, path-free error message already yields a distinct, repeatable fingerprint for each failure mode.
+  - Consequences: Both modes share the `agent:` component prefix but differ in digest; a later fingerprint-classification change (F14) can promote the distinction to the prefix without touching the backend.
+
+## Validation Status
+
+- Runner tests: Passed — `make test-runner` (`cd runner && go test -race ./...`), all packages `ok`.
+- Lint/format: Passed — `gofmt -l .` empty, `go vet ./...` clean.
+- Build: Passed — `cd runner && go build ./...`.
+- Orchestrator, API, web tests: Not run — change is confined to the runner's agent backend.
