@@ -62,13 +62,23 @@ tags=1.4.0,1.4,1,latest,sha-0123456' \
 	EVENT_NAME=release REF=refs/tags/v1.4.0 SHA="$sha_a" RUN_NUMBER=42 \
 	PRERELEASE=false MAKE_LATEST=true
 
-expect 'stable release that is not the newest release never moves latest' \
-	'version=1.4.0
+# Publishing v1.3.5 after v1.4.0. The minor pointer follows the newest patch of
+# its own line, but neither `1` nor `latest` may be dragged backwards.
+expect 'a stable release that is not the newest moves neither latest nor the major' \
+	'version=1.3.5
 channel=stable
 push=true
-tags=1.4.0,1.4,1,sha-0123456' \
-	EVENT_NAME=release REF=refs/tags/v1.4.0 SHA="$sha_a" RUN_NUMBER=42 \
+tags=1.3.5,1.3,sha-0123456' \
+	EVENT_NAME=release REF=refs/tags/v1.3.5 SHA="$sha_a" RUN_NUMBER=42 \
 	PRERELEASE=false MAKE_LATEST=false
+
+expect 'MAKE_LATEST defaults to false, so losing the value cannot move a pointer' \
+	'version=1.3.5
+channel=stable
+push=true
+tags=1.3.5,1.3,sha-0123456' \
+	EVENT_NAME=release REF=refs/tags/v1.3.5 SHA="$sha_a" RUN_NUMBER=42 \
+	PRERELEASE=false
 
 expect 'a 0.x stable release still gets its major and minor pointers' \
 	'version=0.1.0

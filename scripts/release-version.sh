@@ -13,8 +13,10 @@
 #   SHA                40-character commit sha               (github.sha)
 #   RUN_NUMBER         monotonic workflow run counter        (github.run_number)
 #   PRERELEASE         true|false, release events only       (github.event.release.prerelease)
-#   MAKE_LATEST        true|false, release events only; false keeps `latest` pinned
-#                      to whichever release GitHub currently reports as latest.
+#   MAKE_LATEST        true|false, release events only. Gates the tags that must
+#                      never move backwards: `latest` and the bare major `X`.
+#                      Defaults to false, because every way of losing this value
+#                      should leave those pointers where they are.
 #
 # Output (stdout): `key=value` lines, directly appendable to $GITHUB_OUTPUT.
 #   version=   semantic version carried in org.opencontainers.image.version
@@ -36,7 +38,7 @@ REF=${REF:-}
 SHA=${SHA:-}
 RUN_NUMBER=${RUN_NUMBER:-}
 PRERELEASE=${PRERELEASE:-false}
-MAKE_LATEST=${MAKE_LATEST:-true}
+MAKE_LATEST=${MAKE_LATEST:-false}
 
 [ -n "$EVENT_NAME" ] || fail 'EVENT_NAME is required'
 [ -n "$REF" ] || fail 'REF is required'
@@ -85,9 +87,13 @@ release)
 			major=${version%%.*}
 			rest=${version#*.}
 			minor=${rest%%.*}
-			tags="$version,$major.$minor,$major"
+			# `X.Y` always follows the newest patch of its own minor line, which
+			# is what a minor pointer means. `X` and `latest` span lines, so a
+			# patch published for an older line (v1.3.5 after v1.4.0) must not
+			# claim them -- that would move a pointer backwards.
+			tags="$version,$major.$minor"
 			if [ "$MAKE_LATEST" = true ]; then
-				tags="$tags,latest"
+				tags="$tags,$major,latest"
 			fi
 		fi
 		;;

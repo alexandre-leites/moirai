@@ -16,7 +16,9 @@ pushes an image.
 
 The names are `ghcr.io/<owner>/<repo>/<service>`, derived at runtime from
 `github.repository`, so a fork publishes under its own owner without editing the
-workflow. The nested form was chosen over a flat `moirai-<service>` because the
+workflow. (A fork consuming its own images does have to set
+`MOIRAI_IMAGE_PREFIX`; `compose.ghcr.yaml` cannot read `github.repository`.)
+The nested form was chosen over a flat `moirai-<service>` because the
 repository is a monorepo of co-released services: nesting keeps all four
 packages grouped under the repository they come from, and leaves the owner's
 top-level package namespace free for unrelated projects.
@@ -51,7 +53,8 @@ Three triggers, and nothing else, reach this workflow.
 | Trigger | Version | Image tags |
 | --- | --- | --- |
 | Push to `release/X.Y.Z` (or `release/vX.Y.Z`) | `X.Y.Z-rc.<run number>` | `X.Y.Z-rc.<run number>`, `X.Y.Z-rc`, `sha-<short sha>` |
-| Published GitHub Release tagged `vX.Y.Z`, not a pre-release | `X.Y.Z` | `X.Y.Z`, `X.Y`, `X`, `sha-<short sha>`, and `latest` when GitHub reports this release as the newest |
+| Published GitHub Release tagged `vX.Y.Z`, not a pre-release, and the newest release | `X.Y.Z` | `X.Y.Z`, `X.Y`, `X`, `latest`, `sha-<short sha>` |
+| Published GitHub Release tagged `vX.Y.Z`, not a pre-release, but **not** the newest release | `X.Y.Z` | `X.Y.Z`, `X.Y`, `sha-<short sha>` |
 | Published GitHub Release tagged `vX.Y.Z`, flagged pre-release | `X.Y.Z` | `X.Y.Z`, `sha-<short sha>` |
 | Published GitHub Release tagged `vX.Y.Z-<identifier>` | `X.Y.Z-<identifier>` | `X.Y.Z-<identifier>`, `sha-<short sha>` |
 | Manual `workflow_dispatch` | `0.0.0-dev.<run number>` | builds every image for every architecture and **publishes nothing** |
@@ -64,15 +67,26 @@ Consequences worth stating outright:
   registry.
 - **A release branch never claims the bare version.** `1.4.0` only ever points at
   the artifact built from the published `v1.4.0` release.
-- **`latest` only moves forward.** Before claiming it, the workflow asks GitHub
-  which release is currently the newest and only tags `latest` when that is this
-  release. Publishing a patch for an older line (`v1.3.5` after `v1.4.0`) leaves
-  `latest` where it is.
+- **Pointers that span release lines only move forward.** Before claiming
+  `latest` or the bare major `X`, the workflow asks GitHub which release is
+  currently the newest and only claims them when that is this release.
+  Publishing a patch for an older line (`v1.3.5` after `v1.4.0`) therefore
+  updates `1.3.5` and `1.3` and leaves `1` and `latest` alone. `X.Y` is not
+  gated, because a minor pointer is *supposed* to follow the newest patch of its
+  own line.
 - **Every run produces `sha-<short sha>`.** Any published digest can be traced
   back to a revision even after the moving tags have advanced.
 - **A malformed trigger fails the run.** `release/next`, `release/1.4`,
   `refs/tags/1.4.0` (no `v`), and a non-semver release tag are all rejected
   before anything is built. The workflow never guesses a version.
+- **Promoting an existing pre-release does not republish.** The workflow listens
+  for `release: types: [published]` only, so flipping the "pre-release" checkbox
+  off afterwards fires `released`, not `published`, and nothing happens. Adding
+  `released` would make every ordinary release build twice. If you need to
+  promote, delete the release and publish it again, which fires `published`.
+  Note that this only changes the outcome for a tag with no pre-release
+  identifier: `v1.4.0-rc.1` publishes `1.4.0-rc.1` whether the checkbox is set
+  or not, because an identifier in the tag is authoritative.
 
 The derivation is [`scripts/release-version.sh`](../scripts/release-version.sh),
 not inline workflow YAML, so the contract is executable.

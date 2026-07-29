@@ -2560,6 +2560,59 @@ local registry to 39399 to avoid colliding with concurrent agents; all of it was
   - Suggested resolution: `127.0.0.1:3000:8080`, which keeps `curl localhost:3000` working in the
     `compose-smoke` job. Deliberately not done here: `compose.yaml` is contested by PR #160.
 
+## Adversarial review of this diff
+
+A hostile review of the commit was run before the PR was opened. It found seven real defects,
+all fixed and re-verified; three of them would have shipped.
+
+- **Every `sha-<short sha>` tag would have been silently dropped** (high). Both the tag-expansion
+  step and the verify job used `printf '%s' "$TAGS" | tr ',' '\n' | while read`. `printf '%s'`
+  emits no trailing newline, so `read` returns non-zero on the final field and the loop body never
+  runs for it. The `sha-` tag is always last, so no trigger would ever have published it -- and on
+  `workflow_dispatch`, where it is the *only* tag, `build-push-action` would have received an empty
+  tag list. The verify job inherited the same bug, so it would not have noticed. Fixed with
+  `printf '%s\n'`; proven by simulating both steps, which now emit 5 references per service and 20
+  in total for a stable release.
+- **`uv export --frozen` does not detect a stale lock** (high). `--frozen` only means "do not
+  re-lock"; it exports a stale lock happily. Demonstrated: adding `cachetools>=5` to
+  `pyproject.toml` without re-locking, `--frozen` exits 0 and silently omits it, while `--locked`
+  exits 2 with "The lockfile at `uv.lock` needs to be updated". Combined with
+  `pip install --no-deps .`, a dependency added without `uv lock` would have shipped missing from
+  the image. Switched to `--locked`, and confirmed `--locked` works in the builder stage, which
+  has only `pyproject.toml` and `uv.lock` and no `src/`.
+- **The bare major pointer was not protected the way `latest` was** (medium). `tags` unconditionally
+  contained `$major`, so publishing `v1.3.5` after `v1.4.0` would have repointed `1` at `1.3.5` --
+  exactly the backwards move `MAKE_LATEST` exists to prevent. `X` is now gated with `latest`;
+  `X.Y` deliberately is not, because a minor pointer is supposed to follow the newest patch of its
+  own line. Documented in `docs/release.md` and covered by two new test cases.
+- **`github.ref` was interpolated into a `run:` body** (medium). The plan summary step expanded
+  `${{ github.ref }}` directly into shell. `git check-ref-format --branch 'release/$(id)'` accepts
+  that name, and the `workflow_dispatch` branch of the derivation never validates `REF`, so a
+  crafted branch name would execute on the self-hosted runner. Now passed through `env:` like every
+  other untrusted value in the file.
+- **Fixed `/tmp` paths on a shared runner host** (medium). The plan job wrote
+  `/tmp/latest-release.json` and `/tmp/release-plan.env`. Concurrency is per ref, so a
+  `release/1.4.0` push and a `v1.3.9` release can run at the same time; on a host with two runners
+  the second would truncate the first's plan file. Both moved to `$RUNNER_TEMP`.
+- **`MAKE_LATEST` failed open** (low/medium). Both the workflow fallback and the script default
+  were `true`, so any path that lost the value would *claim* `latest`. For a flag whose only
+  purpose is to stop a pointer moving, the safe default is `false`; both were flipped and a test
+  now pins the default.
+- **`org.opencontainers.image.created` was wall-clock time** (low), which contradicted the
+  reproducibility claim: the same commit released twice produced different metadata. Now taken from
+  the commit timestamp in UTC.
+
+Findings accepted without a code change, with reasons:
+
+- The reviewer flagged `opencode --version` running under QEMU on the arm64 leg as an unverified
+  risk. It is verified: the arm64 runner image built successfully (that check runs inside the
+  build) and the pushed arm64 image reports `aarch64` with `opencode 1.18.7`.
+- Promoting an existing pre-release to a full release fires `released`, not `published`, so it does
+  not republish. Adding `released` to the trigger would make every ordinary release build twice.
+  The gap and its workaround are documented in `docs/release.md` instead.
+- `.github/dependabot.yml` does not manage `postgres:16-alpine` in `compose.yaml`; that needs a
+  `docker-compose` ecosystem entry, and `compose.yaml` is owned by PR #160 for now.
+
 ## Next Recommended Implementation
 
 - Run the release workflow once via `workflow_dispatch` after merge (dry run, publishes nothing),

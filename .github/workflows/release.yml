@@ -70,7 +70,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          status=$(curl --silent --show-error --output /tmp/latest-release.json \
+          # $RUNNER_TEMP, not /tmp: several self-hosted runners can share a host,
+          # and this workflow is only serialised per ref.
+          response="$RUNNER_TEMP/latest-release.json"
+          status=$(curl --silent --show-error --output "$response" \
             --write-out '%{http_code}' \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header 'Accept: application/vnd.github+json' \
@@ -79,7 +82,7 @@ jobs:
           case "$status" in
             200)
               newest=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-                /tmp/latest-release.json | head -n 1)
+                "$response" | head -n 1)
               ;;
             404)
               # No non-prerelease release exists yet, so nothing can be newest.
@@ -90,7 +93,7 @@ jobs:
               exit 1
               ;;
           esac
-          rm -f /tmp/latest-release.json
+          rm -f "$response"
           if [ "$newest" = "$RELEASE_TAG" ]; then
             echo "make_latest=true" >> "$GITHUB_OUTPUT"
           else
@@ -106,20 +109,30 @@ jobs:
           SHA: ${{ github.sha }}
           RUN_NUMBER: ${{ github.run_number }}
           PRERELEASE: ${{ (github.event_name == 'release' && github.event.release.prerelease) || false }}
-          MAKE_LATEST: ${{ steps.newest.outputs.make_latest || 'true' }}
+          # Falls back to false, never true: MAKE_LATEST exists to stop pointers
+          # moving, so every way of losing it must leave them where they are.
+          MAKE_LATEST: ${{ steps.newest.outputs.make_latest || 'false' }}
         run: |
           set -eu
           # Deliberately not piped into tee: the default shell for `run` has no
           # pipefail, so a piped failure of the derivation would be masked by
           # tee's exit status and the release would proceed with no plan.
-          sh scripts/release-version.sh > /tmp/release-plan.env
-          cat /tmp/release-plan.env
-          cat /tmp/release-plan.env >> "$GITHUB_OUTPUT"
-          rm -f /tmp/release-plan.env
+          plan="$RUNNER_TEMP/release-plan.env"
+          sh scripts/release-version.sh > "$plan"
+          cat "$plan"
+          cat "$plan" >> "$GITHUB_OUTPUT"
+          rm -f "$plan"
 
-      - name: Record the build timestamp
+      # The commit timestamp, not the wall clock: re-running a release for the
+      # same commit then produces the same org.opencontainers.image.created
+      # instead of a gratuitously different image.
+      - name: Record the source timestamp
         id: created
-        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -eu
+          created=$(TZ=UTC git log -1 --format=%cd \
+            --date=format-local:%Y-%m-%dT%H:%M:%SZ "$GITHUB_SHA")
+          echo "created=$created" >> "$GITHUB_OUTPUT"
 
       - name: Summarise the plan
         env:
@@ -127,6 +140,11 @@ jobs:
           CHANNEL: ${{ steps.plan.outputs.channel }}
           PUSH: ${{ steps.plan.outputs.push }}
           TAGS: ${{ steps.plan.outputs.tags }}
+          # Through env, never interpolated into the script body: a ref is
+          # attacker-influenced text, and `workflow_dispatch` does not run it
+          # through the derivation's validation.
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
           set -eu
           {
@@ -134,7 +152,7 @@ jobs:
             echo
             echo "| field | value |"
             echo "| --- | --- |"
-            echo "| trigger | \`${{ github.event_name }}\` on \`${{ github.ref }}\` |"
+            echo "| trigger | \`$EVENT_NAME\` on \`$REF\` |"
             echo "| version | \`$VERSION\` |"
             echo "| channel | \`$CHANNEL\` |"
             echo "| publishes | \`$PUSH\` |"
@@ -196,12 +214,14 @@ jobs:
           image=$(printf '%s/%s' "$IMAGE_PREFIX" "$SERVICE" | tr '[:upper:]' '[:lower:]')
           {
             echo 'tags<<TAGS_EOF'
-            printf '%s' "$TAGS" | tr ',' '\n' | while IFS= read -r tag; do
+            # printf '%s\n', not '%s': without the trailing newline `read`
+            # returns non-zero on the final field and the loop silently drops
+            # the last tag, which is always the sha- one.
+            printf '%s\n' "$TAGS" | tr ',' '\n' | while IFS= read -r tag; do
               [ -n "$tag" ] || continue
               printf '%s:%s\n' "$image" "$tag"
             done
             echo 'TAGS_EOF'
-            echo "image=$image"
           } >> "$GITHUB_OUTPUT"
 
       # The built-in GITHUB_TOKEN is the only credential involved; no
@@ -272,7 +292,9 @@ jobs:
           references=$(mktemp)
           trap 'rm -f "$references"' EXIT
           for service in orchestrator api runner web; do
-            printf '%s' "$TAGS" | tr ',' '\n' | while IFS= read -r tag; do
+            # printf '%s\n' so `read` sees a terminated final line; with '%s'
+            # the last tag is silently dropped and never verified.
+            printf '%s\n' "$TAGS" | tr ',' '\n' | while IFS= read -r tag; do
               [ -n "$tag" ] || continue
               printf '%s/%s:%s\n' "$prefix" "$service" "$tag"
             done

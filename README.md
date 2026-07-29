@@ -59,8 +59,9 @@ The images are `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}`, 
 | Trigger | Image tags |
 | --- | --- |
 | push to `release/X.Y.Z` | `X.Y.Z-rc.<run number>`, `X.Y.Z-rc`, `sha-<short sha>` |
-| published GitHub Release `vX.Y.Z` | `X.Y.Z`, `X.Y`, `X`, `sha-<short sha>`, and `latest` when it is the newest release |
-| published pre-release `vX.Y.Z[-id]` | that exact version, `sha-<short sha>` |
+| published GitHub Release `vX.Y.Z`, newest | `X.Y.Z`, `X.Y`, `X`, `latest`, `sha-<short sha>` |
+| published GitHub Release `vX.Y.Z`, not newest | `X.Y.Z`, `X.Y`, `sha-<short sha>` |
+| published Release flagged pre-release, or tagged `vX.Y.Z-<id>` | that exact version, `sha-<short sha>` |
 | manual `workflow_dispatch` | builds everything, publishes nothing |
 
 Pushing a git tag on its own publishes nothing; a GitHub Release has to be published. `make test-release-tags` runs the executable specification of that mapping, and [`.github/workflows/release.yml`](.github/workflows/release.yml) runs it before deriving a single tag.

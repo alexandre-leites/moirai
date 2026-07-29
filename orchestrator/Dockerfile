@@ -7,10 +7,11 @@ FROM --platform=$BUILDPLATFORM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
-# --frozen fails when uv.lock no longer matches pyproject.toml, so a dependency
-# edit that skipped `uv lock` breaks the build instead of silently shipping a
-# resolution nobody reviewed.
-RUN uv export --frozen --no-dev --no-emit-project --format requirements.txt -o /requirements.txt
+# --locked, not --frozen: --frozen only means "do not re-lock", and exports a
+# stale lock happily -- a dependency added to pyproject.toml without running
+# `uv lock` would simply be missing from the image. --locked asserts the lock
+# still matches pyproject.toml and exits non-zero when it does not.
+RUN uv export --locked --no-dev --no-emit-project --format requirements.txt -o /requirements.txt
 
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 ARG GH_CLI_VERSION=2.63.2
