@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
@@ -24,6 +26,23 @@ var (
 	ErrInvalidInput = errors.New("orchestrator rejected request: invalid input")
 	ErrNotFound     = errors.New("orchestrator resource not found")
 )
+
+// orchestratorCalls counts every unary RPC the API issues to the orchestrator.
+// Both labels are bounded by construction: `rpc` is the method name from the
+// generated client, so its values are fixed by the proto service, and `code` is
+// a gRPC status code, a closed enum. It is a package variable rather than a
+// field because the interceptor that records it is installed at dial time,
+// before any server exists to hold it; Collectors exposes it for registration.
+var orchestratorCalls = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "moirai_api_orchestrator_calls_total",
+	Help: "Orchestrator gRPC calls issued by the API, by RPC and resulting gRPC status code.",
+}, []string{"rpc", "code"})
+
+// Collectors returns this package's Prometheus collectors so the API server can
+// export them from the registry it serves.
+func Collectors() []prometheus.Collector {
+	return []prometheus.Collector{orchestratorCalls}
+}
 
 type Client struct {
 	conn   *grpc.ClientConn
@@ -74,7 +93,7 @@ func DialWithTLS(ctx context.Context, endpoint string, options TLSOptions) (*Cli
 		ctx,
 		endpoint,
 		grpc.WithTransportCredentials(transport),
-		grpc.WithUnaryInterceptor(correlationInterceptor),
+		grpc.WithChainUnaryInterceptor(correlationInterceptor, callMetricsInterceptor),
 		grpc.WithBlock(),
 	)
 	if err != nil {
@@ -91,6 +110,29 @@ func correlationInterceptor(ctx context.Context, method string, request, reply a
 		ctx = metadata.AppendToOutgoingContext(ctx, "x-request-id", requestID)
 	}
 	return invoke(ctx, method, request, reply, conn, options...)
+}
+
+// callMetricsInterceptor counts the outcome of every unary orchestrator RPC.
+// It sits on the interceptor chain rather than in each wrapper method because
+// the chain is the one place every call passes through, so a new RPC added to
+// Client is counted without anyone remembering to instrument it.
+func callMetricsInterceptor(ctx context.Context, method string, request, reply any, conn *grpc.ClientConn, invoke grpc.UnaryInvoker, options ...grpc.CallOption) error {
+	err := invoke(ctx, method, request, reply, conn, options...)
+	orchestratorCalls.WithLabelValues(rpcLabel(method), status.Code(err).String()).Inc()
+	return err
+}
+
+// rpcLabel reduces a fully qualified gRPC method — "/control.v1.ControlPlane/Login"
+// — to its method name. The service is the same for every call this client
+// makes, so the package qualifier is noise in a label.
+func rpcLabel(method string) string {
+	if index := strings.LastIndex(method, "/"); index >= 0 && index+1 < len(method) {
+		return method[index+1:]
+	}
+	if method == "" {
+		return "unknown"
+	}
+	return method
 }
 
 func transportCredentials(options TLSOptions) (credentials.TransportCredentials, error) {

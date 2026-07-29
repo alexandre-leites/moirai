@@ -2506,3 +2506,105 @@ Final per-job status on run `30471380437`, read from `gh api repos/alexandre-lei
 
 - Fix Docker group membership on both runners, then confirm `compose-smoke` and `test-postgres-integration` go green — they need no repository change once the daemon is reachable.
 - Consider whether `validate` should also gate on `test-postgres-integration`; it currently does not appear in that job's `needs:` list, so a Postgres integration regression would not block the aggregate check even when the job can run.
+
+---
+
+# Session: issue #124 — API and runner Prometheus gauges are hardcoded to zero
+
+## Current Status
+
+Implemented. Branch `issue-124`, opened as a pull request against `main`. Repository CI is red for a pre-existing reason unrelated to this change (see Known Issues), so the PR is deliberately left open and unmerged; validation below is local and real.
+
+## Done
+
+- [x] Replaced the API's and the runner's placeholder gauges with metrics each service can actually populate
+  - Completed: issue #124 in full — every acceptance criterion, plus the two hazards an adversarial review of the diff was asked to look for.
+  - Relevant files:
+    - `api/internal/http/server.go` — removed `moirai_queue_depth`, `moirai_active_workflow_count` and `moirai_runner_heartbeat_age_seconds`; registered `moirai_api_requests_total` and `moirai_api_request_duration_seconds` and recorded both in `withMiddleware`; added `Server.Handler()` so the middleware chain is reachable from a test.
+    - `api/internal/orchestrator/client.go` — `moirai_api_orchestrator_calls_total{rpc,code}`, recorded by a `callMetricsInterceptor` on the dial-time unary chain, exported through `Collectors()`.
+    - `runner/internal/metrics/metrics.go` — rewritten around a `Recorder` holding the runner-owned collectors and an injectable clock; `Server` serves a recorder's registry.
+    - `runner/internal/dispatch/control_loop.go` — execution start/outcome counters, the busy gauge, `UseMetrics`.
+    - `runner/internal/control/events.go` — dropped-event counter by reason and the pending-queue gauge, recorded where the queue actually changes.
+    - `api/README.md`, `runner/README.md` — the exported metric names, their labels, and why each label set is bounded.
+    - New tests: `runner/internal/metrics/metrics_test.go`, `runner/internal/control/events_metrics_test.go`, `runner/internal/dispatch/control_loop_metrics_test.go`, `api/internal/http/request_metrics_test.go`, `api/internal/orchestrator/client_metrics_test.go`; `api/internal/http/server_test.go` updated (its `TestMetricsExposesCoreGauges` asserted the placeholders were present).
+  - Behavior delivered:
+    - **API** exports `moirai_api_requests_total{method,route,status}`, `moirai_api_request_duration_seconds{method,route}` and `moirai_api_orchestrator_calls_total{rpc,code}`. Nothing orchestrator-owned is re-exported: the API has no database access (`PROJECT.md:134`, "Public API (Go) … Has no database access"), and `orchestrator/src/moirai/observability.py:49-52` already exports the real `moirai_queue_depth`, `moirai_active_workflow_count` and fleet-wide `moirai_runner_heartbeat_age_seconds` from a 15 s snapshot loop.
+    - **Runner** exports `moirai_runner_heartbeat_age_seconds`, `moirai_runner_busy`, `moirai_runner_executions_started_total`, `moirai_runner_executions_completed_total{outcome}`, `moirai_runner_pending_events` and `moirai_runner_events_dropped_total{reason}`.
+    - The heartbeat age is a `GaugeFunc` computed at scrape time from the recorder's clock, not a stored value. `MarkHeartbeat` — already wired from `main.go:283`/`main.go:314` through `StreamSupervisor.OnHeartbeat` — records the clock reading; the gauge subtracts it at every scrape. It starts at construction time, so a runner that never reaches the orchestrator ages from process start rather than sitting at zero, which is the case an age alert most needs to catch.
+    - `metrics.New(bind)` serves the process-wide `metrics.Default()` recorder, and the control loop and event reporter fall back to that same recorder when no other is assigned. `runner/cmd/runner/main.go` therefore needed no change and is not in the diff; three tests assert the identity that makes this wiring hold.
+  - Validation performed: see Validation Status. Every new assertion was confirmed to fail against a deliberate mutation of the code it covers (list below).
+  - Commands executed:
+    - `make test-api` — all packages `ok`.
+    - `cd api && go test -race -count=1 ./...` (what CI runs) — all packages `ok`.
+    - `make test-runner` — all 11 packages `ok`.
+    - `cd api && go vet ./...`, `cd runner && go vet ./...` — no output.
+    - `cd api && gofmt -l .`, `cd runner && gofmt -l .` — no output.
+    - `cd api && go build ./cmd/api`, `cd runner && go build ./cmd/runner` — both succeeded; the produced binaries were deleted, not committed.
+    - `go test -race -count=3` over the three new runner packages and the two new API packages — no flakes.
+    - `grep -rn "Set(0)" api/internal/http/server.go runner/internal/metrics/metrics.go` — no matches (exit 1).
+  - Notes: `runner/internal/dispatch/dispatch.go` was deliberately not edited — it is owned by concurrent work on issue #104, and this issue's Scope list does not include it. It is cited in the issue only as evidence that drop counters exist. The dropped-event counter did not need it; see Known Issues for the one drop path that consequently remains uncounted.
+
+## Decisions
+
+- **Removing a placeholder is the fix, not a regression.** The API no longer exports queue depth, workflow counts, or a fleet-wide heartbeat age, and the runner no longer exports the first two. A gauge stuck at zero is worse than an absent one, because `alert: moirai_queue_depth > N` can never fire and reads as healthy. Verified that nothing else in the repository scrapes those names: `grep -rn` across the whole tree finds only `orchestrator/src/moirai/observability.py`, which is the service that owns them. There are no dashboards or alert rules in the repository to update.
+- **Heartbeat age as a `GaugeFunc`, with an injectable clock.** An age is only correct at the instant it is read, so it is computed during the scrape rather than stored. The clock is a `func() time.Time` on the recorder, which is what lets `TestHeartbeatAgeGaugeAgesWithTheInjectedClock` observe the gauge grow to 30 s and then 120 s without a single wall-clock sleep, and what makes the test deterministic regardless of how long the test binary itself takes.
+- **The route label is the matched pattern, never the request path.** `net/http` assigns `Request.Pattern` on the request itself before invoking the matched handler (`net/http/server.go:2859`), and the middleware wraps the mux, so the pattern is readable in the deferred block once the chain has returned. `/api/v1/projects/{project_id}` is therefore one series regardless of how many project IDs are requested; a request that matched nothing is labelled `unmatched`. The method label is likewise folded to `other` outside the standard verbs, because a request line may carry any token as its method — labelling with `r.Method` directly would let any client mint a series per request against the API's own metrics endpoint.
+- **Every label set on the new metrics is closed.** `outcome`, `reason`, `rpc` and `code` are all bounded by construction, and the runner's recorder resolves each label child once at construction into a map, so an unrecognised value is counted under `unknown` rather than creating a series. That also removes the per-call `WithLabelValues` map lookup from the recording path.
+- **Drops are counted in the event reporter, not in the control loop.** `control.EventReporter` owns the pending queue and is the only component that can distinguish an event that was queued from one that was discarded. Counting there covers the log-forwarding path too, which calls `EventReporter.EmitLog` directly and never passes through `ControlLoop.emitEvent`. Counting in both places would double-count.
+- **The busy gauge is republished from `Busy()`, not tracked incrementally.** `Busy()` is the same predicate `OfferState.Admit` uses, so a gauge derived from it cannot drift out of step with the runner's real admission behaviour. The cost is a re-read at each of four call sites instead of a transition count that could desynchronise.
+- **A `busyReports` mutex, mirroring the existing `drainReports` one.** See Post-review corrections.
+
+## Post-review corrections
+
+Self-review of the diff before commit found one real defect, fixed before this was claimed done:
+
+- **A newly introduced stale-write race on the busy gauge** (medium). `publishBusy` read `Busy()` and then wrote the gauge as two separate steps, and it is called from several goroutines — `Handle`, the expiry sweep, and the tail of every execution. A publisher that read "at capacity" could be overtaken by one that read "idle" a moment later and land afterwards, leaving the gauge asserting a busy runner that had been idle since. `Handle`'s publish races exactly that way against a fast execution finishing on its own goroutine. It was not a data race — the race detector would never have caught it — and it self-corrected only at the next expiry sweep or heartbeat, up to one `LOOP_RUNNER_HEARTBEAT_INTERVAL` later. Fixed with a `busyReports` mutex that makes the read and the write atomic with respect to each other, exactly as `drainReports` already does for the drain report in the same file for the same class of bug. `TestControlLoopBusyGaugeConvergesUnderConcurrentPublishers` drives four publisher goroutines against twenty concurrent executions and asserts the gauge agrees with `Busy()` once the dust settles; the guarantee that no *individual* interleaving can strand the gauge is structural, from the mutex, and is not claimed to be proven by that test.
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed. Each new assertion was confirmed to fail against a mutation of the code it covers, run against an isolated copy of both modules so the working tree was never mutated:
+  - heartbeat age frozen at `0` (the original bug) → 3 metrics tests fail.
+  - route label taken from `r.URL.Path` instead of `r.Pattern` → `TestRequestMetricsSeparateStatusesAndMethods` fails.
+  - method label taken straight from `r.Method` → `TestRequestMetricsDoNotGrowWithCallerControlledInput` fails ("series grew from 2 to 4").
+  - buffer-full drop not counted → `TestDroppedLogEventIncrementsTheDroppedEventCounter` fails.
+  - pending gauge not republished after delivery → `TestPendingEventGaugeFollowsTheQueueDown` fails.
+  - `publishBusy` removed from the tail of `execute` → `TestControlLoopPublishesBusyStateInBothDirections` fails on the down direction.
+  - `RecordExecutionCompleted` removed → `TestControlLoopCountsExecutionsByOutcome` and the busy test fail.
+  - orchestrator call counter never incremented → both `client_metrics_test.go` tests fail.
+  - API request counter incremented by zero → all four `request_metrics_test.go` tests fail.
+- Service tests: Passed — `make test-runner` (race detector on, 11 packages `ok`) and `make test-api` (5 packages `ok`). `cd api && go test -race ./...` also passed, which is the stricter form CI runs.
+- Full repository tests: Not run. No orchestrator, web, or proto change, so `make test` and `make validate` were deliberately not invoked; `make lint` and `make typecheck` cover the orchestrator only and nothing there changed.
+- Build: Passed — `go build ./cmd/api` and `go build ./cmd/runner`.
+- Lint: Passed — `gofmt -l .` produced no output in either module.
+- Type checks: Passed — `go vet ./...` in both modules.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run — no Compose or configuration change. `LOOP_RUNNER_METRICS_BIND` already existed and is unchanged.
+- End-to-end workflow: Not run. The production wiring is covered by the three tests asserting that `metrics.New`, `ControlLoop` and `EventReporter` all resolve to `metrics.Default()`, which is what makes `runner/cmd/runner/main.go` correct without being edited.
+
+## Known Issues
+
+- Issue: one dropped-log path is still uncounted — the log forwarder's own queue overflow.
+  - Severity: P3.
+  - Impact: `runner/internal/dispatch/dispatch.go:494-503` buffers agent output in a 128-slot channel and increments a private `dropped` counter when that channel is full, before the event ever reaches `EventReporter`. Those drops are still visible only in the `runner log events dropped` warning at the end of the execution, not in `moirai_runner_events_dropped_total`. Everything downstream of the forwarder — a log event the bounded event buffer rejects, evicts, or discards on lease expiry — is counted.
+  - Evidence: `logForwarder.Write` (`dispatch.go:494-503`) selects on `forwarder.queue` and falls through to `forwarder.dropped.Add(1)`; the emit-failure branch at `dispatch.go:515-518` is already covered, since it reaches `EventReporter.Emit`.
+  - Suggested resolution: one line in `logForwarder`, calling `metrics.Default().RecordEventsDropped(metrics.DropBufferFull, n)` where it already logs the total. Deliberately not done here: `runner/internal/dispatch/dispatch.go` is owned by concurrent work on issue #104 and is not in this issue's Scope list, so editing it would have created a conflict. Duplicating the forwarder's logic elsewhere to avoid touching the file was rejected as worse.
+- Issue: repository CI is red on every branch, including `main`'s own HEAD.
+  - Severity: blocks merge, not this change.
+  - Impact: six jobs fail in under 10 s at `actions/setup-python` with `The version '3.12' with architecture 'x64' was not found for debian 13`. Introduced by `3ba81c2` ("Change CI runner to self-hosted Linux"); the identical six jobs fail the same way on `main`. The PR for this issue is therefore left open and unmerged rather than merged on red.
+  - Suggested resolution: owned by the concurrent `fix/ci-self-hosted-python` branch. Not touched here.
+
+## Post-review corrections (issue #124, second pass)
+
+An adversarial review of the committed diff (`ae07534`) found three more issues. All were fixed in a follow-up commit before the work was claimed done.
+
+- **A successfully delivered run was counted as a dropped event** (high — the defect actively poisoned the one alert the metric exists for). `EventReporter.Emit` counted `reason="invalid"` whenever a payload exceeded the 16 KiB limit. But that is precisely the case `ControlLoop.emitEvent` exists to retry, stripped to its classification fields — its own comment calls it "the failure mode a successful large run is most likely to hit". So a healthy run with a verbose agent incremented `moirai_runner_events_dropped_total`, and `rate(moirai_runner_events_dropped_total[5m]) > 0` — the obvious alert — fired on healthy runners. If the retry also failed, one logical event booked two drops.
+  - Fixed by moving the accounting to the callers that know whether a loss is final. `Emit` now counts nothing it merely *rejects*; it counts only the queued event it *evicts*, which is gone whatever the caller does next. `ControlLoop.emitEvent` counts once, only on the branches where the event is finally lost, and never when the reduced retry succeeded or when the event was queued for later delivery. `EventReporter.EmitLog` counts immediately, since nothing retries log output. `control.DropReason(err)` classifies the loss, which needed two new sentinels (`ErrInvalidExecutionEvent`, `ErrEventOutboxUnavailable`) so a persist failure and an oversized payload stay distinguishable through a wrapped error.
+  - Covered by `TestRetriedTerminalEventIsNotCountedAsADrop` (whose payload is built from the unbounded `changedFiles` list — `summary` is already bounded to 2 KiB by `terminalPayload`, so an earlier version of this test never reached the retry at all and proved nothing; it now asserts the delivered payload lost `changedFiles`, which is proof the reduction ran), `TestTerminalEventLostAfterTheRetryIsCountedOnce`, and `TestEmitDoesNotCountRejectionsTheCallerMayRetry`. Confirmed failing against a revert of the fix and against two different double-counting mutations.
+- **`EmitLog` under-counted multi-chunk losses** (medium). It returned on the first failing chunk, so a >6 KiB log message hitting a full buffer lost several chunks and booked one drop. It now counts the chunks never attempted as well, and does not count a chunk that was queued but whose delivery failed, since the outbox retries that one. `TestDroppedMultiChunkLogCountsEveryLostChunk` fails against the previous behaviour (1 vs 4).
+- **The heartbeat age was wall-clock arithmetic** (medium). It stored `time.Now().UnixNano()`, which strips the monotonic reading, and subtracted via `time.Unix(0, …)`. An NTP correction or a suspend/resume stepping the clock backwards by Δ would make the gauge read 0 — "the heartbeat just happened" — for Δ, which is a narrower version of the exact lie this issue exists to remove, and the negative clamp masked it. It now stores the `time.Time` in an `atomic.Pointer`, so with the process clock the subtraction is monotonic. **This is not covered by a test**: a test clock built from `time.Date` carries no monotonic reading, and Go offers no way to step the wall clock independently of the monotonic one, so the mutation that reverts it is not detectable. The correctness here rests on the type, not on an assertion.
+- **The busy-gauge convergence test was vacuous** (medium). It called `loop.publishBusy()` itself immediately before asserting the gauge was 0, so the assertion could not fail; the reviewer confirmed empirically that deleting the `busyReports` lock still passed it. The forced publish is gone — the asserted value now comes only from the racing publishers, so a stranded gauge fails the test. It still detects the interleaving only probabilistically, and the comment now says so rather than implying the test proves the mutex.
+- **The advertised metrics seam had no production caller** (medium-low). `loop.Metrics` and `Reporter.Metrics` were nil in production and fell back to `metrics.Default()`, which `metrics.New(bind)` happens to serve — correct today, but the `ControlLoop.Metrics` doc comment described wiring through `UseMetrics` that nothing performed, and building the server with a recorder of its own would have silently sent every runner metric except the heartbeat age to an unscraped registry. `runner/cmd/runner/main.go` now calls `loop.UseMetrics(metricsServer.Recorder())`. `UseMetrics` also republishes the queue depth, so a depth recovered from the outbox before the recorder was assigned is carried across rather than stranded on the default recorder.
+
+Review findings accepted without change: the API's request metrics cannot pre-materialise their label children the way the runner's do (routes are registered by handlers after the server is built, and the RPC-by-status-code cross product is large) — `api/README.md` now explains the asymmetry and says to alert on `absent()` rather than assume a series exists; `orchestratorCalls` stays a package variable because the interceptor that writes it is installed at dial time, before any server exists to hold it; a 405 lands in `route="unmatched"` because the mux answers it from a handler it never registered, which the route-label comment and the README now state.

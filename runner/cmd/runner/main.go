@@ -247,6 +247,11 @@ func run(ctx context.Context) error {
 	loop.ReconnectMax = settings.ReconnectMax
 	loop.ExpiryInterval = settings.HeartbeatInterval
 	loop.OfferTimeout = settings.OfferTimeout
+	// Point the loop and its event reporter at the recorder the metrics server
+	// actually serves. Both default to the process-wide recorder, which is the
+	// same object today, but stating it here is what keeps them pointed at the
+	// served registry if the server is ever built with a recorder of its own.
+	loop.UseMetrics(metricsServer.Recorder())
 	dispatcher.EmitLog = loop.Reporter.EmitLog
 	streamSettings := newReloadableStreamSettings(settings)
 	reloadSignal := make(chan os.Signal, 1)
