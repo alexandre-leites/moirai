@@ -1573,3 +1573,117 @@ Done. `AGENTS.md` states the labelling rule, the three non-dependabot pull reque
 ## Next Recommended Implementation
 
 Issue #96 (finding F9) — make transition replay idempotent, still the highest-priority platform-review issue that no branch has claimed. It was already the recommendation of the issue #92 session and nothing in this session touched it. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice.
+
+# Session: F10 / issue #97 — Forward blocked results, summary and remainingWork (branch `issue-97`)
+
+## Current Status
+
+- Overall status: Complete for finding F10.
+- Current phase: Bug fix from the 2026-07-29 platform review (`docs/reviews/2026-07-29-platform-review.md`, F10, P2, marked *(verify)*).
+- Active implementation: issue-97 agent session, 2026-07-29 — none remaining.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-97.
+
+## Done
+
+- [x] An agent-reported block reaches the orchestrator with its reason and remaining work intact
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/dispatch/control_loop.go`, `runner/internal/dispatch/dispatch.go`, `runner/internal/control/events.go`, `orchestrator/src/moirai/workflows/runner_events.py`, their tests, `runner/internal/agents/opencode_test.go`, `runner/README.md`, `orchestrator/README.md`.
+  - Behavior delivered:
+    - **Runner — the block is no longer flattened.** A clean agent exit whose result document says `blocked` reports `status: "blocked"` and `blocked: true` in the terminal payload. The event *type* stays `failed`; see Decisions. A failing *process* never reports a block whatever its document claims, so a crash and a deliberate stop stay distinguishable (`TestControlLoopReportsAProcessFailureAsAFailureEvenWhenTheDocumentSaysBlocked`).
+    - **Runner — the agent's account crosses the wire.** `terminalPayload` attaches `result` (the raw document), `summary`, and `remainingWork` for every outcome the agent itself reached, where previously `result` was attached only for `completed` and the other two never. A `cancelled` run reports none of them: it reached no outcome of its own, and see Decisions for the fingerprint reason.
+    - **Runner — all three are bounded as JSON encodes them.** `boundedAgentText`/`boundedList` sanitise terminal escapes, control bytes and invalid UTF-8, then keep the longest prefix fitting a 2 KiB *encoded* budget (20 entries for the list), reusing `logtail.go`'s `jsonEncodedSize`/`sanitizeLogText`. `minimalTerminalPayload` keeps the three fields on the reduced-payload retry and re-bounds every field it keeps, including `error`, which no other path measures.
+    - **Runner — a non-`completed` agent result skips the packet's pipeline commands**, so a pipeline verdict cannot overwrite the agent's status, reason and remaining work with a generic failure.
+    - **Event redaction — two real holes closed.** `redactPayloadWithPrefixes` had a `[]any` arm but no `[]string` arm, and terminal payloads are built in Go, so every `[]string` value bypassed redaction entirely: `changedFiles` and `commandsRun` always did, and `remainingWork` would have. Redaction now also requires a token boundary before a prefix — `sk-` matched inside `task-runner.py`, `disk-usage.ts` and `make task-build`, which would have corrupted the path and command lists the new arm routes through it.
+    - **Orchestrator.** `validate_runner_event` parses the result document for every terminal event and validates `blocked`/`summary`/`remainingWork`; `RunnerEventSummary` carries them. `_terminal_event_transition` routes a block ahead of the generic failure arm, to the terminal `blocked` status with a `blocking_reason` composed from the agent's summary and outstanding work (bounded to 1024 characters, the width the circuit writer stores), clearing the gate the reporting role owns. The `pipeline` role is resolved first, so the deterministic gate cannot be diverted.
+  - Validation performed: failing-test-first on both sides, then the runner suite with the race detector, the full orchestrator suite, lint, type check, `gofmt`, `go vet`.
+  - Commands executed:
+    - Failing-test-first (runner), before any behaviour change: `cd runner && go test ./internal/dispatch/ -run 'TestTerminalPayload…|TestControlLoopReportsAnAgentReportedBlock…'` → `--- FAIL: TestControlLoopReportsAnAgentReportedBlockDistinctlyFromAFailure` with the payload printed as `{… "error":"the deployment credential is missing", "status":"failed"}` — no `result`, no `summary`, no `remainingWork`, no `blocked`: the flattening, reproduced. Also `--- FAIL: TestTerminalPayloadCarriesTheAgentAccountForEveryOutcome: terminalPayload(completed) summary = <nil>` and `--- FAIL: TestMinimalTerminalPayloadKeepsTheBlockedExplanation: reduced payload lost the block: map[…]{"status":"blocked"}`.
+    - Failing-test-first (orchestrator): `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p test_runner_events.py` → `Ran 45 tests … FAILED (failures=2, errors=28)`, including `test_result_document_is_parsed_for_every_terminal_event: AssertionError` (`summary.result is None` on a `failed` event) and `test_rejects_malformed_block_fields: RunnerEventError not raised`.
+    - Failing-test-first (dispatcher pipeline skip): `go test -run TestDispatcherSkipsThePipelineWhenTheAgentReportedABlock` → `Execute() error = execute agent: pipeline command failed with exit code 1: go test ./..., want a blocked result rather than a failure`.
+    - Encoded-size regression, proved twice by reverting only the measurement to raw bytes: `TestTerminalPayloadBoundsTheAgentAccount/angle_brackets` → `summary encodes to 6113 bytes`, `/ansi_escapes` → `3648 bytes`; and end to end, `TestReducedTerminalPayloadIsAcceptedByTheEventReporter` → `ERROR terminal execution event lost … error="execution event payload is too large"` followed by `timed out waiting for execution events`. Both pass with the encoded-size bound.
+    - `make test-runner` (`go test -race ./...`) → all 10 packages `ok`.
+    - `make test-orchestrator` → `Ran 425 tests … OK (skipped=24)`.
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-97` → `Success: no issues found in 48 source files`.
+    - `cd runner && gofmt -l .` → no output; `go vet ./...` → clean.
+  - Notes: no migration, no new configuration, no proto change. `runner/internal/agents/opencode.go` needed no change — #89 already returns the document's own status when the process exits cleanly — so it only gained a characterisation test pinning that contract at the source of the chain.
+
+## Post-review corrections
+
+An adversarial review of the first draft confirmed the routing and the delivery semantics but found two P1 defects, two P2 defects and several P3 issues. All were fixed before the PR was opened.
+
+- **P1, the exact trap #93 left behind.** `summary`, `remainingWork` and `error` were bounded by *raw* byte length. Go's encoder spends six bytes on each `<`, `>`, `&` and control byte, so three raw-measured 2 KiB fields of angle brackets encode to ~36 KiB — over the 16 KiB cap the reduced-payload retry exists to get under. A blocked agent whose summary was angle-bracket-heavy, ANSI-coloured, or not valid UTF-8 therefore had its terminal event *rejected twice* and logged as `terminal execution event lost`: the run's outcome destroyed by the change meant to enrich it. Fixed by measuring the JSON-encoded size and sanitising first, reusing `logtail.go`'s existing `jsonEncodedSize` and `sanitizeLogText` rather than writing a second bound. `logtail.go:16-23` had already documented this exact rule.
+- **P1, the test that claimed to guard it could not fail.** `TestTerminalPayloadBoundsTheAgentAccount` asserted the right thing — reduced payload under 16 KiB encoded — but filled with characters that encode 1:1 and omitted `error`, the largest contributor and the one field `terminalPayload` never builds. It passed against the defect above. Rewritten as a table over plain / angle-bracket / invalid-UTF-8 / ANSI fills, including `error` and `failureFingerprint`, plus `TestReducedTerminalPayloadIsAcceptedByTheEventReporter`, which drives the real reporter end to end and fails with `terminal execution event lost` against the raw-byte bound.
+- **P2, the new `[]string` redaction arm corrupted ordinary data.** Routing `changedFiles`/`commandsRun` through `redactKnownSecretValues` exposed a pre-existing substring match: `sk-` matches inside `task-runner.py`, `docs/risk-register.md`, `src/disk-usage.ts` and `make task-build`, rewriting them to `ta[REDACTED].py` and so on, into `app.executions.result`, the success outcome hash, and the UI. Fixed at the root with a token-boundary check rather than by narrowing the arm — `commandsRun` can legitimately contain a bearer token, so it must be redacted. Both sides are pinned: `TestEventReporterLeavesOrdinaryPathsAndCommandsIntact` and `TestEventReporterStillRedactsSecretsAtTokenBoundaries`.
+- **P2, attaching `summary` to a cancelled payload destabilised its fingerprint.** The orchestrator's `_failure_message` prefers `error`, then `summary`. A cancelled payload has no `error`, so it used to fall through to a stable `cancelled exit=N`; adding `summary` replaced that with free text that varies per run, so repeated cancellations would no longer match and the non-progress breaker would never trip. Fixed by reporting no agent account on `cancelled` at all — which is also the honest reading, since an interrupted agent reached no conclusion of its own.
+- **P3, fixed.** `boundedList` emitted `["", ""]` for an all-blank list; it now drops blank entries and returns nothing when none remain. Five inaccurate README claims were corrected, including one that asserted the very property the P1 defect broke, and two payload-table rows that were wrong by omission. A tautological orchestrator test (`assertLessEqual` on a dict literal defined 20 lines above) was replaced with one that proves the widened payload is still accepted whole and that one more field would be rejected.
+
+## Decisions
+
+- Decision: an agent-reported block is a `failed` event refined by a `blocked` payload marker, not a new event type.
+  - Context: step 1 of issue #97 asks to check `VALID_EVENT_TYPES` (`workflows/runner_events.py`) before adding a type.
+  - Alternatives considered: (a) add `blocked` to the event vocabulary; (b) reuse `failed` and carry the distinction in the payload.
+  - Reason: the vocabulary is not one list. It is replicated across `control.validEventType` and `eventPriority`/`IsTerminalEventType` in the runner, the `ExecutionEvent` proto and its generated Go and Python bindings, `VALID_EVENT_TYPES`/`TERMINAL_EVENT_TYPES` in the orchestrator, the `app.jobs.status` and `app.workflow_execution_requests.status` check constraints that `accept_event` writes the event type straight into, and the web UI. Adding a type means a migration and a coordinated change across four modules — three of which are owned by concurrent agents this session — to express something that is a *refinement* of an existing outcome: the run did not deliver. The issue itself notes the payload is the smaller protocol change.
+  - Consequences: no migration, no proto change, no orchestrator persistence change, and an old orchestrator reading a new runner's event still classifies it correctly as a failure rather than rejecting it as an unknown type. The marker is honoured only on `failed`, since a `completed` or `cancelled` event claiming a block contradicts the outcome the runner reported and the outcome wins. Cost: `RunnerEventSummary.failed` stays true for a block, so any future consumer must check `blocked` first, as `_terminal_event_transition` now does.
+
+- Decision: step 4 of the issue — "should a blocked developer result still push its branch?" — was already settled by #100 and was deliberately not re-decided.
+  - Context: the issue text (written before #100 merged) reports `dispatch.go:230` as a bonus defect: a blocked result still commits and pushes the delivery branch because `executeErr` is nil.
+  - Reason: verified against the current code, not the issue text. `dispatch.go` gates delivery on `executeErr == nil && result.Status == "completed"`, with the comment "Only a completed run delivers to the agent branch"; a blocked run instead goes through `retainWorkInProgress`, whose `workInProgressCommitMessage` maps the status to an explicit `wip(blocked): …`, anchors it at `refs/moirai-wip/<executionId>`, and publishes it to `wip/<executionId>` when the packet grants `mayPush`. `terminalPayload` already recorded `wipCommit`/`wipBranch`/`wipPushed`. The issue's requirement — "if kept, make it explicit rather than accidental, and record the branch in the payload" — is met in full.
+  - Consequences: no change was made to the delivery path. `TestDispatcherRetainsWorkInProgressWithoutDeliveringWhenExecutionFails` already covered the blocked case; it was extended to assert the block also survives the dispatcher with its summary, so the property is pinned as a *blocked* property and not only as a *failed* one.
+
+- Decision: a blocked payload is not attached to a `cancelled` event.
+  - Context: found by adversarial review — see Post-review corrections.
+  - Alternatives considered: attach the agent account uniformly to all four outcomes; attach it to everything except the summary; attach nothing on cancellation.
+  - Reason: two arguments agree. A cancelled execution was interrupted, so whatever its half-written result document says is not a conclusion the agent reached. And `_failure_message` (`persistence/control_plane.py`) prefers `error` then `summary`, so a summary on a cancelled payload displaces the stable `cancelled exit=N` text that makes repeated cancellations fingerprint identically — silently disabling the non-progress breaker for a cancellation loop.
+  - Consequences: cancelled payloads are byte-identical to before this change. The asymmetry is documented in the runner README's push-semantics table and in `terminalPayload`'s comment.
+
+- Decision: an agent-reported block is terminal, not a retry.
+  - Context: before this change, a developer or repairer whose document said `blocked` produced `recovering`, which stalled-run recovery re-dispatches. It now ends the run at `blocked`. Raised by the adversarial review as a behaviour change worth stating.
+  - Alternatives considered: (a) route a block to `recovering` and keep retrying; (b) gate it on `implementation_attempts`/`pipeline_repair_attempts` the way the planner's block is gated; (c) terminal `blocked`.
+  - Reason: (a) is the "same prompt, count to 3, block" pattern the platform review's executive summary calls out as the core autonomy failure — re-dispatching an identical packet against an agent that has explained why it cannot proceed cannot succeed, and burns budget doing it. (b) adds a counter for a signal that is not attempt-shaped: the agent is not failing, it is telling the operator something is missing. (c) matches the precedent the file already sets for the planner's `blocked` and the reviewer's `human_required`, both terminal, and produces the state a human can act on — `blocking_reason` populated, the `agent:blocked` label, the project circuit's failure reason.
+  - Consequences: one agent writing `"status": "blocked"` ends the workflow. That is the intended trade — it is the difference between an informed escalation and a blind retry — but it does make the block a load-bearing word in the agent prompt. The escalation ladder that should eventually park such a run on a *question* rather than end it is issue [#107](https://github.com/alexandre-leites/moirai/issues/107) (Autonomy L4), which the review lists as depending on this issue.
+
+- Decision: the secret-prefix set was not widened, only the matching rule was corrected.
+  - Context: the review noted that forwarding `summary`, `remainingWork` and the result document on failed runs widens the surface for a credential an agent echoes into its own prose, and that the redactor only knows `ghp_`, `github_pat_`, `glpat-`, `sk-` plus operator-configured prefixes — not AWS keys, Slack tokens, JWTs, PEM blocks or `://user:pass@` URLs.
+  - Alternatives considered: add `AKIA`, `xox` and `-----BEGIN ` here; leave the set alone.
+  - Reason: the default prefix set is a platform-wide security policy that applies to every field of every event on every runner, and `-----BEGIN ` in particular does not work with the token-run algorithm at all (it would redact `BEGIN` and leave the key body). Changing it belongs in a change that can be reasoned about and tested as a security change, not smuggled into a feature. `LOOP_RUNNER_REDACTION_PREFIXES` already lets an operator add their own today. The marginal widening here is genuinely small: `error` and `logTail` — the agent's own stderr — already crossed the wire on failed runs under exactly this redactor.
+  - Consequences: recorded in Quality Backlog below. What this session did change is strictly a correctness fix in both directions: `[]string` values are redacted at all now, and prefixes no longer match mid-identifier.
+
+## Quality Backlog
+
+- [ ] Widen the runner's default secret-prefix set and give it a non-prefix rule
+  - Category: security hardening.
+  - Risk: low to implement, moderate to get wrong — a rule that is too eager corrupts ordinary output, which is exactly the defect the token-boundary fix above had to repair.
+  - Expected benefit: `AKIA…`, `xox[baprs]-…`, JWTs, `-----BEGIN … PRIVATE KEY-----` blocks and `scheme://user:pass@host` credentials are currently forwarded verbatim in `error`, `logTail`, and now `summary`/`remainingWork`/`result` whenever an agent quotes them.
+  - Recommended timing: as its own change, with tests that pin both the redaction and the non-corruption of ordinary text. The PEM and URL cases need a delimiter-aware rule rather than a prefix plus token run.
+
+## Validation Status
+
+- Targeted tests: Passed. New: 9 Go tests in `internal/dispatch` (block routing, the agent account on every outcome, encoded-size bounding across four hostile fills, the end-to-end reduced-payload delivery, blank-entry handling, the rune-boundary and sanitisation properties), 3 in `internal/control` (list redaction, path/command non-corruption, boundary redaction), 1 in `internal/agents`, 1 in `internal/dispatch` for the pipeline skip; 14 orchestrator tests across `ValidateRunnerEventTests`, `WorkflowTransitionTests` and the new `AgentBlockEndToEndTests`. Every behavioural one was confirmed failing first — outputs quoted under Commands executed.
+- Service tests: Passed — `make test-runner` (race detector, 10 packages `ok`); `make test-orchestrator` → `Ran 425 tests … OK (skipped=24)`.
+- Full repository tests: Not run — `make test-api` and `make test-web` were deliberately not invoked; no `api/` or `web/` file is touched.
+- Build: Covered by `go test` and `go vet ./...`.
+- Lint: Passed — `make lint` → `All checks passed!`
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-97` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Not applicable — no schema change, by design (see Decisions).
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. `AgentBlockEndToEndTests` covers the wire shape the runner builds through `validate_runner_event` to `workflow_transition_for_terminal_event`, but the payload there is a literal, not one produced by the Go code.
+
+## Known Issues
+
+- Issue: the runner's terminal payload and the orchestrator's parser agree only by hand.
+  - Severity: P3
+  - Impact: `AgentBlockEndToEndTests.BLOCKED_PAYLOAD` transcribes what `dispatch.terminalPayload` builds. A future field rename on either side passes both suites and fails in production.
+  - Evidence: `orchestrator/tests/test_runner_events.py` and `runner/internal/dispatch/control_loop.go` share no generated artefact; the `ExecutionEvent` proto types the payload as an opaque JSON string.
+  - Suggested resolution: a golden-file fixture written by a Go test and read by the Python one, or a schema for the terminal payload alongside `schemas/agent-result.schema.json`.
+
+- Issue: the planner result document cannot satisfy both schemas it is validated against.
+  - Severity: P2 — it makes the planner's `ready` verdict unreachable, independently of this issue.
+  - Impact: `schemas/agent-result.schema.json` requires `status ∈ {completed, blocked, failed}` and the runner enforces it in `readResultDocument`; `schemas/planner-result.schema.json` requires `status ∈ {ready, human_required, blocked, invalid}` and `_schema_field` enforces that. One `status` field serves both, so `blocked` is the only value that satisfies them together. A planner writing `ready` has its document rejected by the runner as invalid; one writing `completed` fails `planner-result` validation in the orchestrator and is routed back to `planning` with `plan_valid = False`.
+  - Evidence: `runner/internal/agents/opencode.go` `readResultDocument`'s status switch; `orchestrator/src/moirai/workflows/runner_events.py` `_schema_field(summary.result, "planner-result", "status")`; the two schema files.
+  - Suggested resolution: separate the transport status from the role verdict — keep `status` for the agent-result envelope and give the planner its own `verdict` field, as `review-result` already does. Out of scope here: it changes the agent protocol and both schemas, and this issue's acceptance criteria are met without it (the block path is role-independent by construction, precisely so it does not depend on this).
+
+## Next Recommended Implementation
+
+Issue [#104](https://github.com/alexandre-leites/moirai/issues/104) (Autonomy L1) — the runner-side goal gate and session-resume continuation loop. It is the review's highest-priority runner task, it depends only on #89 (merged), and it is the natural continuation of this session: after the agent exits, check that the result document is valid, `status == "completed"`, `remainingWork` is empty, and — for mutating roles — that a non-empty diff exists; if the gate fails and a continuation budget remains, re-invoke the agent resuming the captured `sessionId` with a prompt naming the missing evidence. Relevant files: `runner/internal/dispatch/dispatch.go`, `runner/internal/agents/opencode.go` (`Result.SessionID` is already captured and still unused), `runner/internal/config`. Expected behaviour: an agent that stops early with outstanding `remainingWork` is continued rather than reported, and the continuation is bounded and counted separately from the workflow's retry budgets. Targeted validation: new cases in `runner/internal/dispatch/dispatch_test.go` covering gate pass, gate fail with budget, and budget exhaustion. This session makes the failing case legible — `remainingWork` now reaches the orchestrator — and #104 is what acts on it inside the run.
