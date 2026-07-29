@@ -1511,3 +1511,81 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 ## Next Recommended Implementation
 
 Issue #96 (finding F9) — make transition replay idempotent. It is the highest-priority platform-review issue with no `ai-working` label as of this session (#90, #92, #94 and #100 were all claimed). The transition outbox is at-least-once, but `_dispatch` in `workflows/nodes.py` increments attempt counters and `total_agent_executions` even when it reuses a queued request, and creates a duplicate request for the same role when the previous one already moved to `dispatched`; outbox rows set to `processing` are never retried after a crash. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice. Those budgets are what open a project circuit in the first place, so double-counting them is what makes the breaker above fire early.
+
+---
+
+# Session: issue #111 — Orchestrator aborts the runner stream when a runner reports draining (branch `issue-111`)
+
+## Current Status
+
+- Overall status: Complete for issue #111.
+- Current phase: P1 bug fix found while auditing the MVP end-to-end flow for #87.
+- Active implementation: issue-111 agent session, 2026-07-29 — runner-reported drain state.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-111.
+
+## Done
+
+- [x] A runner-reported drain no longer aborts the control stream, and now stops scheduling
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/grpc/runner_control.py`, `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/domain/control_plane.py`, `orchestrator/tests/test_runner_grpc.py`, `orchestrator/tests/test_postgres_integration.py`, `docs/architecture.md`.
+  - Behavior delivered:
+    - `RunnerControlService._handle_message` has a `runner_draining` branch. Before it, `RunnerToOrchestrator.runner_draining` fell through to the catch-all `_StreamFailure(INVALID_ARGUMENT, "runner stream message is invalid")`, which `Connect` turns into `context.abort` — so a runner announcing it was draining ended its own bidirectional stream as a protocol violation, and nothing was recorded.
+    - The branch persists the reported flag and returns, leaving the stream open. That matters beyond tidiness: a draining runner still has to renew leases and report execution events for work it already holds, and aborting the stream took that channel away mid-execution.
+    - `AsyncpgControlPlane.set_runner_draining(runner_id, draining)` writes `app.runners.draining` and nothing else. All three placement queries already gate on `r.draining = false` (`schedule()` at `control_plane.py:1118`, `schedule_execution()` at `:1247`, `recover_one()` at `:1647`), so the next scheduling pass simply stops considering the runner. `draining=false` clears it.
+    - It is deliberately narrower than `set_runner_state`, which also writes `enabled`, `revoked_at` and `status`: a runner reports one fact about itself, so the operator's decisions must survive the report. A revoked runner (`revoked_at IS NOT NULL`) is not written at all, and a row that does not match raises `ValueError`, which the handler maps to `FAILED_PRECONDITION` rather than letting an unhandled exception take down the receive task.
+    - `InMemoryControlPlane.set_runner_draining` mirrors it so the domain reference implementation stays in parity; `Runner.available` already excludes `draining`, so the in-memory scheduler drops the runner for the same reason the SQL one does.
+  - Validation performed: two gRPC tests written against the real `grpc.aio` server and confirmed failing without the handler, plus one PostgreSQL integration test for the SQL; full orchestrator suite; full PostgreSQL integration suite; lint; type check.
+  - Commands executed:
+    - `make test-orchestrator` → `Ran 415 tests in 1.298s / OK (skipped=25)`.
+    - `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p test_runner_grpc.py -v` → `Ran 7 tests / OK`.
+    - Regression proof: with `orchestrator/src/moirai/grpc/runner_control.py` stashed and the tests kept, the same command → `FAILED (failures=2)`, both new tests failing.
+    - `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@127.0.0.1:55411/loop_test make test-postgres-integration` → `Ran 25 tests in 3.721s / OK`, against a throwaway `postgres:16-alpine` container on port 55411, removed afterwards.
+    - `make lint` → `All checks passed!`.
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-111` → `Success: no issues found in 48 source files`.
+  - Notes: `proto/runner_control.proto` already defined `RunnerDraining` (`:21`, `:40`) and the generated code already carried it, so no contract changed. Orchestrator-initiated drain (`OrchestratorToRunner.drain`) and the operator drain/revoke API stayed out of scope — issue #119.
+
+## Decisions
+
+- Decision: a new `set_runner_draining` rather than reusing `set_runner_state("drain")`.
+  - Context: the issue offered either. `set_runner_state` maps `"drain"` to `(enabled=True, draining=True)` and `"enable"` to `(enabled=True, draining=False)`, and also writes `revoked_at` and `status`.
+  - Alternatives considered: (a) call `set_runner_state(runner_id, "drain" if draining else "enable", None, now)`; (b) add a `draining`-only branch inside `set_runner_state`.
+  - Reason: (a) is wrong on the clear path — a runner reporting `draining=false` would re-`enable` a runner an operator had deliberately disabled, and on the drain path it would re-enable a disabled runner too. The runner is authoritative about its own drain state and about nothing else. (b) widens a method #119 is about to build the operator API on, for a caller that shares none of its audit or revocation behavior.
+  - Consequences: two methods write the same column with different scopes, which is the point. `set_runner_state` keeps its operator semantics untouched for #119; the runner path cannot reach `enabled`, `revoked_at` or `status`.
+
+- Decision: an unknown or revoked runner fails the stream rather than being ignored.
+  - Context: `set_runner_draining` raises `ValueError` when the `UPDATE` matches no row.
+  - Alternatives considered: swallow it, since the runner authenticated moments earlier and the case is near-unreachable.
+  - Reason: near-unreachable is not unreachable — a concurrent revoke between `authenticate_runner` and the write produces exactly this. Silently discarding it would leave the runner believing the orchestrator agreed to stop sending it work.
+  - Consequences: the handler maps `ValueError` to `_StreamFailure(FAILED_PRECONDITION, "runner drain report was rejected")`, matching how `offer_accepted`, `offer_rejected` and `lease_renewal` already report rejected control messages. The stream ends, which is correct for a runner that no longer exists.
+
+- Decision: work already leased to a draining runner is left alone.
+  - Context: the acceptance criteria only require the flag and the open stream, and the obvious extra step would be to release or recover the runner's in-flight leases.
+  - Alternatives considered: cancel or requeue the runner's `offered`/`preparing`/`running` jobs on the drain report.
+  - Reason: draining means "no *new* work". The runner's own `Drain()` finishes what it holds and then exits (`WaitForIdle`), so cancelling on the orchestrator side would destroy work that is about to succeed, and would do it on a message the runner sends routinely. If the runner dies instead, `expire_leases` already recovers the job on the lease clock. See Known Issues for the one hazard this leaves.
+  - Consequences: no change to in-flight behavior; drain is purely a placement signal.
+
+## Validation Status
+
+- Targeted tests: Passed — `test_connect_drain_report_keeps_the_stream_open_and_stops_scheduling` and `test_connect_drain_report_of_false_clears_the_flag` (`orchestrator/tests/test_runner_grpc.py`), both confirmed failing with the handler reverted; `test_runner_reported_drain_state_is_persisted_and_reversible` (`orchestrator/tests/test_postgres_integration.py`).
+- Service tests: Passed — `make test-orchestrator` → `Ran 415 tests … OK (skipped=25)`; `make test-postgres-integration` → `Ran 25 tests … OK` against a throwaway database.
+- Full repository tests: Not run — no Go, proto, or web change. `make test` was deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-111` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Not applicable — `app.runners.draining` already exists (migration `001_initial.sql`). Migrations were run against the throwaway database by the integration suite.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run.
+
+## Known Issues
+
+- Issue: nothing clears a runner-reported drain automatically, so a runner that reports draining and later restarts comes back with `draining = true`.
+  - Severity: P2 — latent today, live as soon as the runner's shutdown ordering is fixed or #119 lands.
+  - Impact: the scheduler would never offer that runner work again until an operator cleared the flag, and the operator API that would clear it (#119) does not exist yet.
+  - Evidence: `ControlLoop.Drain()` (`runner/internal/dispatch/control_loop.go:260`) only ever calls `SetDraining(true)`; nothing in `runner/` sends `draining: false`. The wedge does not fire today only by accident: `StreamSupervisor.Run` calls `s.Client.Disconnect()` on `ctx.Done()` (`runner/internal/control/stream.go:103-106`) *before* `main` reaches `loop.Drain()` (`runner/cmd/runner/main.go:300-308`), so `Client.send` hits `c.stream == nil` and returns `ErrNotConnected` (`runner/internal/control/client.go:196-205`) — the SIGTERM path the issue describes never actually delivers the message. The path that does deliver it is the orchestrator-initiated drain at `control_loop.go:208`, which is unwired pending #119.
+  - Suggested resolution: belongs in `runner/`, which is outside this session's ownership and was being worked on concurrently (#97, #136) — have the runner report `draining: false` once a fresh control stream is established, so its own state is what the orchestrator mirrors. Fixing it orchestrator-side is not sound with one boolean column: clearing on reconnect would also erase an operator drain, which reconnects every few seconds during a network blip.
+- Issue: a scheduling pass that selected a runner just before its drain report still delivers that offer.
+  - Severity: P3
+  - Impact: the offer is placed on a runner that is going away. No work is lost — the runner rejects it (`control_loop.go:198`, `"runner is draining"`) and `reject_offer` requeues the run.
+  - Evidence: the drain report and the candidate query are separate transactions; there is no lock spanning them.
+  - Suggested resolution: none needed. This is the ordinary offer-rejection path, and the unanswered-offer bounds already cover the case where the runner dies without answering.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +16,8 @@ from moirai.domain.models import ExecutionEvent
 from moirai.grpc.sessions import RunnerSession, RunnerSessionRegistry
 from moirai.workflows.runner_events import RunnerEventError, validate_runner_event
 from proto import runner_control_pb2, runner_control_pb2_grpc
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def _await_if_needed(value: Any) -> Any:
@@ -227,6 +230,27 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
                     grpc.StatusCode.INVALID_ARGUMENT, "runner lease renewal is invalid"
                 ) from error
             await self._send_lease_acknowledgement(runner_id, lease)
+            return
+        if message_type == "runner_draining":
+            # A drain report is a normal protocol message, not a violation: the
+            # runner is telling us it wants no new work. Record it -- every
+            # placement query gates on `r.draining = false` -- and keep the
+            # stream open, because a draining runner still has to renew leases
+            # and report events for the work it already holds.
+            draining = request.runner_draining.draining
+            try:
+                await _await_if_needed(self._control_plane.set_runner_draining(runner_id, draining))
+            except ValueError as error:
+                raise _StreamFailure(
+                    grpc.StatusCode.FAILED_PRECONDITION, "runner drain report was rejected"
+                ) from error
+            # Nothing else records this, and it silently stops all placement on
+            # the runner, so leave a trace for whoever asks why a runner went
+            # quiet.
+            _LOGGER.info(
+                "runner reported its drain state",
+                extra={"runner_id": runner_id, "draining": draining},
+            )
             return
         if message_type != "event":
             raise _StreamFailure(grpc.StatusCode.INVALID_ARGUMENT, "runner stream message is invalid")

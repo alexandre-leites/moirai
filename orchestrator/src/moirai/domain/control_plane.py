@@ -131,6 +131,13 @@ class InMemoryControlPlane:
             self._runners[runner_id] = updated
             return updated
 
+    def set_runner_draining(self, runner_id: str, draining: bool) -> None:
+        with self._lock:
+            runner = self._runners.get(runner_id)
+            if runner is None:
+                raise ValueError("runner is unknown")
+            self._runners[runner_id] = replace(runner, draining=draining)
+
     def add_project(self, project: Project) -> None:
         with self._lock:
             if project.id in self._projects:

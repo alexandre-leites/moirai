@@ -115,6 +115,44 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["status"], "preparing")
         self.assertEqual(job["lease_expires_at"], _NOW + timedelta(minutes=10))
 
+    async def test_runner_reported_drain_state_is_persisted_and_reversible(self) -> None:
+        control_plane = AsyncpgControlPlane(self.pool)
+        suffix = uuid4().hex
+        label = f"drain-{suffix}"
+        token = await control_plane.create_registration_token(
+            {label}, _NOW + timedelta(minutes=30), now=_NOW
+        )
+        runner, credential = await control_plane.register_runner(
+            token, f"drain-runner-{suffix}", {label}, _NOW
+        )
+        self.addAsyncCleanup(
+            self.pool.execute, "DELETE FROM app.runners WHERE id = $1", UUID(runner.id)
+        )
+        await control_plane.heartbeat(runner.id, credential, _NOW)
+
+        await control_plane.set_runner_draining(runner.id, True)
+        drained = await self.pool.fetchrow(
+            "SELECT enabled, draining, status FROM app.runners WHERE id = $1", UUID(runner.id)
+        )
+        assert drained is not None
+        self.assertTrue(drained["draining"])
+        # A runner reports only its own drain state; the operator-owned columns
+        # and its liveness must survive the report.
+        self.assertTrue(drained["enabled"])
+        self.assertEqual(drained["status"], "online")
+        # Heartbeating while draining must not silently undo the drain.
+        self.assertTrue((await control_plane.heartbeat(runner.id, credential, _NOW)).draining)
+
+        await control_plane.set_runner_draining(runner.id, False)
+        cleared = await self.pool.fetchrow(
+            "SELECT draining FROM app.runners WHERE id = $1", UUID(runner.id)
+        )
+        assert cleared is not None
+        self.assertFalse(cleared["draining"])
+
+        with self.assertRaises(ValueError):
+            await control_plane.set_runner_draining(str(uuid4()), True)
+
     async def test_label_reconciliation_reads_only_the_newest_workflow_run_per_issue(self) -> None:
         control_plane = AsyncpgControlPlane(self.pool)
         suffix = uuid4().hex
