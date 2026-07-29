@@ -64,11 +64,19 @@ type Recorder struct {
 	registry *prometheus.Registry
 	now      func() time.Time
 
-	// lastHeartbeat is the clock reading at the last successful heartbeat, in
-	// Unix nanoseconds. It starts at the recorder's construction time so a
-	// runner that never completes a heartbeat still ages from process start,
-	// which is precisely the condition an age alert has to catch.
-	lastHeartbeat atomic.Int64
+	// lastHeartbeat is the clock reading at the last successful heartbeat. It
+	// starts at the recorder's construction time so a runner that never
+	// completes a heartbeat still ages from process start, which is precisely
+	// the condition an age alert has to catch.
+	//
+	// It stores the time.Time rather than Unix nanoseconds so the monotonic
+	// reading time.Now() carries survives, and the subtraction in
+	// HeartbeatAgeSeconds is monotonic-clock arithmetic. Stripping it to an
+	// integer would make an NTP correction or a suspend/resume that steps the
+	// wall clock backwards report an age of zero — "the heartbeat just
+	// happened" — for the length of the step, which is the same lie issue #124
+	// exists to remove.
+	lastHeartbeat atomic.Pointer[time.Time]
 
 	executionsStarted   prometheus.Counter
 	executionsCompleted map[string]prometheus.Counter
@@ -94,7 +102,8 @@ func NewRecorder(now func() time.Time) *Recorder {
 		now = time.Now
 	}
 	recorder := &Recorder{registry: prometheus.NewRegistry(), now: now}
-	recorder.lastHeartbeat.Store(now().UnixNano())
+	started := now()
+	recorder.lastHeartbeat.Store(&started)
 
 	recorder.executionsStarted = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "moirai_runner_executions_started_total",
@@ -156,17 +165,25 @@ func (r *Recorder) MarkHeartbeat() {
 	if r == nil {
 		return
 	}
-	r.lastHeartbeat.Store(r.now().UnixNano())
+	at := r.now()
+	r.lastHeartbeat.Store(&at)
 }
 
 // HeartbeatAgeSeconds reports the seconds elapsed since the last successful
-// heartbeat. A clock that moves backwards reports zero rather than a negative
-// age, which no consumer of an age has a meaning for.
+// heartbeat. Both readings come from the same clock, so with the process clock
+// the subtraction is monotonic and a wall-clock step cannot affect it. The
+// negative clamp covers a clock that genuinely runs backwards — a test clock,
+// or a monotonic-less one — since no consumer of an age has a meaning for a
+// negative one.
 func (r *Recorder) HeartbeatAgeSeconds() float64 {
 	if r == nil {
 		return 0
 	}
-	age := r.now().Sub(time.Unix(0, r.lastHeartbeat.Load()))
+	last := r.lastHeartbeat.Load()
+	if last == nil {
+		return 0
+	}
+	age := r.now().Sub(*last)
 	if age < 0 {
 		return 0
 	}

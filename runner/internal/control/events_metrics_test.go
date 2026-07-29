@@ -2,6 +2,7 @@ package control
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -46,19 +47,17 @@ func queueLog(t *testing.T, reporter *EventReporter, lease Lease, message string
 
 // TestDroppedLogEventIncrementsTheDroppedEventCounter is the acceptance test
 // for the counter itself: a log event the bounded buffer has no room for is
-// lost, and until now that loss was visible only in a log line.
+// lost, and until now that loss was visible only in a log line. It goes through
+// EmitLog, which is what the runner's log forwarding actually calls — nothing
+// retries log output, so EmitLog is where the loss becomes final and is counted.
 func TestDroppedLogEventIncrementsTheDroppedEventCounter(t *testing.T) {
 	reporter, recorder := newMeteredReporter(t, 2)
 	lease := beginMeteredLease(t, reporter)
 	queueLog(t, reporter, lease, "first")
 	queueLog(t, reporter, lease, "second")
 
-	sequence, err := reporter.Emit(lease.JobID, lease.Generation, "log", map[string]any{"message": "third"})
-	if !errors.Is(err, ErrEventBufferFull) {
-		t.Fatalf("Emit() into a full buffer error = %v, want ErrEventBufferFull", err)
-	}
-	if sequence != 0 {
-		t.Fatalf("Emit() into a full buffer sequence = %d, want 0", sequence)
+	if _, err := reporter.EmitLog(lease.JobID, lease.Generation, "third"); !errors.Is(err, ErrEventBufferFull) {
+		t.Fatalf("EmitLog() into a full buffer error = %v, want ErrEventBufferFull", err)
 	}
 
 	body := scrapeRecorder(t, recorder)
@@ -67,6 +66,80 @@ func TestDroppedLogEventIncrementsTheDroppedEventCounter(t *testing.T) {
 	}
 	if value := metricValue(t, body, "moirai_runner_pending_events"); value != 2 {
 		t.Errorf("pending events = %v, want 2", value)
+	}
+}
+
+// A log message longer than the chunk limit is emitted as several events. When
+// one chunk is rejected the rest are never attempted, so they are lost too;
+// counting only the rejected chunk would understate the loss exactly when a
+// chatty agent is what is overrunning the buffer.
+func TestDroppedMultiChunkLogCountsEveryLostChunk(t *testing.T) {
+	reporter, recorder := newMeteredReporter(t, 2)
+	lease := beginMeteredLease(t, reporter)
+	queueLog(t, reporter, lease, "first")
+	queueLog(t, reporter, lease, "second")
+
+	// Four chunks' worth of output, none of which can be queued.
+	message := strings.Repeat("x", 3*maxLogChunkBytes+1)
+	chunks := len(splitUTF8Chunks(message, maxLogChunkBytes))
+	if chunks != 4 {
+		t.Fatalf("test message split into %d chunks, want 4", chunks)
+	}
+	if _, err := reporter.EmitLog(lease.JobID, lease.Generation, message); !errors.Is(err, ErrEventBufferFull) {
+		t.Fatalf("EmitLog() error = %v, want ErrEventBufferFull", err)
+	}
+
+	if value := metricValue(t, scrapeRecorder(t, recorder), `moirai_runner_events_dropped_total{reason="buffer_full"}`); value != float64(chunks) {
+		t.Errorf("buffer_full drops = %v, want %d", value, chunks)
+	}
+}
+
+// Emit does not count its own rejections: a rejected event is not necessarily a
+// lost one, because ControlLoop.emitEvent re-emits a terminal event with a
+// reduced payload. Counting here would book a drop against a run that went on
+// to report its outcome.
+func TestEmitDoesNotCountRejectionsTheCallerMayRetry(t *testing.T) {
+	reporter, recorder := newMeteredReporter(t, 2)
+	lease := beginMeteredLease(t, reporter)
+	queueLog(t, reporter, lease, "first")
+	queueLog(t, reporter, lease, "second")
+
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "log", map[string]any{"message": "third"}); !errors.Is(err, ErrEventBufferFull) {
+		t.Fatalf("Emit() into a full buffer error = %v, want ErrEventBufferFull", err)
+	}
+	oversized := strings.Repeat("x", maxExecutionEventPayloadBytes+1)
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "completed", map[string]any{"message": oversized}); !errors.Is(err, ErrInvalidExecutionEvent) {
+		t.Fatalf("Emit() with an oversized payload error = %v, want ErrInvalidExecutionEvent", err)
+	}
+	if _, err := reporter.Emit("job-unknown", lease.Generation, "log", nil); !errors.Is(err, ErrNoActiveEventLease) {
+		t.Fatalf("Emit() without a lease error = %v, want ErrNoActiveEventLease", err)
+	}
+
+	body := scrapeRecorder(t, recorder)
+	for _, reason := range []string{"buffer_full", "invalid", "no_lease", "unknown"} {
+		series := `moirai_runner_events_dropped_total{reason="` + reason + `"}`
+		if value := metricValue(t, body, series); value != 0 {
+			t.Errorf("%s = %v, want 0 — Emit counted a rejection its caller may still recover from", series, value)
+		}
+	}
+}
+
+func TestDropReasonClassifiesEveryRejection(t *testing.T) {
+	for _, testCase := range []struct {
+		err    error
+		reason string
+	}{
+		{ErrEventBufferFull, metrics.DropBufferFull},
+		{fmt.Errorf("wrapped: %w", ErrEventBufferFull), metrics.DropBufferFull},
+		{ErrNoActiveEventLease, metrics.DropNoLease},
+		{ErrStaleEventLease, metrics.DropNoLease},
+		{ErrEventOutboxUnavailable, metrics.DropPersistFailed},
+		{ErrInvalidExecutionEvent, metrics.DropInvalid},
+		{errors.New("the control stream is down"), metrics.DropUnknown},
+	} {
+		if reason := DropReason(testCase.err); reason != testCase.reason {
+			t.Errorf("DropReason(%v) = %q, want %q", testCase.err, reason, testCase.reason)
+		}
 	}
 }
 
@@ -116,30 +189,33 @@ func TestAbandonedLeaseCountsEveryDiscardedEvent(t *testing.T) {
 	}
 }
 
-func TestRejectedEmitsAreCountedByReason(t *testing.T) {
+// A rejected log event is lost for good, and EmitLog labels each loss with the
+// reason the reporter refused it.
+func TestLostLogEventsAreCountedByReason(t *testing.T) {
 	reporter, recorder := newMeteredReporter(t, 4)
 	lease := beginMeteredLease(t, reporter)
 
-	if _, err := reporter.Emit(lease.JobID, lease.Generation, "not-an-event-type", nil); err == nil {
-		t.Fatal("an invalid event type was accepted")
+	if _, err := reporter.EmitLog("job-unknown", lease.Generation, "orphan"); !errors.Is(err, ErrNoActiveEventLease) {
+		t.Fatalf("EmitLog() without a lease error = %v, want ErrNoActiveEventLease", err)
 	}
-	oversized := strings.Repeat("x", maxExecutionEventPayloadBytes+1)
-	if _, err := reporter.Emit(lease.JobID, lease.Generation, "log", map[string]any{"message": oversized}); err == nil {
-		t.Fatal("an oversized payload was accepted")
+	if _, err := reporter.EmitLog(lease.JobID, lease.Generation+1, "stale"); !errors.Is(err, ErrStaleEventLease) {
+		t.Fatalf("EmitLog() at a stale generation error = %v, want ErrStaleEventLease", err)
 	}
-	if _, err := reporter.Emit("job-unknown", lease.Generation, "log", map[string]any{"message": "orphan"}); !errors.Is(err, ErrNoActiveEventLease) {
-		t.Fatalf("Emit() without a lease error = %v, want ErrNoActiveEventLease", err)
-	}
-	if _, err := reporter.Emit(lease.JobID, lease.Generation+1, "log", map[string]any{"message": "stale"}); !errors.Is(err, ErrStaleEventLease) {
-		t.Fatalf("Emit() at a stale generation error = %v, want ErrStaleEventLease", err)
+
+	// A chunk that is queued but whose delivery fails is not lost — the outbox
+	// retries it — but the chunks after it are never attempted and are. The
+	// transport failure is outside the counter's vocabulary, so it is counted
+	// as `unknown` rather than mislabelled.
+	if _, err := reporter.EmitLog(lease.JobID, lease.Generation, strings.Repeat("y", maxLogChunkBytes+1)); err == nil {
+		t.Fatal("EmitLog() over a failing transport was expected to fail")
 	}
 
 	body := scrapeRecorder(t, recorder)
-	if value := metricValue(t, body, `moirai_runner_events_dropped_total{reason="invalid"}`); value != 2 {
-		t.Errorf("invalid drops = %v, want 2", value)
-	}
 	if value := metricValue(t, body, `moirai_runner_events_dropped_total{reason="no_lease"}`); value != 2 {
 		t.Errorf("no_lease drops = %v, want 2", value)
+	}
+	if value := metricValue(t, body, `moirai_runner_events_dropped_total{reason="unknown"}`); value != 1 {
+		t.Errorf("unknown drops = %v, want 1 (the second chunk, never attempted)", value)
 	}
 }
 

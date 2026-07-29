@@ -20,6 +20,44 @@ var ErrNoActiveEventLease = errors.New("runner event lease is not active")
 var ErrStaleEventLease = errors.New("runner event lease is stale")
 var ErrEventBufferFull = errors.New("execution event buffer is full")
 
+// ErrEventOutboxUnavailable reports that an event could not be mirrored to the
+// crash-safe outbox and was rolled back out of the queue rather than held only
+// in memory. It exists so a caller classifying a lost event can tell an outbox
+// failure from a rejected payload; the underlying cause is wrapped with it.
+var ErrEventOutboxUnavailable = errors.New("execution event outbox is unavailable")
+
+// ErrInvalidExecutionEvent reports an event the reporter refused to queue
+// because its type or its payload was unusable — most often a payload over the
+// size limit. It is the one rejection a caller can act on by re-emitting
+// something smaller, which ControlLoop.emitEvent does for terminal events.
+var ErrInvalidExecutionEvent = errors.New("execution event is invalid")
+
+// DropReason classifies an Emit failure for the runner's dropped-event
+// counter. Emit itself does not count its rejections: a rejected event is not
+// necessarily a lost one — ControlLoop.emitEvent retries a terminal event with
+// a reduced payload, and counting at the point of rejection would book a drop
+// for a run that went on to report its outcome perfectly well. Only the caller
+// knows whether the loss was final, so the caller counts it and asks this what
+// to call it.
+func DropReason(err error) string {
+	switch {
+	case errors.Is(err, ErrEventBufferFull):
+		return metrics.DropBufferFull
+	case errors.Is(err, ErrNoActiveEventLease), errors.Is(err, ErrStaleEventLease):
+		return metrics.DropNoLease
+	case errors.Is(err, ErrEventOutboxUnavailable):
+		return metrics.DropPersistFailed
+	case errors.Is(err, ErrInvalidExecutionEvent):
+		return metrics.DropInvalid
+	default:
+		// A transport failure reaches here: the event was queued and will be
+		// retried, but whatever the caller abandoned alongside it is gone for a
+		// reason this vocabulary does not name. Saying so beats inventing a
+		// classification the counter cannot support.
+		return metrics.DropUnknown
+	}
+}
+
 type EventClient interface {
 	SendExecutionEvent(*runnerv1.ExecutionEvent) error
 }
@@ -114,6 +152,20 @@ func (r *EventReporter) recorder() *metrics.Recorder {
 	return metrics.Default()
 }
 
+// PublishMetrics republishes the queue depth against whatever recorder is
+// assigned now. The constructor publishes the depth recovered from the outbox
+// before a caller has had a chance to set Metrics, so that first value lands on
+// the process-wide recorder; a caller that assigns its own must call this to
+// carry it across.
+func (r *EventReporter) PublishMetrics() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.publishPendingLocked()
+}
+
 // publishPendingLocked republishes the queue depth from the queue itself, so
 // the gauge cannot drift from what the reporter actually holds. It is called at
 // every point the queue changes, with mu held (or before the reporter is
@@ -180,19 +232,18 @@ func (r *EventReporter) Finish(jobID string, generation int64) bool {
 	return true
 }
 
-// Emit queues one execution event for delivery. Every path that returns
-// without queueing has discarded the event, and each records why against the
-// runner's dropped-event counter: this is the only place in the runner that can
-// tell a rejected event from a delivered one, and the counter is what makes a
-// loss visible to a scrape rather than only to whoever reads the log.
+// Emit queues one execution event for delivery. A zero sequence with an error
+// means the event was rejected and never queued; the caller decides whether
+// that is a final loss and counts it (see DropReason). Emit itself counts only
+// the one event it destroys unilaterally — a queued event evicted to make room
+// for a higher-priority one — because that loss is final whatever the caller
+// does next.
 func (r *EventReporter) Emit(jobID string, generation int64, eventType string, payload map[string]any) (int64, error) {
 	if !validEventType(eventType) {
-		r.recorder().RecordEventDropped(metrics.DropInvalid)
-		return 0, errors.New("execution event type is invalid")
+		return 0, fmt.Errorf("%w: type %q", ErrInvalidExecutionEvent, eventType)
 	}
 	contents, err := marshalEventPayloadWithPrefixes(payload, r.redactionPrefixes)
 	if err != nil {
-		r.recorder().RecordEventDropped(metrics.DropInvalid)
 		return 0, err
 	}
 
@@ -200,7 +251,6 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	state, err := r.emitStateLocked(jobID, generation, eventType)
 	if err != nil {
 		r.mu.Unlock()
-		r.recorder().RecordEventDropped(metrics.DropNoLease)
 		return 0, err
 	}
 	var evicted *runnerv1.ExecutionEvent
@@ -208,7 +258,6 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	if len(r.pending) >= r.maxPending {
 		if evicted, evictedIndex = r.makeRoomLocked(eventType); evicted == nil {
 			r.mu.Unlock()
-			r.recorder().RecordEventDropped(metrics.DropBufferFull)
 			return 0, ErrEventBufferFull
 		}
 	}
@@ -235,8 +284,7 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 		state.next = previousNext
 		r.publishPendingLocked()
 		r.mu.Unlock()
-		r.recorder().RecordEventDropped(metrics.DropPersistFailed)
-		return 0, err
+		return 0, fmt.Errorf("%w: %w", ErrEventOutboxUnavailable, err)
 	}
 	r.publishPendingLocked()
 	if evicted != nil {
@@ -363,6 +411,12 @@ func (r *EventReporter) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// EmitLog splits a log message into payload-sized chunks and queues each one.
+// A rejected chunk is a final loss — nothing retries log output, unlike the
+// terminal events ControlLoop.emitEvent re-emits — so this counts it here,
+// along with every chunk after it that is consequently never attempted. Losing
+// four chunks and reporting one drop would understate the loss precisely when a
+// chatty agent is the thing overrunning the buffer.
 func (r *EventReporter) EmitLog(jobID string, generation int64, message string) ([]int64, error) {
 	chunks := splitUTF8Chunks(message, maxLogChunkBytes)
 	sequences := make([]int64, 0, len(chunks))
@@ -373,6 +427,14 @@ func (r *EventReporter) EmitLog(jobID string, generation int64, message string) 
 			"chunkCount": len(chunks),
 		})
 		if err != nil {
+			// A non-zero sequence means this chunk was queued and will be
+			// retried from the outbox; only the chunks never attempted are
+			// lost. A zero sequence means this one was rejected too.
+			lost := len(chunks) - index
+			if sequence > 0 {
+				lost--
+			}
+			r.recorder().RecordEventsDropped(DropReason(err), lost)
 			return sequences, err
 		}
 		sequences = append(sequences, sequence)
@@ -455,10 +517,10 @@ func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) 
 	}
 	contents, err := json.Marshal(redactPayloadWithPrefixes(payload, prefixes))
 	if err != nil {
-		return nil, fmt.Errorf("encode execution event payload: %w", err)
+		return nil, fmt.Errorf("%w: encode payload: %w", ErrInvalidExecutionEvent, err)
 	}
 	if len(contents) > maxExecutionEventPayloadBytes {
-		return nil, errors.New("execution event payload is too large")
+		return nil, fmt.Errorf("%w: payload is %d bytes, over the %d byte limit", ErrInvalidExecutionEvent, len(contents), maxExecutionEventPayloadBytes)
 	}
 	return contents, nil
 }

@@ -14,6 +14,7 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
 	"github.com/loop-engineering/runner/internal/metrics"
+	"github.com/loop-engineering/runner/internal/taskpacket"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -116,11 +117,86 @@ func TestControlLoopPublishesBusyStateInBothDirections(t *testing.T) {
 	waitForMetric(t, recorder, `moirai_runner_executions_completed_total{outcome="cancelled"}`, 1)
 }
 
+// A terminal payload an agent made too large is rejected by the reporter and
+// re-emitted stripped to its classification fields, and that retry usually
+// succeeds — the comment on emitEvent calls it "the failure mode a successful
+// large run is most likely to hit". Nothing was lost, so nothing may be
+// counted: booking a drop here would make `rate(events_dropped_total[5m]) > 0`,
+// the obvious alert on this metric, fire on healthy runners with verbose
+// agents.
+func TestRetriedTerminalEventIsNotCountedAsADrop(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	// A changed-file list far past the 16 KiB event payload limit. Nothing
+	// bounds it in terminalPayload, which is why the reduced payload drops it
+	// outright — so the first emit is rejected and the retry fits.
+	changed := make([]string, 512)
+	for index := range changed {
+		changed[index] = fmt.Sprintf("internal/generated/%s/file-%d.go", strings.Repeat("deep", 8), index)
+	}
+	loop, recorder := newMeteredLoop(t, client, &staticDispatcher{result: Result{
+		Status:       "completed",
+		Summary:      "done",
+		ChangedFiles: changed,
+	}}, now)
+
+	leaseJob(t, loop, loopOffer(t), now)
+	waitForEvents(t, client, 2)
+	waitForMetric(t, recorder, `moirai_runner_executions_completed_total{outcome="completed"}`, 1)
+
+	client.mu.Lock()
+	terminal := client.events[1]
+	client.mu.Unlock()
+	if terminal.GetType() != "completed" {
+		t.Fatalf("terminal event type = %q, want completed — the reduced retry did not deliver", terminal.GetType())
+	}
+	// Proof the reduction actually ran: the unbounded field is gone from what
+	// was delivered. Without it this test would pass on a payload that never
+	// needed a retry, and would prove nothing.
+	if strings.Contains(terminal.GetPayloadJson(), "changedFiles") {
+		t.Fatalf("terminal payload was not reduced, so the retry path was never exercised: %s", terminal.GetPayloadJson())
+	}
+
+	body := scrapeLoopRecorder(t, recorder)
+	for _, reason := range []string{"invalid", "buffer_full", "no_lease", "persist_failed", "evicted", "lease_expired", "unknown"} {
+		series := `moirai_runner_events_dropped_total{reason="` + reason + `"}`
+		if value := loopMetricValue(t, body, series); value != 0 {
+			t.Errorf("%s = %v, want 0 — a delivered run was counted as a drop", series, value)
+		}
+	}
+}
+
+// When the reduced retry cannot save it either, the event really is gone and
+// is counted exactly once, labelled with why the reporter refused it.
+func TestTerminalEventLostAfterTheRetryIsCountedOnce(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	loop, recorder := newMeteredLoop(t, client, &staticDispatcher{result: Result{Status: "completed"}}, now)
+
+	offer := loopOffer(t)
+	leaseJob(t, loop, offer, now)
+	waitForEvents(t, client, 2)
+
+	// Emit against a generation the loop does not hold: both the first attempt
+	// and the reduced retry are refused for the same reason.
+	lease := control.Lease{JobID: offer.GetJobId(), Generation: offer.GetLeaseGeneration() + 7, Packet: taskpacket.Packet{ExecutionID: "execution-1"}}
+	loop.emitEvent(lease, "completed", map[string]any{"status": "completed", "summary": "done"})
+
+	series := `moirai_runner_events_dropped_total{reason="no_lease"}`
+	if value := loopMetricValue(t, scrapeLoopRecorder(t, recorder), series); value != 1 {
+		t.Errorf("%s = %v, want 1", series, value)
+	}
+}
+
 // The busy gauge is published from several goroutines — every Handle, every
 // expiry sweep, and the tail of every execution — so the read of the capacity
-// state and the write that reports it are serialized. This drives all of them
-// at once and asserts the gauge agrees with the truth once the dust settles;
-// under -race it also covers the publishing itself.
+// state and the write that reports it are serialized behind busyReports. This
+// exercises all of them at once and asserts the gauge ends up agreeing with
+// Busy(). The final value comes from the racing publishers themselves, never
+// from a publish this test forces, so a gauge stranded high fails it — but only
+// probabilistically, since the losing interleaving is rare. It is a -race and
+// convergence exercise; the ordering guarantee itself is structural, from the
+// mutex, and this does not prove it.
 func TestControlLoopBusyGaugeConvergesUnderConcurrentPublishers(t *testing.T) {
 	const jobs = 20
 	now := time.Now()
@@ -160,14 +236,11 @@ func TestControlLoopBusyGaugeConvergesUnderConcurrentPublishers(t *testing.T) {
 	close(stop)
 	publishers.Wait()
 
-	// Every execution has reported its outcome, so the runner is idle; the last
-	// publish must say so.
-	loop.publishBusy()
+	// Deliberately no forced publish here: the value under assertion has to be
+	// one a racing publisher wrote, or the assertion proves nothing.
+	waitForMetric(t, recorder, "moirai_runner_busy", 0)
 	if loop.Busy() {
 		t.Fatal("runner is still busy after every execution reported a terminal event")
-	}
-	if value := loopMetricValue(t, scrapeLoopRecorder(t, recorder), "moirai_runner_busy"); value != 0 {
-		t.Errorf("moirai_runner_busy = %v, want 0", value)
 	}
 	waitForMetric(t, recorder, `moirai_runner_executions_completed_total{outcome="completed"}`, jobs)
 	if value := loopMetricValue(t, scrapeLoopRecorder(t, recorder), "moirai_runner_executions_started_total"); value != jobs {

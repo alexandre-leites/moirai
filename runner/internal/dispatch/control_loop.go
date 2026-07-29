@@ -228,7 +228,12 @@ func (loop *ControlLoop) UseMetrics(recorder *metrics.Recorder) {
 	loop.Metrics = recorder
 	if loop.Reporter != nil {
 		loop.Reporter.Metrics = recorder
+		// The reporter published whatever it recovered from the outbox before
+		// this recorder existed; republish so the new one starts from the truth
+		// rather than from zero.
+		loop.Reporter.PublishMetrics()
 	}
+	loop.publishBusy()
 }
 
 func (loop *ControlLoop) recorder() *metrics.Recorder {
@@ -629,9 +634,18 @@ func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payloa
 		"error", err,
 	}
 	if sequence > 0 {
+		// Queued but not yet delivered: the outbox will retry it, so this is
+		// not a loss and must not be counted as one.
 		loop.logger().Warn("execution event queued for delivery after a transport failure", append(fields, "event_sequence", sequence)...)
 		return
 	}
+	// Nothing was queued and the retry above — where there was one — did not
+	// save it either, so the event is gone. This is the only place a rejected
+	// lifecycle event is counted: the reporter deliberately does not count its
+	// own rejections, because the reduced-payload retry above turns the most
+	// common one into a delivered event, and counting at rejection would book a
+	// drop against a run that reported its outcome perfectly well.
+	loop.recorder().RecordEventDropped(control.DropReason(err))
 	if control.IsTerminalEventType(eventType) {
 		loop.logger().Error("terminal execution event lost", fields...)
 		return

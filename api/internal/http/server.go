@@ -221,13 +221,21 @@ const unmatchedRoute = "unmatched"
 // has returned. The label set is therefore bounded by the number of registered
 // routes: `/api/v1/projects/{project_id}` stays one series however many project
 // IDs are requested.
+//
+// A request that matched nothing has no pattern, and so does one that matched a
+// path but not its method: the mux answers 405 from a handler it did not
+// register. Both land in unmatchedRoute, so a method-not-allowed on a real
+// route is not distinguishable here from a 404 on a route that does not exist.
+// The status label separates them.
 func routeLabel(r *http.Request) string {
 	pattern := r.Pattern
 	if pattern == "" {
 		return unmatchedRoute
 	}
 	// A pattern is "[METHOD ][HOST]/[PATH]" and the method travels in its own
-	// label, so only the path template belongs here.
+	// label, so the method token is stripped. A host, were one ever registered,
+	// would stay in the label — it is part of what identifies the route, and
+	// this service registers none.
 	if index := strings.LastIndex(pattern, " "); index >= 0 {
 		pattern = pattern[index+1:]
 	}
@@ -237,9 +245,11 @@ func routeLabel(r *http.Request) string {
 	return pattern
 }
 
-// methodLabel bounds the method label to the verbs the API registers routes
-// for. A request line may carry any token as its method, so labelling with
-// r.Method directly would let a client mint a new time series per request.
+// methodLabel bounds the method label to the standard HTTP verbs. A request
+// line may carry any token as its method, so labelling with r.Method directly
+// would let a client mint a new time series per request. The list is wider than
+// the verbs this service registers routes for, so that a request the API does
+// not serve is still reported under the method it used.
 func methodLabel(method string) string {
 	switch method {
 	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
