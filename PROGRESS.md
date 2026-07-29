@@ -67,8 +67,191 @@
 - Active implementation: None
 - Last updated: 2026-07-28
 - Agent/session identifier: agent/docs-contracts
+- Overall status: MVP audit complete (issue #87). The stack builds, boots and schedules, but the
+  end-to-end flow **Web UI → API → Orchestrator → Runner → Orchestrator → API → Web UI** does not
+  close: the runner cannot authenticate to GitHub, and the API/UI have no read path for a
+  workflow's progress, logs or resulting pull request.
+- Current phase: MVP gap remediation. Backlog is now the full set of open issues (#88–#124).
+- Active implementation: None. Audit finished; no production code changed by this task.
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/mvp-audit-87
 
 ## In Progress
+
+## MVP audit (issue #87, 2026-07-29)
+
+Every claim below is grounded in a file that was opened during the audit. No speculation.
+
+### Critical repository finding: PR #81 was merged as a no-op
+
+`git rev-parse a260c8f^{tree} bbc8432^{tree}` returns the **same tree hash**, so merge commit
+`bbc8432` ("Add live operations dashboard (#81)") contributed zero bytes to `main`. Its conflict
+resolution discarded the entire 4364-line changeset. Confirmed absent from the tree:
+`api/internal/http/handlers/events.go`, `api/internal/http/handlers/queue.go`,
+`web/src/events.ts`, `web/src/operations.tsx`, `web/src/api.test.ts`,
+`web/src/live-pages.test.tsx`, the workflow/runner action RPCs in `proto/control_plane.proto`,
+and the matching orchestrator control-plane methods.
+
+Issues #54, #56 and #57 were auto-closed as `completed` by that merge. The work they describe is
+not in the repository. Re-filed as #110, #112, #113, #117, #118, #119, #120 and #123, each stating
+explicitly why it is not a duplicate.
+
+### Status by MVP capability
+
+**Complete and working**
+
+- Monorepo layout, `compose.yaml` three-network isolation, secrets-from-files, per-service
+  healthchecks; CI covers orchestrator unit tests, a real PostgreSQL 16 migration/persistence
+  suite, Go race tests, `govulncheck`/`pip-audit`/`npm audit`/Trivy, and a Compose smoke boot
+  (`.github/workflows/ci.yml`).
+- Authentication: login/logout/me, server-side sessions, CSRF, per-session rate limiting
+  (`api/internal/auth/`, `orchestrator/src/moirai/persistence/authentication.py`).
+- Project CRUD end to end: `web/src/projects.tsx` → `api/internal/http/handlers/handlers.go` →
+  `orchestrator/src/moirai/grpc/control_plane.py` → PostgreSQL. The API holds no DB handle.
+- Runner registration tokens, one-time-token registration, persistent credential, outbound
+  bidirectional gRPC, heartbeats, leases with generation fencing, renewal, reconnection and a
+  crash-safe event outbox (`runner/internal/control/`, `orchestrator/src/moirai/grpc/runner_control.py`).
+- Global scheduler: priority ordering with creation-time tie-break, one-active-workflow-per-project
+  lock via `app.project_locks`, up to 50 offers per tick, PostgreSQL advisory-lock leader election
+  (`orchestrator/src/moirai/scheduler.py`, `persistence/control_plane.py:946-1163`).
+- Issue synchronisation from GitHub through `gh` with exponential backoff, durable retry state and
+  label reconciliation (`orchestrator/src/moirai/services/issue_sync.py`).
+- Durable LangGraph workflow: 13 nodes, PostgreSQL checkpointing, retry budgets, transition outbox
+  with at-least-once drain, stalled-run recovery, project/provider circuit breakers with half-open
+  probes (`orchestrator/src/moirai/workflows/`).
+- Runner execution: mirror clone/worktree preparation, task-packet and prompt artifacts, opencode /
+  CLI / Docker backends, pipeline execution, commit, push, log streaming, cancellation, workspace
+  retention (`runner/internal/`).
+- Orchestrator-side pull-request creation, check polling, merge and issue closure via `gh`
+  (`orchestrator/src/moirai/code_hosts/github_cli.py`, `workflows/nodes.py`).
+- Orchestrator observability: structured JSON logs, request-ID propagation, and a metrics loop
+  backed by real control-plane state (`orchestrator/src/moirai/main.py:270-281`).
+
+**Partially implemented**
+
+- Workflow visibility. `ListWorkflows` returns only `{id, project_id, status, phase}`
+  (`proto/control_plane.proto:56`). The pull-request URL is persisted
+  (`workflows/persistence.py:80-97`) and never exposed. → #110, #117
+- Local pipeline gate. The dedicated pipeline execution role exists, but
+  `app.project_pipeline_steps` is read at `persistence/control_plane.py:848` and **written
+  nowhere in the repository**, so every pipeline execution runs zero commands and reports
+  `completed` → `pipeline_passed = True`. → #114 (with #90)
+- Task packet context. `acceptance_criteria` is the issue title
+  (`persistence/control_plane.py:826`); `plan`, `diffSummary`, `failedChecks` and `reviewFindings`
+  are never populated. → pre-existing #106
+- Merge gate. `nodes.py:146-159` transitions to `"merging"` on an unverified `gh pr merge` and then
+  closes the issue; `app.pull_requests.merged_at` is never written. → #121
+- Runner administration. `set_runner_state` supports enable/disable/drain/revoke
+  (`persistence/control_plane.py:674-705`) with no gRPC caller. → #119
+- Metrics. Orchestrator metrics are real; the API (`api/internal/http/server.go:81-88`) and runner
+  (`runner/internal/metrics/metrics.go:19-38`) publish gauges permanently set to zero. → #124
+
+**Implemented but not integrated**
+
+- `GET /api/v1/runners` exists (`api/internal/http/handlers/runners.go:19-51`, `openapi.yaml:285`);
+  `web/src/api.ts` has no `listRunners` and `web/src/main.tsx` has no route. → #113
+- `EnvironmentRef` is specified (`schemas/task-packet.schema.json:42-54`), validated
+  (`runner/internal/taskpacket/taskpacket.go:66-69`) and resolved
+  (`runner/cmd/runner/main.go:52-62`), but `workflows/task_packets.py:218` hardcodes
+  `"environmentRefs": []`. → #109
+- `OrchestratorToRunner.drain` and `.cancel` are defined and handled by the runner
+  (`dispatch/control_loop.go:187-195`); the orchestrator never constructs either. → #119, #120
+
+**Missing**
+
+- Server-Sent Events. `grep -rn "event-stream\|EventSource"` finds nothing, though `PROJECT.md:117,134`
+  specifies REST + SSE. → #118
+- Queue visibility. No reader, RPC or route returns the eligible-issue queue; only an aggregate
+  `queue_depth` in `metrics_snapshot`. → #112
+- Workflow retry/cancel/block. → #120
+- Web workflow detail, runners and queue pages. → #117, #113, #112
+- Web automated tests; `make test-web` is not wired into CI. → #123
+
+**Blocked by another gap**
+
+- #117 (workflow detail page) is blocked by #110 (detail/event RPCs and routes).
+- #118 (SSE) is blocked by #110 (shared change-notification path).
+- #119 (drain/revoke) is blocked by #111 (the orchestrator currently aborts the stream on
+  `RunnerDraining`) and #113 (the page hosting the controls).
+- #120 (retry/cancel/block) is blocked by #110 and #117.
+- #122 (pipeline environment isolation) is blocked by #109, which introduces the credential that
+  makes the leak exploitable.
+
+### Issues created by this audit
+
+| Issue | Priority | Scope |
+|---|---|---|
+| #109 | P0 | Task packets never declare credentials; runner cannot authenticate `git clone`/`git push` |
+| #110 | P0 | No `GetWorkflow` / workflow-events read path; `app.workflow_events` is write-only |
+| #117 | P0 | No web workflow detail page: progress, logs and the pull request are never shown |
+| #111 | P1 | Orchestrator aborts the runner stream on `RunnerDraining` |
+| #112 | P1 | Eligible-issue queue not exposed by orchestrator, API or UI |
+| #113 | P1 | No web runners page although `GET /api/v1/runners` exists |
+| #114 | P1 | `app.project_pipeline_steps` is unwritable, so the pipeline gate always passes |
+| #116 | P1 | `create_pull_request` / `wait_for_checks` report success when no code host resolves |
+| #118 | P1 | Server-Sent Events unimplemented; the dashboard never updates without a reload |
+| #119 | P1 | Runner drain/revoke unreachable from the API and UI |
+| #120 | P1 | Workflow runs cannot be retried, cancelled or blocked by an operator |
+| #121 | P1 | Merge is never verified; `merged_at` never written |
+| #122 | P1 | Pipeline commands inherit the entire runner process environment |
+| #123 | P2 | Web app has no tests and eslint never runs in CI |
+| #124 | P2 | API and runner Prometheus gauges are hardcoded to zero |
+
+#115 was filed and closed as a duplicate of the pre-existing #106.
+
+### Recommended implementation order
+
+1. #109 — restore the delivery half of the flow. Nothing downstream is observable until a push works.
+2. #110 — the API read path for workflow state, events and the pull-request URL.
+3. #117 — the web detail page that consumes #110, closing the flow's last step.
+4. #114 (with the pre-existing #90) — make the deterministic pipeline gate real.
+5. #116, #121 — stop the workflow reporting phases and merges it did not achieve.
+6. #111, then #119 — runner drain protocol, then the operator surface.
+7. #113, #112 — runners and queue pages.
+8. #120 — retry/cancel/block, on top of #110 and #117.
+9. #118 — SSE, once the pages it refreshes exist.
+10. #122 — pipeline environment isolation, immediately after #109.
+11. #123, #124 — web test coverage and honest metrics.
+
+The pre-existing platform-review backlog (#88–#108) is complementary and largely orchestrator- and
+runner-internal. #88 (event-driven graph suspension) is described there as the root workflow defect
+and should be sequenced alongside #110, since both change how a run's progress is observed.
+
+### Gaps deliberately not converted into issues
+
+- `app.project_labels` (migration `001_initial.sql:44`) has zero references anywhere in the
+  repository. Dead schema, not an MVP gap; label policy is hardcoded in `domain/issues.py:12-20`.
+- `app.audit_events` is written (`persistence/authentication.py:313`) and never read. An audit-log
+  view is post-MVP and outside `PROJECT.md`'s stated Web UI scope.
+- The `progress` runner event type is accepted (`workflows/runner_events.py:8`) with no emitter.
+  Cosmetic once #110 exposes the `log` events that do flow.
+- `LOOP_RUNNER_RECONNECT_GRACE` and `LOOP_RUNNER_MAX_LOG_BYTES` are parsed and unused. The sibling
+  variables are already covered by the pre-existing #95 and #102; these two are too small to
+  warrant a separate issue and belong in #102's checklist.
+- "The Web UI submits a task through the API" (issue #87's flow step 1) has no literal
+  implementation, and should not get one: `PROJECT.md:55,84` scopes task creation to issue-tracker
+  synchronisation. The Web UI's equivalent is project registration plus enablement, which works.
+  Operator control over what runs is covered by #112 and #120.
+
+### Validation performed for the audit task (2026-07-29, agent/mvp-audit-87)
+
+This task changed documentation only (`PROGRESS.md`); no production code was written, by design —
+every gap became an issue, not a patch. The following were run in the `issue-87` worktree and all
+passed:
+
+- `make test-orchestrator` — 288 tests, 2 skipped, OK. (The scheduler tracebacks in the output are
+  deliberate failure-injection fixtures in `tests/test_scheduler_service.py`.)
+- `make test-runner` — `go test -race ./...`, all 10 packages ok.
+- `make test-api` — `go test ./...`, all 5 packages ok.
+- `make test-web` — `tsc --noEmit` clean; `eslint .` 0 errors, 10 pre-existing warnings (already in
+  the quality backlog below).
+- `make lint` — ruff, all checks passed.
+- `make typecheck` — mypy, no issues in 47 source files.
+- `make compose` — `docker compose config` rendered successfully.
+- `cd api && go vet ./...` — clean.
+
+Not run: `make test-postgres-integration` (requires `LOOP_TEST_DATABASE_URL`), `make proto-check`
+(requires the buf container; no proto changed), and a full Compose boot (no change to any image).
 
 ## Done
 
@@ -350,3 +533,47 @@ Record only validation that was actually run.
 
 Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce it in this worktree, make a focused fix, rerun the relevant checks, and update this record before the next commit.
 
+---
+
+# Issue #89 — Runner: a missing or invalid result document must not be reported as success
+
+- Overall status: Complete; awaiting PR review
+- Current phase: 2026-07-29 platform review remediation (finding F2)
+- Active implementation: None
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/issue-89
+
+## Done
+
+- [x] Stop the opencode backend from reporting success without result evidence
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/agents/opencode.go`, `runner/internal/agents/opencode_test.go`, `runner/README.md`
+  - Behavior delivered:
+    - `OpenCodeBackend.Execute` no longer discards `readResultDocument`'s error. When the process exits 0 but the result document is missing or invalid, it returns `status="failed"` and an error wrapping the new exported sentinel `agents.ErrNoResultEvidence`, e.g. `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`. The summary carries the same text, so the persisted `terminal-result.json` names the missing evidence too.
+    - A valid document keeps its own status, summary, changed files, commands, remaining work, session ID, and raw payload — unchanged from before, including the case where the process exits non-zero.
+    - "Process failed" and "no result evidence" stay distinguishable in the failure fingerprint: when the process itself fails, the executor error is still returned (`ErrNoResultEvidence` is not used), so the two paths hash differently downstream in `dispatch.FailureFingerprint`. Measured end to end: `agent:42051f1c5fc5560d` (exit 0, no document) vs `agent:68daef1c6e1313c9` (exit 3).
+    - Failure text is free of absolute workspace paths (`readResultDocument` reports a missing file without the path; `workspaceRelativePath` renders `.loop/result.json`), so repeated no-evidence failures produce one stable fingerprint instead of a new one per workspace.
+  - Validation performed:
+    - `make test-runner` — pass (all runner packages, race detector).
+    - `cd runner && gofmt -l .` — no output.
+    - `cd runner && go vet ./...` — clean.
+    - `cd runner && go build ./...` — clean.
+    - New unit tests in `runner/internal/agents/opencode_test.go`: exit 0 + missing document, exit 0 + malformed JSON, exit 0 + wrong `executionId` (all three assert `failed`, `errors.Is(err, ErrNoResultEvidence)`, evidence named, no absolute path leak), exit 0 + valid document still `completed` (`TestOpenCodeBackendReadsValidatedResult`), non-zero exit + valid document keeps the document status while returning the process error, non-zero exit + missing document reports the process failure rather than `ErrNoResultEvidence`, and failure text stability across two workspaces.
+    - Temporary end-to-end harness (real `OpenCodeBackend` + `Dispatcher` + `ControlLoop`, deleted after use) confirmed the emitted terminal event: `type=failed`, `"error":"execute agent: agent exited 0 without a valid result document (.loop/result.json): agent result was not written"`, `"exitCode":0`, `"failureFingerprint":"agent:42051f1c5fc5560d"`.
+  - Commands executed: `make test-runner`; `cd runner && gofmt -l .`; `cd runner && go vet ./...`; `cd runner && go build ./...`; `cd runner && go test -race ./internal/agents/ -v`.
+  - Notes: Re-prompting/continuation stays out of scope (issue #104). `runner/internal/dispatch/control_loop.go` and `runner/internal/control/` were not touched; concurrent agents own those files.
+
+## Decisions
+
+- Decision: Carry the "no result evidence" classification in the returned error rather than in `dispatch.FailureFingerprint`'s category table.
+  - Context: The fingerprint is computed from the error text in `control_loop.go`, which is owned by a concurrent agent.
+  - Alternatives considered: Adding a dedicated fingerprint category for missing result documents.
+  - Reason: Keeping the change inside `runner/internal/agents/` avoids a conflict on shared dispatch files, and a stable, path-free error message already yields a distinct, repeatable fingerprint for each failure mode.
+  - Consequences: Both modes share the `agent:` component prefix but differ in digest; a later fingerprint-classification change (F14) can promote the distinction to the prefix without touching the backend.
+
+## Validation Status
+
+- Runner tests: Passed — `make test-runner` (`cd runner && go test -race ./...`), all packages `ok`.
+- Lint/format: Passed — `gofmt -l .` empty, `go vet ./...` clean.
+- Build: Passed — `cd runner && go build ./...`.
+- Orchestrator, API, web tests: Not run — change is confined to the runner's agent backend.
