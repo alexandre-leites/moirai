@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -494,6 +496,254 @@ func TestControlLoopRunBacksOffWithoutDisconnectingWhileUnreachable(t *testing.T
 	if client.disconnects != 0 {
 		t.Fatalf("Run() called Disconnect() %d times, want 0 (owned by StreamSupervisor)", client.disconnects)
 	}
+}
+
+// gatedDispatcher blocks after cancellation until release is closed, so a test
+// can interleave lease expiry with the still-running execution's terminal event.
+type gatedDispatcher struct {
+	started   chan struct{}
+	release   chan struct{}
+	cancelled chan control.Lease
+}
+
+func (dispatcher *gatedDispatcher) Execute(ctx context.Context, _ control.Lease) (Result, error) {
+	close(dispatcher.started)
+	<-ctx.Done()
+	<-dispatcher.release
+	return Result{ExitCode: -1}, ctx.Err()
+}
+
+func (dispatcher *gatedDispatcher) Cancel(_ context.Context, lease control.Lease) error {
+	dispatcher.cancelled <- lease
+	return nil
+}
+
+type syncBuffer struct {
+	mu       sync.Mutex
+	contents bytes.Buffer
+}
+
+func (buffer *syncBuffer) Write(payload []byte) (int, error) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.contents.Write(payload)
+}
+
+func (buffer *syncBuffer) String() string {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	return buffer.contents.String()
+}
+
+func TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected(t *testing.T) {
+	now := time.Now()
+	outboxPath := filepath.Join(t.TempDir(), "events.json")
+	client := &loopClient{sendErr: errors.New("control stream disconnected")}
+	dispatcher := &gatedDispatcher{started: make(chan struct{}), release: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Second, 250*time.Millisecond, nil, outboxPath)
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Second).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	select {
+	case <-dispatcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not start")
+	}
+
+	now = now.Add(2 * time.Second)
+	if err := loop.Reconcile(); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	select {
+	case <-dispatcher.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("expired lease did not cancel the execution")
+	}
+	close(dispatcher.release)
+	waitForPendingEvents(t, loop, 1)
+
+	contents, err := os.ReadFile(outboxPath)
+	if err != nil {
+		t.Fatalf("read event outbox: %v", err)
+	}
+	if !contains(string(contents), `"cancelled"`) {
+		t.Fatalf("event outbox after lease expiry = %s, want the terminal event", contents)
+	}
+
+	client.mu.Lock()
+	client.sendErr = nil
+	client.mu.Unlock()
+	if err := loop.FlushEvents(); err != nil {
+		t.Fatalf("FlushEvents() error = %v", err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.events) != 1 || client.events[0].GetType() != "cancelled" {
+		t.Fatalf("delivered events = %#v, want the terminal event", client.events)
+	}
+	if client.events[0].GetLeaseGeneration() != offer.GetLeaseGeneration() {
+		t.Fatalf("terminal event lost its lease fencing: %#v", client.events[0])
+	}
+}
+
+// chattyDispatcher floods the event buffer with log output before reporting a
+// successful result, reproducing an agent that talks while the stream is down.
+type chattyDispatcher struct {
+	reporter  *control.EventReporter
+	messages  int
+	saturated chan struct{}
+	release   chan struct{}
+}
+
+func (dispatcher *chattyDispatcher) Execute(_ context.Context, lease control.Lease) (Result, error) {
+	for index := 0; index < dispatcher.messages; index++ {
+		_, _ = dispatcher.reporter.EmitLog(lease.JobID, lease.Generation, "chatty agent output")
+	}
+	close(dispatcher.saturated)
+	<-dispatcher.release
+	return Result{Status: "completed", ExitCode: 0}, nil
+}
+
+func TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected(t *testing.T) {
+	now := time.Now()
+	outboxPath := filepath.Join(t.TempDir(), "events.json")
+	client := &loopClient{sendErr: errors.New("control stream disconnected")}
+	dispatcher := &chattyDispatcher{messages: 32, saturated: make(chan struct{}), release: make(chan struct{})}
+	loop, err := NewControlLoopWithEventBuffer(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, outboxPath, 1, 4)
+	if err != nil {
+		t.Fatalf("NewControlLoopWithEventBuffer() error = %v", err)
+	}
+	dispatcher.reporter = loop.Reporter
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	select {
+	case <-dispatcher.saturated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatcher did not produce its log output")
+	}
+	if pending := loop.Reporter.Pending(); pending != 4 {
+		t.Fatalf("pending events = %d, want a saturated buffer of 4", pending)
+	}
+	close(dispatcher.release)
+	waitForOutboxEvent(t, outboxPath, "completed")
+
+	client.mu.Lock()
+	client.sendErr = nil
+	client.mu.Unlock()
+	if err := loop.FlushEvents(); err != nil {
+		t.Fatalf("FlushEvents() error = %v", err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.events) == 0 || client.events[len(client.events)-1].GetType() != "completed" {
+		t.Fatalf("delivered events = %#v, want the terminal event last", client.events)
+	}
+	if _, err := os.Stat(outboxPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("event outbox was not drained: %v", err)
+	}
+}
+
+func waitForOutboxEvent(t *testing.T, path, eventType string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		contents, err := os.ReadFile(path)
+		if err == nil && contains(string(contents), `"`+eventType+`"`) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("event outbox %s never contained a %q event", path, eventType)
+}
+
+func TestControlLoopLogsTerminalEventLoss(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	output := &syncBuffer{}
+	loop.Logger = slog.New(slog.NewJSONHandler(output, nil))
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	select {
+	case <-dispatcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not start")
+	}
+	waitForEvents(t, client, 1)
+	if !loop.Reporter.Finish(offer.GetJobId(), offer.GetLeaseGeneration()) {
+		t.Fatal("Finish() did not release the event lease")
+	}
+	loop.Cancel("execution-1", offer.GetLeaseGeneration())
+	select {
+	case <-dispatcher.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("execution was not cancelled")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry, ok := findLogEntry(t, output.String(), "terminal execution event lost"); ok {
+			if entry["level"] != "ERROR" {
+				t.Fatalf("terminal event loss logged at %v, want ERROR", entry["level"])
+			}
+			if entry["job_id"] != offer.GetJobId() || entry["event_type"] != "cancelled" {
+				t.Fatalf("terminal event loss log = %#v", entry)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("terminal event loss was not logged: %s", output.String())
+}
+
+func findLogEntry(t *testing.T, output, message string) (map[string]any, bool) {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("parse structured log %q: %v", line, err)
+		}
+		if entry["msg"] == message {
+			return entry, true
+		}
+	}
+	return nil, false
+}
+
+func waitForPendingEvents(t *testing.T, loop *ControlLoop, count int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if loop.Reporter.Pending() == count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("pending events = %d, want %d", loop.Reporter.Pending(), count)
 }
 
 func TestControlLoopWithCapacityRunsExecutionsForDifferentProjectsConcurrently(t *testing.T) {

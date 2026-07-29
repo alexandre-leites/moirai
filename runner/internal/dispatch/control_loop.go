@@ -90,6 +90,13 @@ func NewControlLoopWithEventBuffer(client ControlClient, dispatcher executionDis
 	if eventBufferSize < 1 {
 		eventBufferSize = defaultEventBufferSize
 	}
+	// Every concurrent execution must be able to queue its terminal event even
+	// when the buffer is already saturated with undeliverable events from the
+	// other executions, so the buffer never holds fewer slots than the runner
+	// has capacity.
+	if eventBufferSize < capacity {
+		eventBufferSize = capacity
+	}
 	reporter, err := control.NewEventReporter(client, eventBufferSize, redactionPrefixes, outboxPath)
 	if err != nil {
 		return nil, err
@@ -357,13 +364,13 @@ func (loop *ControlLoop) Busy() bool {
 func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 	started := time.Now()
 	loop.logger().Info("runner execution started", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
-	_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "started", map[string]any{"status": "running"})
+	loop.emitEvent(lease, "started", map[string]any{"status": "running"})
 	result, err := loop.Dispatcher.Execute(ctx, lease)
 	usage := executionUsage(started, result)
 	cancelled := loop.finish(lease) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)
 	if cancelled {
 		payload := terminalPayload("cancelled", result, usage)
-		_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "cancelled", payload)
+		loop.emitEvent(lease, "cancelled", payload)
 	} else if err != nil || result.Status != "completed" {
 		failure := err
 		if failure == nil {
@@ -372,14 +379,42 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 		payload := terminalPayload("failed", result, usage)
 		payload["failureFingerprint"] = FailureFingerprint("execution", failure)
 		payload["error"] = failure.Error()
-		_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "failed", payload)
+		loop.emitEvent(lease, "failed", payload)
 	} else {
 		payload := terminalPayload(result.Status, result, usage)
-		_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "completed", payload)
+		loop.emitEvent(lease, "completed", payload)
 	}
 	loop.logger().Info("runner execution terminal", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation, "status", terminalStatus(cancelled, err, result))
 	loop.Offers.Abandon(lease.JobID, lease.Generation)
 	loop.Reporter.Finish(lease.JobID, lease.Generation)
+}
+
+// emitEvent reports an execution lifecycle event and, unlike a discarded
+// error, makes both failure modes visible. A non-zero sequence means the event
+// reached the crash-safe outbox and delivery is retried on reconnect; a zero
+// sequence means the event was never queued, which for a terminal event is a
+// lost run outcome and is logged at error level.
+func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payload map[string]any) {
+	sequence, err := loop.Reporter.Emit(lease.JobID, lease.Generation, eventType, payload)
+	if err == nil {
+		return
+	}
+	fields := []any{
+		"job_id", lease.JobID,
+		"execution_id", lease.Packet.ExecutionID,
+		"lease_generation", lease.Generation,
+		"event_type", eventType,
+		"error", err,
+	}
+	if sequence > 0 {
+		loop.logger().Warn("execution event queued for delivery after a transport failure", append(fields, "event_sequence", sequence)...)
+		return
+	}
+	if control.IsTerminalEventType(eventType) {
+		loop.logger().Error("terminal execution event lost", fields...)
+		return
+	}
+	loop.logger().Warn("execution event dropped", fields...)
 }
 
 func executionUsage(started time.Time, result Result) map[string]any {

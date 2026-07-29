@@ -85,6 +85,17 @@ Every agent execution must write the result document named by the task packet's 
 
 Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `docker` — reports a `failed` terminal event when the document is missing or invalid, naming the missing evidence (for example `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`). A process that fails outright reports the process failure instead, so the orchestrator receives distinct failure fingerprints for "the agent crashed" and "the agent claimed nothing".
 
+## Execution Events
+
+Execution events are queued in a bounded in-memory buffer (`LOOP_RUNNER_EVENT_BUFFER_SIZE`) that is mirrored to a crash-safe outbox in `LOOP_RUNNER_DATA_DIR`, and delivered in order on every reconnect. Terminal events (`completed`, `failed`, `cancelled`) carry the only record of a run's outcome, so they are never dropped silently:
+
+- When the buffer is full, a terminal event evicts the oldest queued lower-priority event (`log` and `progress` first, then `started`) instead of being rejected. Log and progress events are never allowed to evict anything.
+- Lease expiry discards a job's queued log and progress events but keeps its terminal events, still fenced by their lease generation, and keeps the expired lease just long enough for the still-running execution to report its outcome.
+- The effective buffer size is raised to `LOOP_RUNNER_CAPACITY` when it is configured lower, so every concurrent execution keeps a terminal-event slot.
+- A terminal event that still cannot be queued is logged at `ERROR` with `msg="terminal execution event lost"` plus the job, execution, lease generation, and reason. One that is queued but not yet delivered is logged at `WARN` and retried from the outbox.
+
+The orchestrator remains authoritative: it fences every event on the lease generation and currently rejects events whose lease has expired. The runner's job is to make sure the outcome is durably recorded and offered for delivery.
+
 ## Health Probes
 
 `runner live` verifies the process can start. `runner ready` additionally validates its configuration, data directory capacity, and selected agent backend prerequisites.
