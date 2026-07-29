@@ -51,6 +51,28 @@ Arm 3 clears `awaiting_execution` when it re-enters the graph — the detector h
 
 Runs parked on an external event rather than an execution — `pr_created`, `waiting_github_checks`, `waiting_human`, `merging` — are deliberately not recovered this way: re-entering the graph for one would resolve a pending human-approval interrupt as "not approved". Unanswered offers (`offered`) and lease expiry (jobs in `recovering`) have their own owners, `expire_offers` and `recover_one`.
 
+## Gate ownership
+
+No role's exit code is ever read as another role's verdict. Each gate is decided by the thing that produced its evidence:
+
+| Gate | Decided by |
+| --- | --- |
+| `plan_valid` | the planner execution's terminal event, from a schema-valid `planner-result` |
+| `pipeline_passed` | the pipeline execution's terminal event, and nothing else |
+| `review_approved` | the reviewer execution's terminal event, from a schema-valid `review-result` |
+| `checks_passed` / `checks_pending` | the `wait_for_checks` node, from the code host's required checks |
+
+`pipeline_passed` is the strictest of these: `grep -rn '"pipeline_passed":' orchestrator/src` returns exactly one hit, the `resolved_role == "pipeline"` branch of `workflows/runner_events.py`. The `pipeline` node dispatches a real pipeline execution every time the phase is entered — after the developer implements, and again after every repair — and it neither reads nor writes the gate. A developer or repairer terminal event moves the run to `local_pipeline` with `pipeline_passed` untouched.
+
+That strictness is deliberate: the local pipeline is the platform's deterministic completion gate. Inferring it from the developer's exit code, as the orchestrator used to, skipped the deterministic checks in exactly the case they exist for — the agent believing it succeeded — and let a repaired tree inherit the verdict of the pipeline run that preceded the repair.
+
+The pipeline execution does not spend `total_agent_executions`: it runs the project's commands, not an agent. It is bounded instead by the phases that lead into it, since the `pipeline` node is reachable only from `implement` and `repair`, both of which dispatch a counted agent execution first. An exhausted agent budget still blocks at the `pipeline` node rather than paying for a verdict that has nowhere to route.
+
+Two caveats about what the gate is worth today, neither of them in the orchestrator:
+
+- The commands come from `app.project_pipeline_steps` (`required = true`, in `position` order), which nothing in this repository writes yet ([#114](https://github.com/alexandre-leites/moirai/issues/114)). A project with no required steps has an empty gate: the execution reports success without running anything.
+- The runner rebuilds the workspace from the default branch for every execution (`repository.Manager.Prepare` runs `git worktree add -B <agent-branch> … <default-branch>`, which force-resets the branch), so a pipeline execution currently validates the base branch rather than the implementation it follows ([#136](https://github.com/alexandre-leites/moirai/issues/136)).
+
 ## Operations
 
 Logs are JSON and retain structured fields passed with Python logging `extra`. Metrics are served at `LOOP_METRICS_BIND` (default `0.0.0.0:9090`) on `/metrics`.

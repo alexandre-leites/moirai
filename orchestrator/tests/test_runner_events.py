@@ -193,6 +193,43 @@ class WorkflowTransitionTests(unittest.TestCase):
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
 
+    def test_developer_exit_code_never_decides_the_pipeline_gate(self) -> None:
+        """A clean developer exit is evidence the agent process ended, not that
+        the deterministic checks pass. Either exit code must hand the run to the
+        local_pipeline phase with the gate untouched, so the pipeline node
+        dispatches a real execution instead of short-circuiting into review."""
+        for exit_code in (0, 1):
+            summary = self._summary("completed", "job-1-implement", exit_code=exit_code)
+            transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
+            assert transition is not None
+            self.assertEqual(transition.new_status, "local_pipeline")
+            self.assertNotIn("pipeline_passed", transition.state_updates)
+
+    def test_only_the_pipeline_role_writes_the_pipeline_gate(self) -> None:
+        """`pipeline_passed` has exactly one producer. Any other role writing it
+        would reintroduce a gate that can be satisfied without the deterministic
+        checks ever running."""
+        cases = [
+            (self._summary("completed", "job-1-plan", result=self._planner_result("ready")), "planning", "planner"),
+            (self._summary("completed", "job-1-plan"), "planning", "planner"),
+            (self._summary("completed", "job-1-implement"), "implementing", "developer"),
+            (self._summary("completed", "job-1-implement"), "pushing", "developer"),
+            (self._summary("completed", "job-1-review", result=self._review_result("approved")), "ai_review", "reviewer"),
+            (self._summary("completed", "job-1-review"), "ai_review", "reviewer"),
+            (self._summary("completed", "job-1-repair"), "repairing", "repairer"),
+            (self._summary("failed", "job-1-implement", exit_code=1), "implementing", "developer"),
+            (self._summary("cancelled", "job-1-implement"), "implementing", "developer"),
+        ]
+        for summary, status, role in cases:
+            transition = workflow_transition_for_terminal_event(summary, status, role=role)
+            assert transition is not None, (role, status)
+            self.assertNotIn("pipeline_passed", transition.state_updates, (role, status))
+        pipeline = workflow_transition_for_terminal_event(
+            self._summary("completed", "job-1-pipeline"), "local_pipeline", role="pipeline"
+        )
+        assert pipeline is not None
+        self.assertIn("pipeline_passed", pipeline.state_updates)
+
     def test_completed_reviewer_with_approved_verdict_transitions_to_pushing(self) -> None:
         summary = self._summary("completed", "job-1-review", result=self._review_result("approved"))
         transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
@@ -248,6 +285,9 @@ class WorkflowTransitionTests(unittest.TestCase):
         transition = workflow_transition_for_terminal_event(summary, "repairing", role="repairer")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
+        # The repaired tree is re-validated by a real pipeline execution: the
+        # gate must not survive from the run that preceded the repair.
+        self.assertNotIn("pipeline_passed", transition.state_updates)
 
     def test_completed_unknown_role_returns_none(self) -> None:
         summary = self._summary("completed", "job-1-push")

@@ -17,6 +17,18 @@ IssueTrackerFactory = Callable[[str], "IssueTracker | None | Awaitable[IssueTrac
 # functions so the two can no longer drift out of sync by coincidence.
 _BUDGET = RetryBudget()
 
+# Roles the runner executes without an agent. The local pipeline runs the
+# project's configured commands directly -- `dispatch.Dispatcher` does not even
+# require an agent backend for it -- so it does not spend
+# `total_agent_executions`, which budgets *agent* runs. Counting it would mean
+# that making the pipeline mandatory silently cut the number of agent attempts a
+# workflow gets: a review-driven repair cycle would cost three units instead of
+# two, and an approved review could land on an exhausted budget and block with
+# the work finished but no pull request. It cannot run away either: `pipeline` is
+# reachable only from `implement` and `repair`, both of which dispatch a counted
+# agent execution first and are capped by their own attempt counters.
+_NON_AGENT_ROLES = frozenset({"pipeline"})
+
 
 class WorkflowPersistence(Protocol):
     async def transition(
@@ -82,12 +94,14 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "developer", "implementing", "implementation_attempts")
 
     async def pipeline(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if state.get("pipeline_passed") is True:
-            return await self._transition(
-                state,
-                "local_pipeline",
-                {"status": "local_pipeline", "pipeline_passed": True, "awaiting_execution": False},
-            )
+        # Unconditional: the local pipeline is the deterministic gate that
+        # decides whether the work is complete, so entering this phase always
+        # dispatches a real pipeline execution. This node deliberately never
+        # reads or writes `pipeline_passed` -- the gate belongs to the pipeline
+        # execution's terminal event alone (runner_events.py). Short-circuiting
+        # on an inherited `pipeline_passed` would skip the gate exactly when the
+        # previous phase claimed success, and would leave repaired work carrying
+        # the verdict of the pipeline run that predates the repair.
         return await self._dispatch(state, "pipeline", "local_pipeline", None)
 
     async def review(self, state: IssueWorkflowState) -> WorkflowUpdate:
@@ -202,6 +216,11 @@ class PersistedWorkflowNodes:
         attempt_counter: str | None,
     ) -> WorkflowUpdate:
         workflow_run_id = _workflow_run_id(state)
+        # The exhaustion check applies to every role, including the ones that do
+        # not spend the budget: once no agent run is affordable, the pipeline's
+        # verdict has nowhere to route (both of its successors dispatch agents),
+        # so validating first would only cost a runner execution to reach the
+        # same blocked state.
         if int(state.get("total_agent_executions", 0)) >= _BUDGET.total_agent_executions:
             return await self._budget_exhausted(state)
         existing = await _await(self.persistence.get_queued_execution_request(workflow_run_id))
@@ -231,7 +250,8 @@ class PersistedWorkflowNodes:
         if attempt_counter is not None:
             current_attempts = state.get(attempt_counter, 0)
             updates[attempt_counter] = (current_attempts if isinstance(current_attempts, int) else 0) + 1
-        updates["total_agent_executions"] = int(state.get("total_agent_executions", 0)) + 1
+        if role not in _NON_AGENT_ROLES:
+            updates["total_agent_executions"] = int(state.get("total_agent_executions", 0)) + 1
         await _await(self.persistence.transition(workflow_run_id, status, updates))
         return updates
 
