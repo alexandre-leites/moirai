@@ -110,6 +110,11 @@ make failures visible, then finish MVP features, then harden.
 
 ## Phase 3 — Finish the MVP surface (per AGENTS.md, implementation-first)
 
+> **Console design approved (2026-07-29):** the management-UI portion of this phase is now
+> fully specified in `docs/design/web-console/` (benchmark mockup + implementation spec +
+> task breakdown A1–E3 with acceptance criteria). Implement from that package; the bullets
+> below remain as the original context.
+
 - [ ] **SSE end-to-end** (the spec's live-update backbone, absent at every layer):
   streaming RPC in `control_plane.proto` → orchestrator event stream → API SSE proxy
   (`internal/http/events/`) → web `EventSource` hook replacing fetch-once pages.
