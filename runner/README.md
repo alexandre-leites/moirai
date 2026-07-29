@@ -97,6 +97,16 @@ Every agent execution must write the result document named by the task packet's 
 
 Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `docker` — reports a `failed` terminal event when the document is missing or invalid, naming the missing evidence (for example `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`). A process that fails outright reports the process failure instead, so the orchestrator receives distinct failure fingerprints for "the agent crashed" and "the agent claimed nothing".
 
+## Workspace Preparation
+
+Every execution gets a fresh workspace at `workspaces/job-<jobId>`: the previous one is removed when its execution ends, and the next execution of the same job may be leased by another runner. The directory is therefore not what carries a job's work from one execution to the next — the execution branch is. Every execution of a job shares one branch name (`agent/<issueExternalId>/<jobId>`), and preparation re-creates the workspace from that branch's tip, looked for in this order:
+
+1. the branch as published on the remote, found with `git ls-remote` and fetched — the one state of the job every runner can see, so it decides the tip;
+2. otherwise the branch in this runner's own repository, which is where an execution that could not push leaves its work;
+3. otherwise the default branch — the start point of a job's first execution, stated rather than implied, because `git worktree add -B` would just as happily rewind an existing branch onto it ([#136](https://github.com/alexandre-leites/moirai/issues/136)).
+
+This is what makes the mandatory local pipeline ([#90](https://github.com/alexandre-leites/moirai/issues/90)) mean anything: the pipeline execution runs the project's commands against the tree the developer execution produced, and a reviewer execution reads that tree rather than base-branch code.
+
 ## Failed Work and Workspace Retention
 
 Iterative repair needs the previous attempt's work, so a run that does not complete is not discarded.
@@ -110,9 +120,9 @@ Iterative repair needs the previous attempt's work, so a run that does not compl
 | `blocked` | `wip(blocked): …` | as `failed` | as `failed` | as `failed` |
 | cancelled / abandoned | none — the context is already cancelled | — | — | `status: cancelled` |
 
-Only a completed run writes to the packet's branch, so a non-delivery can never be mistaken for a delivery. A failed or blocked run publishes to a per-execution `wip/<executionId>` ref instead, which cannot collide with the branch the next attempt re-creates from the base revision. That ref is force-pushed: it belongs to exactly one execution, which must be able to replace its own earlier remains after a redelivery.
+Only a completed run writes to the packet's branch, so a non-delivery can never be mistaken for a delivery. A failed or blocked run publishes to a per-execution `wip/<executionId>` ref instead, which cannot collide with the branch the next attempt continues from. That ref is force-pushed: it belongs to exactly one execution, which must be able to replace its own earlier remains after a redelivery.
 
-The local `refs/moirai-wip/<executionId>` anchor is what makes the commit durable, and it is written for every non-delivering run. The commit itself sits on the execution branch, and the next preparation of that job re-creates the branch from the base revision ([#136](https://github.com/alexandre-leites/moirai/issues/136)) — without the anchor the work would be unreachable in the runner's own repository. This matters most for roles the orchestrator does not grant `mayPush`: today that is every file-modifying role except `developer`, so a **repairer**'s work is preserved only locally, on the runner that produced it, until #106 or a `mayPush` grant lets it be published.
+The commit itself sits on the execution branch, which the next preparation of that job continues from, so a retry on this runner inherits the failed run's work directly. The local `refs/moirai-wip/<executionId>` anchor — written for every non-delivering run — covers what the branch cannot: when the branch has been published elsewhere, preparation resets the local branch onto the published tip, and only a reference outside `refs/heads` still reaches the failed run's commit. This matters most for roles the orchestrator does not grant `mayPush`: today that is every file-modifying role except `developer`, so a **repairer**'s work is preserved only locally, on the runner that produced it, until #106 or a `mayPush` grant lets it be published.
 
 `logTail` is a sanitised excerpt of the failing pipeline command's output, or of the agent's log, bounded to 2 KiB *as JSON encodes it* rather than raw, since `<`, `>`, and `&` cost six bytes each in the encoded payload.
 
@@ -123,7 +133,7 @@ Note that pipeline commands currently reach the runner only on `role=pipeline` p
 - Every retained workspace is registered in `<LOOP_RUNNER_DATA_DIR>/retained`. A workspace that cannot be registered is cleaned up instead, so nothing is kept that the sweep could not later release.
 - The sweep runs at startup and before every execution — the moments at which new workspace disk is about to be consumed — and releases workspaces older than `LOOP_RUNNER_RETENTION_MAX_AGE`, then the oldest beyond `LOOP_RUNNER_RETENTION_MAX_WORKSPACES`, then the oldest remaining while free disk is under `LOOP_RUNNER_MINIMUM_FREE_BYTES`. An idle runner therefore holds up to `LOOP_RUNNER_RETENTION_MAX_WORKSPACES` workspaces past their age bound until it next starts an execution.
 - A job whose execution is running is never swept, even when a retained record still names its ID — one job ID serves every execution of a workflow run, so the record of an earlier execution names the path the next one prepares.
-- A retained workspace's HEAD is detached, so it can never be the reason a later `git worktree add -B` fails.
+- A retained workspace's HEAD is detached, so it can never be the reason a later preparation fails to fetch or to re-create that branch.
 
 How long the forensics last: a retained workspace lives at `workspaces/job-<jobId>`, and the *next execution of the same job* removes that directory when it prepares. Retention therefore covers inspection after a failure and up to the workflow's next attempt — the durable artefact across attempts is the work-in-progress commit, not the workspace.
 

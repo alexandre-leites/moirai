@@ -59,8 +59,24 @@ type Manager struct {
 	Sleep             func(time.Duration)
 }
 
+// Prepare gives an execution a fresh workspace on its job's execution branch.
+//
+// The workspace directory is re-created for every execution — the runner
+// removes it when the execution ends, and the next execution of the job may
+// well be leased by a different runner — so the directory cannot be what
+// carries a job's work from one execution to the next. The branch is: every
+// execution of a job shares one branch name, and Prepare re-creates the
+// workspace from that branch's tip whenever the tip exists. Only a job whose
+// branch exists nowhere yet starts from the default branch.
 func (manager Manager) Prepare(ctx context.Context, request PrepareRequest) (Workspace, error) {
 	if err := validateRequest(request); err != nil {
+		return Workspace{}, err
+	}
+	// The credential environment is validated before anything is removed or
+	// fetched: an unusable credential must fail the execution, not destroy the
+	// workspace the previous one left behind.
+	credentials, err := credentialEnvironment(request.Environment)
+	if err != nil {
 		return Workspace{}, err
 	}
 	root, err := manager.dataDirectory()
@@ -88,18 +104,22 @@ func (manager Manager) Prepare(ctx context.Context, request PrepareRequest) (Wor
 		return Workspace{}, fmt.Errorf("stat workspace: %w", err)
 	}
 
-	source, err := manager.prepareSource(ctx, root, request)
+	source, err := manager.prepareSource(ctx, root, request, credentials)
+	if err != nil {
+		return Workspace{}, err
+	}
+	// The registration of the workspace just removed still claims the execution
+	// branch, and Git refuses both to fetch into and to re-create a branch a
+	// worktree claims. Pruning first therefore has to happen before the branch
+	// is resolved, not merely before it is checked out.
+	_ = manager.git(ctx, "-C", source, "worktree", "prune")
+	baseRevision, err := manager.prepareBaseRevision(ctx, source, request, credentials)
 	if err != nil {
 		return Workspace{}, err
 	}
 	if err := os.MkdirAll(workspace.Root, 0o700); err != nil {
 		return Workspace{}, fmt.Errorf("create workspace: %w", err)
 	}
-	baseRevision := "origin/" + request.DefaultBranch
-	if request.RepositoryMode == "" || request.RepositoryMode == RepositoryModeManagedClone {
-		baseRevision = request.DefaultBranch
-	}
-	_ = manager.git(ctx, "-C", source, "worktree", "prune")
 	if err := manager.git(ctx, "-C", source, "worktree", "add", "-B", request.Branch, workspace.Repository, baseRevision); err != nil {
 		_ = os.RemoveAll(workspace.Root)
 		return Workspace{}, fmt.Errorf("create worktree: %w", err)
@@ -153,11 +173,11 @@ func (manager Manager) excludeLoopArtifacts(ctx context.Context, repository stri
 	return nil
 }
 
-func (manager Manager) prepareSource(ctx context.Context, root string, request PrepareRequest) (string, error) {
-	credentials, err := credentialEnvironment(request.Environment)
-	if err != nil {
-		return "", err
-	}
+// prepareSource returns the repository the workspace is a worktree of, cloning
+// or repairing the managed cache when that is the mode. It does not fetch:
+// which revisions have to be present depends on the branch the execution
+// starts from, which prepareBaseRevision decides.
+func (manager Manager) prepareSource(ctx context.Context, root string, request PrepareRequest, credentials []string) (string, error) {
 	if request.RepositoryMode == RepositoryModeExistingPath {
 		source, err := filepath.EvalSymlinks(request.LocalRepositoryPath)
 		if err != nil {
@@ -169,9 +189,6 @@ func (manager Manager) prepareSource(ctx context.Context, root string, request P
 		}
 		if !info.IsDir() {
 			return "", errors.New("local repository path must be a directory")
-		}
-		if err := manager.gitWithEnv(ctx, credentials, "-C", source, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
-			return "", fmt.Errorf("fetch local repository default branch: %w", err)
 		}
 		return source, nil
 	}
@@ -197,10 +214,104 @@ func (manager Manager) prepareSource(ctx context.Context, root string, request P
 			return "", fmt.Errorf("reclone corrupt repository cache: %w", err)
 		}
 	}
-	if err := manager.gitWithEnv(ctx, credentials, "-C", cache, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
+	return cache, nil
+}
+
+// prepareBaseRevision brings the revision a new workspace starts from into the
+// source repository and names it.
+//
+// The execution branch is preferred over the default branch whenever it exists,
+// because it holds what the previous executions of this job produced: a
+// pipeline execution that ran against the default branch would report a verdict
+// about code the developer execution never touched. The branch is looked for on
+// the remote first and in this runner's own repository second, and only a job
+// with no execution branch at all starts from the default branch.
+func (manager Manager) prepareBaseRevision(ctx context.Context, source string, request PrepareRequest, credentials []string) (string, error) {
+	if err := manager.gitWithEnv(ctx, credentials, "-C", source, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
 		return "", fmt.Errorf("fetch default branch: %w", err)
 	}
-	return cache, nil
+	reference := "refs/heads/" + request.Branch
+	published, err := manager.publishedBranchExists(ctx, source, reference, credentials)
+	if err != nil {
+		return "", err
+	}
+	if published {
+		// The published branch decides the tip: it is the one state of the job
+		// every runner can see, and an earlier execution of this job may well
+		// have run on a different one. The destination is named in the refspec
+		// rather than left to the remote's configured one, so the reference the
+		// workspace then starts from is the one this fetch just wrote — a
+		// checkout configured to track only its default branch would otherwise
+		// leave it absent, or stale from an earlier execution.
+		tracking := trackedRevision(request, request.Branch)
+		if err := manager.gitWithEnv(ctx, credentials, "-C", source, "fetch", "origin", "+"+reference+":"+tracking); err != nil {
+			return "", fmt.Errorf("fetch execution branch: %w", err)
+		}
+		return tracking, nil
+	}
+	local, err := manager.referenceExists(ctx, source, reference)
+	if err != nil {
+		return "", fmt.Errorf("inspect local execution branch: %w", err)
+	}
+	if local {
+		// Nothing was published — a role without `mayPush`, or a project whose
+		// remote refuses writes — but this runner ran an earlier execution of
+		// the job, and its work is still on the branch here.
+		return reference, nil
+	}
+	// First execution of the job: the branch exists nowhere, so the workspace
+	// starts from the default branch. That start point is stated rather than
+	// left implied by "git worktree add -B", whose reset would just as happily
+	// rewind an existing branch onto it.
+	return trackedRevision(request, request.DefaultBranch), nil
+}
+
+// trackedRevision names, inside the source repository, the revision that tracks
+// a branch of the remote. A managed cache is a mirror, so the remote's branches
+// are its own refs/heads/*; an existing checkout keeps them under
+// refs/remotes/origin/* because its refs/heads/* belong to whoever works there.
+func trackedRevision(request PrepareRequest, branch string) string {
+	if request.RepositoryMode == RepositoryModeExistingPath {
+		return "refs/remotes/origin/" + branch
+	}
+	return "refs/heads/" + branch
+}
+
+// publishedBranchExists reports whether the remote holds the execution
+// branch. A missing branch is an ordinary answer here — most jobs have never
+// published one — so it is read from the output of a successful ls-remote
+// rather than from a failure, which would be indistinguishable from an
+// unreachable or unauthenticated remote.
+func (manager Manager) publishedBranchExists(ctx context.Context, source, reference string, credentials []string) (bool, error) {
+	output, err := manager.gitOutputWithEnv(ctx, credentials, "-C", source, "ls-remote", "--heads", "origin", reference)
+	if err != nil {
+		return false, fmt.Errorf("inspect published execution branch: %w", err)
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == reference {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// referenceExists reports whether the source repository itself holds a
+// reference. for-each-ref answers with its output rather than its exit status,
+// so "the branch is not there" stays distinguishable from "Git failed", and its
+// pattern match is confirmed against the full reference name so a nested
+// reference cannot pass for the branch itself.
+func (manager Manager) referenceExists(ctx context.Context, source, reference string) (bool, error) {
+	output, err := manager.gitOutput(ctx, "-C", source, "for-each-ref", "--format=%(refname)", reference)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == reference {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ReleaseBranch detaches a workspace's HEAD, leaving its commits and files in

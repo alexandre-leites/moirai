@@ -1511,3 +1511,80 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 ## Next Recommended Implementation
 
 Issue #96 (finding F9) — make transition replay idempotent. It is the highest-priority platform-review issue with no `ai-working` label as of this session (#90, #92, #94 and #100 were all claimed). The transition outbox is at-least-once, but `_dispatch` in `workflows/nodes.py` increments attempt counters and `total_agent_executions` even when it reuses a queued request, and creates a duplicate request for the same role when the previous one already moved to `dispatched`; outbox rows set to `processing` are never retried after a crash. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice. Those budgets are what open a project circuit in the first place, so double-counting them is what makes the breaker above fire early.
+
+---
+
+# Session: F3 follow-up / issue #136 — an execution's workspace is force-reset to the default branch (branch `issue-136`)
+
+- Agent/session identifier: runner-agent-issue-136
+- Last updated: 2026-07-29
+- Branch: `issue-136`
+- Scope: `runner/internal/repository/` and `runner/README.md` only. No orchestrator, API, web, proto, or Compose file was touched, and no file under `runner/internal/dispatch/` or `runner/internal/agents/`.
+
+## Done
+
+- [x] Prepare a workspace from the job's execution branch instead of force-resetting it to the default branch (#136)
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/repository/manager.go`, `runner/internal/repository/manager_test.go`, `runner/internal/repository/delivery_test.go`, `runner/README.md`.
+  - Behavior delivered:
+    - `Prepare` now resolves an explicit base revision before creating the worktree: the execution branch as published on the remote (found with `git ls-remote --heads origin refs/heads/<branch>`, then fetched) if it exists; otherwise the execution branch in this runner's own repository; otherwise the default branch. `git worktree add -B <branch> <workspace> <base>` is still what creates the worktree, but the start point it resets onto is now the branch's own tip whenever that tip exists, so the previous execution's commits survive.
+    - `prepareBaseRevision` names the start point per repository mode: a managed cache is a `--mirror`, so the remote's branches *are* its `refs/heads/*`; an existing checkout keeps them under `refs/remotes/origin/*`, because its own `refs/heads/*` belong to whoever works there. Both modes are covered by real-git tests.
+    - `git worktree prune` moved ahead of every fetch. Git refuses to fetch into a branch a worktree claims — including a *stale* registration whose directory `Prepare` has just removed — so pruning after the fetch would have made every second preparation of a job fail once the execution branch became a fetch target (`fatal: refusing to fetch into branch 'refs/heads/agent/…' checked out at …`, reproduced with real git before the ordering was changed).
+    - The credential environment is validated before the workspace is removed or anything is fetched, so an unusable credential fails the execution instead of first destroying the workspace the previous one left behind.
+    - "The remote branch does not exist" is read from the *output* of a successful `ls-remote`, and "the local branch does not exist" from the output of `for-each-ref`, never from an exit status. An unreachable or unauthenticated remote therefore fails the preparation loudly instead of degrading into "start from the default branch", which is the bug this issue is about.
+  - Validation performed: see `Validation Status` below.
+
+- [x] Update #100's work-in-progress anchor test, whose premise this fix removes
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/repository/delivery_test.go`.
+  - Behavior delivered: `TestRecordedWorkInProgressSurvivesTheNextPreparation` asserted that *every* preparation rewound the execution branch off the failed run's commit; its author wrote it to self-invalidate if #136 were fixed, and it did — the guard fired on the first run of the new code. It is now `TestRecordedWorkInProgressSurvivesAPreparationThatMovesTheBranch`: another runner publishes the branch, this runner's preparation resets its local branch onto the published tip, and only `refs/moirai-wip/<executionId>` still reaches the failed run's commit. The anchor keeps a real job, narrowed to the case the branch cannot cover; the case it used to cover (a retry on the same runner inheriting the failed work) is now provided by the branch itself and is asserted in `TestPrepareResumesAJobFromThePreviousExecutionsWork`.
+
+## Decisions
+
+- Decision: the execution branch, not the workspace directory, carries a job's work between its executions. Every execution still gets a freshly created workspace; it is created from the branch tip.
+  - Context: step 1 of the issue asks for the lifecycle to be chosen explicitly — one workspace per job kept across executions, or re-creation from the branch tip with a default-branch fallback for the first execution.
+  - Alternatives considered: (1) keep `workspaces/job-<jobId>` across the executions of a job and re-use it; (2) re-create the workspace from the branch tip; (3) re-create from a per-execution ref such as `wip/<executionId>`.
+  - Reason: (1) cannot work as the system is built. `Dispatcher.Execute` removes the workspace when an execution ends unless retention keeps it, retention is bounded by age, count and free disk, and — decisively — the executions of one job are leased independently, so the next one may run on a different runner that has never seen the directory. A directory is local; a branch is not. (3) makes the runner depend on the orchestrator naming the right predecessor execution, which nothing does today (#106), and the branch name is already stable per job. (2) needs nothing new: the orchestrator already gives every execution of a job the same `agent/<issueExternalId>/<jobId>` branch, and `deliver` already pushes it.
+  - Consequences: preparation costs one extra `ls-remote` round trip per execution, and one extra `fetch` when the branch is published. A job's branch accumulates the commits of its executions rather than one commit rewritten repeatedly, so the delivery push is a fast-forward instead of the non-fast-forward #100 had to design around. The workspace directory keeps exactly the meaning it had before: scratch space plus forensics until the next execution of the same job removes it.
+
+- Decision: the published branch outranks this runner's own copy of it; the local branch is used only when nothing is published.
+  - Context: after a fetch of the execution branch, a managed cache's `refs/heads/<branch>` *is* the remote's branch — the mirror refspec (`+refs/*:refs/*`) force-updates it — so "prefer the local tip" is not even expressible there without capturing it beforehand.
+  - Alternatives considered: (1) local branch first; (2) whichever tip is a descendant of the other, remote on divergence.
+  - Reason: the remote is the one state of a job that every runner resolves identically, so preferring it keeps preparation deterministic no matter which runner ran the previous execution — (1) would make a job's start point depend on *where* it last ran. (2) buys nothing that matters: the only way the local branch legitimately leads the remote is work that was never published, and #100 already anchors that at `refs/moirai-wip/<executionId>`, so nothing is lost when the branch is reset onto the published tip. The local branch is still consulted, because a role without `mayPush` (today every file-modifying role except `developer`) leaves its work nowhere else.
+  - Consequences: a runner that keeps working on a job it has already run inherits its own previous execution's commit even when nothing was published — which is what makes the mandatory local pipeline (#90) validate the developer's tree. Across runners, that inheritance depends on the delivery push, which is broken in `managed_clone` mode for an unrelated reason recorded under `Known Issues` below.
+
+- Decision: the first execution's default-branch start point is stated, not implied.
+  - Context: step 3 of the issue. `git worktree add -B <branch> <path> <defaultBranch>` produced the right result for a first execution and the wrong one for every execution after it, and the two cases were indistinguishable in the code.
+  - Alternatives considered: `git worktree add` without `-B` and let Git decide.
+  - Reason: dropping `-B` fails outright when the branch already exists elsewhere in the repository, and would leave "first execution starts from the default branch" as an accident of Git's checkout rules rather than a decision the runner makes. `prepareBaseRevision` now returns the default branch only after establishing that the execution branch exists neither on the remote nor locally, and says so.
+  - Consequences: the branch resolution is one function with three named outcomes, each covered by a test that fails if the outcome changes.
+
+## Validation Status
+
+- Targeted tests: Passed — `cd runner && go test ./internal/repository/`. Five new real-git tests cover the two acceptance criteria in both repository modes (`TestPrepareStartsAJobWithoutAnExecutionBranchFromTheDefaultBranch`, `TestPrepareResumesAJobFromThePreviousExecutionsWork`, `TestPrepareResumesAJobFromTheBranchPublishedByAnotherRunner`, `TestPrepareResumesAnExistingPathJobFromItsExecutionBranch`, `TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch`), plus stub tests pinning the command sequence and the credential environment of the two networked commands the fix adds. All five were re-run against the *unmodified* `manager.go` from `09a6c1b` in this worktree: the four resume tests fail there, each landing on the default-branch tip, while the first-execution test passes — the behaviour the fix had to preserve. `TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch` was likewise confirmed to fail when the execution-branch fetch is weakened to `git fetch origin <branch>` (`fatal: invalid reference: refs/remotes/origin/agent/issue-7/run-1`).
+- Service tests: Passed — `make test-runner` (`go test -race ./...`), all packages `ok`.
+- Full repository tests: Not run — the change is Go-only, inside `runner/`. `make test` would additionally build the web and orchestrator suites, which no file here touches.
+- Build: Passed — `cd runner && go build ./...`.
+- Lint: Passed — `gofmt -l .` (no output) and `go vet ./...` in `runner/`.
+- Type checks: Not applicable — Go only.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. The defect and the fix were both reproduced against real Git instead: the issue's plain-git reproduction was run first (`worktree add -B agent/42/abc ../wt2 main` after a commit in `wt1` yields `base`, and `agent/42/abc` equals `main`), and the equivalent through `Manager.Prepare` is now a test.
+
+## Known Issues
+
+- Issue: every `git push` from a `managed_clone` workspace fails, so the execution branch is never published in that mode.
+  - Severity: P1 — it breaks delivery itself, not only this issue's cross-runner half.
+  - Impact: `Manager.Push`, `Manager.PushWorkInProgress` and `Manager.CleanupRemoteBranch` all push with a refspec, and the workspace is a worktree of a `git clone --mirror` cache, whose `remote.origin.mirror=true` makes Git reject any push that names one: `fatal: --mirror can't be combined with refspecs`. A completed developer execution therefore fails at delivery, and no execution branch reaches the code host. `existing_path` mode is unaffected (its source is an ordinary checkout).
+  - Evidence: reproduced at the Go level with a throwaway test that ran `Prepare` → `Commit` → `Push` against a real repository in `managed_clone` mode — `push branch: git -C: exit status 128: fatal: --mirror can't be combined with refspecs` (git 2.43.0). Equivalent plain-git reproduction: `git clone --mirror <origin> cache.git && git --git-dir cache.git worktree add -B agent/42/abc wt main && (cd wt && git push --set-upstream origin agent/42/abc)`.
+  - Suggested resolution: filed as its own issue. Left unfixed here deliberately: it is a distinct defect in `delivery.go`'s push semantics (the candidate fixes — `-c remote.origin.mirror=false` on each push, or cloning the cache as `--bare` with an explicit fetch refspec — change delivery or cache layout, not workspace preparation), and #136 is complete without it. Within a single runner the first acceptance criterion holds regardless, because preparation falls back to the local execution branch, which is exactly the path that this bug leaves as the only carrier.
+
+- Issue: nothing prunes an execution branch, so a job's branch keeps every execution's commit.
+  - Severity: P3
+  - Impact: the branch now accumulates `developer`, `repairer` and `wip(failed)` commits for a job instead of a single rewritten commit. That is the point of the fix — the history is honest — but a reviewer or a pull request for a long-running job sees more commits than before.
+  - Evidence: `retainWorkInProgress` (`runner/internal/dispatch/dispatch.go`) commits on the execution branch for every non-delivering run, and that commit is now inherited rather than discarded.
+  - Suggested resolution: none needed for correctness. If squashing is wanted it belongs to whoever owns delivery or the orchestrator's pull-request step, not to workspace preparation.
+
+## Next Recommended Implementation
+
+Fix the `managed_clone` push failure recorded above — no delivery reaches the code host in that mode today, which makes it strictly more urgent than anything left in this area. Relevant files: `runner/internal/repository/delivery.go` (`Push`, `PushWorkInProgress`, `CleanupRemoteBranch`) and, if the cache layout is chosen as the fix instead, `runner/internal/repository/manager.go`'s `prepareSource`. Expected behavior: a completed developer execution in `managed_clone` mode publishes its branch to the remote, and a failed one publishes `wip/<executionId>`. Targeted validation: a real-git test that prepares a `managed_clone` workspace, commits, pushes, and reads the branch back out of the origin repository — the existing push tests all run against an ordinary checkout, which is why the defect survived.
