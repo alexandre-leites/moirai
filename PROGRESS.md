@@ -1574,6 +1574,111 @@ Done. `AGENTS.md` states the labelling rule, the three non-dependabot pull reque
 
 Issue #96 (finding F9) — make transition replay idempotent, still the highest-priority platform-review issue that no branch has claimed. It was already the recommendation of the issue #92 session and nothing in this session touched it. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice.
 
+# Session: issue #113 — Web UI has no runners page although `GET /api/v1/runners` already exists (branch `issue-113`)
+
+## Current Status
+
+- Overall status: Complete for issue #113.
+- Current phase: MVP web surface — `PROJECT.md:62,90` require a runner status view that did not exist.
+- Active implementation: issue-113 agent session, 2026-07-29 — `/runners` page.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-113.
+
+## Done
+
+- [x] `/runners` lists the runner fleet
+  - Completed: 2026-07-29.
+  - Relevant files: `web/src/api.ts`, `web/src/runner-status.ts` (new), `web/src/runners.tsx` (new), `web/src/main.tsx`, `web/src/styles.css`, `web/src/vite-env.d.ts` (new), `web/src/runner-status.test.ts` (new), `web/src/runners.test.tsx` (new), `web/src/runners-page.test.tsx` (new), `web/vitest.config.ts` (new), `web/package.json`, `web/package-lock.json`, `web/README.md`, `README.md`, `Makefile`, `.github/workflows/ci.yml`.
+  - Behavior delivered:
+    - **Integration only, no new server surface.** `ListRunners`, `GET /api/v1/runners` and the `Runner` schema in `api/openapi.yaml` already existed; nothing in `web/` called them. No API, orchestrator, proto or schema file was touched. (Issue #57 covered the same ground and was auto-closed by PR #81, whose merge produced a tree identical to its first parent, so none of it was on `main`. Written from scratch.)
+    - `api.ts` gains a `Runner` type and `listRunners(signal?)`. Two boundary decisions: a body without a `runners` array raises instead of unwrapping to `[]`, because returning `[]` would render "no runner is registered" for what is really a broken response; and `labels` is normalized from the wire's `null` to `[]`, because the handler marshals the protobuf's repeated field directly and Go writes a nil slice as `null`, contradicting the OpenAPI schema.
+    - `runner-status.ts` holds the fleet's pure logic — heartbeat age formatting, the staleness rule, the status-pill mapping, `countOnline`, error copy, and a `loadRunners` that resolves to an error result rather than rejecting.
+    - `runners.tsx` splits into `RunnersView` (pure, every state directly renderable) and `RunnersPage` (fetching). One row per runner: name + short id, status pill, labels, draining flag, heartbeat age with the absolute time in `title`. Stale rows carry a warn stripe, a "Stale" badge beside the age, and a "Stale" status pill — three signals, none of them colour alone. Loading, empty and failure states are explicit; a failed *refresh* keeps the last known rows behind a warning instead of blanking them.
+    - Polling per specification §4.5 interim mode: 10s while the tab is visible, paused on `document.hidden`, resumed on `visibilitychange`, one request at a time, cleaned up on unmount.
+    - `/runners` is routed inside `ProtectedRoute` and linked from the nav and the dashboard link list.
+  - Validation performed: 53 web unit tests, all three acceptance criteria mutation-tested, typecheck, lint, production build.
+  - Commands executed:
+    - `make test-web` → `tsc --noEmit` clean; `eslint .` → `✖ 10 problems (0 errors, 10 warnings)`, all ten pre-existing in `auth.tsx`/`main.tsx`/`tokens.tsx` and none in new files; `vitest run` → `Test Files 3 passed (3) / Tests 53 passed (53)`.
+    - `make build-web` → `tsc && vite build` → `✓ 26 modules transformed … built in 48ms`.
+    - Mutation testing (each mutation applied to the source, suite re-run, source restored) — every one is caught, so no acceptance criterion rests on a vacuous test:
+      - `stale` forced to `false` → 10 failures. `heartbeat.stale` ignored by the status pill → 2. `countOnline` replaced by `runners.length` → 2. The heartbeat cell's `title` removed → 1. The draining cell blanked → 1.
+      - The error block never rendered → 7 failures. A malformed body returning `[]` instead of raising → 1.
+      - The in-flight guard removed → 2. `setNow(requestedAt)` changed to `setNow(Date.now())` → 1. `clearInterval` removed → 1. The `!document.hidden` pause removed → 1. The `cancelled` guard removed → 1. The `labels ?? []` normalization removed → 1.
+      - Restored tree: `Tests 53 passed (53)`.
+  - Notes: no migration, no Compose change. One new build-time variable, `VITE_RUNNER_HEARTBEAT_INTERVAL_MS`, documented in `web/README.md`.
+
+- [x] Web unit tests now exist and run in CI
+  - Completed: 2026-07-29.
+  - Behavior delivered: Vitest is wired in (`web/vitest.config.ts`, `npm test`), `make test-web` runs `tsc --noEmit`, `eslint .` and `vitest run`, and the CI `build-web` job now runs `make test-web` before `make build-web`. Until this change CI ran neither eslint nor `tsc` for `web/` — only the production build. Two new dev dependencies: `vitest` and `jsdom` (169 packages, no package removed, no unrelated version bump, `npm audit --audit-level=high` clean; the two pre-existing moderate `react-router` advisories are unchanged).
+  - Notes: this is a deliberately minimal slice of what `docs/design/web-console/tasks.md` C2 and issue #123 ask for. There is no MSW layer — components take an `ApiClient` prop, so a stub object suffices. Whoever takes #123 should widen this rather than start over.
+
+## Decisions
+
+- Decision: the page follows specification §5.5's information architecture and status vocabulary but keeps the existing pages' chrome, rather than porting the console design system.
+  - Context: `docs/design/web-console/` does specify a runners view (§5.5, task D5). D5 is written against a widened `GET /api/v1/runners` (task A12: capacity, activeJobs, reservedOffers, version) and a new `POST /api/v1/runners/{id}/state` (task B1), and it assumes the C-phase foundation — design tokens (C3) and the component library (C4) — which is not ported. `web/` is still the old four-page SPA the console is meant to replace.
+  - Alternatives considered: (a) port the C3 token sheet and C4 components for this one page; (b) build the §5.5 fleet cards with the fields that do exist and leave the capacity meter out; (c) invent a layout.
+  - Reason: the issue is explicit that no API change is needed, and A12/B1 are other people's tasks; (a) is C3+C4, multi-day, and would leave one page in a visual language no other page speaks. (c) is what the design package exists to prevent. What §5.5 *can* be honoured on today's payload is its information architecture (name, status pill Online/Draining/Offline, heartbeat age, labels) and §5's global rules (relative timestamps with the absolute time in `title`, explicit loading/empty/error states, "never a silent blank"), and those are followed exactly. The card-vs-table shape follows the issue's own acceptance criterion ("one row per runner") and the three existing pages.
+  - Consequences: capacity, version, backend and "Working on" are absent, and there are no drain/disable/revoke controls. When A12 and B1 land, D5 replaces this page rather than extending it; the pure logic in `runner-status.ts` survives that.
+
+- Decision: a stale heartbeat overrides `runners.status` in the pill and in the online count.
+  - Context: `runners.status` is a lagging column. `record_heartbeat` sets it to `online`, but only `expire_leases` (600s, and only for a runner holding a lease) or revocation sets it back to `offline`; `sessions.disconnect()` is in-memory and never writes. An *idle* runner that is killed keeps `status = 'online'` forever.
+  - Alternatives considered: render the pill straight off `status` and let the "Stale" badge carry the contradiction.
+  - Reason: an operator opening this page is asking "is anything actually connected". A green `Online` pill beside "7d ago" answers that wrongly, and the header count would have said `3/3 online` for a fleet with nothing alive. Warn rather than crit, because §5.1 assigns warn to a stale probe.
+  - Consequences: `describeRunnerStatus` takes the heartbeat as a second argument and `countOnline` takes `now`. A runner whose row genuinely is `offline` still reads `Offline`; stale only outranks `online`.
+
+- Decision: the staleness budget is a build-time constant with an escape hatch, not a hard-coded 30s.
+  - Context: the rule is three missed heartbeats, and the interval is `LOOP_RUNNER_HEARTBEAT_INTERVAL` — per-runner env configuration that `GET /api/v1/runners` does not report.
+  - Alternatives considered: hard-code the 10s default; wait for A12.
+  - Reason: hard-coding means a fleet configured to 60s renders every runner permanently stale, which is a page that cries wolf until nobody reads it. `VITE_RUNNER_HEARTBEAT_INTERVAL_MS` costs eight lines and removes that failure mode.
+  - Consequences: it is read at build time (Vite), so a Compose deployment overriding it must rebuild the image. Documented as such. It is deleted when A12 puts the interval in the payload.
+
+- Decision: heartbeat ages are measured from when the request was sent, not when it returned.
+  - Context: found by the adversarial review. `setNow(Date.now())` ran after `await`, so every age carried the full round-trip.
+  - Reason: with a 30s budget, roughly 6s of latency was enough to flip a runner that beat 25s ago into "Stale" — and it fires precisely when the orchestrator is struggling, which is when the page is being read. Sampling before the request is both correct and free.
+  - Consequences: ages can lag by up to one poll interval, which is honest: they are as fresh as the answer they came from.
+
+## Post-review corrections
+
+An adversarial review of the first commit found six P2s and a list of P3s. All were fixed before the PR.
+
+- **Ages inflated by request latency** (above). Reproduced by the reviewer under fake timers: a runner 2s old at request time rendered `37s ago` + stale when the response took 35s. Now covered by `measures heartbeat age from when the orchestrator was asked, not when it answered`, which fails against the old code.
+- **Polls could stack and resolve out of order.** With nothing resolving, four concurrent requests had accumulated after 30s, and resolving the newest then the oldest left the *oldest* snapshot on screen. Fixed with a one-request-at-a-time gate and a per-request `AbortController`; `never stacks requests when the orchestrator is slow to answer` and `does not let an abandoned request overwrite a newer one` pin both halves. The related wedge — `loading` stuck `true` disabling Refresh forever behind a hung request — is fixed by never disabling the control; a click restarts the load from scratch.
+- **The pill contradicted the badge** (above).
+- **The 10s heartbeat interval was hard-coded** (above).
+- **The abort test was vacuous.** `expect(container.textContent).toBe("")` after `root.unmount()` is trivially true, and React 18 removed the setState-after-unmount warning, so deleting the guard left all tests green. Replaced with the out-of-order test on a live component.
+- **`labels` is typed non-nullable but arrives as `null`.** Go marshals a nil `[]string` as `null`, so an unlabelled runner would have thrown on `labels.length` — and because `main.tsx` wraps the whole app in the ErrorBoundary, that replaces the *entire console*, nav included, with "Something went wrong". The view's `?? []` was load-bearing while the type said the branch was unreachable and no test covered it. Now normalized in the API client and covered by `normalizes the null the Go handler emits for a runner with no labels`.
+- **P3s fixed:** an unknown future `status` value now renders `idle` rather than painting the fleet critical; an unreadable timestamp says "unknown" instead of being conflated with "never reported"; the malformed-body rejection is a plain `Error` rather than an `ApiError` claiming status 200 (which the server never sent); the clock-skew comment named the wrong two clocks (the timestamp is stamped by the orchestrator, not the runner); the stale row tint uses `color-mix` on `--warning` instead of a literal rgba; the count is in an `aria-live="polite"` region; the `vitest.config.ts` comment claimed no test needs a DOM, which the same commit contradicted.
+- **P3s accepted, not fixed:** `eslint .` exits 0 on warnings, so `react-hooks/exhaustive-deps` cannot fail CI; `--max-warnings 0` needs the ten pre-existing warnings resolved first and belongs with #123. `npm ci` now runs twice in the `build-web` job (once per make target), costing a few seconds. The job is still named `build-web` though it now gates tests; renaming it would break `validate`'s `needs` list and any branch protection.
+
+## Validation Status
+
+- Targeted tests: Passed — `make test-web` → `Tests 53 passed (53)` across `runner-status.test.ts` (26), `runners.test.tsx` (14) and `runners-page.test.tsx` (13). Thirteen mutations of the source were each confirmed to fail the suite (see Commands executed).
+- Service tests: Not applicable beyond `web/` — no Python or Go file changed. `make test-orchestrator`, `make test-runner` and `make test-api` were deliberately not invoked.
+- Full repository tests: Not run.
+- Build: Passed — `make build-web`.
+- Lint: Passed — `eslint .`, 0 errors. Ten warnings, all pre-existing and none in the new files.
+- Type checks: Passed — `tsc --noEmit`.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose change. The new `VITE_RUNNER_HEARTBEAT_INTERVAL_MS` is optional and defaults to the runner's own default, so the existing image build is unaffected.
+- End-to-end workflow: Not run. The page was not exercised against a live orchestrator in a browser; the fleet, empty, stale, failed-load and failed-refresh states were verified by mounting the real component under jsdom with a stubbed `ApiClient`, not by clicking through the Compose stack.
+
+## Known Issues
+
+- Issue: the runners page cannot know a runner's real heartbeat interval.
+  - Severity: P3
+  - Impact: the staleness rule assumes the runner default (10s) unless the bundle is built with `VITE_RUNNER_HEARTBEAT_INTERVAL_MS`. A fleet running a longer interval without that build flag reports every runner stale.
+  - Evidence: `LOOP_RUNNER_HEARTBEAT_INTERVAL` is runner-side env configuration (`runner/README.md`); `GET /api/v1/runners` does not carry it.
+  - Suggested resolution: `docs/design/web-console/tasks.md` A12 already plans to widen the payload — add the interval there, then delete the variable.
+
+- Issue: `runners.status` cannot distinguish a disconnected idle runner from a live one.
+  - Severity: P3 — worked around in the UI, not fixed at the source.
+  - Impact: the column stays `online` indefinitely for a killed runner that held no lease, so every consumer of it other than this page (including the scheduler's `JOIN app.runners AS r ON r.status = 'online'`) treats it as connected.
+  - Evidence: `record_heartbeat` writes `status = 'online'`; only `expire_leases` and revoke write it back; `sessions.disconnect()` is in-memory only.
+  - Suggested resolution: belongs to whoever owns `orchestrator/` — either flip the column on stream disconnect, or have the scheduler's candidate query gate on `last_seen_at` freshness rather than the column.
+
+## Next Recommended Implementation
+
+Issue #123 (web test infrastructure) is now much cheaper: Vitest and jsdom are installed, `make test-web` runs them, and CI gates on them. What remains of `docs/design/web-console/tasks.md` C2 is Testing Library, MSW, and raising `eslint` to `--max-warnings 0` after clearing the ten existing warnings. Doing it before more D-phase views land means each view arrives with the "renders / empty / error / primary action" bar the specification asks for rather than retrofitting it.
 ---
 
 # Session: issue #111 — Orchestrator aborts the runner stream when a runner reports draining (branch `issue-111`)

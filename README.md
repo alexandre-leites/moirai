@@ -60,4 +60,4 @@ Each service README lists its executable configuration surface:
 - [orchestrator configuration](orchestrator/README.md#configuration)
 - [API configuration and HTTP contract](api/README.md#configuration)
 - [runner configuration](runner/README.md#configuration)
-- [web development and proxying](web/README.md#development)
+- [web pages, development and proxying](web/README.md#pages)
