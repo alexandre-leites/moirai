@@ -9,7 +9,8 @@ from uuid import uuid4
 from moirai.domain.control_plane import AuthenticationError, OfferError, RegistrationError
 from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import ExecutionEvent
-from moirai.persistence.control_plane import AsyncpgControlPlane
+from moirai.persistence.control_plane import AsyncpgControlPlane, _runner_failure_fingerprint
+from moirai.workflows.runner_events import ROLE_TO_SUFFIX
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -157,7 +158,35 @@ class _DurableConnection:
             if self.pool.offer_status != "offered" or self.pool.offer_expires_at > arguments[0]:
                 return None
             self.pool.offer_status = "expired"
+            self.pool.record_unanswered_offer(arguments[0])
             return {"job_id": self.pool.job_id}
+        if "AS bootstrap" in query:
+            if self.pool.job_status != "offered":
+                return None
+            if arguments[1] is not None and str(arguments[1]) != str(self.pool.runner_id):
+                return None
+            return {
+                "workflow_run_id": self.pool.workflow_id,
+                "project_id": self.pool.project_id,
+                "terminal": self.pool.workflow_status
+                in {"completed", "blocked", "failed", "cancelled"},
+                "request_id": (
+                    self.pool.execution_request_id
+                    if self.pool.execution_request_status == "dispatched"
+                    else None
+                ),
+                "bootstrap": (
+                    self.pool.workflow_status == "offered"
+                    and self.pool.workflow_phase == "offered"
+                    and self.pool.branch_name is None
+                    and self.pool.execution_request_status == "none"
+                ),
+            }
+        if "AS unanswered" in query:
+            return {
+                "unanswered": self.pool.unanswered_offers,
+                "started_at": self.pool.unanswered_since,
+            }
         if "SET status = 'recovering'" in query:
             if self.pool.job_status not in {"preparing", "running"} or self.pool.lease_expires_at > arguments[0]:
                 return None
@@ -168,11 +197,6 @@ class _DurableConnection:
                 "runner_id": self.pool.runner_id,
                 "lease_generation": 2,
             }
-        if "SET status = 'cancelled'" in query:
-            if self.pool.job_status != "offered":
-                return None
-            self.pool.job_status = "cancelled"
-            return {"workflow_run_id": self.pool.workflow_id, "project_id": self.pool.project_id}
         if "SELECT state, opened_at FROM app.project_circuit_state" in query:
             return self.pool.project_circuit
         if "SELECT state, opened_at FROM app.provider_circuit_state" in query:
@@ -182,13 +206,14 @@ class _DurableConnection:
         if "UPDATE app.job_offers" in query:
             if self.pool.offer_status != "offered" or self.pool.offer_expires_at <= arguments[2]:
                 return None
-            self.pool.offer_status = "rejected" if "SET status = 'rejected'" in query else "accepted"
+            if "SET status = 'rejected'" in query:
+                self.pool.offer_status = "rejected"
+                self.pool.record_unanswered_offer(arguments[2])
+            else:
+                self.pool.offer_status = "accepted"
+                self.pool.unanswered_offers = 0
+                self.pool.unanswered_since = None
             return {"job_id": self.pool.job_id}
-        if "SET status = 'cancelled'" in query:
-            if self.pool.job_status != "offered":
-                return None
-            self.pool.job_status = "cancelled"
-            return {"workflow_run_id": self.pool.workflow_id, "project_id": self.pool.project_id}
         if "SET status = 'preparing'" in query:
             if self.pool.job_status != "offered":
                 return None
@@ -241,10 +266,31 @@ class _DurableConnection:
                 self.pool.provider_circuit["state"] = "half_open"
             return "UPDATE 1"
         if "UPDATE app.workflow_execution_requests" in query:
+            if "SET status = 'queued'" in query:
+                if self.pool.execution_request_status != "dispatched":
+                    return "UPDATE 0"
+                self.pool.execution_request_status = "queued"
+                return "UPDATE 1"
+            if "SET status = 'expired'" in query:
+                self.pool.execution_request_status = "expired"
+                return "UPDATE 1"
             if self.pool.execution_request_status != "queued":
                 return "UPDATE 0"
             self.pool.execution_request_status = "dispatched"
             return "UPDATE 1"
+        if "UPDATE app.jobs" in query and "recovery_reason" in query:
+            self.pool.job_status = "recovering" if "SET status = 'recovering'" in query else "cancelled"
+            if self.pool.job_status == "recovering":
+                self.pool.lease_generation += 1
+            return "UPDATE 1"
+        if "UPDATE app.workflow_runs" in query and "SET status = " in query:
+            self.pool.workflow_status = str(query.split("SET status = '")[1].split("'")[0])
+            if "current_phase" in query:
+                self.pool.workflow_phase = self.pool.workflow_status
+            return "UPDATE 1"
+        if "DELETE FROM app.project_locks" in query:
+            self.pool.project_locked = False
+            return "DELETE 1"
         if "app.jobs" in query and "last_event_sequence" in query:
             if self.pool.last_event_sequence >= int(arguments[1]):
                 return "UPDATE 0"
@@ -270,6 +316,12 @@ class _DurablePool:
         self.offer_status = "offered"
         self.job_status = "offered"
         self.workflow_status = "planning"
+        self.workflow_phase = "planning"
+        self.branch_name: str | None = "moirai/issue-91"
+        self.project_locked = True
+        self.lease_generation = 1
+        self.unanswered_offers = 0
+        self.unanswered_since: datetime | None = None
         self.last_event_sequence = 0
         self.execution_request_id = "00000000-0000-0000-0000-000000000007"
         self.execution_request_status = "none"
@@ -292,6 +344,19 @@ class _DurablePool:
             "status": "online",
             "labels": ["docker"],
         }
+
+    def record_unanswered_offer(self, now: object) -> None:
+        self.unanswered_offers += 1
+        if self.unanswered_since is None and isinstance(now, datetime):
+            self.unanswered_since = now
+
+    def bootstrap_run(self) -> None:
+        """Shapes the pool like a run schedule() just created: no branch, no
+        execution request, nothing accepted yet."""
+        self.workflow_status = "offered"
+        self.workflow_phase = "offered"
+        self.branch_name = None
+        self.execution_request_status = "none"
 
     def acquire(self) -> _DurableConnection:
         return _DurableConnection(self)
@@ -478,6 +543,10 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet["role"], "developer")
         self.assertTrue(packet["executionId"].endswith("-implement"))
         self.assertEqual(packet["constraints"], {"mayModifyFiles": True, "mayPush": True, "mayMerge": False})
+        self.assertEqual(
+            [reference["name"] for reference in packet["environmentRefs"]],
+            ["GITHUB_TOKEN"],
+        )
         self.assertTrue(any("workflow_execution_requests" in query for query in pool.queries))
 
     async def test_schedule_creates_an_atomic_offer_and_project_lock(self) -> None:
@@ -605,14 +674,82 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
                 NOW,
             )
 
-    async def test_expire_offers_cancels_job_and_releases_project_lock(self) -> None:
+    async def test_expire_offers_cancels_a_bootstrap_job_and_releases_project_lock(self) -> None:
         pool = _DurablePool()
+        pool.bootstrap_run()
         pool.offer_expires_at = NOW
         expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
         self.assertEqual(expired, (pool.job_id,))
         self.assertEqual(pool.offer_status, "expired")
         self.assertEqual(pool.job_status, "cancelled")
-        self.assertTrue(any("DELETE FROM app.project_locks" in query for query in pool.queries))
+        self.assertEqual(pool.workflow_status, "cancelled")
+        self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_requeues_an_in_flight_run(self) -> None:
+        """An unanswered re-offer must not cancel a run that already has work
+        (issue #91): the execution request goes back to the queue and the
+        project lock stays with the run."""
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
+        self.assertEqual(expired, (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "planning")
+        self.assertEqual(pool.execution_request_status, "queued")
+        self.assertEqual(pool.job_status, "cancelled")
+        self.assertTrue(pool.project_locked)
+        self.assertTrue(any("offer_unanswered" in query for query in pool.queries))
+
+    async def test_expire_offers_returns_a_recovery_offer_to_recovering(self) -> None:
+        pool = _DurablePool()
+        pool.workflow_status = "offered"
+        pool.workflow_phase = "recovering"
+        pool.offer_expires_at = NOW
+        expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
+        self.assertEqual(expired, (pool.job_id,))
+        self.assertEqual(pool.job_status, "recovering")
+        self.assertEqual(pool.lease_generation, 2)
+        self.assertEqual(pool.workflow_status, "recovering")
+        self.assertTrue(pool.project_locked)
+
+    async def test_expire_offers_does_not_resurrect_a_terminal_run(self) -> None:
+        pool = _DurablePool()
+        pool.workflow_status = "completed"
+        pool.workflow_phase = "completed"
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
+        self.assertEqual(expired, (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "completed")
+        self.assertEqual(pool.job_status, "cancelled")
+        self.assertEqual(pool.execution_request_status, "dispatched")
+        self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_blocks_a_run_that_never_answers(self) -> None:
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        pool.unanswered_offers = 4
+        pool.unanswered_since = NOW - timedelta(hours=1)
+        control_plane = AsyncpgControlPlane(pool, unanswered_offer_limit=5)
+        self.assertEqual(await control_plane.expire_offers(NOW), (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "blocked")
+        self.assertEqual(pool.execution_request_status, "expired")
+        self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_keeps_retrying_inside_the_grace_window(self) -> None:
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        pool.unanswered_offers = 9
+        pool.unanswered_since = NOW - timedelta(minutes=1)
+        control_plane = AsyncpgControlPlane(
+            pool, unanswered_offer_limit=5, unanswered_offer_grace=timedelta(minutes=15)
+        )
+        self.assertEqual(await control_plane.expire_offers(NOW), (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "planning")
+        self.assertEqual(pool.execution_request_status, "queued")
+        self.assertTrue(pool.project_locked)
 
     async def test_accept_offer_rejects_an_expired_durable_offer(self) -> None:
         pool = _DurablePool()
@@ -620,12 +757,29 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OfferError):
             await AsyncpgControlPlane(pool).accept_offer(pool.job_id, pool.runner_id, NOW)
 
-    async def test_reject_offer_cancels_the_durable_job_and_releases_the_lock(self) -> None:
+    async def test_reject_offer_cancels_a_bootstrap_job_and_releases_the_lock(self) -> None:
         pool = _DurablePool()
+        pool.bootstrap_run()
         await AsyncpgControlPlane(pool).reject_offer(pool.job_id, pool.runner_id, NOW)
         self.assertEqual(pool.offer_status, "rejected")
         self.assertEqual(pool.job_status, "cancelled")
-        self.assertTrue(any("DELETE FROM app.project_locks" in query for query in pool.queries))
+        self.assertEqual(pool.workflow_status, "cancelled")
+        self.assertFalse(pool.project_locked)
+
+    async def test_reject_offer_requeues_an_in_flight_run(self) -> None:
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        await AsyncpgControlPlane(pool).reject_offer(pool.job_id, pool.runner_id, NOW)
+        self.assertEqual(pool.offer_status, "rejected")
+        self.assertEqual(pool.workflow_status, "planning")
+        self.assertEqual(pool.execution_request_status, "queued")
+        self.assertTrue(pool.project_locked)
+
+    async def test_reject_offer_rejects_a_runner_that_does_not_own_the_job(self) -> None:
+        pool = _DurablePool()
+        pool.job_status = "preparing"
+        with self.assertRaises(OfferError):
+            await AsyncpgControlPlane(pool).reject_offer(pool.job_id, pool.runner_id, NOW)
 
     async def test_project_creation_listing_and_disable_are_durable(self) -> None:
         pool = _ProjectPool()
@@ -938,7 +1092,7 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("INSERT INTO app.ai_reviews" in query for query, _ in pool.calls))
         self.assertTrue(any("INSERT INTO app.workflow_transition_outbox" in query for query, _ in pool.calls))
-        self.assertEqual(transitions, [("00000000-0000-0000-0000-000000000001", "pushing", {"status": "pushing", "review_approved": True})])
+        self.assertEqual(transitions, [("00000000-0000-0000-0000-000000000001", "pushing", {"status": "pushing", "review_approved": True, "awaiting_execution": False})])
         self.assertTrue(any("status = 'processed'" in query for query, _ in pool.calls))
 
     async def test_outbox_entry_stays_pending_when_on_transition_raises(self) -> None:
@@ -1087,6 +1241,294 @@ class ListWorkflowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow["blocking_reason"], "workflow retry budget exhausted")
         self.assertEqual(workflow["review_cycles"], 3)
         self.assertEqual(workflow["total_agent_executions"], 6)
+
+
+_PROGRESS_JOB_ID = "00000000-0000-0000-0000-0000000000b2"
+_PROGRESS_WORKFLOW_ID = "00000000-0000-0000-0000-0000000000b1"
+_PROGRESS_RUNNER_ID = "00000000-0000-0000-0000-0000000000b3"
+
+
+class _ProgressConnection:
+    def __init__(self, pool: _ProgressPool) -> None:
+        self.pool = pool
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def transaction(self) -> _Transaction:
+        return _Transaction()
+
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        self.pool.calls.append((query, arguments))
+        if "FROM app.jobs AS j" in query and "JOIN app.workflow_runs" in query:
+            return {
+                "id": _PROGRESS_JOB_ID,
+                "workflow_run_id": _PROGRESS_WORKFLOW_ID,
+                "lease_generation": 1,
+                "lease_expires_at": NOW + timedelta(minutes=5),
+                "last_event_sequence": self.pool.last_event_sequence,
+                "workflow_status": self.pool.workflow_status,
+                "last_diff_hash": self.pool.last_diff_hash,
+                "last_failure_fingerprint": self.pool.last_failure_fingerprint,
+                "non_progress_attempts": self.pool.non_progress_attempts,
+            }
+        if "SELECT 1 AS present FROM app.workflow_execution_requests" in query:
+            return {"present": 1}
+        if "SELECT role, attempt" in query and "workflow_execution_requests" in query:
+            return self.pool.dispatched.get(str(arguments[0]))
+        raise AssertionError(query)
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        self.pool.calls.append((query, arguments))
+        if "UPDATE app.workflow_runs" in query and "last_diff_hash" in query:
+            self.pool.apply_progress_update(query, arguments)
+        elif "UPDATE app.workflow_runs" in query and "SET status = $2, current_phase = $2" in query:
+            self.pool.workflow_status = str(arguments[1])
+        return "INSERT 0 1"
+
+
+class _ProgressPool:
+    """Stateful fake for the non-progress evidence path.
+
+    It keeps the three ``app.workflow_runs`` progress columns across events so a
+    whole terminal-event sequence can be replayed. ``apply_progress_update``
+    interprets the statement that was actually issued (plain assignment versus
+    ``COALESCE``) so the fake matches PostgreSQL for either writer.
+    """
+
+    def __init__(self, workflow_status: str = "planning") -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+        self.dispatched: dict[str, dict[str, object]] = {}
+        self.workflow_status = workflow_status
+        self.last_event_sequence = 0
+        self.last_diff_hash: str | None = None
+        self.last_failure_fingerprint: str | None = None
+        self.non_progress_attempts = 0
+
+    def acquire(self) -> _ProgressConnection:
+        return _ProgressConnection(self)
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        self.calls.append((query, arguments))
+        return "INSERT 0 1"
+
+    def apply_progress_update(self, query: str, arguments: tuple[object, ...]) -> None:
+        diff_hash = arguments[1]
+        fingerprint = arguments[2]
+        preserves_unset = "COALESCE($2" in query
+        if not preserves_unset or diff_hash is not None:
+            self.last_diff_hash = None if diff_hash is None else str(diff_hash)
+        if not preserves_unset or fingerprint is not None:
+            self.last_failure_fingerprint = None if fingerprint is None else str(fingerprint)
+        self.non_progress_attempts = int(arguments[3])  # type: ignore[call-overload]
+
+
+class NonProgressEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    """Covers issue #101 / review finding F14.
+
+    The non-progress detector must increment only for same-phase, semantically
+    identical terminal outcomes, and must block at the threshold the README
+    documents (four identical outcomes).
+    """
+
+    def setUp(self) -> None:
+        self.pool = _ProgressPool()
+        self.control_plane = AsyncpgControlPlane(self.pool)
+        self.transitions: list[tuple[str, str, dict[str, object]]] = []
+
+    async def _on_transition(
+        self, workflow_run_id: str, new_status: str, updates: dict[str, object]
+    ) -> None:
+        self.transitions.append((workflow_run_id, new_status, updates))
+
+    async def _emit(
+        self,
+        role: str,
+        event_type: str,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        request_id = str(uuid4())
+        self.pool.dispatched[request_id] = {"role": role, "attempt": 1}
+        self.pool.last_event_sequence += 1
+        await self.control_plane.accept_event(
+            ExecutionEvent(
+                job_id=_PROGRESS_JOB_ID,
+                runner_id=_PROGRESS_RUNNER_ID,
+                lease_generation=1,
+                event_sequence=self.pool.last_event_sequence,
+                event_type=event_type,
+                execution_id=f"{request_id}-{ROLE_TO_SUFFIX.get(role, 'implement')}",
+                payload=payload or {},
+            ),
+            NOW,
+            on_transition=self._on_transition,
+        )
+
+    @staticmethod
+    def _failure_payload(duration_ms: int, fingerprint: str = "pipeline:b455761a24ca33ba") -> dict[str, object]:
+        """A realistic runner `failed` payload. `durationMs` is the volatile
+        field that used to make two identical failures hash differently."""
+        return {
+            "status": "failed",
+            "exitCode": 1,
+            "changedFiles": [],
+            "commandsRun": ["ruff check ."],
+            "finalRevision": "abc123",
+            "committed": False,
+            "pushed": False,
+            "durationMs": duration_ms,
+            "changedFileCount": 0,
+            "commandCount": 1,
+            "pipelineCommandCount": 1,
+            "failureFingerprint": fingerprint,
+            "error": "pipeline failed: ruff check exited 1",
+        }
+
+    async def test_zero_diff_successes_from_different_phases_do_not_collide(self) -> None:
+        """Defect 1: the success hash covered only the sorted changed-file list,
+        so every zero-diff success collided on sha256("[]") across phases."""
+        await self._emit(
+            "planner",
+            "completed",
+            {"exitCode": 0, "changedFiles": [], "result": {"status": "invalid", "summary": "no plan"}},
+        )
+        self.assertEqual(self.pool.non_progress_attempts, 0)
+        await self._emit("pipeline", "completed", {"exitCode": 0, "changedFiles": []})
+        self.assertEqual(
+            self.pool.non_progress_attempts,
+            0,
+            "a zero-diff pipeline success must not repeat a zero-diff planner success",
+        )
+
+    async def test_healthy_plan_implement_pipeline_review_never_increments(self) -> None:
+        """A healthy multi-phase run must leave the counter at zero throughout."""
+        await self._emit(
+            "planner",
+            "completed",
+            {
+                "exitCode": 0,
+                "changedFiles": [],
+                "result": {"status": "ready", "summary": "plan", "acceptanceCriteria": [], "steps": []},
+            },
+        )
+        self.assertEqual(self.pool.non_progress_attempts, 0)
+        await self._emit(
+            "developer",
+            "completed",
+            {"exitCode": 0, "changedFiles": ["src/a.py"], "result": {"status": "completed", "summary": "done"}},
+        )
+        self.assertEqual(self.pool.non_progress_attempts, 0)
+        await self._emit("pipeline", "completed", {"exitCode": 0, "changedFiles": []})
+        self.assertEqual(self.pool.non_progress_attempts, 0)
+        await self._emit(
+            "reviewer",
+            "completed",
+            {"exitCode": 0, "changedFiles": [], "result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+        )
+        self.assertEqual(self.pool.non_progress_attempts, 0)
+        self.assertFalse(
+            any(status == "blocked" for _, status, _ in self.transitions),
+            "a healthy plan -> implement -> pipeline -> review run must never block",
+        )
+
+    async def test_identical_failures_survive_volatile_payload_fields(self) -> None:
+        """Defect 2: the failure fingerprint hashed the whole raw payload, so
+        durations and counters made genuinely identical failures differ."""
+        await self._emit("pipeline", "failed", self._failure_payload(1200))
+        self.assertEqual(self.pool.non_progress_attempts, 0)
+        await self._emit("pipeline", "failed", self._failure_payload(3400))
+        self.assertEqual(
+            self.pool.non_progress_attempts,
+            1,
+            "two identical pipeline failures differing only in durationMs are one outcome",
+        )
+
+    async def test_four_identical_failures_block_at_the_documented_threshold(self) -> None:
+        """Defect 4: README documents four identical outcomes; the code needed five."""
+        for index in range(3):
+            await self._emit("pipeline", "failed", self._failure_payload(1000 + index))
+            self.assertFalse(
+                any(status == "blocked" for _, status, _ in self.transitions),
+                f"blocked after only {index + 1} identical outcomes",
+            )
+        await self._emit("pipeline", "failed", self._failure_payload(9999))
+        blocked = [updates for _, status, updates in self.transitions if status == "blocked"]
+        self.assertEqual(len(blocked), 1, "the fourth identical outcome must block the workflow")
+        self.assertIn("identical execution outcomes", str(blocked[0]["blocking_reason"]))
+
+    async def test_a_success_does_not_erase_a_same_phase_failure_run(self) -> None:
+        """Defect 3: `current` could be a failure fingerprint while `previous`
+        preferred `last_diff_hash`, so failures were compared against successes."""
+        await self._emit("pipeline", "failed", self._failure_payload(100))
+        await self._emit(
+            "repairer",
+            "completed",
+            {"exitCode": 0, "changedFiles": ["src/a.py"], "result": {"status": "completed", "summary": "repair"}},
+        )
+        await self._emit("pipeline", "failed", self._failure_payload(200))
+        self.assertEqual(
+            self.pool.non_progress_attempts,
+            1,
+            "an intervening success of another role must not hide a repeated pipeline failure",
+        )
+
+    async def test_different_failures_reset_the_counter(self) -> None:
+        await self._emit("pipeline", "failed", self._failure_payload(100))
+        await self._emit("pipeline", "failed", self._failure_payload(200))
+        self.assertEqual(self.pool.non_progress_attempts, 1)
+        await self._emit(
+            "pipeline", "failed", self._failure_payload(300, fingerprint="pipeline:0000000000000000")
+        )
+        self.assertEqual(self.pool.non_progress_attempts, 0, "a different failure is progress")
+
+    async def test_no_diff_is_recorded_as_null_never_as_an_empty_string(self) -> None:
+        """Defect 5: `last_diff_hash` had two encodings for "no diff"."""
+        for index in range(4):
+            await self._emit("pipeline", "failed", self._failure_payload(index))
+        progress_writes = [
+            arguments
+            for query, arguments in self.pool.calls
+            if "UPDATE app.workflow_runs" in query and "last_diff_hash" in query
+        ]
+        self.assertTrue(progress_writes)
+        self.assertFalse(
+            any(arguments[1] == "" for arguments in progress_writes),
+            "the SQL writer must use NULL, never an empty string",
+        )
+        blocked = [updates for _, status, updates in self.transitions if status == "blocked"]
+        self.assertEqual(len(blocked), 1)
+        self.assertNotEqual(
+            blocked[0].get("last_diff_hash", None), "", "state updates must not encode 'no diff' as ''"
+        )
+
+
+class FailureFingerprintDefinitionTests(unittest.TestCase):
+    """`_runner_failure_fingerprint` is a port of the runner's
+    `dispatch.FailureFingerprint` (runner/internal/dispatch/fingerprint.go).
+    The expected values below were produced by the Go implementation itself."""
+
+    def test_matches_the_runner_implementation(self) -> None:
+        cases = {
+            "execute agent: agent exited 0 without a valid result document "
+            "(.loop/result.json): agent result was not written": "agent:42051f1c5fc5560d",
+            "pipeline failed: ruff check exited 1": "pipeline:b455761a24ca33ba",
+            "pipeline failed token=secret-value": "pipeline:9556f5fa7d015562",
+            "Some Mixed CASE Failure With No Category": "execution:8a734b398eae890c",
+            "git push rejected: non-fast-forward": "git:18d3405ee44dffb8",
+            "executor timeout after 3600s": "executor:895cb601a71e2fc6",
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(_runner_failure_fingerprint("execution", message), expected)
+
+    def test_redacts_secret_bearing_suffixes(self) -> None:
+        first = _runner_failure_fingerprint("execution", "pipeline failed token=secret-value")
+        second = _runner_failure_fingerprint("execution", "pipeline failed token=other-value")
+        self.assertEqual(first, second)
+        self.assertNotIn("secret-value", first)
 
 
 if __name__ == "__main__":

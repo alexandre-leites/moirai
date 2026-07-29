@@ -2,6 +2,71 @@
 
 ## Current Status
 
+- Overall status: #109 implemented; branch `issue-109` pushed and PR opened
+- Current phase: Resolve GitHub issue #109 (P0 runner cannot authenticate to GitHub)
+- Active implementation: None
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/issue-109-runner-credentials
+
+## Done
+
+- [x] Populate task-packet `environmentRefs` and thread the credential through the runner's Git path (#109)
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/task_packets.py`,
+    `orchestrator/tests/test_task_packets.py`, `orchestrator/tests/test_asyncpg_control_plane.py`,
+    `orchestrator/tests/test_end_to_end.py`, `runner/internal/dispatch/dispatch.go`,
+    `runner/internal/repository/manager.go`, `runner/internal/repository/delivery.go`,
+    `runner/internal/config/config.go`, `runner/cmd/runner/main.go`,
+    `compose.yaml`, `.env.example`, `README.md`, `runner/README.md`
+  - Behavior delivered:
+    - `build_task_packet` emits real `environmentRefs` instead of a hardcoded `[]`.
+      `TaskExecutionRequest` carries `environment_refs`, and `environment_refs_for`
+      declares `GITHUB_TOKEN` (secretRef `github_token`) for any role that may push
+      and for every `managed_clone` repository. Emission is validated for name
+      pattern, uniqueness, `secretRef` shape, and count, matching the Go validator.
+    - The runner resolves the task environment *before* `Workspaces.Prepare`, so
+      `git clone --mirror` and `git fetch` receive the same credential the later
+      `git push` does. `repository.PrepareRequest` gained an `Environment` field and
+      `prepareSource` runs its networked Git commands through `gitWithEnv`.
+    - `pushEnvironment` became `credentialEnvironment`, now shared by clone, fetch,
+      and push; it injects `GIT_CONFIG_KEY_0=http.https://github.com/.extraheader`
+      so the token never appears in an argument list.
+    - `osEnvironmentResolver` resolves a reference from the plain variable or the
+      Docker-style `<NAME>_FILE` path, via the new `config.SecretValue`, so a Compose
+      secret can back the credential.
+    - An unresolvable or disallowed reference fails the execution before the
+      workspace exists; the control loop reports a terminal `failed` event whose
+      `error` payload names the variable, and no unauthenticated push is attempted.
+    - Compose mounts the shared `github_token` secret into the runner and sets
+      `LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN`. No token value is committed;
+      `.env.example` carries only the allow-list name.
+  - Validation performed: 292 orchestrator tests, full runner race suite, Ruff,
+    Mypy, and Compose rendering (runner service shows the `github_token` secret and
+    `LOOP_RUNNER_ALLOWED_ENVIRONMENT: GITHUB_TOKEN`).
+  - Commands executed: `make test-orchestrator`; `make test-runner`; `make lint`;
+    `make typecheck`; `make compose`; `cd runner && gofmt -l . && go vet ./...`.
+  - Notes: pipeline-command environment isolation stays open as #122; this change is
+    the dependency it names.
+
+## Decisions
+
+- Decision: declare `GITHUB_TOKEN` for any role that may push and for every `managed_clone` packet.
+  - Context: the runner clones and fetches from the code host during workspace preparation, and pushes during delivery.
+  - Alternatives considered: declaring the credential on every packet regardless of mode; sniffing the repository URL scheme.
+  - Reason: `managed_clone` is the GitHub-backed mode and always reaches the network, while a read-only `existing_path` role works inside an operator-provided checkout and should not receive a credential. URL sniffing would encode code-host specifics in the orchestrator, which #109 puts out of scope.
+  - Consequences: a runner serving `managed_clone` projects must have `GITHUB_TOKEN` allowed and configured; otherwise every such packet fails loudly, which is the requested behavior.
+
+- Decision: resolve the credential from `<NAME>_FILE` as well as the plain variable.
+  - Context: Compose delivers secrets as mounted files, but `osEnvironmentResolver` only read `os.LookupEnv`.
+  - Alternatives considered: passing the token to the runner as a plain Compose environment variable.
+  - Reason: a plain variable would put the token in `docker inspect` and in the Compose file or `.env`, which the repository explicitly forbids.
+  - Consequences: the runner reads `/run/secrets/github_token` on demand; the file indirection is documented in `runner/README.md`.
+
+- Overall status: Complete; PR #74 rebased onto current main and awaiting CI
+- Current phase: Resolve GitHub issues #40 and #70
+- Active implementation: None
+- Last updated: 2026-07-28
+- Agent/session identifier: agent/docs-contracts
 - Overall status: MVP audit complete (issue #87). The stack builds, boots and schedules, but the
   end-to-end flow **Web UI → API → Orchestrator → Runner → Orchestrator → API → Web UI** does not
   close: the runner cannot authenticate to GitHub, and the API/UI have no read path for a
@@ -468,6 +533,52 @@ Record only validation that was actually run.
 
 Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce it in this worktree, make a focused fix, rerun the relevant checks, and update this record before the next commit.
 
+
+---
+
+## Issue #103 — Bootstrap NameError and step order-dependence (F16)
+
+### Done
+
+- [x] Make `_bootstrap_initial_setup` restartable and its steps order-independent
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/main.py`, `orchestrator/tests/test_main_bootstrap.py`, `orchestrator/README.md`, `.env.example`, `compose.yaml`
+  - Behavior delivered:
+    - `uuid4` imported at module scope. Pre-fix conditional import caused `UnboundLocalError`.
+    - Bootstrap split into three independent steps (`_bootstrap_admin_user`, `_bootstrap_seed_project`, `_bootstrap_registration_token`), each with its own existence check. Previously one early return silently skipped downstream steps, so interrupt or deferred config never seeded the rest.
+    - Seed inserts carry `ON CONFLICT DO NOTHING`; admin step re-reads after insert race. Token check ignores `used_at`/`expires_at` (single-use).
+    - `LOOP_SEED_PROJECT_NAME=""` disables seed-project bootstrap; `compose.yaml` uses `${LOOP_SEED_PROJECT_NAME-demo}`.
+  - Validation: `make test-orchestrator` (301 tests, OK), `make test-postgres-integration` (2 tests, OK), `make lint`, `make typecheck`, `make compose`.
+
+## Issue #88 — Event-driven issue workflow (platform review finding F1)
+
+### Done
+
+- [x] Suspend the LangGraph issue workflow after every execution dispatch
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/runner_events.py`, `orchestrator/src/moirai/workflows/runtime.py`, `orchestrator/tests/test_end_to_end.py`, `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_runtime.py`, `orchestrator/tests/test_runner_events.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `README.md`, `PROJECT.md`, `orchestrator/README.md`
+  - Behavior delivered:
+    - `_dispatch` sets `awaiting_execution` on the graph state; `suspend_after_dispatch` wraps the outgoing edge of every dispatching node (`plan`, `implement`, `pipeline`, `review`, `repair`, `push`) so the invocation ends at `END` while an execution is pending.
+    - `workflow_transition_for_terminal_event` clears `awaiting_execution` on every terminal transition, so `PersistedWorkflowRuntime.run` resumes the graph from that same edge.
+    - `_dispatch` replay guard: a node re-entered while its own request is still `queued` reuses that request.
+    - Checkpointer decision: production requires one. Without a checkpointer the runtime leaves a suspended run untouched and logs a warning.
+  - Validation: `make test-orchestrator` (298 tests, OK), `make lint`, `make typecheck`, `make compose`.
+
+### Decisions
+
+- Decision: Suspend with a conditional edge to `END` rather than langgraph's static `interrupt_after`.
+- Decision: Clear `awaiting_execution` in `workflow_transition_for_terminal_event`, not in `PersistedWorkflowRuntime.run`.
+
+## Issue #91 — Offer expiry must not cancel in-flight workflows (finding F4)
+### Done
+
+- [x] Offer expiry and rejection no longer cancel in-flight workflow runs
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/scheduler.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_scheduler_service.py`, `orchestrator/tests/test_postgres_integration.py`, `docs/architecture.md`
+  - Behavior delivered:
+    - `expire_offers` and `reject_offer` share one release path distinguishing bootstrap (cancel) from re-offer (requeue). Consecutive failures bounded by `unanswered_offer_limit` + `unanswered_offer_grace`. Accepting an offer resets the streak.
+    - `Scheduler.tick` no longer routes packet-build errors into `reject_offer`: logs and skips.
+  - Validation: `make test-orchestrator` (303 tests, OK), `make test-postgres-integration` (8 tests, OK), `make test-runner`, `make test-api`, `make lint`, `make typecheck`, `make compose`.
 ---
 
 # Issue #89 — Runner: a missing or invalid result document must not be reported as success
@@ -515,6 +626,109 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
 
 ---
 
+# Non-progress fingerprinting (issue #101, finding F14, 2026-07-29)
+
+## Current Status
+
+- Overall status: Complete, awaiting review.
+- Current phase: P3 hardening from the 2026-07-29 platform review.
+- Active implementation: none — issue #101 finished (session `issue-101`, 2026-07-29).
+- Last updated: 2026-07-29
+- Agent/session identifier: `issue-101`
+
+## Done
+
+- [x] Fix non-progress fingerprinting: cross-phase collisions and unstable failure fingerprints (issue #101, finding F14)
+  - Completed: 2026-07-29
+  - Relevant files:
+    - `orchestrator/src/moirai/persistence/control_plane.py` (`_record_progress_evidence`, the
+      non-progress comparison in `accept_event`, and the new outcome-identity helpers)
+    - `orchestrator/src/moirai/workflows/persistence.py` (`transition` durable-column writer)
+    - `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_workflow_persistence.py`
+    - `README.md` ("Workflow recovery guarantees")
+  - Behavior delivered:
+    - A terminal outcome now has a *kind-scoped, role-scoped* identity. Successes are
+      identified by a diff hash over `(role, sorted changed files, exit code, result document
+      minus per-attempt identifiers)`; failures and cancellations by a fingerprint over
+      `(role, event type, exit code, stable failure fingerprint)`. Every zero-diff success no
+      longer collides on `sha256("[]")` across phases.
+    - The failure identity is the runner's own `failureFingerprint` when the payload carries
+      one, so volatile fields (`durationMs`, counters) can no longer make two identical
+      failures hash differently. When no fingerprint is supplied (older runners, `cancelled`
+      events) the orchestrator derives one with `_runner_failure_fingerprint`, a byte-exact
+      port of the runner's `dispatch.FailureFingerprint`, applied to the first five lines of
+      the failure text. The two ends now share one definition; no runner change was required.
+    - Comparison is like-with-like: a success is only ever compared with `last_diff_hash`, a
+      failure only with `last_failure_fingerprint`. The SQL writer uses
+      `COALESCE($n, column)` so recording one kind never erases the other kind's identity,
+      which is what previously let an intervening success hide a repeated failure.
+    - Blocking now happens at the documented threshold: `NON_PROGRESS_OUTCOME_LIMIT = 4`
+      identical outcomes (the counter stores repeats, so the code compares `repeats + 1`).
+      Previously five outcomes were required.
+    - "No diff" has exactly one encoding, SQL NULL. `_record_progress_evidence` reports only
+      the column it actually wrote instead of `"" `, and `AsyncpgWorkflowPersistence.transition`
+      normalises an empty string to NULL for both outcome-identity columns. `_stored_outcome`
+      reads legacy `""` rows as absent.
+  - Validation performed:
+    - Defects reproduced first: the seven new behavioural tests in `NonProgressEvidenceTests`
+      were written against the unmodified detector and all seven failed
+      (`FAILED (failures=7)`; e.g. `test_zero_diff_successes_from_different_phases_do_not_collide`
+      → `AssertionError: 1 != 0`, `test_identical_failures_survive_volatile_payload_fields`
+      → `AssertionError: 0 != 1`, `test_four_identical_failures_block_at_the_documented_threshold`
+      → `AssertionError: 0 != 1`, `test_healthy_plan_implement_pipeline_review_never_increments`
+      → `AssertionError: 1 != 0`). All seven pass after the fix.
+    - `test_transition_stores_an_empty_outcome_hash_as_null` likewise failed first with
+      `AssertionError: '' is not None`.
+    - The Python fingerprint port was cross-checked against the Go implementation itself by
+      running `dispatch.FailureFingerprint` over six messages in a scratch copy of `runner/`;
+      output was byte-identical, including PR #128's published value
+      `agent:42051f1c5fc5560d`. Those values are pinned in
+      `FailureFingerprintDefinitionTests.test_matches_the_runner_implementation`.
+  - Commands executed:
+    - `make test-orchestrator` — OK, 299 tests, 2 skipped.
+    - `make lint` — `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-101` — `Success: no issues found in 47 source files`.
+    - `make test-runner` — all packages `ok` (runner untouched; run to confirm the fingerprint
+      contract this change depends on still holds).
+  - Notes:
+    - `MYPY_CACHE` was overridden because the Makefile default `/tmp/moirai-mypy-cache` is
+      shared across every worktree and `make typecheck` deletes it; concurrent agents were
+      active in sibling worktrees.
+    - No migration was needed: both columns and the counter already exist and keep their
+      meaning.
+
+## Decisions
+
+- Decision: The documented threshold wins — four identical terminal outcomes block, and the code was changed to match the README rather than the README changed to match the code.
+  - Context: README's "Workflow recovery guarantees" promised four identical outcomes; the code blocked at `non_progress_attempts >= 4` with a counter that starts at 0 and only increments on the *second* identical outcome, so five outcomes were actually required.
+  - Alternatives considered: (a) relax the README to "five"; (b) redefine the column to count outcomes rather than repeats so `>= 4` becomes literally correct.
+  - Reason: The published guarantee is the contract, and four is the more useful bound given the retry budget usually preempts the detector. (b) would have silently changed the meaning of an existing persisted column for every other reader.
+  - Consequences: `NON_PROGRESS_OUTCOME_LIMIT = 4` is the single source of truth for both the comparison and the `blocking_reason` text; `non_progress_attempts` keeps its existing "repeats since the run started" meaning, so 0 still means "no repetition" and no migration or backfill is needed.
+
+- Decision: Zero-diff successes still count toward non-progress, but a zero-diff is no longer an identity on its own.
+  - Context: The issue asked whether zero-diff successes should count at all, noting that the pending evidence-gate work reclassifies a zero-diff developer "success" as a failure. Planner, pipeline and reviewer executions legitimately never change files, so under the old changed-files-only hash they all collided.
+  - Alternatives considered: (a) count only failures and ignore successes entirely; (b) count successes only for mutating roles (developer, repairer); (c) keep counting all successes but widen the identity.
+  - Reason: (a) would discard the genuinely useful signal of a reviewer returning the same findings or a planner returning the same rejected plan four times in a row — a real stuck loop. (b) hard-codes a role policy that the evidence gate is about to make redundant. (c) removes the false positives (role and result document are in the hash) while keeping the true positives.
+  - Consequences: A repeated identical *same-role* success still blocks; a healthy plan → implement → pipeline → review sequence never increments the counter, which is covered by `test_healthy_plan_implement_pipeline_review_never_increments`. When the evidence gate lands, a zero-diff developer success simply arrives as a `failed` event and is handled by the failure path with no further change here.
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed — `orchestrator.tests.test_asyncpg_control_plane` (41) and `orchestrator.tests.test_workflow_persistence` (15).
+- Service tests: Passed — `make test-orchestrator`, 299 tests, 2 skipped.
+- Full repository tests: Not run (`make test-api` / `make test-web` not exercised; no Go API or web sources changed).
+- Build: Not run.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-101`.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run.
+- End-to-end workflow: Not run against a live stack. The terminal-event path is covered in-process by `NonProgressEvidenceTests`, which replays whole runner-event sequences through `accept_event` against a stateful fake that reproduces the progress columns.
+- Runner tests: Passed — `make test-runner` (runner unchanged).
+
+## Next Recommended Implementation
+
+Continue the P3 hardening track from `docs/reviews/2026-07-29-platform-review.md`: F15 (runner lifecycle hardening, issue #102) and F16 (bootstrap `NameError`, issue #103) are both unblocked and independent of this change.
 ## Label reconciliation data loss and nondeterministic terminal labels (issue #99, F12, 2026-07-29)
 
 ### Done

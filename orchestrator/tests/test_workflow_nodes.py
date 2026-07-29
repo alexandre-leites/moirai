@@ -8,14 +8,15 @@ from moirai.workflows.nodes import PersistedWorkflowNodes
 
 
 class _Persistence:
-    def __init__(self) -> None:
+    def __init__(self, queued: dict[str, Any] | None = None) -> None:
         self.transitions: list[tuple[str, str, dict[str, object]]] = []
+        self.queued = queued
 
     async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
         self.transitions.append((workflow_run_id, status, updates))
 
     async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
-        return None
+        return self.queued
 
 
 class _Dispatcher:
@@ -118,6 +119,50 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["status"], "local_pipeline")
         self.assertEqual(update["execution_id"], "workflow-1-pipeline")
         self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "pipeline")])
+
+    async def test_dispatching_marks_the_workflow_as_awaiting_the_execution(self) -> None:
+        """The gate the graph reads to end the invocation after a dispatch."""
+        for node in (self.nodes.plan, self.nodes.implement, self.nodes.pipeline, self.nodes.review,
+                     self.nodes.repair, self.nodes.push):
+            update = await node({"workflow_run_id": "workflow-1"})
+            self.assertTrue(update["awaiting_execution"], node)
+
+    async def test_short_circuiting_nodes_clear_the_awaiting_gate(self) -> None:
+        plan = await self.nodes.plan({"workflow_run_id": "workflow-1", "plan_valid": True})
+        pipeline = await self.nodes.pipeline({"workflow_run_id": "workflow-1", "pipeline_passed": True})
+        exhausted = await self.nodes.review({"workflow_run_id": "workflow-1", "review_cycles": 3})
+        self.assertFalse(plan["awaiting_execution"])
+        self.assertFalse(pipeline["awaiting_execution"])
+        self.assertFalse(exhausted["awaiting_execution"])
+        self.assertEqual(exhausted["status"], "blocked")
+        self.assertEqual(self.dispatcher.dispatches, [])
+
+    async def test_replayed_node_reuses_its_queued_request_without_respending_budget(self) -> None:
+        """A node re-entered while its own request is still queued must not
+        duplicate the agent run nor count a second attempt against the budget."""
+        persistence = _Persistence(queued={"id": "queued-1", "role": "developer", "attempt": 1})
+        nodes = PersistedWorkflowNodes(persistence, self.dispatcher)
+        state: IssueWorkflowState = {
+            "workflow_run_id": "workflow-1", "implementation_attempts": 1, "total_agent_executions": 2,
+        }
+
+        update = await nodes.implement(state)
+
+        self.assertEqual(update["execution_id"], "queued-1")
+        self.assertTrue(update["awaiting_execution"])
+        self.assertNotIn("implementation_attempts", update)
+        self.assertNotIn("total_agent_executions", update)
+        self.assertEqual(self.dispatcher.dispatches, [])
+
+    async def test_a_queued_request_for_another_role_still_dispatches(self) -> None:
+        persistence = _Persistence(queued={"id": "queued-1", "role": "planner", "attempt": 1})
+        nodes = PersistedWorkflowNodes(persistence, self.dispatcher)
+
+        update = await nodes.implement({"workflow_run_id": "workflow-1"})
+
+        self.assertEqual(update["execution_id"], "workflow-1-developer")
+        self.assertEqual(update["implementation_attempts"], 1)
+        self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "developer")])
 
     async def test_push_and_blocked_persist_deterministic_terminal_states(self) -> None:
         push = await self.nodes.push(self.state)

@@ -2,6 +2,7 @@ import unittest
 from typing import cast
 
 from moirai.workflows.task_packets import (
+    EnvironmentRef,
     PipelineCommand,
     RepositorySource,
     TaskExecutionRequest,
@@ -60,6 +61,86 @@ class TaskPacketTests(unittest.TestCase):
         self.assertEqual(packet["executionId"], "request-1-implement")
         self.assertEqual(packet["role"], "developer")
         self.assertEqual(packet["constraints"], {"mayModifyFiles": True, "mayPush": True, "mayMerge": False})
+
+    def test_developer_packet_declares_the_github_credential_the_runner_must_resolve(self) -> None:
+        packet = build_task_packet(
+            task_execution(
+                job_id="job-1",
+                execution_id="request-1-implement",
+                role="developer",
+                project_id="project-1",
+                issue_external_id="42",
+                issue_title="Title",
+                issue_body="Body",
+                repository_mode="managed_clone",
+                repository_url="https://github.com/example/repository.git",
+                local_repository_path=None,
+                default_branch="main",
+            )
+        )
+        references = cast(list[dict[str, str]], packet["environmentRefs"])
+        self.assertEqual([reference["name"] for reference in references], ["GITHUB_TOKEN"])
+        self.assertEqual(references[0]["secretRef"], "github_token")
+
+    def test_managed_clone_declares_the_credential_even_for_read_only_roles(self) -> None:
+        packet = build_task_packet(
+            planner_task_execution(
+                job_id="job-1",
+                project_id="project-1",
+                issue_external_id="42",
+                issue_title="Title",
+                issue_body="Body",
+                repository_mode="managed_clone",
+                repository_url="https://github.com/example/repository.git",
+                local_repository_path=None,
+                default_branch="main",
+            )
+        )
+        references = cast(list[dict[str, str]], packet["environmentRefs"])
+        self.assertEqual([reference["name"] for reference in references], ["GITHUB_TOKEN"])
+
+    def test_read_only_existing_path_role_declares_no_credential(self) -> None:
+        packet = build_task_packet(
+            planner_task_execution(
+                job_id="job-1",
+                project_id="project-1",
+                issue_external_id="42",
+                issue_title="Title",
+                issue_body="Body",
+                repository_mode="existing_path",
+                repository_url=None,
+                local_repository_path="/repositories/project-1",
+                default_branch="main",
+            )
+        )
+        self.assertEqual(packet["environmentRefs"], [])
+
+    def test_factory_rejects_invalid_environment_references(self) -> None:
+        for references in (
+            (EnvironmentRef(name="github-token", secret_ref="github_token"),),
+            (EnvironmentRef(name="GITHUB_TOKEN", secret_ref=""),),
+            (
+                EnvironmentRef(name="GITHUB_TOKEN", secret_ref="github_token"),
+                EnvironmentRef(name="GITHUB_TOKEN", secret_ref="other"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "environment references"):
+                build_task_packet(
+                    task_execution(
+                        job_id="job-1",
+                        execution_id="request-1-implement",
+                        role="developer",
+                        project_id="project-1",
+                        issue_external_id="42",
+                        issue_title="Title",
+                        issue_body="Body",
+                        repository_mode="managed_clone",
+                        repository_url="https://github.com/example/repository.git",
+                        local_repository_path=None,
+                        default_branch="main",
+                        environment_refs=references,
+                    )
+                )
 
     def test_pipeline_packet_is_read_only_and_carries_configured_commands(self) -> None:
         packet = build_task_packet(

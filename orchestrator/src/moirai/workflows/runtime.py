@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Protocol, cast
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class WorkflowCheckpointStore(Protocol):
@@ -36,6 +39,21 @@ def build_persisted_runtime(
     from .persistence import AsyncpgWorkflowPersistence
 
     persistence = AsyncpgWorkflowPersistence(pool, now=now)
+    if checkpointer is None:
+        # The graph suspends on the edge out of every dispatching node, and
+        # resuming from that edge is a checkpointer feature: without one the
+        # only way forward is to replay the graph from START, which re-enters
+        # nodes whose executions already ran. Production must configure a
+        # checkpointer (main.py treats a missing one as fatal unless
+        # LOOP_ALLOW_NO_CHECKPOINTER is set).
+        _LOGGER.warning(
+            "workflow runtime built without a LangGraph checkpointer: "
+            "workflows cannot resume from the node that queued an execution"
+        )
+    # Suspension is expressed as an edge to END rather than interrupt_after so
+    # it stays conditional on a dispatch having actually happened; a static
+    # interrupt would also stop on the passes where a node short-circuits
+    # without queueing anything, and nothing would ever wake the run.
     interrupt_after = None
     interrupt_before = ("wait_for_human",) if checkpointer else None
     graph = build_issue_graph(
@@ -91,6 +109,13 @@ class PersistedWorkflowRuntime:
                 checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
                 state = {**(checkpoint[1] if checkpoint is not None else {}), **state_updates}
                 state["workflow_run_id"] = workflow_run_id
+                if state.get("awaiting_execution"):
+                    # No checkpointer means the graph can only be replayed from
+                    # START, which would re-enter the node that queued the
+                    # execution this run is still waiting on. Persist whatever
+                    # the caller reported and leave the run suspended.
+                    await self._checkpoints.checkpoint(workflow_run_id, state)
+                    return state
                 result = self._graph.ainvoke(state, config)
 
             if inspect.isawaitable(result):

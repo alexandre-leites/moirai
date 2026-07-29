@@ -111,6 +111,33 @@ func TestLoadRejectsUnreadableRegistrationTokenFile(t *testing.T) {
 	}
 }
 
+func TestSecretValuePrefersMountedSecretFileOverPlainVariable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "github_token")
+	if err := os.WriteFile(path, []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "mounted secret file", env: map[string]string{"GITHUB_TOKEN_FILE": path, "GITHUB_TOKEN": "plain-token"}, want: "file-token"},
+		{name: "plain variable", env: map[string]string{"GITHUB_TOKEN": "plain-token"}, want: "plain-token"},
+		{name: "unconfigured", env: map[string]string{}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value, err := SecretValue(lookup(test.env), "GITHUB_TOKEN")
+			if err != nil || value != test.want {
+				t.Fatalf("SecretValue() = %q, %v, want %q", value, err, test.want)
+			}
+		})
+	}
+	if _, err := SecretValue(lookup(map[string]string{"GITHUB_TOKEN_FILE": "/missing/github_token"}), "GITHUB_TOKEN"); err == nil {
+		t.Fatal("SecretValue() accepted an unreadable secret file")
+	}
+}
+
 func TestLoadRejectsUnsafeOrInvalidConfiguration(t *testing.T) {
 	tests := []struct {
 		name string

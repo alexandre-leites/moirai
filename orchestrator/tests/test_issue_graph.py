@@ -6,6 +6,7 @@ from moirai.workflows.issue_graph import (
     route_pipeline,
     route_plan,
     route_review,
+    suspend_after_dispatch,
 )
 from moirai.workflows.policy import RetryBudget
 
@@ -39,6 +40,17 @@ class IssueGraphRouteTests(unittest.TestCase):
             route_checks({"pipeline_passed": True, "review_approved": True, "checks_passed": True, "human_approval_required": True}, budget),
             "wait_for_human",
         )
+
+    def test_dispatching_edge_ends_the_invocation_while_an_execution_is_pending(self) -> None:
+        route = suspend_after_dispatch(lambda state: "pipeline")
+        self.assertEqual(route({"status": "implementing"}), "pipeline")
+        self.assertNotEqual(route({"status": "implementing", "awaiting_execution": True}), "pipeline")
+
+    def test_dispatching_edge_sends_an_exhausted_budget_straight_to_blocked(self) -> None:
+        """A node that reported blocked instead of dispatching must not fall
+        through an unconditional edge into another dispatching node."""
+        route = suspend_after_dispatch(lambda state: "pipeline")
+        self.assertEqual(route({"status": "blocked", "blocking_reason": "budget"}), "blocked")
 
     def test_human_route_routes_based_on_human_response(self) -> None:
         self.assertEqual(route_human({"human_approved": True}), "merge")
