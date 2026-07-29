@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/loop-engineering/api/internal/orchestrator"
@@ -56,12 +58,22 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// Server is the API's HTTP surface. It exports only the metrics it owns — the
+// requests it serves and the orchestrator calls it issues. Queue depth, active
+// workflow counts and the fleet-wide runner heartbeat age are orchestrator-owned
+// state derived from the database, and the API has no database access
+// (PROJECT.md, "Service boundaries"). Those three names used to be registered
+// here as gauges set to zero once at construction and never written again,
+// which made an alert on them permanently unfireable; the orchestrator exports
+// the real ones (`moirai/observability.py`). See issue #124.
 type Server struct {
-	cfg     Config
-	mux     *http.ServeMux
-	srv     *http.Server
-	logger  *slog.Logger
-	metrics *prometheus.Registry
+	cfg      Config
+	mux      *http.ServeMux
+	srv      *http.Server
+	logger   *slog.Logger
+	metrics  *prometheus.Registry
+	requests *prometheus.CounterVec
+	latency  *prometheus.HistogramVec
 }
 
 func New(cfg Config, logger *slog.Logger) (*Server, error) {
@@ -77,15 +89,18 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 		mux:     mux,
 		logger:  logger,
 		metrics: prometheus.NewRegistry(),
+		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "moirai_api_requests_total",
+			Help: "HTTP requests served by the API, by method, matched route, and response status.",
+		}, []string{"method", "route", "status"}),
+		latency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "moirai_api_request_duration_seconds",
+			Help:    "HTTP request duration served by the API, by method and matched route.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"method", "route"}),
 	}
-	for _, gauge := range []prometheus.Gauge{
-		prometheus.NewGauge(prometheus.GaugeOpts{Name: "moirai_queue_depth", Help: "Eligible issue queue depth"}),
-		prometheus.NewGauge(prometheus.GaugeOpts{Name: "moirai_active_workflow_count", Help: "Active workflow count"}),
-		prometheus.NewGauge(prometheus.GaugeOpts{Name: "moirai_runner_heartbeat_age_seconds", Help: "Age of the oldest runner heartbeat"}),
-	} {
-		gauge.Set(0)
-		s.metrics.MustRegister(gauge)
-	}
+	s.metrics.MustRegister(s.requests, s.latency)
+	s.metrics.MustRegister(orchestrator.Collectors()...)
 	s.mux.Handle("GET /metrics", promhttp.HandlerFor(s.metrics, promhttp.HandlerOpts{}))
 	srv := &http.Server{
 		Addr:         cfg.BindAddress,
@@ -100,6 +115,14 @@ func New(cfg Config, logger *slog.Logger) (*Server, error) {
 
 func (s *Server) Mux() *http.ServeMux {
 	return s.mux
+}
+
+// Handler returns the full request chain the server listens with, middleware
+// included. Mux() returns the bare router, so anything that has to observe
+// middleware behaviour — request IDs, security headers, request metrics — must
+// go through this instead.
+func (s *Server) Handler() http.Handler {
+	return s.srv.Handler
 }
 
 func (s *Server) ListenAndServe() error {
@@ -171,10 +194,60 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			s.logger.Info("api request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", time.Since(started).Milliseconds())
+			elapsed := time.Since(started)
+			s.logger.Info("api request", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "status", status, "duration_ms", elapsed.Milliseconds())
+			// Recorded from the same measurements the log line already carries,
+			// so the metrics cost is one atomic add and one histogram
+			// observation on a request that has finished. Prometheus resolves
+			// each label child under its own read lock; nothing here touches
+			// server state, so no lock is added to the serving path.
+			method, route := methodLabel(r.Method), routeLabel(r)
+			s.requests.WithLabelValues(method, route, strconv.Itoa(status)).Inc()
+			s.latency.WithLabelValues(method, route).Observe(elapsed.Seconds())
 		}()
 		next.ServeHTTP(recorded, r)
 	})
+}
+
+// unmatchedRoute is the route label for a request no registered pattern
+// matched. Collapsing every such request into one series is the point: the
+// requested path is attacker-controlled and would otherwise be unbounded
+// cardinality.
+const unmatchedRoute = "unmatched"
+
+// routeLabel reduces a served request to the ServeMux pattern that matched it,
+// never to its raw path. net/http assigns Request.Pattern on the request itself
+// before invoking the matched handler, so it is readable here once the chain
+// has returned. The label set is therefore bounded by the number of registered
+// routes: `/api/v1/projects/{project_id}` stays one series however many project
+// IDs are requested.
+func routeLabel(r *http.Request) string {
+	pattern := r.Pattern
+	if pattern == "" {
+		return unmatchedRoute
+	}
+	// A pattern is "[METHOD ][HOST]/[PATH]" and the method travels in its own
+	// label, so only the path template belongs here.
+	if index := strings.LastIndex(pattern, " "); index >= 0 {
+		pattern = pattern[index+1:]
+	}
+	if pattern == "" {
+		return unmatchedRoute
+	}
+	return pattern
+}
+
+// methodLabel bounds the method label to the verbs the API registers routes
+// for. A request line may carry any token as its method, so labelling with
+// r.Method directly would let a client mint a new time series per request.
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return method
+	default:
+		return "other"
+	}
 }
 
 type statusRecorder struct {

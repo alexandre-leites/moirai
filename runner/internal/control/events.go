@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/runner/internal/metrics"
 )
 
 const maxExecutionEventPayloadBytes = 16 * 1024
@@ -48,6 +49,13 @@ type EventReporter struct {
 	// Logger reports discarded events. Assign before the reporter is shared
 	// with other goroutines; nil falls back to slog.Default().
 	Logger *slog.Logger
+
+	// Metrics counts the events this reporter discards and publishes the depth
+	// of its pending queue. This reporter is the only component that can see
+	// either — it owns the queue — so it is where both are recorded. Assign
+	// before the reporter is shared with other goroutines; nil falls back to
+	// the process-wide recorder the metrics server exports.
+	Metrics *metrics.Recorder
 
 	mu sync.Mutex
 	// leases holds leases the runner currently owns, keyed by job ID.
@@ -95,7 +103,24 @@ func NewEventReporter(client EventClient, maxPending int, prefixes []string, out
 	}
 	reporter.outbox = outbox
 	reporter.pending = pending
+	reporter.publishPendingLocked()
 	return reporter, nil
+}
+
+func (r *EventReporter) recorder() *metrics.Recorder {
+	if r != nil && r.Metrics != nil {
+		return r.Metrics
+	}
+	return metrics.Default()
+}
+
+// publishPendingLocked republishes the queue depth from the queue itself, so
+// the gauge cannot drift from what the reporter actually holds. It is called at
+// every point the queue changes, with mu held (or before the reporter is
+// shared). Setting a Prometheus gauge is an atomic store against a child
+// resolved at recorder construction, so this adds no lock to the emit path.
+func (r *EventReporter) publishPendingLocked() {
+	r.recorder().SetPendingEvents(len(r.pending))
 }
 
 func (r *EventReporter) Begin(lease Lease) error {
@@ -130,7 +155,10 @@ func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 	}
 	delete(r.leases, jobID)
 	r.expired[expiredLeaseKey{jobID: jobID, generation: generation}] = existing
+	queued := len(r.pending)
 	r.pending = withoutNonTerminalJobEvents(r.pending, jobID)
+	r.recorder().RecordEventsDropped(metrics.DropLeaseExpired, queued-len(r.pending))
+	r.publishPendingLocked()
 	if err := r.persistLocked(); err != nil {
 		r.logger().Warn("could not rewrite the execution event outbox after lease expiry", "job_id", jobID, "lease_generation", generation, "error", err)
 	}
@@ -152,12 +180,19 @@ func (r *EventReporter) Finish(jobID string, generation int64) bool {
 	return true
 }
 
+// Emit queues one execution event for delivery. Every path that returns
+// without queueing has discarded the event, and each records why against the
+// runner's dropped-event counter: this is the only place in the runner that can
+// tell a rejected event from a delivered one, and the counter is what makes a
+// loss visible to a scrape rather than only to whoever reads the log.
 func (r *EventReporter) Emit(jobID string, generation int64, eventType string, payload map[string]any) (int64, error) {
 	if !validEventType(eventType) {
+		r.recorder().RecordEventDropped(metrics.DropInvalid)
 		return 0, errors.New("execution event type is invalid")
 	}
 	contents, err := marshalEventPayloadWithPrefixes(payload, r.redactionPrefixes)
 	if err != nil {
+		r.recorder().RecordEventDropped(metrics.DropInvalid)
 		return 0, err
 	}
 
@@ -165,6 +200,7 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	state, err := r.emitStateLocked(jobID, generation, eventType)
 	if err != nil {
 		r.mu.Unlock()
+		r.recorder().RecordEventDropped(metrics.DropNoLease)
 		return 0, err
 	}
 	var evicted *runnerv1.ExecutionEvent
@@ -172,6 +208,7 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	if len(r.pending) >= r.maxPending {
 		if evicted, evictedIndex = r.makeRoomLocked(eventType); evicted == nil {
 			r.mu.Unlock()
+			r.recorder().RecordEventDropped(metrics.DropBufferFull)
 			return 0, ErrEventBufferFull
 		}
 	}
@@ -196,10 +233,14 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 			r.pending = append(r.pending[:evictedIndex:evictedIndex], append([]*runnerv1.ExecutionEvent{evicted}, r.pending[evictedIndex:]...)...)
 		}
 		state.next = previousNext
+		r.publishPendingLocked()
 		r.mu.Unlock()
+		r.recorder().RecordEventDropped(metrics.DropPersistFailed)
 		return 0, err
 	}
+	r.publishPendingLocked()
 	if evicted != nil {
+		r.recorder().RecordEventDropped(metrics.DropEvicted)
 		r.logger().Warn("discarded a queued execution event to make room for a higher-priority event",
 			"job_id", evicted.GetJobId(),
 			"execution_id", evicted.GetExecutionId(),
@@ -375,6 +416,7 @@ func (r *EventReporter) flush() error {
 		r.mu.Lock()
 		if len(r.pending) > 0 && r.pending[0] == event {
 			r.pending = r.pending[1:]
+			r.publishPendingLocked()
 			if err := r.persistLocked(); err != nil {
 				r.sending = false
 				r.mu.Unlock()

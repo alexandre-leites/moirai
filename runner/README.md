@@ -164,6 +164,23 @@ Execution events are queued in a bounded in-memory buffer (`LOOP_RUNNER_EVENT_BU
 
 The orchestrator remains authoritative: it fences every event on the lease generation. Note that it currently *rejects* an event whose lease has expired — `expire_leases` bumps the generation, so a terminal event reported after expiry is discarded and the control stream is aborted. The runner still records and offers the outcome; accepting it as recovery evidence is tracked as the orchestrator half of #93.
 
+## Metrics
+
+`LOOP_RUNNER_METRICS_BIND` (default `:9091`) serves `GET /metrics` in the Prometheus text format. The runner exports only values it holds itself; queue depth and active workflow counts are orchestrator-owned state it cannot populate, and it no longer exports placeholders for them ([#124](https://github.com/alexandre-leites/moirai/issues/124)).
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `moirai_runner_heartbeat_age_seconds` | gauge | | Seconds since this runner last completed a control-stream heartbeat. Computed at scrape time, and counting from process start until the first heartbeat, so a runner that never connects still ages. |
+| `moirai_runner_busy` | gauge | | `1` when the runner is at `LOOP_RUNNER_CAPACITY` and would reject the next offer, `0` when it can accept work. Published from the same predicate the offer admission uses, so the two cannot disagree. |
+| `moirai_runner_executions_started_total` | counter | | Executions started. |
+| `moirai_runner_executions_completed_total` | counter | `outcome` | Executions that reached a terminal outcome: `completed`, `failed`, `blocked`, or `cancelled`. |
+| `moirai_runner_pending_events` | gauge | | Execution events queued for delivery, republished from the queue at every change. |
+| `moirai_runner_events_dropped_total` | counter | `reason` | Execution events discarded rather than delivered. |
+
+`reason` is one of `buffer_full` (the bounded buffer had no room and nothing lower-priority to evict), `evicted` (a queued event gave up its slot to a higher-priority one, in practice a terminal event), `lease_expired` (a job's queued log and progress events were discarded when its lease expired — its terminal events are kept), `invalid` (the event type or payload was rejected), `no_lease` (no lease of that generation was held), or `persist_failed` (the outbox write failed and the event was rolled back). Both label sets are closed: an unrecognised value is counted as `unknown` rather than creating a new series.
+
+Note that this runner's `moirai_runner_heartbeat_age_seconds` reports *its own* last heartbeat. The orchestrator exports a series of the same name meaning the age of the oldest heartbeat across the fleet; the scrape's `job`/`instance` labels distinguish them.
+
 ## Health Probes
 
 `runner live` verifies the process can start. `runner ready` additionally validates its configuration, data directory capacity, and selected agent backend prerequisites.
