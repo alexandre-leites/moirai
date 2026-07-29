@@ -1580,11 +1580,9 @@ Issue #96 (finding F9) — make transition replay idempotent. It is the highest-
 
 ## Known Issues
 
-- Issue: two comments in `runner/internal/dispatch/dispatch.go` now describe behaviour this change removed.
-  - Severity: P3 — comments only, but they carry the rationale a future reader will trust.
-  - Impact: `dispatch.go:386-393` and the comment above the `RecordWorkInProgress` call both justify their design with "the next preparation of that job re-creates the branch from the base revision", which is no longer what happens. `dispatch.go:391` goes further and claims a work-in-progress commit on the delivery branch "would be rejected as a non-fast-forward push on the following attempt" — with the branch now continued rather than reset, such a push is a fast-forward, and the `wip(failed):` commit is inherited instead (see the Decision above).
-  - Evidence: `runner/internal/dispatch/dispatch.go:386-393`, `:417-420`.
-  - Suggested resolution: whoever owns `runner/internal/dispatch/` should reword both. Not done here: `dispatch.go` was claimed by the concurrent issue #97 session for this round, and editing it would have collided. The equivalent comment in `runner/internal/repository/delivery.go` (unclaimed) *was* corrected in this change, and `runner/README.md` now documents the real ordering.
+- Resolved during the session: two comments in `runner/internal/dispatch/dispatch.go` described behaviour this change removes.
+  - What they said: the doc comment on `retainWorkInProgress` and the comment above its `RecordWorkInProgress` call both justified their design with "the next preparation of that job re-creates the branch from the base revision", and the former added that a work-in-progress commit on the delivery branch "would be rejected as a non-fast-forward push on the following attempt". Neither is true once the branch is continued rather than reset.
+  - How it was handled: `dispatch.go` was owned by the concurrent issue #97 session when this work started, so the finding was first recorded here rather than fixed. #97 has since merged (PR #151) and PR #146 is the only open non-dependabot pull request, so the ownership constraint was re-checked with `gh pr list` and both comments were corrected in this branch. The change is comment-only; no behaviour in `dispatch.go` was touched. The equivalent comment in `runner/internal/repository/delivery.go` was corrected too, and `runner/README.md` documents the real ordering.
 
 - Issue: every `git push` from a `managed_clone` workspace fails, so the execution branch is never published in that mode.
   - Severity: P1 — it breaks delivery itself, not only this issue's cross-runner half.
