@@ -132,6 +132,9 @@ class InMemoryControlPlane:
             return updated
 
     def set_runner_draining(self, runner_id: str, draining: bool) -> None:
+        # The asyncpg control plane additionally refuses a revoked runner; this
+        # one has no runner revocation to refuse (only credentials carry
+        # `revoked_at`, and `authenticate_runner` already rejects those).
         with self._lock:
             runner = self._runners.get(runner_id)
             if runner is None:
