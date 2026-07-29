@@ -2307,6 +2307,83 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 ---
 
+# Session: issue #141 — `accept_offer` clobbered the workflow phase, so successful developer executions produced no transition (branch `issue-141`)
+
+## Current Status
+
+- Overall status: complete, pending review.
+- Current phase: core-loop correctness.
+- Active implementation: none — issue #141 delivered (session `issue-141`, 2026-07-29).
+- Last updated: 2026-07-29.
+- Agent/session identifier: `issue-141`.
+
+## Done
+
+- [x] `app.workflow_runs.current_phase` belongs to the graph alone, so a terminal developer event can transition.
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_postgres_integration.py`, `orchestrator/README.md`, `docs/design/web-console/specification.md`.
+  - Behavior delivered:
+    - `accept_offer` writes only `app.workflow_runs.status = 'preparing'`. It no longer touches `current_phase`. Acceptance is a fact about the *job* (`app.jobs.status` already records it); the phase is the graph's, and it is the only durable record of which node a suspended run is waiting on.
+    - `accept_event` decides the terminal-event transition from `w.current_phase`, not `w.status`. `implement` and `push` both dispatch the `developer` role, so the phase is the one thing that separates their terminal events; the status is `preparing` for the whole life of an execution and can never read `implementing` or `pushing` when the event lands.
+    - `expire_leases` and `recover_one` likewise write only `status` (`recovering`, then `offered`). This is not cosmetic: a recovery re-offer carries the **same** `dispatched` execution request, so the phase that queued it has to survive for the terminal event it eventually produces to mean anything. Without this the fix would have held for the first attempt and the identical loop would have reappeared one lease expiry deeper.
+    - The invariant is now: `status` is the scheduling lifecycle (`offered` / `preparing` / `recovering` / the committed phase / terminal); `current_phase` is written only by `AsyncpgWorkflowPersistence.transition` and by `accept_event`'s own transition. `_cancel_offered_job` and `_block_unanswered_run` still write both, because `cancelled` and `blocked` are genuine terminal workflow outcomes rather than job lifecycle events.
+    - Consequence, deliberate and documented: `_release_unanswered_offer`'s `bootstrap` predicate reads `current_phase = 'offered'`, which now means exactly "no graph node has ever committed a phase for this run" instead of "`accept_offer` has never run". A run whose very first offer was accepted by a runner that then died without reporting anything is therefore cancelled and its issue returned to the global queue rather than re-offered until the unanswered-offer limit blocks it. The predicate's other guards (no branch, no pull request, `total_agent_executions = 0`, no `app.executions` row, no execution request) are unchanged, so a run with any work at all still cannot match it.
+    - No migration: both columns already exist (`001_initial.sql`) and no schema change was needed. `preparing` and `recovering` remain valid `status` values, so `find_stalled_workflow_runs`' allow-list, `services/issue_sync.py`'s active-status list, `recover_one`'s `w.status = 'recovering'` predicate and the console's status pills are all untouched.
+  - Validation performed: failing-test-first against real PostgreSQL and against the query fakes, then the full orchestrator suite, the Postgres integration suite on a fresh database, lint and type checks.
+  - Commands executed:
+    - Failing-first, real PostgreSQL, before the fix — the two new integration tests failed, and instrumenting `test_successful_developer_execution_advances_to_the_local_pipeline` printed exactly the outcome issue #141 describes:
+      `AFTER DEVELOPER EVENT -> run status: preparing | phase: preparing | job status: running | graph nodes run since dispatch: 0 | requests: [('developer', 1, 'completed'), ('planner', 1, 'completed')] | outbox: ['processed']`
+      No transition, no new outbox row, no `pipeline` request, job left `running` for `expire_leases` to sweep.
+    - Failing-first, fakes, before the fix — `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p test_asyncpg_control_plane.py` → `Ran 75 tests ... FAILED (failures=5)`, the five being the new `test_successful_developer_event_advances_the_implementing_phase`, `..._the_pushing_phase`, `test_accept_offer_records_readiness_without_clobbering_the_phase`, `test_expire_leases_preserves_the_phase_of_the_run_it_fences`, `test_recovery_reoffer_preserves_the_phase_it_is_recovering`.
+    - `make test-orchestrator` → `Ran 458 tests in 1.372s ... OK (skipped=33)` (449 before this change).
+    - `LOOP_TEST_DATABASE_URL="postgresql://moirai:moirai@127.0.0.1:55141/moirai" make test-postgres-integration` → `Ran 33 tests in 5.054s ... OK`, against a freshly created throwaway PostgreSQL 16 container on a port unique to this session, removed afterwards. (30 before this change.)
+    - Each half of the fix was proved load-bearing independently. With only the `accept_offer`/`accept_event` half applied and the two recovery sweeps reverted, `test_developer_execution_recovered_from_a_lease_expiry_still_transitions` fails with `'recovering' != 'implementing'` while the direct test passes. With the `app.job_offers` guard removed, `test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap` fails with `'cancelled' != 'recovering'`. With the production `SELECT` mutated back to `w.status AS workflow_phase`, the two developer-transition unit tests fail.
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-141` → `Success: no issues found in 48 source files` (own cache directory, so it cannot collide with a sibling worktree).
+  - Notes:
+    - The issue's claim held exactly as written on `5903aa0`, including the reproduction it quotes. Its "How to tackle" section is stale in one detail: it says `current_phase = 'preparing'` is read by `_release_unanswered_offer`'s bootstrap predicate, but #91 reworked that predicate to read `current_phase = 'offered'`. That is what made option 1 (stop the clobber) viable without touching `runner_events.py` at all — the whole fix is inside `persistence/control_plane.py`.
+    - Option 2 from the issue (make the `developer` branch phase-independent) was rejected: `implement` and `push` dispatch the same role with the same request shape, so nothing in the request distinguishes them. Deriving it from the graph's suspension point would mean reading the LangGraph checkpoint from the control plane, which is a much larger coupling than keeping one column honest.
+
+## Post-review corrections
+
+An adversarial review of the diff was run before committing. Its substantive finding, and what was done about it:
+
+- **The widened bootstrap arm turned a bounded failure into an unbounded loop** (major, self-inflicted). `_release_unanswered_offer`'s `bootstrap` predicate reads `current_phase = 'offered'`, which used to mean "never accepted a job" only because `accept_offer` overwrote the phase. Preserving the phase made that proxy also match a run whose first offer *was* accepted by a runner that then died silently — no `started` event, so no `app.executions` row, no branch, no request — and the first draft accepted that as "nothing to preserve, so cancelling is fine". It is not fine, and the review proved why against real PostgreSQL: cancelling releases the project lock and leaves the issue eligible, so `schedule()` immediately builds a **new** run with a **new** job, and the unanswered-offer streak is counted per job — so `unanswered_offer_limit`, the bound that is supposed to stop exactly this, resets on every cycle. A bad runner image would churn runs forever instead of blocking one. Fixed by grounding the predicate in the fact it actually means: `NOT EXISTS (SELECT 1 FROM app.job_offers WHERE job_id = j.id AND status = 'accepted')`, keeping `current_phase = 'offered'` alongside it. That restores the pre-change reachability of the arm exactly. Covered by `test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap` (PostgreSQL) and `test_expire_offers_never_cancels_a_run_a_runner_already_accepted` (fake), both confirmed failing with the new guard removed.
+- **The unit fakes did not test the SQL** (minor). The review demonstrated that changing the production `SELECT` to `w.status AS workflow_phase` — the exact bug, reintroduced — left the whole `test_asyncpg_control_plane.py` suite green, because the fakes returned a `workflow_phase` key regardless of what the query asked for. Only the PostgreSQL tests caught it. The three fakes that answer that query now resolve the alias from the statement (`_selected_phase`), so whichever `app.workflow_runs` column the SELECT names is what they serve; the same mutation now fails `test_successful_developer_event_advances_the_implementing_phase` and `..._the_pushing_phase`. `_DurableConnection` likewise now parses the literal each column is actually assigned (`_assigned_literal`) instead of assuming `current_phase` always receives the same value as `status`.
+- **Three documentation claims were wrong or overstated** (minor). `status` is not `offered` "while an offer is outstanding" — `schedule_execution` leaves the committed phase in place until the runner accepts; the `phase` field is `workflow_runs.current_phase` in the workflow *list* only, since `SubmitHumanDecision` echoes the graph state's status into both fields; and the paragraph describing the widened bootstrap arm described behaviour that the fix above removes. All three corrected.
+- Two findings were confirmed as clean by the review and needed no change: no remaining job-lifecycle writer of `current_phase`, and no consumer of either column that breaks now that they can differ (`find_stalled_workflow_runs`, `close_orphaned_execution_requests`, `recover_one`'s candidate query, `schedule`/`schedule_execution`, `issue_sync`, `load_state` and the runtime all read `status`, which is unchanged).
+
+## Validation Status
+
+- Targeted tests: Passed — three new PostgreSQL integration tests (`test_successful_developer_execution_advances_to_the_local_pipeline`, `test_developer_execution_recovered_from_a_lease_expiry_still_transitions`, `test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap`) and six new unit tests, every one confirmed failing with the production change it covers reverted.
+- Service tests: Passed — `make test-orchestrator` → `Ran 458 tests ... OK (skipped=33)`; `make test-postgres-integration` → `Ran 33 tests ... OK` against a fresh throwaway database.
+- Full repository tests: Not run — no Go, proto, or web change. `make test` was deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-141`.
+- Database migrations: None added. `MigrationRunner` ran `001`–`007` against the throwaway database as part of the integration suite.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Partially — `test_successful_developer_execution_advances_to_the_local_pipeline` drives seed → `schedule` → `accept_offer` → graph → planner event → `schedule_execution` → `accept_offer` → developer event → `pipeline` dispatch through the real control plane, real graph runtime and real PostgreSQL, with nothing about `app.workflow_runs` patched by hand.
+
+## Known Issues
+
+- Issue: `recover_stalled_workflow_run` hands `wr.status` to the graph runtime, which can now be a scheduling state rather than a phase.
+  - Severity: P3 — pre-existing, unchanged by this session.
+  - Impact: the "transition committed but never invoked" branch calls `on_transition(run, status, {"awaiting_execution": False})`, so the graph state's `status` key can read `preparing`. Harmless today: nothing routes on `status` except `issue_graph`'s `blocked` check and `runtime`'s terminal-status check, and the node the graph resumes into writes its own status immediately.
+  - Evidence: `persistence/control_plane.py` `recover_stalled_workflow_run` selects `wr.status`; that branch is only reachable when the run has no job in `offered`/`preparing`/`running`/`recovering`, which is exactly when the status and the phase are already in agreement.
+  - Suggested resolution: pass `current_phase` instead, once something depends on the distinction. Not changed here: it would widen this diff into #94's recovery machinery with no demonstrated defect.
+
+- Issue: `_release_unanswered_offer`'s two early-return arms commit no `offer_unanswered` workflow event.
+  - Severity: P3 — pre-existing, unchanged by this session.
+  - Impact: a bootstrap run cancelled by an unanswered offer, and an offer released for an already-terminal run, leave no entry in `app.workflow_events`. The audit trail only records the requeue/block arms, so the console shows a run vanishing with `terminal_reason = 'offer_expired'` and nothing explaining the decision.
+  - Evidence: `persistence/control_plane.py` `_release_unanswered_offer` — both `return True` branches sit above the `INSERT INTO app.workflow_events ... 'offer_unanswered'`. Identical at `5903aa0`.
+  - Suggested resolution: emit the event before each early return. Not done here: this session narrowed that arm rather than widening it, so it adds no new instances, and the change belongs with #91's paths.
+
+- Issue: `InMemoryControlPlane` cannot express the status/phase split, so it still models the bug this issue fixes.
+  - Severity: P3 — test double only, never constructed by `main.py`.
+  - Impact: `domain/control_plane.py` stores one `WorkflowStatus` per run, sets it to `PREPARING` on `accept_offer`, and feeds it to `workflow_transition_for_terminal_event`. Any future test written against that double would see a developer terminal event produce no transition, and would "prove" behaviour the real control plane no longer has.
+  - Evidence: `domain/control_plane.py` — `accept_offer` assigns `WorkflowStatus.PREPARING`; there is no phase field to preserve.
+  - Suggested resolution: give the double a `current_phase` alongside `status` and mirror the invariant. Not done here: the file is outside this issue's ownership and the fix needs no change to it.
 # Session: CI red on `main` — every Python job dies on the self-hosted Debian 13 runners (branch `fix/ci-self-hosted-python`)
 
 ## Current Status
