@@ -491,7 +491,9 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code_host.merged_prs, [("42", "squash")])
         self.assertIs(second["pull_request_merged"], True)
         self.assertEqual(second["pull_request_merge_commit"], "def456")
-        self.assertNotIn("merge_verification_attempts", second)
+        # One read on each entry, and no confirmation loop on the second: an
+        # already-merged pull request is settled by the read that opens the node.
+        self.assertEqual(code_host.reads, 3)
         self.assertEqual(route_merge(cast(IssueWorkflowState, {**state, **second})), "complete")
 
     async def test_merge_never_merges_a_pull_request_that_is_already_merged(self) -> None:
