@@ -50,14 +50,22 @@ type EventReporter struct {
 	Logger *slog.Logger
 
 	mu sync.Mutex
-	// leases holds leases the runner currently owns.
+	// leases holds leases the runner currently owns, keyed by job ID.
 	leases map[string]*leaseState
 	// expired holds leases whose expiry was observed while their execution was
 	// still running, retained only so that execution's terminal event can still
-	// be sequenced, persisted, and delivered. Cleared by Finish.
-	expired map[string]*leaseState
+	// be sequenced, persisted, and delivered. Cleared by Finish. It is keyed by
+	// generation as well as job ID: the orchestrator can re-offer a job at the
+	// next generation while the superseded execution is still winding down, and
+	// that execution still owes a terminal event.
+	expired map[expiredLeaseKey]*leaseState
 	pending []*runnerv1.ExecutionEvent
 	sending bool
+}
+
+type expiredLeaseKey struct {
+	jobID      string
+	generation int64
 }
 
 func NewEventReporter(client EventClient, maxPending int, prefixes []string, outboxPath string) (*EventReporter, error) {
@@ -69,7 +77,7 @@ func NewEventReporter(client EventClient, maxPending int, prefixes []string, out
 		maxPending:        maxPending,
 		redactionPrefixes: append([]string(nil), prefixes...),
 		leases:            map[string]*leaseState{},
-		expired:           map[string]*leaseState{},
+		expired:           map[expiredLeaseKey]*leaseState{},
 	}
 	if outboxPath == "" {
 		return reporter, nil
@@ -121,7 +129,7 @@ func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 		return false
 	}
 	delete(r.leases, jobID)
-	r.expired[jobID] = existing
+	r.expired[expiredLeaseKey{jobID: jobID, generation: generation}] = existing
 	r.pending = withoutNonTerminalJobEvents(r.pending, jobID)
 	if err := r.persistLocked(); err != nil {
 		r.logger().Warn("could not rewrite the execution event outbox after lease expiry", "job_id", jobID, "lease_generation", generation, "error", err)
@@ -132,8 +140,8 @@ func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 func (r *EventReporter) Finish(jobID string, generation int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if retained, ok := r.expired[jobID]; ok && retained.lease.Generation == generation {
-		delete(r.expired, jobID)
+	if _, ok := r.expired[expiredLeaseKey{jobID: jobID, generation: generation}]; ok {
+		delete(r.expired, expiredLeaseKey{jobID: jobID, generation: generation})
 		return true
 	}
 	existing, ok := r.leases[jobID]
@@ -159,9 +167,13 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 		r.mu.Unlock()
 		return 0, err
 	}
-	if len(r.pending) >= r.maxPending && !r.makeRoomLocked(eventType) {
-		r.mu.Unlock()
-		return 0, ErrEventBufferFull
+	var evicted *runnerv1.ExecutionEvent
+	evictedIndex := -1
+	if len(r.pending) >= r.maxPending {
+		if evicted, evictedIndex = r.makeRoomLocked(eventType); evicted == nil {
+			r.mu.Unlock()
+			return 0, ErrEventBufferFull
+		}
 	}
 	lease := state.lease
 	previousNext := state.next
@@ -177,10 +189,24 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	}
 	r.pending = append(r.pending, event)
 	if err := r.persistLocked(); err != nil {
+		// The trade never completed, so put the evicted event back rather than
+		// losing it to an emit that produced nothing.
 		r.pending = r.pending[:len(r.pending)-1]
+		if evicted != nil {
+			r.pending = append(r.pending[:evictedIndex:evictedIndex], append([]*runnerv1.ExecutionEvent{evicted}, r.pending[evictedIndex:]...)...)
+		}
 		state.next = previousNext
 		r.mu.Unlock()
 		return 0, err
+	}
+	if evicted != nil {
+		r.logger().Warn("discarded a queued execution event to make room for a higher-priority event",
+			"job_id", evicted.GetJobId(),
+			"execution_id", evicted.GetExecutionId(),
+			"discarded_type", evicted.GetType(),
+			"discarded_sequence", evicted.GetEventSequence(),
+			"event_type", eventType,
+		)
 	}
 	flush := !r.sending
 	if flush {
@@ -201,26 +227,40 @@ func (r *EventReporter) emitStateLocked(jobID string, generation int64, eventTyp
 	if state, ok := r.leases[jobID]; ok && state.lease.Generation == generation {
 		return state, nil
 	}
-	if state, ok := r.expired[jobID]; ok && state.lease.Generation == generation {
+	if state, ok := r.expired[expiredLeaseKey{jobID: jobID, generation: generation}]; ok {
 		if !IsTerminalEventType(eventType) {
 			return nil, ErrNoActiveEventLease
 		}
 		return state, nil
 	}
-	if _, ok := r.leases[jobID]; ok {
-		return nil, ErrStaleEventLease
-	}
-	if _, ok := r.expired[jobID]; ok {
+	if r.knowsJobLocked(jobID) {
 		return nil, ErrStaleEventLease
 	}
 	return nil, ErrNoActiveEventLease
 }
 
-// makeRoomLocked frees one slot for eventType by discarding the oldest queued
-// event of the lowest priority below it, and reports whether it succeeded. Log
-// and progress output is droppable for any lifecycle event; `started` is
-// droppable for a terminal event; terminal events are never discarded.
-func (r *EventReporter) makeRoomLocked(eventType string) bool {
+// knowsJobLocked reports whether any lease for the job is tracked, at any
+// generation, so a mismatched generation is reported as stale rather than as an
+// absent lease.
+func (r *EventReporter) knowsJobLocked(jobID string) bool {
+	if _, ok := r.leases[jobID]; ok {
+		return true
+	}
+	for key := range r.expired {
+		if key.jobID == jobID {
+			return true
+		}
+	}
+	return false
+}
+
+// makeRoomLocked frees one slot for eventType by removing the oldest queued
+// event of the lowest priority below it, returning that event and the index it
+// came from so the caller can restore it if the emit does not complete. Log and
+// progress output is droppable for any lifecycle event; `started` is droppable
+// for a terminal event; terminal events are never discarded. A nil event means
+// nothing outranked could be freed.
+func (r *EventReporter) makeRoomLocked(eventType string) (*runnerv1.ExecutionEvent, int) {
 	priority := eventPriority(eventType)
 	victim := -1
 	for index, queued := range r.pending {
@@ -233,18 +273,11 @@ func (r *EventReporter) makeRoomLocked(eventType string) bool {
 		}
 	}
 	if victim < 0 {
-		return false
+		return nil, -1
 	}
 	discarded := r.pending[victim]
-	r.logger().Warn("discarded a queued execution event to make room for a higher-priority event",
-		"job_id", discarded.GetJobId(),
-		"execution_id", discarded.GetExecutionId(),
-		"discarded_type", discarded.GetType(),
-		"discarded_sequence", discarded.GetEventSequence(),
-		"event_type", eventType,
-	)
 	r.pending = append(r.pending[:victim:victim], r.pending[victim+1:]...)
-	return true
+	return discarded, victim
 }
 
 // IsTerminalEventType reports whether an execution-event type carries the final

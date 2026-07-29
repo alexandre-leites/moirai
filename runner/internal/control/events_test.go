@@ -446,6 +446,73 @@ func TestEventReporterRejectsTerminalEventWhenBufferHoldsOnlyTerminalEvents(t *t
 	}
 }
 
+func TestEventReporterRetainsEveryExpiredGenerationOfAJob(t *testing.T) {
+	disconnected := errors.New("disconnected")
+	client := &eventClient{err: disconnected}
+	reporter := newEventReporter(t, client, 8)
+	first := eventLease()
+	if err := reporter.Begin(first); err != nil {
+		t.Fatalf("Begin(gen %d) error = %v", first.Generation, err)
+	}
+	if !reporter.Abandon(first.JobID, first.Generation) {
+		t.Fatal("Abandon() did not release the first lease")
+	}
+	second := first
+	second.Generation = first.Generation + 1
+	if err := reporter.Begin(second); err != nil {
+		t.Fatalf("Begin(gen %d) error = %v", second.Generation, err)
+	}
+	if !reporter.Abandon(second.JobID, second.Generation) {
+		t.Fatal("Abandon() did not release the re-offered lease")
+	}
+	for _, lease := range []Lease{first, second} {
+		sequence, err := reporter.Emit(lease.JobID, lease.Generation, "failed", map[string]any{"status": "failed"})
+		if sequence < 1 || !errors.Is(err, disconnected) {
+			t.Fatalf("Emit(failed, gen %d) = (%d, %v), want the terminal event queued", lease.Generation, sequence, err)
+		}
+	}
+	if pending := reporter.Pending(); pending != 2 {
+		t.Fatalf("pending events = %d, want one terminal event per expired generation", pending)
+	}
+	for _, lease := range []Lease{first, second} {
+		if !reporter.Finish(lease.JobID, lease.Generation) {
+			t.Fatalf("Finish(gen %d) did not release the retained lease", lease.Generation)
+		}
+	}
+}
+
+func TestEventReporterRestoresEvictedEventWhenPersistFails(t *testing.T) {
+	outboxDirectory := t.TempDir()
+	outboxPath := filepath.Join(outboxDirectory, "events.json")
+	disconnected := errors.New("disconnected")
+	client := &eventClient{err: disconnected}
+	reporter, err := NewEventReporter(client, 2, nil, outboxPath)
+	if err != nil {
+		t.Fatalf("NewEventReporter() error = %v", err)
+	}
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatalf("Begin() error = %v", err)
+	}
+	for index := 0; index < 2; index++ {
+		if _, err := reporter.Emit(lease.JobID, lease.Generation, "log", map[string]any{"message": "chatty"}); !errors.Is(err, disconnected) {
+			t.Fatalf("Emit(log %d) error = %v", index, err)
+		}
+	}
+	// Make the outbox directory unwritable so the terminal Emit fails to persist
+	// after it has already evicted a log event to make room for itself.
+	if err := os.Chmod(outboxDirectory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(outboxDirectory, 0o700) })
+	if sequence, err := reporter.Emit(lease.JobID, lease.Generation, "completed", map[string]any{"status": "completed"}); sequence != 0 || err == nil {
+		t.Fatalf("Emit(completed) = (%d, %v), want a persist failure", sequence, err)
+	}
+	if pending := reporter.Pending(); pending != 2 {
+		t.Fatalf("pending events = %d, want the evicted log restored after the failed emit", pending)
+	}
+}
+
 func loadOutbox(t *testing.T, path string) []*runnerv1.ExecutionEvent {
 	t.Helper()
 	outbox, err := newEventOutbox(path)

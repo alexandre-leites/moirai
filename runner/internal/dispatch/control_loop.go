@@ -90,12 +90,14 @@ func NewControlLoopWithEventBuffer(client ControlClient, dispatcher executionDis
 	if eventBufferSize < 1 {
 		eventBufferSize = defaultEventBufferSize
 	}
-	// Every concurrent execution must be able to queue its terminal event even
-	// when the buffer is already saturated with undeliverable events from the
-	// other executions, so the buffer never holds fewer slots than the runner
-	// has capacity.
-	if eventBufferSize < capacity {
-		eventBufferSize = capacity
+	// Each execution owes a terminal event, and an expired lease frees its
+	// capacity slot (control.OfferState.Expire) while the superseded execution
+	// is still winding down and still owes one. Two terminal slots per unit of
+	// capacity covers that overlap. It is a floor, not a guarantee: a longer
+	// pile-up of undelivered terminal events can still exhaust the buffer, in
+	// which case the loss is reported by emitEvent rather than passing silently.
+	if eventBufferSize < 2*capacity {
+		eventBufferSize = 2 * capacity
 	}
 	reporter, err := control.NewEventReporter(client, eventBufferSize, redactionPrefixes, outboxPath)
 	if err != nil {
@@ -362,6 +364,13 @@ func (loop *ControlLoop) Busy() bool {
 }
 
 func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
+	// Deferred so a panic while building the terminal payload cannot leak the
+	// reporter's retained lease record.
+	defer func() {
+		if !loop.Reporter.Finish(lease.JobID, lease.Generation) {
+			loop.logger().Warn("execution finished without a matching event lease", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
+		}
+	}()
 	started := time.Now()
 	loop.logger().Info("runner execution started", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
 	loop.emitEvent(lease, "started", map[string]any{"status": "running"})
@@ -386,18 +395,33 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 	}
 	loop.logger().Info("runner execution terminal", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation, "status", terminalStatus(cancelled, err, result))
 	loop.Offers.Abandon(lease.JobID, lease.Generation)
-	loop.Reporter.Finish(lease.JobID, lease.Generation)
 }
 
 // emitEvent reports an execution lifecycle event and, unlike a discarded
 // error, makes both failure modes visible. A non-zero sequence means the event
-// reached the crash-safe outbox and delivery is retried on reconnect; a zero
-// sequence means the event was never queued, which for a terminal event is a
-// lost run outcome and is logged at error level.
+// was queued (and persisted to the outbox when one is configured) and delivery
+// is retried on reconnect; a zero sequence means the event was never queued,
+// which for a terminal event is a lost run outcome and is logged at error
+// level. A terminal event that could not be queued is retried once stripped to
+// its essential fields, since an oversized payload is the failure mode a
+// successful large run is most likely to hit.
 func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payload map[string]any) {
 	sequence, err := loop.Reporter.Emit(lease.JobID, lease.Generation, eventType, payload)
 	if err == nil {
 		return
+	}
+	if sequence == 0 && control.IsTerminalEventType(eventType) {
+		if reduced := minimalTerminalPayload(payload); reduced != nil {
+			if retrySequence, retryErr := loop.Reporter.Emit(lease.JobID, lease.Generation, eventType, reduced); retrySequence > 0 {
+				loop.logger().Warn("terminal execution event reduced to its essential fields after a failed emit",
+					"job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation,
+					"event_type", eventType, "event_sequence", retrySequence, "error", err)
+				sequence, err = retrySequence, retryErr
+				if err == nil {
+					return
+				}
+			}
+		}
 	}
 	fields := []any{
 		"job_id", lease.JobID,
@@ -415,6 +439,24 @@ func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payloa
 		return
 	}
 	loop.logger().Warn("execution event dropped", fields...)
+}
+
+// minimalTerminalPayload strips a terminal payload down to the fields the
+// orchestrator needs to classify the outcome, dropping the unbounded ones
+// (changed files, commands, the raw result document). It returns nil when the
+// payload is already minimal, so the caller does not re-emit an identical
+// event that would fail for the same reason.
+func minimalTerminalPayload(payload map[string]any) map[string]any {
+	reduced := make(map[string]any, 6)
+	for _, key := range []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch"} {
+		if value, ok := payload[key]; ok {
+			reduced[key] = value
+		}
+	}
+	if len(reduced) == len(payload) {
+		return nil
+	}
+	return reduced
 }
 
 func executionUsage(started time.Time, result Result) map[string]any {

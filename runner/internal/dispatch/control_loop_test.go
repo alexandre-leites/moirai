@@ -717,6 +717,42 @@ func TestControlLoopLogsTerminalEventLoss(t *testing.T) {
 	t.Fatalf("terminal event loss was not logged: %s", output.String())
 }
 
+func TestControlLoopRescuesOversizedTerminalEventWithMinimalPayload(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	oversized := strings.Repeat("x", 20*1024)
+	dispatcher := &staticDispatcher{result: Result{Status: "completed", ExitCode: 0, Raw: map[string]any{"transcript": oversized}}}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	terminal := client.events[1]
+	if terminal.GetType() != "completed" {
+		t.Fatalf("terminal event = %#v, want the outcome to survive an oversized payload", terminal)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(terminal.GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	if payload["status"] != "completed" || payload["exitCode"] != float64(0) {
+		t.Fatalf("reduced terminal payload lost its classification fields: %#v", payload)
+	}
+	if _, present := payload["result"]; present {
+		t.Fatalf("reduced terminal payload kept the oversized result document: %#v", payload)
+	}
+}
+
 func findLogEntry(t *testing.T, output, message string) (map[string]any, bool) {
 	t.Helper()
 	for _, line := range strings.Split(output, "\n") {
