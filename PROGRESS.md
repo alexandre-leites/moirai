@@ -974,6 +974,93 @@ An adversarial review of the first commit confirmed the mechanism (no double-rel
 
 Unchanged from the previous session: the orchestrator half of issue #93 step 4.
 
+# Session: F3 / issue #90 — Always run the local pipeline; stop deriving `pipeline_passed` from the developer exit code (branch `issue-90`)
+
+## Current Status
+
+- Overall status: Complete for issue #90.
+- Current phase: Bug fix from the 2026-07-29 platform review (`docs/reviews/2026-07-29-platform-review.md`, F3, P1).
+- Active implementation: issue-90 agent session, 2026-07-29.
+- Branch `issue-90`, based on `main` at `8956d84`.
+- Last updated: 2026-07-29.
+
+## Done
+
+- [x] Issue #90 (finding F3): `pipeline_passed` was inferred from the developer agent's exit code, and the `pipeline` node skipped dispatching a real pipeline execution whenever that inferred flag was already `True`.
+  - Root cause: two places conspired. `workflows/runner_events.py` translated a developer `completed` event while `implementing` into `{"status": "local_pipeline", "pipeline_passed": summary.exit_code == 0}`, and `workflows/nodes.py::pipeline` short-circuited with `if state.get("pipeline_passed") is True:` instead of dispatching. The deterministic completion gate therefore ran only when the coding agent had already failed — exactly backwards. Combined with the (since-fixed) runner result-document bug (#89), an agent that did nothing exited 0 and sailed into AI review and PR creation. A second, quieter consequence: after a review-driven repair the stale `pipeline_passed = True` from the pre-repair run also skipped the pipeline, so repaired work never got a pipeline verdict of its own.
+  - `orchestrator/src/moirai/workflows/runner_events.py`: the developer `implementing` branch now returns `{"status": "local_pipeline"}` with the gate untouched. The `pipeline` branch is unchanged behaviourally and is now the sole writer of `pipeline_passed` (its redundant `and summary.terminal` was dropped — `_terminal_event_transition` already returns `None` for non-terminal events). The `repairer` branch was verified to already leave the gate alone (issue step 3) and is now commented to say why.
+  - `orchestrator/src/moirai/workflows/nodes.py`: `pipeline` is unconditional — every entry into the phase dispatches a real pipeline execution. The node neither reads nor writes `pipeline_passed`. `_dispatch` also stops counting the pipeline against `total_agent_executions` (new `_NON_AGENT_ROLES`); see the Decisions section — this is a regression fix for the first version of this change, not an unrelated tweak.
+  - Docs: `orchestrator/README.md` gains a "Gate ownership" section (who decides each gate, why `pipeline_passed` is the strictest, the budget rule, and the two non-orchestrator caveats below); top-level `README.md` gains a matching bullet under "Workflow recovery guarantees".
+  - Composition with #88/PR #130 (event-driven graph, already on `main`): a developer terminal event clears `awaiting_execution`, the graph resumes on the `implement` edge, `pipeline` dispatches and re-sets `awaiting_execution`, and the invocation ends. The pipeline execution's own terminal event is what supplies the gate and resumes the run. No change was needed to `suspend_after_dispatch`.
+  - Acceptance criteria:
+    1. *Only the pipeline-role event branch writes `pipeline_passed`.* Met. `grep -rn '"pipeline_passed":' orchestrator/src` → exactly one hit, `orchestrator/src/moirai/workflows/runner_events.py:212`, inside `if resolved_role == "pipeline":`. Before the change the same grep returned three hits (`runner_events.py` ×2, `nodes.py` ×1). Also asserted behaviourally by `test_only_the_pipeline_role_writes_the_pipeline_gate`, which drives every role/status pair through `workflow_transition_for_terminal_event` and requires the key to be absent for all of them except `pipeline`.
+    2. *A developer completion always results in a dispatched pipeline execution.* Met. `test_a_clean_developer_exit_cannot_reach_review_without_the_pipeline` drives the real compiled graph: after a developer `completed` with `exitCode 0`, the queued roles are `["planner", "developer", "pipeline"]`, `pipeline_passed` is absent from the graph state, no reviewer was ever queued, and the run is suspended. A subsequent *failed* pipeline event routes to `repairing`, never to review.
+  - Notes: 8 tests added — `test_a_clean_developer_exit_cannot_reach_review_without_the_pipeline`, `test_a_repair_gets_its_own_pipeline_execution_despite_an_earlier_pass`, `test_full_review_cycle_still_reaches_delivery_on_the_agent_budget` (`orchestrator/tests/test_end_to_end.py`); `test_developer_exit_code_never_decides_the_pipeline_gate`, `test_only_the_pipeline_role_writes_the_pipeline_gate` (`orchestrator/tests/test_runner_events.py`); `test_pipeline_dispatches_even_when_the_gate_is_already_set`, `test_pipeline_execution_does_not_spend_the_agent_budget`, `test_pipeline_still_blocks_once_no_agent_run_is_affordable` (`orchestrator/tests/test_workflow_nodes.py`). Tests updated — the three `test_end_to_end.py` happy-path tests now deliver the pipeline event they previously skipped; `test_repair_cycle_blocks_only_after_every_counted_attempt_really_ran` now starts from a developer exit **0** (the case that used to bypass the pipeline) instead of exit 1; `test_completed_repairer_transitions_to_local_pipeline` gained a gate-absence assertion; `test_short_circuiting_nodes_clear_the_awaiting_gate` lost its `pipeline` case because `pipeline` no longer short-circuits.
+
+## Decisions
+
+- Decision: the `pipeline` node does not clear `pipeline_passed` to `False` when it dispatches.
+  - Context: while a new pipeline execution is in flight, a stale `True` from an earlier run is still in the LangGraph checkpoint (`PersistedWorkflowRuntime.run` merges updates, so an absent key keeps its previous value).
+  - Alternatives considered: have the node write `"pipeline_passed": False` alongside the dispatch, so the gate is provably unset while the execution runs.
+  - Reason: it would violate acceptance criterion 1 — the criterion is literally a grep for who writes the gate, and one producer is the invariant worth keeping. The stale value is also unreachable: the graph suspends on `awaiting_execution` until the pipeline reports, `route_after_pipeline` is only evaluated after that report has overwritten the gate, and `route_after_checks` is only reached downstream of a genuinely passing pipeline.
+  - Consequences: a reader inspecting persisted graph state mid-pipeline can see `pipeline_passed = True` next to `status = local_pipeline`. `awaiting_execution` is the field that disambiguates. Covered by `test_a_repair_gets_its_own_pipeline_execution_despite_an_earlier_pass`.
+
+- Decision: the pipeline execution does not spend `total_agent_executions`; the budget itself stays at 10.
+  - Context: **the first version of this change was a regression and the adversarial review caught it.** Making the pipeline mandatory added an execution to every review-driven repair cycle, which previously cost two agent runs (repairer, reviewer) because `repair → pipeline` short-circuited on the still-`True` gate. At three units per cycle, `review_cycles = 3` no longer fits in `total_agent_executions = 10`. Reproduced against the real compiled graph: after two `changes_requested` cycles the third review **approved** the work and the run still ended `status=blocked`, `blocking_reason="workflow retry budget exhausted"`, `total=10`, with no pull request created — because `route_after_pipeline`'s approved branch has no budget check and `push` then hit the cap in `_dispatch`. The same scenario replayed against `HEAD` (`8956d84`) reaches `pushing` at `total=8`. Second-order: `blocking_reason` is the constant string the project circuit breaker counts, so three review-heavy issues would have opened a project's circuit.
+  - Alternatives considered: (1) raise `total_agent_executions` to 11–13; (2) make `route_after_review`'s approved branch budget-aware so a run fails before spending the reviewer.
+  - Reason: `total_agent_executions` budgets *agent* runs, and the local pipeline is not one — the runner executes the project's configured commands directly and `dispatch.Dispatcher` does not even require an agent backend for the `pipeline` role. Raising the number would have been a magic constant papering over a category error, and would still have changed the budget's meaning under the same value. Not counting it restores exactly `HEAD`'s accounting: the happy path is 4 again, and the reproduction above now reaches `pushing` at `total=8`, identical to `HEAD`. It also cannot run away — `pipeline` is reachable only from `implement` and `repair`, both of which dispatch a counted agent execution first and are capped by their own attempt counters.
+  - Consequences: the exhaustion *check* still applies to the pipeline node (an exhausted agent budget blocks there rather than paying for a verdict whose only two successors dispatch agents), so no dispatch is unbounded. Relative to `HEAD` the change is never stricter: the pipeline-failure repair path, which did count pipelines before, now gets more headroom and still blocks on `pipeline_repair_attempts` (3). Covered by `test_pipeline_execution_does_not_spend_the_agent_budget`, `test_pipeline_still_blocks_once_no_agent_run_is_affordable`, and `test_full_review_cycle_still_reaches_delivery_on_the_agent_budget` (the end-to-end reproduction of the regression).
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed — `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p 'test_runner_events.py'`, and the same for `test_workflow_nodes.py` and `test_end_to_end.py`. (One pattern at a time: `unittest discover` honours only the last `-p`.)
+- Service tests: Passed — `make test-orchestrator` → `Ran 359 tests ... OK (skipped=9)` (351 before this change; the 9 skips are the pre-existing Postgres-integration skips).
+- Failing-test-first evidence: with the fix applied and the tests not yet updated, `make test-orchestrator` failed exactly the four tests that encoded the old behaviour — `test_sequential_runner_events_drive_the_workflow_to_completed` (`'local_pipeline' != 'ai_review'`), `test_runner_event_entry_point_resumes_the_graph_and_completes_delivery` (`'repairing' != 'pushing'`), `test_human_approval_interrupt_pauses_before_merge`, and `test_workflow_nodes.test_short_circuiting_nodes_clear_the_awaiting_gate` (`True is not false`).
+- Mutation checks: three, each reverting one part of the change and running the full `make test-orchestrator`, then restoring the file byte-for-byte (`git diff --stat` re-checked afterwards).
+  - Developer branch infers the gate again → `FAILED (failures=4)`: `test_developer_exit_code_never_decides_the_pipeline_gate`, `test_only_the_pipeline_role_writes_the_pipeline_gate`, `test_a_clean_developer_exit_cannot_reach_review_without_the_pipeline`, `test_sequential_runner_events_drive_the_workflow_to_completed`.
+  - `pipeline` node short-circuits again → `FAILED (failures=3)`: `test_pipeline_dispatches_even_when_the_gate_is_already_set`, `test_a_repair_gets_its_own_pipeline_execution_despite_an_earlier_pass`, `test_full_review_cycle_still_reaches_delivery_on_the_agent_budget`.
+  - Pipeline spends the agent budget again → `FAILED (failures=3)`: `test_pipeline_execution_does_not_spend_the_agent_budget`, `test_sequential_runner_events_drive_the_workflow_to_completed`, `test_full_review_cycle_still_reaches_delivery_on_the_agent_budget`.
+  - All three parts are load-bearing and none masks another: with only the node's short-circuit restored the happy path still dispatches a pipeline, because the developer no longer seeds the gate.
+- Adversarial review: run against the full diff before committing. It found the budget regression above (with a reproduction), two factual overclaims in the new documentation (`plan_valid` is also written by the `plan` node's short-circuit, so "exactly one producer per gate" was false as a repo-wide statement; and the `checks_*` row contradicted the sentence claiming every gate is written by an *execution*), and the workspace-reset gap now filed as #136. All were fixed before the commit; the review's remaining findings are recorded under Known Issues.
+- Lint: Passed — `make lint` → `All checks passed!`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-90` → `Success: no issues found in 47 source files` (private cache so it cannot race sibling worktrees).
+- Full repository tests: Not run. No Go, web, proto, Compose, or configuration file changed; `make test-runner` / `test-api` / `test-web` / `compose` / `proto-check` were deliberately skipped.
+- Database migrations: Not applicable — `pipeline_passed` has no `app.workflow_runs` column (`workflows/persistence.py::_DURABLE_COLUMNS`); it lives only in the LangGraph checkpoint and the `workflow_events` audit trail, so nothing persisted changes shape.
+- End-to-end workflow: Not run against live services. Exercised against the real compiled LangGraph graph in `orchestrator/tests/test_end_to_end.py`, including the gRPC `RunnerControlService` entry point.
+
+## Known Issues
+
+- Issue: the local pipeline now always runs, but for every project in the repository today it runs **zero commands** and therefore always passes.
+  - Severity: P1 — it caps the value of this fix.
+  - Impact: the gate is real and un-bypassable after this change, but it is still vacuous until pipeline steps can be configured. "Deterministic checks decide whether work is complete" is only true once a project has required steps.
+  - Evidence: `app.project_pipeline_steps` is read in `persistence/control_plane.py` (`WHERE project_id = $1 AND required = true`) and written nowhere in the repository; `runner/internal/dispatch/dispatch.go` reports `Status: "completed", ExitCode: 0` for an empty command list.
+  - Suggested resolution: issue [#114](https://github.com/alexandre-leites/moirai/issues/114), which owns configuring project pipeline steps. Out of scope here — closing it needs the API/web/persistence write path, not the workflow engine. Documented in `orchestrator/README.md` under "Gate ownership".
+
+- Issue: the pipeline execution validates the **default branch**, not the implementation it follows. Filed as [#136](https://github.com/alexandre-leites/moirai/issues/136).
+  - Severity: P1 — together with the empty-pipeline issue above, it is what stands between this orchestrator fix and a gate that actually means something.
+  - Impact: the mandatory pipeline run now happens, but it runs the project's commands against pristine base content, so a pass says nothing about the developer's work and a repair is never re-validated either. The reviewer execution reads base-branch code for the same reason.
+  - Evidence: `runner/internal/repository/manager.go` — `Prepare` does `os.RemoveAll(workspace.Root)` and then `git worktree add -B <branch> <workspace> <default-branch>`; `-B` is create-*or-reset*, so the agent branch is rewound to the default branch on every execution, and `prepareSource` fetches only the default branch. The branch name is stable per job (`task_packets.py`: `agent/{issue}/{job[:8]}`), which is what makes the reset silent. Reproduced with plain git in the issue body: after a commit on the agent branch, the next `worktree add -B` yields base content and moves the branch back to `main`.
+  - Suggested resolution: #136. Distinct from #100/F13 (retain and commit *failed* work) — even with #100 landed, a committed diff is reset away by the next `Prepare`. Runner-side, and `runner/` is owned by another agent's task right now, so untouched here.
+  - Correction: an earlier draft of this section claimed #114 was "the single thing standing between this fix and a genuinely deterministic completion gate". That was wrong; the adversarial review found #136. Both must land.
+
+- Issue: a `cancelled` pipeline execution is translated to `pipeline_passed = False` and routes to `repairing`, rather than to the `cancelled` status a cancelled execution of any other role produces.
+  - Severity: P3
+  - Impact: an operator-cancelled or lease-expired pipeline execution looks like a pipeline failure and spends a repair attempt. Not a behaviour change here — but the *exposure* grew, because before this fix a pipeline execution only ran after a non-zero developer exit, so most workflows never opened that window at all.
+  - Evidence: `workflows/runner_events.py` tests `resolved_role == "pipeline"` before the `summary.cancelled` branch. The same branch also ignores `current_status` (unlike the `developer` branch, which discriminates `implementing` from `pushing`), so a late terminal pipeline event arriving during `ai_review`/`pushing` rewinds `status` to `local_pipeline`. Both shapes are pre-existing; this issue explicitly scoped the pipeline branch as already correct.
+  - Suggested resolution: decide whether a cancelled pipeline should be terminal-cancelled or a failed gate, and whether the pipeline branch should be status-guarded; then order and guard the branches accordingly. Wants its own issue.
+
+- Issue: duplicate delivery of one developer terminal transition queues a repairer alongside the in-flight pipeline execution.
+  - Severity: P2 — pre-existing (F9 / [#96](https://github.com/alexandre-leites/moirai/issues/96)), not introduced here.
+  - Impact: `_dispatch`'s replay guard only suppresses a duplicate of *the same* role, so it does not help across a phase boundary. The count of spurious dispatches is the same as before this change, but the shape is worse in kind: a repairer can mutate the tree while the pipeline meant to validate it is running.
+  - Evidence: replaying one developer transition twice through `PersistedWorkflowRuntime.run` without the scheduler claiming in between yields queued roles `[pipeline, repairer]` (before this change: `[reviewer, repairer]`).
+  - Suggested resolution: #96, which owns transition-replay idempotency.
+
+## Next Recommended Implementation
+
+Issues [#114](https://github.com/alexandre-leites/moirai/issues/114) (a write path for `app.project_pipeline_steps`) and [#136](https://github.com/alexandre-leites/moirai/issues/136) (stop force-resetting each execution's workspace to the default branch). The orchestrator now guarantees the gate is dispatched and that only the gate's own execution decides it; those two make what the gate runs, and what it runs *against*, real. Neither is an orchestrator change.
+
 # Session: F5 / issue #92 — Circuit-breaker wedge states (branch `issue-92`)
 
 ## Current Status
