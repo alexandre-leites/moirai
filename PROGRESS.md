@@ -2304,3 +2304,98 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 - #102 (runner lifecycle hardening) is now unblocked on its shutdown-ordering item: delivering the SIGTERM drain report can no longer strand a runner, because the next connect clears it.
 - #119 (operator drain/revoke API) should decide the `draining` column ownership before it ships. See Known Issues above for the constraint this change adds.
+
+---
+
+# Session: CI red on `main` — every Python job dies on the self-hosted Debian 13 runners (branch `fix/ci-self-hosted-python`)
+
+## Current Status
+
+Partially resolved. Four of the six broken jobs are fixed and verified green on PR #160; the remaining two are blocked on a runner-side change that cannot be made from this repository.
+
+CI had been red on `main` itself since `3ba81c2` ("Change CI runner to self-hosted Linux"), blocking every open PR. Investigation found **two independent root causes**, not the single one the failure pattern suggested.
+
+## Done
+
+- [x] Diagnosed and fixed `actions/setup-python` on Debian 13
+  - Completed: `test-orchestrator`, `lint`, `typecheck` and `vulnerability-scan` pass on the self-hosted runners.
+  - Relevant files: `.github/workflows/ci.yml`.
+  - Behavior delivered: `3ba81c2` moved every job to `runs-on: [self-hosted, linux]`. Those runners (`github-runner1`, `github-runner2`, runner v2.336.0) are Debian 13 (trixie), and `actions/setup-python` publishes no prebuilt CPython for that platform. Each affected job died in under ten seconds with `##[error]The version '3.12' with architecture 'x64' was not found for debian 13.` The four jobs that never touched `setup-python` (`runner`, `api`, `build-web`) were unaffected throughout, which is what isolated the cause.
+    Replaced `actions/setup-python` with `astral-sh/setup-uv` (v9.0.0, SHA `c771a70e6277c0a99b617c7a806ffedaca235ff9`) pinned to uv `0.11.33`, followed by `uv python install "$PYTHON_VERSION"` and prepending the resulting interpreter directory to `$GITHUB_PATH` under `UV_PYTHON_PREFERENCE: only-managed`. uv fetches `python-build-standalone` CPython, which is distro-independent. The workflow's contract with the `Makefile` — "there is a suitable `python3` on `PATH`" — is unchanged, so no job's behaviour changed.
+  - Validation performed: run `30470376318` on PR #160. CI logs confirm the venv is genuinely 3.12 (`.venv/lib/python3.12/site-packages`, `cp312` wheels), not the host's system 3.13.5.
+  - Commands executed:
+    - `gh api repos/alexandre-leites/moirai/actions/runs/30461468403/jobs` — established the failing set on `c67a881`.
+    - `gh api repos/alexandre-leites/moirai/actions/jobs/90608340039/logs` — the `lint` log carrying the verbatim `setup-python` error.
+    - `gh api repos/alexandre-leites/moirai/actions/runs/30470376318/jobs` — the green result.
+  - Notes: `PYTHON_VERSION` remains `3.12`, matching `requires-python = ">=3.12"`, `[tool.mypy] python_version = "3.12"` and ruff's `target-version = "py312"`.
+
+- [x] Removed a dead `pip install` step that PEP 668 turned into a hard failure
+  - Completed: `python3 -m pip install -e "./orchestrator[dev]"` dropped from `test-orchestrator`, `test-postgres-integration`, `lint` and `typecheck`; `pip-audit` in `vulnerability-scan` switched to `uv tool run pip-audit`.
+  - Relevant files: `.github/workflows/ci.yml`, `Makefile` (read only, not modified).
+  - Behavior delivered: uv-managed CPython is PEP 668 externally managed, so installing into the interpreter is refused with `error: externally-managed-environment`. The step was a no-op regardless: every `make` target it preceded depends on `dev-install`, which builds `.venv` and runs all tooling out of `$(VENV)/bin`, so the interpreter-level copy was never consulted. Removing it therefore drops no coverage.
+  - Validation performed: reproduced locally from a clean checkout with no prior install (`rm -rf .venv` first), proving the `make` targets self-bootstrap.
+  - Commands executed:
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-ci-fix` → `Success: no issues found in 48 source files`
+    - `make test-orchestrator` → `Ran 449 tests in 1.341s` / `OK (skipped=30)`
+  - Notes: CI reproduces the same numbers — `Ran 449 tests in 4.476s`, `OK (skipped=30)`.
+
+- [x] Pinned the last two unpinned actions
+  - Completed: `actions/checkout@v7` and `actions/setup-python@v7` in `test-postgres-integration` were the only floating `uses:` refs in the file; both are now full-SHA pinned, matching the repo standard. Every `uses:` in `ci.yml` is SHA-pinned.
+
+- [x] Established the second root cause with an on-runner probe
+  - Completed: identified that `compose-smoke` and `test-postgres-integration` fail for a reason unrelated to `setup-python`.
+  - Behavior delivered: a temporary `runner-probe` job (added in `ecd13bf`, removed in `0d64f33`) was pushed to read facts off the runner that are not otherwise observable. See Known Issues for the result.
+
+## Decisions
+
+- **uv, not the runner's system Python.** Trixie ships only `/usr/bin/python3.13` (3.13.5); there is no system 3.12. Using it would satisfy `requires-python = ">=3.12"` but would silently run tests, mypy and ruff on an interpreter the project does not pin, make `PYTHON_VERSION` meaningless, and hand control of the toolchain to the next distro upgrade. uv pins the exact interpreter from the repo and installs it in ~3s.
+- **uv, not moving the Python jobs back to `ubuntu-latest`.** This was not merely a question of respecting `3ba81c2`'s intent — the fallback does not work. GitHub-hosted runners are unavailable for this account. The pre-switch run on `5903aa0` (run `30446858812`) failed with every job at zero steps and no logs; the check annotation reads *"The job was not started because recent account payments have failed or your spending limit needs to be increased."* Retrieved with `gh api repos/alexandre-leites/moirai/check-runs/90580585820/annotations`. That billing failure is almost certainly why `3ba81c2` was written. Moving jobs back would leave them permanently un-startable.
+- **Removed the redundant `pip install` rather than forcing it through.** `--break-system-packages` would have kept a step that installs into an environment nothing reads. The `Makefile` owns the install; the workflow should not duplicate it badly.
+- **Left `compose-smoke` and `test-postgres-integration` failing.** Deleting them, marking them `continue-on-error`, or replacing the Postgres service container with a non-Docker Postgres would all have produced a green tick by testing less. The red signal is accurate and should persist until the runners are fixed.
+
+## Validation Status
+
+- Targeted tests: Passed — `make test-orchestrator`, locally (`Ran 449 tests`, `OK (skipped=30)`) and in CI job `90638757510`.
+- Service tests: Not applicable — no service code changed; this is a CI-configuration fix only.
+- Full repository tests: Partially — the seven jobs that can run on these runners all pass in run `30470376318`. `test-postgres-integration` and `compose-smoke` cannot execute at all (see Known Issues).
+- Build: Passed — `build-web` (job `90638757684`).
+- Lint: Passed — `make lint` locally and CI job `90638757494` (`All checks passed!`).
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-ci-fix` locally and CI job `90638757312` (`Success: no issues found in 48 source files`).
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: **Not run — blocked.** `compose-smoke` cannot reach the Docker daemon on either runner.
+- End-to-end workflow: Not run — out of scope for a CI-configuration fix.
+
+Final per-job status on run `30470376318`, read from `gh api repos/alexandre-leites/moirai/actions/runs/30470376318/jobs`:
+
+| job | on `c67a881` | on this branch |
+| --- | --- | --- |
+| `test-orchestrator` | failure | success |
+| `lint` | failure | success |
+| `typecheck` | failure | success |
+| `vulnerability-scan` | failure | success |
+| `runner` | success | success |
+| `api` | success | success |
+| `build-web` | success | success |
+| `test-postgres-integration` | failure | failure (Docker, runner-side) |
+| `compose-smoke` | failure | failure (Docker, runner-side) |
+| `validate` | skipped | skipped (gated on `compose-smoke`) |
+
+## Known Issues
+
+- Issue: the runner user cannot reach the Docker socket, so `compose-smoke` and `test-postgres-integration` cannot run at all.
+  - Severity: P1 — two real gates are dark. The Compose stack and the Postgres integration suite are currently unverified by CI on every branch.
+  - Impact: `test-postgres-integration` dies during job initialization, before any step executes, because its `services:` container cannot be created. `compose-smoke` dies at `docker compose config`. Neither failure has anything to do with `setup-python`; both predate and outlast this fix.
+  - Evidence: `##[error]Value cannot be null. (Parameter 'network')`, preceded by `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` (job `90638757513`). The on-runner probe (job `90637745398`) showed why: the runner process is `uid=1000(runner) gid=1000(runner) groups=1000(runner)`, `/var/run/docker.sock` is `srw-rw---- root:docker` mode `0660`, and `getent group docker` returns `docker:x:991:` — the group exists with **no members**. There is also no escape hatch: `sudo -n true` fails with `sudo: a password is required`, `/run/user/*/docker.sock` does not exist, and `podman` is not installed.
+  - Suggested resolution: **runner-side, not repo-side.** On each of `github-runner1` and `github-runner2`: `sudo usermod -aG docker runner`, then restart the runner service (`sudo systemctl restart 'actions.runner.*'`) — supplementary group membership only takes effect for a newly-spawned process. No repository change can substitute: `services:` containers are created by the runner process itself before any step runs, so workflow-level `env:`, `DOCKER_HOST` or a `sudo` wrapper cannot reach that code path.
+
+- Issue: the two self-hosted runners are the only capacity available; GitHub-hosted runners cannot be used as a fallback.
+  - Severity: P2 — an operational constraint on every future CI decision, not a defect in this branch.
+  - Impact: any job that cannot run on Debian 13 self-hosted has nowhere else to go. `runs-on: ubuntu-latest` is not an escape hatch for this repo until billing is resolved.
+  - Evidence: annotation on check-run `90580585820` (run `30446858812`, commit `5903aa0`, pre-switch): *"The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"*.
+  - Suggested resolution: resolve the account billing state if GitHub-hosted capacity is wanted again; otherwise treat the self-hosted pool as the only target and provision it accordingly (starting with Docker group membership above).
+
+## Next Recommended Implementation
+
+- Fix Docker group membership on both runners, then confirm `compose-smoke` and `test-postgres-integration` go green — they need no repository change once the daemon is reachable.
+- Consider whether `validate` should also gate on `test-postgres-integration`; it currently does not appear in that job's `needs:` list, so a Postgres integration regression would not block the aggregate check even when the job can run.
