@@ -1385,6 +1385,20 @@ class AsyncpgControlPlane:
         no execution history, and cancelling it hands the issue straight back
         to the global queue.
 
+        "Never accepted a job" is tested directly, against `app.job_offers`.
+        It used to ride on `current_phase = 'offered'`, which held only because
+        `accept_offer` overwrote the phase; now that it does not (issue #141),
+        that proxy would also match a run whose first offer *was* accepted by a
+        runner that then died silently, and cancelling such a run is not
+        equivalent. Cancelling releases the project lock and leaves the issue
+        eligible, so `schedule()` immediately builds a **new** run with a new
+        job -- and the unanswered-offer streak below is counted per job, so
+        every cycle would reset the budget that is supposed to stop it. The run
+        would churn forever instead of blocking. Both columns are kept in the
+        predicate: the phase says no node ever committed, the offer says no
+        runner ever took the job, and only a run for which both hold has
+        nothing whatsoever to preserve.
+
         Every other offer belongs to a run with progress, so it is returned to
         a schedulable state instead: the workflow keeps its phase and its
         project lock, a leaked `dispatched` execution request goes back to
@@ -1409,6 +1423,10 @@ class AsyncpgControlPlane:
                        AND NOT EXISTS (
                            SELECT 1 FROM app.workflow_execution_requests AS r
                            WHERE r.workflow_run_id = w.id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM app.job_offers AS taken
+                           WHERE taken.job_id = j.id AND taken.status = 'accepted'
                        )
                    ) AS bootstrap
             FROM app.jobs AS j
@@ -1630,10 +1648,15 @@ class AsyncpgControlPlane:
                     )
                     if job is None:
                         break
+                    # `recovering` is a scheduling state, not a phase: the
+                    # re-offer `recover_one` makes carries the *same* dispatched
+                    # execution request, so the phase that queued it has to
+                    # survive for the eventual terminal event to transition
+                    # (issue #141).
                     await connection.execute(
                         """
                         UPDATE app.workflow_runs
-                        SET status = 'recovering', current_phase = 'recovering', updated_at = $2
+                        SET status = 'recovering', updated_at = $2
                         WHERE id = $1
                         """,
                         job["workflow_run_id"],
@@ -1702,7 +1725,7 @@ class AsyncpgControlPlane:
                 await connection.execute(
                     """
                     UPDATE app.workflow_runs
-                    SET status = 'offered', current_phase = 'recovering', updated_at = $2
+                    SET status = 'offered', updated_at = $2
                     WHERE id = $1 AND status = 'recovering'
                     """,
                     candidate["workflow_run_id"],
@@ -1758,6 +1781,23 @@ class AsyncpgControlPlane:
         return ScheduledJob(Assignment(issue, runner), workflow, offer)
 
     async def accept_offer(self, job_id: str, runner_id: str, now: datetime) -> JobLease:
+        """Records that the assigned runner took the job.
+
+        Acceptance is a fact about the *job*, so it may only move the run's
+        `status` -- the scheduling-lifecycle column. `current_phase` is the
+        graph's, written by `AsyncpgWorkflowPersistence.transition` when a node
+        commits a phase, and it is the only durable record of which node a
+        suspended run is waiting on. Both `implement` and `push` dispatch the
+        `developer` role, so the phase is the one thing that tells their
+        terminal events apart; overwriting it here left a successful developer
+        execution with no transition at all, so the graph was never resumed and
+        the job ran until its lease expired, forever (issue #141).
+
+        `preparing` still goes on `status` deliberately: it is what makes
+        `find_stalled_workflow_runs` see a run whose execution can no longer
+        report, and what the console renders while a runner is preparing a
+        workspace.
+        """
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 offer = await connection.fetchrow(
@@ -1788,7 +1828,7 @@ class AsyncpgControlPlane:
                     raise OfferError("job offer is no longer active")
                 await connection.execute(
                     """
-                    UPDATE app.workflow_runs SET status = 'preparing', current_phase = 'preparing', updated_at = $2
+                    UPDATE app.workflow_runs SET status = 'preparing', updated_at = $2
                     WHERE id = (SELECT workflow_run_id FROM app.jobs WHERE id = $1)
                     """,
                     _uuid(job_id),
@@ -1858,7 +1898,8 @@ class AsyncpgControlPlane:
                 job = await connection.fetchrow(
                     """
                     SELECT j.id, j.workflow_run_id, j.lease_generation, j.lease_expires_at,
-                           j.last_event_sequence, w.status AS workflow_status, w.last_diff_hash,
+                           j.last_event_sequence, w.current_phase AS workflow_phase,
+                           w.last_diff_hash,
                            w.last_failure_fingerprint, w.non_progress_attempts
                     FROM app.jobs AS j
                     JOIN app.workflow_runs AS w ON w.id = j.workflow_run_id
@@ -1905,9 +1946,15 @@ class AsyncpgControlPlane:
                         summary.event_type,
                     )
 
-                current_workflow_status = str(job["workflow_status"])
+                # The phase, not the status: `accept_offer` stamps the run
+                # `preparing` for the whole life of the execution, so the
+                # status can never say `implementing` or `pushing` by the time
+                # a developer's terminal event lands (issue #141). The phase is
+                # what the dispatching node committed, and it survives both
+                # acceptance and a recovery re-offer.
+                current_phase = str(job["workflow_phase"])
                 transition = workflow_transition_for_terminal_event(
-                    summary, current_workflow_status, role=resolved_role
+                    summary, current_phase, role=resolved_role
                 )
                 progress_updates = await self._record_progress_evidence(
                     connection, job, summary, event.payload, now, resolved_role

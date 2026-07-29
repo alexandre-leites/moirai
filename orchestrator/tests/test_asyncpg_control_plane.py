@@ -15,6 +15,30 @@ from moirai.workflows.runner_events import ROLE_TO_SUFFIX
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+# `accept_event` decides a terminal transition from whichever `app.workflow_runs`
+# column its SELECT aliases as `workflow_phase`. Every fake that answers that
+# query resolves the alias through this map instead of hard-coding the key, so a
+# production query that goes back to reading `w.status` is served the *status*
+# and the developer transition tests fail (issue #141).
+_PHASE_ALIAS_SOURCES = {"current_phase": "workflow_phase", "status": "workflow_status"}
+
+
+def _selected_phase(query: str, status: object, phase: object) -> object:
+    for column, key in _PHASE_ALIAS_SOURCES.items():
+        if f"w.{column} AS workflow_phase" in query:
+            return phase if key == "workflow_phase" else status
+    raise AssertionError(f"query aliases no app.workflow_runs column as workflow_phase: {query}")
+
+
+def _assigned_literal(query: str, column: str) -> str | None:
+    """The literal a `SET ... <column> = '<literal>'` statement assigns, or None
+    when the statement does not assign that column at all."""
+    marker = f"{column} = '"
+    if marker not in query:
+        return None
+    return query.split(marker, 1)[1].split("'", 1)[0]
+
+
 def _probe_releases(queries: list[str]) -> list[str]:
     """The statements that hand a half-open circuit back to `open` (issue #92)."""
     return [
@@ -217,12 +241,7 @@ class _DurableConnection:
                     if self.pool.execution_request_status == "dispatched"
                     else None
                 ),
-                "bootstrap": (
-                    self.pool.workflow_status == "offered"
-                    and self.pool.workflow_phase == "offered"
-                    and self.pool.branch_name is None
-                    and self.pool.execution_request_status == "none"
-                ),
+                "bootstrap": self.pool.is_bootstrap(query),
             }
         if "AS unanswered" in query:
             return {
@@ -253,6 +272,7 @@ class _DurableConnection:
                 self.pool.record_unanswered_offer(arguments[2])
             else:
                 self.pool.offer_status = "accepted"
+                self.pool.accepted_offer = True
                 self.pool.unanswered_offers = 0
                 self.pool.unanswered_since = None
             return {"job_id": self.pool.job_id}
@@ -272,7 +292,9 @@ class _DurableConnection:
                 "lease_generation": int(arguments[2]),
                 "lease_expires_at": self.pool.lease_expires_at,
                 "last_event_sequence": self.pool.last_event_sequence,
-                "workflow_status": self.pool.workflow_status,
+                "workflow_phase": _selected_phase(
+                    query, self.pool.workflow_status, self.pool.workflow_phase
+                ),
             }
         if "SET last_event_sequence" in query:
             if (
@@ -334,10 +356,14 @@ class _DurableConnection:
             if self.pool.job_status == "recovering":
                 self.pool.lease_generation += 1
             return "UPDATE 1"
-        if "UPDATE app.workflow_runs" in query and "SET status = " in query:
-            self.pool.workflow_status = str(query.split("SET status = '")[1].split("'")[0])
-            if "current_phase" in query:
-                self.pool.workflow_phase = self.pool.workflow_status
+        if "UPDATE app.workflow_runs" in query and "SET status = '" in query:
+            # Each column moves only if the statement actually assigns it, and
+            # to the literal that statement assigns -- the two are not always
+            # the same value (`recover_one` used to write 'offered'/'recovering').
+            self.pool.workflow_status = _assigned_literal(query, "status")
+            phase = _assigned_literal(query, "current_phase")
+            if phase is not None:
+                self.pool.workflow_phase = phase
             return "UPDATE 1"
         if "DELETE FROM app.project_locks" in query:
             self.pool.project_locked = False
@@ -365,6 +391,10 @@ class _DurablePool:
         self.lease_expires_at = NOW + timedelta(minutes=5)
         self.offer_expires_at = NOW + timedelta(minutes=5)
         self.offer_status = "offered"
+        # Whether any offer for this job was ever accepted -- the durable fact
+        # `app.job_offers` carries, which `offer_status` (the *current* offer)
+        # does not.
+        self.accepted_offer = False
         self.job_status = "offered"
         self.workflow_status = "planning"
         self.workflow_phase = "planning"
@@ -412,6 +442,24 @@ class _DurablePool:
         self.workflow_phase = "offered"
         self.branch_name = None
         self.execution_request_status = "none"
+        self.accepted_offer = False
+
+    def is_bootstrap(self, query: str) -> bool:
+        """The bootstrap predicate, evaluated only over the guards this fake
+        carries state for and only over the guards the statement actually
+        contains. The real predicate also requires no pull request, no
+        `app.executions` row and `total_agent_executions = 0`; those are
+        covered by the PostgreSQL suite.
+        """
+        bootstrap = (
+            self.workflow_status == "offered"
+            and self.workflow_phase == "offered"
+            and self.branch_name is None
+            and self.execution_request_status == "none"
+        )
+        if "AND taken.status = 'accepted'" in query:
+            bootstrap = bootstrap and not self.accepted_offer
+        return bootstrap
 
     def acquire(self) -> _DurableConnection:
         return _DurableConnection(self)
@@ -788,6 +836,21 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("SET status = 'offline'" in query for query in pool.queries))
         self.assertFalse(any("DELETE FROM app.project_locks" in query for query in pool.queries))
 
+    async def test_expire_leases_preserves_the_phase_of_the_run_it_fences(self) -> None:
+        """Issue #141: the recovery re-offer hands the *same* dispatched
+        request back to a runner, so the terminal event it produces still has
+        to know which phase queued it."""
+        pool = _DurablePool()
+        pool.job_status = "preparing"
+        pool.workflow_status = "preparing"
+        pool.workflow_phase = "implementing"
+        pool.lease_expires_at = NOW
+
+        self.assertEqual(await AsyncpgControlPlane(pool).expire_leases(NOW), (pool.job_id,))
+
+        self.assertEqual(pool.workflow_status, "recovering")
+        self.assertEqual(pool.workflow_phase, "implementing")
+
     async def test_recovery_reoffers_one_fenced_job_without_releasing_project_lock(self) -> None:
         pool = _DurablePool()
         pool.job_status = "recovering"
@@ -819,6 +882,22 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
                 NOW,
             )
 
+    async def test_recovery_reoffer_preserves_the_phase_it_is_recovering(self) -> None:
+        """The re-offer only makes the run schedulable again (`status`); which
+        phase it is in is still the graph's, so a developer execution recovered
+        from a lease expiry can still transition when it reports (issue #141)."""
+        pool = _DurablePool()
+        pool.job_status = "recovering"
+        pool.workflow_status = "recovering"
+        pool.workflow_phase = "implementing"
+        pool.lease_expires_at = NOW
+
+        recovered = await AsyncpgControlPlane(pool).recover_one(NOW, timedelta(seconds=30))
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(pool.workflow_status, "offered")
+        self.assertEqual(pool.workflow_phase, "implementing")
+
     async def test_expire_offers_cancels_a_bootstrap_job_and_releases_project_lock(self) -> None:
         pool = _DurablePool()
         pool.bootstrap_run()
@@ -829,6 +908,33 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.job_status, "cancelled")
         self.assertEqual(pool.workflow_status, "cancelled")
         self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_never_cancels_a_run_a_runner_already_accepted(self) -> None:
+        """Issue #141: once `accept_offer` stopped overwriting `current_phase`,
+        the phase alone no longer said "no runner has ever taken this job", and
+        a run whose first offer was accepted by a runner that then died
+        silently matched the bootstrap arm. Cancelling it releases the project
+        lock and leaves the issue eligible, so `schedule()` builds a fresh run
+        with a fresh job -- and the unanswered-offer streak is per job, so the
+        limit that is supposed to stop the churn resets every cycle."""
+        pool = _DurablePool()
+        pool.bootstrap_run()
+        await AsyncpgControlPlane(pool).accept_offer(pool.job_id, pool.runner_id, NOW)
+        # The runner reported nothing at all, so its lease expires and the job
+        # is fenced and re-offered.
+        pool.lease_expires_at = NOW
+        await AsyncpgControlPlane(pool).expire_leases(NOW)
+        pool.job_status = "offered"
+        pool.workflow_status = "offered"
+        pool.offer_status = "offered"
+        pool.offer_expires_at = NOW
+
+        self.assertEqual(await AsyncpgControlPlane(pool).expire_offers(NOW), (pool.job_id,))
+
+        self.assertNotEqual(pool.workflow_status, "cancelled")
+        self.assertEqual(pool.workflow_status, "recovering")
+        self.assertTrue(pool.project_locked)
+        self.assertTrue(any("offer_unanswered" in query for query in pool.queries))
 
     async def test_expire_offers_requeues_an_in_flight_run(self) -> None:
         """An unanswered re-offer must not cancel a run that already has work
@@ -935,6 +1041,23 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         pool.offer_expires_at = NOW
         with self.assertRaises(OfferError):
             await AsyncpgControlPlane(pool).accept_offer(pool.job_id, pool.runner_id, NOW)
+
+    async def test_accept_offer_records_readiness_without_clobbering_the_phase(self) -> None:
+        """Issue #141: acceptance is a fact about the *job*, so it may only
+        move `app.workflow_runs.status`. `current_phase` belongs to the graph,
+        and it is what tells a terminal developer event whether the run is
+        coming out of `implement` or out of `push`; stamping it `preparing`
+        here is what made a successful developer execution produce no
+        transition at all."""
+        pool = _DurablePool()
+        pool.workflow_status = "implementing"
+        pool.workflow_phase = "implementing"
+
+        await AsyncpgControlPlane(pool).accept_offer(pool.job_id, pool.runner_id, NOW)
+
+        self.assertEqual(pool.job_status, "preparing")
+        self.assertEqual(pool.workflow_status, "preparing")
+        self.assertEqual(pool.workflow_phase, "implementing")
 
     async def test_reject_offer_cancels_a_bootstrap_job_and_releases_the_lock(self) -> None:
         pool = _DurablePool()
@@ -1133,7 +1256,13 @@ class _EventConnection:
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
         self.pool.calls.append((query, arguments))
         if "FROM app.jobs AS j" in query and "JOIN app.workflow_runs" in query:
-            return dict(self.pool.job_row) if self.pool.job_row is not None else None
+            if self.pool.job_row is None:
+                return None
+            row = dict(self.pool.job_row)
+            row["workflow_phase"] = _selected_phase(
+                query, row.pop("workflow_status"), row["workflow_phase"]
+            )
+            return row
         if "SELECT 1 AS present FROM app.workflow_execution_requests" in query:
             return {"present": 1} if self.pool.has_existing_requests else None
         if "SELECT id, role, attempt" in query and "workflow_execution_requests" in query:
@@ -1155,7 +1284,11 @@ class _EventPool:
             "lease_generation": 1,
             "lease_expires_at": NOW + timedelta(minutes=5),
             "last_event_sequence": 0,
-            "workflow_status": "ai_review",
+            # What `accept_offer` leaves behind: the run's *status* is the job
+            # lifecycle's, the *phase* is the graph's. Only the phase decides a
+            # transition (issue #141).
+            "workflow_status": "preparing",
+            "workflow_phase": "ai_review",
         }
         self.has_existing_requests = True
         self.dispatched: dict[str, dict[str, object]] = {}
@@ -1452,6 +1585,54 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(self._request_status_writes(pool), [])
+
+    async def _transition_for_developer_event(self, phase: str) -> list[tuple[str, str, dict[str, object]]]:
+        pool = _EventPool()
+        assert pool.job_row is not None
+        # Exactly the row `accept_offer` leaves behind: the run is `preparing`
+        # for the whole life of the execution, and the phase underneath it is
+        # the one the dispatching node committed.
+        pool.job_row["workflow_status"] = "preparing"
+        pool.job_row["workflow_phase"] = phase
+        pool.dispatched = {self.REQUEST_ID: {"role": "developer", "attempt": 1}}
+        transitions: list[tuple[str, str, dict[str, object]]] = []
+
+        async def on_transition(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
+            transitions.append((workflow_run_id, new_status, dict(updates)))
+
+        await AsyncpgControlPlane(pool).accept_event(
+            self._event(f"{self.REQUEST_ID}-implement", "completed", {"exitCode": 0}),
+            NOW,
+            on_transition=on_transition,
+        )
+        return transitions
+
+    async def test_successful_developer_event_advances_the_implementing_phase(self) -> None:
+        """Issue #141: `accept_offer` stamps the run `preparing`, so the run's
+        *status* can never read `implementing` by the time the developer's
+        terminal event lands. Deciding from the status produced no transition
+        at all, which left the graph suspended on the edge out of `implement`
+        and the job running until its lease expired."""
+        self.assertEqual(
+            await self._transition_for_developer_event("implementing"),
+            [(
+                "00000000-0000-0000-0000-000000000001",
+                "local_pipeline",
+                {"status": "local_pipeline", "awaiting_execution": False},
+            )],
+        )
+
+    async def test_successful_developer_event_advances_the_pushing_phase(self) -> None:
+        """`push` dispatches the same `developer` role as `implement`, so the
+        phase is the only thing that separates them."""
+        self.assertEqual(
+            await self._transition_for_developer_event("pushing"),
+            [(
+                "00000000-0000-0000-0000-000000000001",
+                "pr_created",
+                {"status": "pr_created", "awaiting_execution": False},
+            )],
+        )
 
     async def test_bootstrap_planner_event_closes_no_request(self) -> None:
         """The first planning dispatch predates any request row, so there is
@@ -1819,7 +2000,10 @@ class _ProgressConnection:
                 "lease_generation": 1,
                 "lease_expires_at": NOW + timedelta(minutes=5),
                 "last_event_sequence": self.pool.last_event_sequence,
-                "workflow_status": self.pool.workflow_status,
+                # `preparing` stands in for the status accept_offer leaves on
+                # every run with an execution in flight: reading it instead of
+                # the phase transitions nothing at all (issue #141).
+                "workflow_phase": _selected_phase(query, "preparing", self.pool.workflow_phase),
                 "last_diff_hash": self.pool.last_diff_hash,
                 "last_failure_fingerprint": self.pool.last_failure_fingerprint,
                 "non_progress_attempts": self.pool.non_progress_attempts,
@@ -1836,7 +2020,7 @@ class _ProgressConnection:
         if "UPDATE app.workflow_runs" in query and "last_diff_hash" in query:
             self.pool.apply_progress_update(query, arguments)
         elif "UPDATE app.workflow_runs" in query and "SET status = $2, current_phase = $2" in query:
-            self.pool.workflow_status = str(arguments[1])
+            self.pool.workflow_phase = str(arguments[1])
         return "INSERT 0 1"
 
 
@@ -1849,10 +2033,10 @@ class _ProgressPool:
     ``COALESCE``) so the fake matches PostgreSQL for either writer.
     """
 
-    def __init__(self, workflow_status: str = "planning") -> None:
+    def __init__(self, workflow_phase: str = "planning") -> None:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.dispatched: dict[str, dict[str, object]] = {}
-        self.workflow_status = workflow_status
+        self.workflow_phase = workflow_phase
         self.last_event_sequence = 0
         self.last_diff_hash: str | None = None
         self.last_failure_fingerprint: str | None = None
