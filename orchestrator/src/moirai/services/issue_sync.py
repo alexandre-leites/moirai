@@ -128,27 +128,37 @@ class IssueSync:
         return len(seen_external_ids)
 
     async def sync_all_projects(self, now: datetime) -> dict[str, int | str]:
-        """Syncs every enabled project and updates the shared provider circuit once.
+        """Syncs every enabled project and reaches one verdict on the provider.
 
-        The provider circuit is global: it gates scheduling for every project on
-        that provider, so it is only decided after the whole pass (issue #92).
-        Clearing it per project let one project's success erase the failure
-        another project had just recorded, and a label-write failure used to
-        open it even though nothing about the provider's availability was in
-        doubt.
+        The provider circuit is global -- it gates scheduling for every project
+        on that provider -- so it is decided once, from the whole pass, and only
+        on evidence about the provider itself (issue #92):
+
+        - any project synced: the provider answered, so the circuit is cleared;
+        - every project attempted failed: one failure is recorded for the pass;
+        - nothing was attempted (all backing off): no verdict, nothing written.
+
+        Deciding it per project was incoherent in both directions. One
+        project's success erased the failure another had just recorded in the
+        same pass, and one project's permanent fault -- a deleted repository, a
+        bad URL -- looked exactly like a provider outage and halted scheduling
+        for every other project. A per-project fault is already handled by that
+        project's own `app.issue_sync_state` backoff.
         """
         projects = await _await(self._control_plane.list_enabled_projects())
         results: dict[str, int | str] = {}
-        provider_reachable = False
-        provider_failed = False
+        attempted = False
+        answered = False
+        provider_error: str | None = None
         for project in projects:
             retry_after = self._retry_after.get(project.id)
             if retry_after is not None and retry_after > now:
                 results[project.id] = "issue sync is backing off"
                 continue
+            attempted = True
             try:
                 count = await self.sync_project(project, now)
-                provider_reachable = True
+                answered = True
                 await self.reconcile_project_labels(project)
                 self._failure_counts.pop(project.id, None)
                 self._retry_after.pop(project.id, None)
@@ -157,21 +167,24 @@ class IssueSync:
                     await _await(clear_failure(project.id, now))
                 results[project.id] = count
             except LabelReconciliationError as error:
-                # Backs this project's sync off, but leaves the provider circuit
-                # (and therefore scheduling) alone.
+                # The tracker answered the read this pass depends on, so the
+                # provider counts as reachable; only this project backs off.
+                answered = True
                 await self._record_sync_failure(project.id, error, now)
                 results[project.id] = str(error)
             except IssueSyncError as error:
-                provider_failed = True
+                if provider_error is None:
+                    provider_error = str(error)
                 await self._record_sync_failure(project.id, error, now)
-                record_provider = getattr(self._control_plane, "record_provider_failure", None)
-                if record_provider is not None:
-                    await _await(record_provider("github", str(error), now))
                 results[project.id] = str(error)
-        if provider_reachable and not provider_failed:
+        if answered:
             clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
             if clear_provider is not None:
                 await _await(clear_provider("github", now))
+        elif attempted and provider_error is not None:
+            record_provider = getattr(self._control_plane, "record_provider_failure", None)
+            if record_provider is not None:
+                await _await(record_provider("github", provider_error, now))
         return results
 
     async def _record_sync_failure(self, project_id: str, error: Exception, now: datetime) -> None:

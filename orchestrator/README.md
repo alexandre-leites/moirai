@@ -68,7 +68,7 @@ Both circuits are claimed in one savepoint, so a claim that cannot complete leav
 
 Closing or reopening a circuit always clears `probe_workflow_run_id`, so a workflow that outlived its claim cannot decide a circuit twice. As a backstop, each leader-gated scheduler pass reopens any `half_open` row whose probe workflow is missing or already terminal and which has been claimed for longer than the cooldown, and logs `reopened orphaned circuit probes` when it does.
 
-The provider circuit is shared, so an issue-sync pass decides it once at the end rather than per project: it opens on a failure to read or persist issues, and is cleared only when the pass had at least one success and no failure. A failed `agent:*` label write backs that project's sync off but never opens it — the labels mirror status onto issues and are not an input to any workflow.
+The provider circuit is shared by every project on that provider, so an issue-sync pass decides it once, from the pass as a whole, and only on evidence about the provider: any project that syncs clears it, every attempted project failing records one failure for the pass, and a pass where all projects are backing off writes nothing. One project failing beside a healthy one is a project fault — a deleted repository, a bad URL — and is handled by that project's own `app.issue_sync_state` backoff rather than by halting scheduling everywhere. A failed `agent:*` label write does not count against the provider at all: the read the pass depends on succeeded, and the labels mirror status onto issues rather than feeding any workflow.
 
 ## Issue label ownership
 

@@ -314,39 +314,89 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(control_plane.provider_clears, [("github", NOW)])
         self.assertEqual(control_plane.sync_failures[0][0], "project-1")
 
-    async def test_one_projects_success_does_not_clear_another_projects_provider_failure(self) -> None:
-        """Issue #92: the provider circuit is shared, but it used to be cleared
-        per project, so whichever project synced last decided it -- erasing the
-        failure another project had just recorded in the same pass."""
+    def _two_project_sync(
+        self, trackers: dict[str, _FakeTracker]
+    ) -> tuple[IssueSync, _FakeControlPlane]:
         control_plane = _FakeControlPlane()
         control_plane.projects = [
             Project("project-1", True, frozenset({"linux"})),
             Project("project-2", True, frozenset({"linux"})),
         ]
-        trackers = {
-            "project-1": _FakeTracker([_external_issue()], fail=True),
-            "project-2": _FakeTracker([_external_issue()]),
-        }
-        sync = IssueSync(
-            control_plane=control_plane, issue_tracker_factory=lambda project: trackers[project.id]
+        return (
+            IssueSync(
+                control_plane=control_plane,
+                issue_tracker_factory=lambda project: trackers[project.id],
+            ),
+            control_plane,
+        )
+
+    async def test_one_broken_project_never_opens_the_shared_provider_circuit(self) -> None:
+        """Issue #92: the provider circuit is global, so it must only be moved
+        by evidence about the provider. One project failing while another syncs
+        is a project fault -- a deleted repository, a bad URL -- and opening the
+        circuit for it would stop scheduling every other project on GitHub.
+        Deciding it per project was incoherent in both directions: the same pass
+        recorded a failure and then cleared it, in whichever order the projects
+        happened to be listed."""
+        sync, control_plane = self._two_project_sync(
+            {
+                "project-1": _FakeTracker([_external_issue()], fail=True),
+                "project-2": _FakeTracker([_external_issue()]),
+            }
         )
 
         results = await sync.sync_all_projects(NOW)
 
         self.assertIsInstance(results["project-1"], str)
         self.assertEqual(results["project-2"], 1)
-        self.assertEqual([failure[0] for failure in control_plane.provider_failures], ["github"])
+        self.assertEqual(control_plane.provider_failures, [])
+        self.assertEqual(control_plane.provider_clears, [("github", NOW)])
+        # The broken project is still backed off on its own.
+        self.assertEqual([failure[0] for failure in control_plane.sync_failures], ["project-1"])
+
+    async def test_a_pass_where_every_project_fails_records_one_provider_failure(self) -> None:
+        """Every attempted project failing is the only evidence issue sync has
+        that the provider itself is down -- and it is recorded once for the
+        pass, not once per project, so a fleet of projects cannot open the
+        circuit on the first outage tick."""
+        sync, control_plane = self._two_project_sync(
+            {
+                "project-1": _FakeTracker([_external_issue()], fail=True),
+                "project-2": _FakeTracker([_external_issue()], fail=True),
+            }
+        )
+
+        await sync.sync_all_projects(NOW)
+
+        self.assertEqual(len(control_plane.provider_failures), 1)
+        self.assertEqual(control_plane.provider_failures[0][0], "github")
+        self.assertIn("project-1", control_plane.provider_failures[0][1])
         self.assertEqual(control_plane.provider_clears, [])
 
-    async def test_a_pass_with_no_provider_failure_clears_the_circuit_once(self) -> None:
-        control_plane = _FakeControlPlane()
-        control_plane.projects = [
-            Project("project-1", True, frozenset({"linux"})),
-            Project("project-2", True, frozenset({"linux"})),
-        ]
-        sync = IssueSync(
-            control_plane=control_plane,
-            issue_tracker_factory=lambda project: _FakeTracker([_external_issue()]),
+    async def test_a_permanently_broken_project_never_accumulates_provider_failures(self) -> None:
+        """The regression a per-pass verdict has to avoid: recording a provider
+        failure per failing project, with nothing clearing it while a healthy
+        project still syncs, opens the shared circuit after three passes and
+        halts scheduling for the whole provider."""
+        sync, control_plane = self._two_project_sync(
+            {
+                "project-1": _FakeTracker([_external_issue()], fail=True),
+                "project-2": _FakeTracker([_external_issue()]),
+            }
+        )
+
+        for minute in range(6):
+            await sync.sync_all_projects(NOW + timedelta(minutes=minute))
+
+        self.assertEqual(control_plane.provider_failures, [])
+        self.assertEqual(len(control_plane.provider_clears), 6)
+
+    async def test_a_clean_pass_clears_the_provider_circuit_once(self) -> None:
+        sync, control_plane = self._two_project_sync(
+            {
+                "project-1": _FakeTracker([_external_issue()]),
+                "project-2": _FakeTracker([_external_issue()]),
+            }
         )
 
         await sync.sync_all_projects(NOW)
@@ -355,7 +405,8 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_pass_that_synced_nothing_leaves_the_provider_circuit_alone(self) -> None:
         """Backing off every project proves nothing about the provider, so an
-        open circuit must not be cleared by a pass that made no request."""
+        open circuit must not be cleared -- nor opened further -- by a pass that
+        made no request."""
         sync, control_plane, _ = self._sync(tracker_fail=True)
         await sync.sync_all_projects(NOW)
         control_plane.provider_clears.clear()

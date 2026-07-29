@@ -54,8 +54,12 @@ _COUNTED_AS = {"project_circuit_state": "project_circuits", "provider_circuit_st
 async def reopen_probe_circuits(connection: Any, workflow_run_id: Any, now: datetime) -> None:
     """Reopens every circuit whose half-open probe is this workflow run.
 
-    Called when a probe reaches a terminal state that proves nothing -- a
-    cancelled or failed run, an unanswered offer -- and when it is blocked.
+    For the callers that cannot produce a verdict about the project or the
+    provider: a cancelled or failed run, an offer nobody answered, and a
+    terminal status one layer finds another layer already wrote. A *blocked*
+    probe going through `AsyncpgWorkflowPersistence.transition` does not come
+    here -- that path reopens the circuit and counts the failure in one
+    statement, because there the block is the probe's verdict.
     """
     for table in _TABLES:
         await connection.execute(_REOPEN_PROBE.format(table=table), workflow_run_id, now)
@@ -68,15 +72,23 @@ async def reap_orphaned_probes(
 
     Covers the probe workflow that was never inserted (a claim whose
     transaction rolled back after the pointer was written by an older release),
-    the probe deleted with its project, and the probe that reached a terminal
-    status without its terminal write reaching the circuit. The cooldown grace
-    keeps a probe that is merely between its claim and its first write safe.
+    the provider-circuit pointer left dangling when a probe's project is
+    deleted (`app.project_circuit_state` cascades with the project;
+    `app.provider_circuit_state` has no foreign key), and the probe that
+    reached a terminal status without its terminal write reaching the circuit.
 
-    It cannot reopen a circuit some other writer is deciding: every path that
-    takes a run terminal writes `app.workflow_runs` and this circuit row in one
-    transaction, so no snapshot ever shows a terminal probe beside a circuit
-    that still points at it -- except after the control plane's runner-event
-    path, where reopening is the correct outcome anyway.
+    A probe that is still running is protected by the `NOT EXISTS` clause
+    alone, at any age. The cooldown grace is for the terminal probe whose
+    resolution is merely late: the control plane writes some terminal statuses
+    straight to `app.workflow_runs`, and the resolving read in `load_state`
+    lands on a later tick, so the grace lets the specific path resolve the
+    probe before this general one reopens it.
+
+    It cannot contradict a writer that is mid-decision: every path that takes a
+    run terminal writes `app.workflow_runs` and this circuit row in one
+    transaction, so no snapshot shows a terminal probe beside a circuit that
+    still points at it -- except after that raw-SQL path, where reopening is
+    the correct outcome anyway.
     """
     reaped: dict[str, int] = {}
     for table in _TABLES:

@@ -144,8 +144,9 @@ class AsyncpgWorkflowPersistence:
             # Issue #92: a cancelled or failed run delivers no verdict about the
             # project, but if it was holding a probe the circuit stays half-open
             # -- and unschedulable -- until something releases it. Nothing else
-            # in this path does, and a project circuit is never opened by these
-            # statuses, so releasing the probe is the whole obligation here.
+            # in this path does. Only the probe is released: neither status
+            # counts as a project failure, so nothing else about the circuit
+            # changes.
             await reopen_probe_circuits(connection, _uuid(workflow_run_id), now)
             return
         reason = str(updates.get("blocking_reason") or "workflow blocked")[:1024]

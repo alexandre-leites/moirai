@@ -302,6 +302,10 @@ class _DurableConnection:
     async def execute(self, query: str, *arguments: object) -> str:
         self.pool.queries.append(query)
         if "SET state = 'half_open'" in query:
+            if "provider_circuit_state" in query and self.pool.provider_claim_fails:
+                # What a lost race looks like to the claimer: the row was open
+                # when it was read, and the claiming UPDATE matched nothing.
+                return "UPDATE 0"
             if "project_circuit_state" in query and self.pool.project_circuit is not None:
                 self.pool.project_circuit["state"] = "half_open"
             if "provider_circuit_state" in query and self.pool.provider_circuit is not None:
@@ -370,6 +374,7 @@ class _DurablePool:
         self.dispatched_requests: list[tuple[str, str, int]] = []
         self.project_circuit: dict[str, object] | None = None
         self.provider_circuit: dict[str, object] | None = None
+        self.provider_claim_fails = False
         self.queries: list[str] = []
         self.candidate: dict[str, object] | None = {
             "issue_id": "00000000-0000-0000-0000-000000000004",
@@ -638,18 +643,44 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(pool.project_circuit["state"], "open")
 
-    async def test_the_probe_claim_runs_in_its_own_savepoint(self) -> None:
-        """Issue #92: a claim that only half succeeded used to be committed by
-        the caller's `return None`, wedging the project at `half_open`."""
+    async def test_a_failed_second_claim_unwinds_the_claim_transaction(self) -> None:
+        """Issue #92: the project claim used to be committed by the caller's
+        `return None`, wedging the project at `half_open` with a probe pointing
+        at a workflow run `schedule()` never inserted.
+
+        This asserts the two halves of the mechanism a fake can observe: the
+        failed claim is reported as such, and the claim ran inside its own
+        nested transaction, which asyncpg issues as a SAVEPOINT because
+        `schedule()` already holds the outer one. That the savepoint really
+        discards the first claim is proved against PostgreSQL by
+        `test_postgres_integration.py`'s `test_a_partial_probe_claim_is_never_committed`.
+        """
         pool = _DurablePool()
         pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
         pool.provider_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_claim_fails = True
         connection = _DurableConnection(pool)
         control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
 
-        await control_plane._claim_circuit_probes(connection, pool.project_id, "github", uuid4(), NOW)
+        claimed = await control_plane._claim_circuit_probes(
+            connection, pool.project_id, "github", uuid4(), NOW
+        )
 
+        self.assertFalse(claimed)
         self.assertEqual(connection.transactions_opened, 1)
+        self.assertEqual(sum("SET state = 'half_open'" in query for query in pool.queries), 2)
+
+    async def test_schedule_places_no_offer_when_a_probe_claim_fails(self) -> None:
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_claim_fails = True
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        self.assertIsNone(await control_plane.schedule(NOW, timedelta(seconds=30)))
+
+        self.assertFalse(any("INSERT INTO app.workflow_runs" in query for query in pool.queries))
+        self.assertFalse(any("INSERT INTO app.job_offers" in query for query in pool.queries))
 
     async def test_a_stale_probe_pointer_does_not_veto_a_new_claim(self) -> None:
         """`state = 'open'` means no probe is outstanding, so a pointer still on

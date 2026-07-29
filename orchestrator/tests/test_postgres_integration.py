@@ -860,6 +860,58 @@ class CircuitBreakerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider["state"], "closed")
         self.assertIsNone(provider["opened_at"])
 
+    async def test_a_stale_pointer_cannot_flip_a_circuit_that_is_no_longer_half_open(self) -> None:
+        """Wedge 3, the general case behind the `state = 'half_open'` guards.
+
+        Clearing the pointer everywhere removes the way this happened in
+        practice, but not the hazard: a row written by an older orchestrator, or
+        one restored from a backup, can still name a workflow that no longer
+        owns the probe. Matching on the pointer alone let that workflow close an
+        open provider circuit -- re-enabling scheduling in the middle of an
+        outage -- and reopen a closed one.
+        """
+        project_id, issue_id, _ = await self._seed()
+        completing = await self._workflow_run_id(project_id, issue_id, "ai_review")
+        blocking = await self._workflow_run_id(project_id, issue_id, "ai_review")
+        await self.pool.execute(
+            """
+            INSERT INTO app.provider_circuit_state
+                (provider, state, consecutive_failures, last_failure_reason, opened_at,
+                 probe_workflow_run_id, updated_at)
+            VALUES ($1, 'open', 3, 'issue tracker is unavailable', $2, $3, $2)
+            """,
+            self.provider,
+            _NOW,
+            UUID(completing),
+        )
+
+        await AsyncpgWorkflowPersistence(
+            self.pool, now=lambda: _NOW + timedelta(minutes=1)
+        ).transition(completing, "completed", {"status": "completed"})
+
+        provider = await self._provider_circuit()
+        self.assertEqual(provider["state"], "open")
+        self.assertEqual(provider["opened_at"], _NOW)
+
+        await self.pool.execute(
+            """
+            UPDATE app.provider_circuit_state
+            SET state = 'closed', consecutive_failures = 0, opened_at = NULL,
+                probe_workflow_run_id = $2
+            WHERE provider = $1
+            """,
+            self.provider,
+            UUID(blocking),
+        )
+
+        await AsyncpgWorkflowPersistence(
+            self.pool, now=lambda: _NOW + timedelta(minutes=2)
+        ).transition(blocking, "blocked", {"status": "blocked", "blocking_reason": "stale"})
+
+        provider = await self._provider_circuit()
+        self.assertEqual(provider["state"], "closed")
+        self.assertIsNone(provider["opened_at"])
+
     async def test_recording_a_provider_failure_drops_the_probe_pointer(self) -> None:
         """A new failure invalidates any probe: leaving the pointer set made
         the circuit unclaimable for the rest of its life."""
