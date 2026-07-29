@@ -256,6 +256,10 @@ class EndToEndExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet["constraints"]["mayModifyFiles"], True)
         self.assertEqual(packet["constraints"]["mayPush"], True)
         self.assertEqual(packet["constraints"]["mayMerge"], False)
+        self.assertEqual(
+            [reference["name"] for reference in packet["environmentRefs"]],
+            ["GITHUB_TOKEN"],
+        )
 
 
 # Counters that app.workflow_runs stores as columns; _WorkflowStore mirrors the

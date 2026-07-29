@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-var pushEnvironmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+var credentialEnvironmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 
 type CommitResult struct {
 	Committed bool
@@ -66,7 +66,7 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 	if !safeRef(branch) {
 		return PushResult{}, errors.New("push branch is invalid")
 	}
-	extraEnvironment, err := pushEnvironment(environment)
+	extraEnvironment, err := credentialEnvironment(environment)
 	if err != nil {
 		return PushResult{}, err
 	}
@@ -76,15 +76,16 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 	return PushResult{Branch: branch, Pushed: true}, nil
 }
 
-// pushEnvironment renders resolved task environment (which may carry a push
-// credential such as GITHUB_TOKEN) as extra environment variables for the
-// "git push" subprocess, so a configured credential helper or askpass hook
-// on the runner host can authenticate the push.
-func pushEnvironment(environment map[string]string) ([]string, error) {
+// credentialEnvironment renders the resolved task environment (which may carry
+// a code-host credential such as GITHUB_TOKEN) as extra environment variables
+// for a Git subprocess. When a GitHub token is present it also configures the
+// GitHub HTTPS authorization header through GIT_CONFIG_* so clone, fetch, and
+// push authenticate without the token ever appearing in an argument list.
+func credentialEnvironment(environment map[string]string) ([]string, error) {
 	extra := make([]string, 0, len(environment))
 	for name, value := range environment {
-		if !pushEnvironmentName.MatchString(name) || strings.ContainsAny(value, "\x00\r\n") {
-			return nil, errors.New("push credential environment is invalid")
+		if !credentialEnvironmentName.MatchString(name) || strings.ContainsAny(value, "\x00\r\n") {
+			return nil, errors.New("git credential environment is invalid")
 		}
 		extra = append(extra, name+"="+value)
 	}

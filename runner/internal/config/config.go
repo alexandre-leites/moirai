@@ -268,6 +268,18 @@ func validateTLS(config Config) error {
 	return nil
 }
 
+// SecretValue resolves a named secret, preferring the Docker-style
+// "<NAME>_FILE" indirection that Compose secrets use over the plain variable.
+// It returns an empty value with a nil error when neither is configured, so
+// callers can report a missing secret in their own terms.
+func SecretValue(lookupEnv func(string) (string, bool), key string) (string, error) {
+	value, err := secretFileValue(lookupEnv, key)
+	if err != nil || value != "" {
+		return value, err
+	}
+	return envValue(lookupEnv, key), nil
+}
+
 func secretFileValue(lookupEnv func(string) (string, bool), key string) (string, error) {
 	path := envValue(lookupEnv, key+"_FILE")
 	if path == "" {

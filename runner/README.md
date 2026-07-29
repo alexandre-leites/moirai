@@ -20,7 +20,7 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_REGISTRATION_TOKEN` | | One-time registration token. |
 | `LOOP_RUNNER_LABELS` | | Comma-separated capability labels. |
 | `LOOP_RUNNER_CAPACITY` | `1` | Concurrent execution capacity. |
-| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | | Comma-separated task environment variable allow-list. |
+| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | | Comma-separated task environment variable allow-list; set `GITHUB_TOKEN` for GitHub-backed projects. |
 | `LOOP_RUNNER_HEARTBEAT_INTERVAL` | `10s` | Heartbeat and local lease-expiry check interval. |
 | `LOOP_RUNNER_RECONNECT_MIN` / `LOOP_RUNNER_RECONNECT_MAX` | `1s` / `1m` | Control-stream exponential-backoff bounds. |
 | `LOOP_RUNNER_RECONNECT_GRACE` | `1m` | Reconnection grace configuration. |
@@ -45,9 +45,17 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_DOCKER_NETWORK` | `bridge` | Docker network mode; use a network with provider access for autonomous agents. |
 | `LOOP_RUNNER_DOCKER_STOP_TIMEOUT` | `10s` | Docker graceful-stop timeout. |
 
-`GITHUB_TOKEN` may be included in the allowed task environment. Delivery configures Git's GitHub HTTPS authorization header from this environment without putting the token in the `git push` argument list. Docker task secrets are supplied through a temporary `0600` env-file rather than Docker command-line environment arguments.
-
 TLS settings are `LOOP_ORCHESTRATOR_TLS`, `LOOP_ORCHESTRATOR_TLS_CA_FILE`, `LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE`, `LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE`, and `LOOP_ORCHESTRATOR_TLS_SERVER_NAME`.
+
+## Task credentials
+
+A task packet declares the credentials it needs as `environmentRefs` — a variable name plus an opaque audit reference. The runner resolves each name against its own environment before the workspace is prepared, so the same credential authenticates the `git clone --mirror` and `git fetch` that populate the workspace and the `git push` that delivers the branch. Values are resolved from either the plain variable or a Docker-style `<NAME>_FILE` path to a mounted secret; secret values never travel in the packet.
+
+A reference that is missing from `LOOP_RUNNER_ALLOWED_ENVIRONMENT`, or that the runner cannot resolve, fails the execution with a terminal `failed` event naming the variable. The runner never falls back to an unauthenticated Git operation.
+
+`GITHUB_TOKEN` must be included in the allowed task environment for GitHub-backed projects. Delivery configures Git's GitHub HTTPS authorization header from this environment without putting the token in the `git push` argument list. Docker task secrets are supplied through a temporary `0600` env-file rather than Docker command-line environment arguments.
+
+In Compose the runner receives it as `GITHUB_TOKEN_FILE=/run/secrets/github_token` with `LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN`.
 
 
 
@@ -63,7 +71,8 @@ TLS settings are `LOOP_ORCHESTRATOR_TLS`, `LOOP_ORCHESTRATOR_TLS_CA_FILE`, `LOOP
 | `LOOP_RUNNER_RECONNECT_MAX` | `1m` | Maximum reconnect backoff. |
 | `LOOP_RUNNER_CAPACITY` | `1` | Concurrent execution capacity; must be positive. |
 | `LOOP_RUNNER_MINIMUM_FREE_BYTES` | `1073741824` | Required free space in the runner data directory. |
-| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | empty | Comma-separated environment variable names allowed into agent processes. |
+| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | empty | Comma-separated environment variable names a task packet may request. |
+| `GITHUB_TOKEN` / `GITHUB_TOKEN_FILE` | empty | Code-host credential resolved for task packets that declare `GITHUB_TOKEN`; the `_FILE` form reads a mounted secret. |
 | `LOOP_RUNNER_REDACTION_PREFIXES` | empty | Comma-separated sensitive-variable prefixes removed from logs. |
 | `LOOP_RUNNER_RETAIN_WORKSPACES` | empty | Comma-separated terminal states to retain: `succeeded`, `failed`, `abandoned`. |
 | `LOOP_RUNNER_DOCKER_ENABLED` | `false` | Allow Docker-backed execution. |
@@ -77,7 +86,7 @@ TLS settings are `LOOP_ORCHESTRATOR_TLS`, `LOOP_ORCHESTRATOR_TLS_CA_FILE`, `LOOP
 | `LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE` | empty | Absolute client key path; requires TLS and a matching certificate. |
 | `LOOP_ORCHESTRATOR_TLS_SERVER_NAME` | empty | TLS server name override; requires TLS. |
 
-Registration credentials must be provided through `LOOP_RUNNER_REGISTRATION_TOKEN_FILE`; raw registration-token environment variables are not read. In Compose, this is mounted as a Docker secret at `/run/secrets/runner_registration_token`.
+Registration credentials must be provided through `LOOP_RUNNER_REGISTRATION_TOKEN_FILE`; raw registration-token environment variables are not read. In Compose, this is mounted as a Docker secret at `/run/secrets/runner_registration_token`, alongside the shared `github_token` secret at `/run/secrets/github_token`.
 
 ## Agent Result Document
 

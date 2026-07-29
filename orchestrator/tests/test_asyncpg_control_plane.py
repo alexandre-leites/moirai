@@ -543,6 +543,10 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet["role"], "developer")
         self.assertTrue(packet["executionId"].endswith("-implement"))
         self.assertEqual(packet["constraints"], {"mayModifyFiles": True, "mayPush": True, "mayMerge": False})
+        self.assertEqual(
+            [reference["name"] for reference in packet["environmentRefs"]],
+            ["GITHUB_TOKEN"],
+        )
         self.assertTrue(any("workflow_execution_requests" in query for query in pool.queries))
 
     async def test_schedule_creates_an_atomic_offer_and_project_lock(self) -> None:

@@ -45,15 +45,20 @@ func main() {
 // osEnvironmentResolver resolves a task packet's EnvironmentRefs from the
 // runner process's own environment. Operators configure the runner host or
 // container with the secret material (e.g. GITHUB_TOKEN) under the same
-// name declared in LOOP_RUNNER_ALLOWED_ENVIRONMENT; the SecretRef field is
-// carried for audit purposes only and does not select a backend here.
+// name declared in LOOP_RUNNER_ALLOWED_ENVIRONMENT, either as a plain
+// variable or as a "<NAME>_FILE" path to a mounted Compose secret; the
+// SecretRef field is carried for audit purposes only and does not select a
+// backend here.
 type osEnvironmentResolver struct{}
 
 func (osEnvironmentResolver) Resolve(_ context.Context, references []taskpacket.EnvironmentRef) (map[string]string, error) {
 	resolved := make(map[string]string, len(references))
 	for _, reference := range references {
-		value, ok := os.LookupEnv(reference.Name)
-		if !ok || value == "" {
+		value, err := config.SecretValue(os.LookupEnv, reference.Name)
+		if err != nil {
+			return nil, fmt.Errorf("environment reference %q cannot be read on this runner: %w", reference.Name, err)
+		}
+		if value == "" {
 			return nil, fmt.Errorf("environment reference %q is not configured on this runner", reference.Name)
 		}
 		resolved[reference.Name] = value

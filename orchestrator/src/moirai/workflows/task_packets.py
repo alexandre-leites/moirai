@@ -1,15 +1,51 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
 ExecutionRole = Literal["planner", "developer", "pipeline", "reviewer", "repairer"]
+
+_ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 
 
 @dataclass(frozen=True)
 class PipelineCommand:
     command: str
     timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class EnvironmentRef:
+    """A credential the runner must resolve locally before executing the task.
+
+    Only the variable name and an opaque audit reference travel in the packet;
+    the secret value never leaves the runner host.
+    """
+
+    name: str
+    secret_ref: str
+
+    def packet(self) -> dict[str, str]:
+        return {"name": self.name, "secretRef": self.secret_ref}
+
+
+GITHUB_TOKEN_REF = EnvironmentRef(name="GITHUB_TOKEN", secret_ref="github_token")
+
+
+def environment_refs_for(
+    *, repository_mode: str, may_push: bool
+) -> tuple[EnvironmentRef, ...]:
+    """Decide which credentials a role needs for its repository.
+
+    A managed clone is fetched from the code host by the runner, and any role
+    that may push writes back to it, so both cases require the GitHub
+    credential. An ``existing_path`` read-only role works entirely inside an
+    operator-provided checkout and is given nothing.
+    """
+    if may_push or repository_mode == "managed_clone":
+        return (GITHUB_TOKEN_REF,)
+    return ()
 
 
 @dataclass(frozen=True)
@@ -53,6 +89,7 @@ class TaskExecutionRequest:
     may_modify_files: bool
     may_push: bool
     may_merge: bool
+    environment_refs: tuple[EnvironmentRef, ...] = ()
     pipeline: tuple[PipelineCommand, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
     plan: tuple[str, ...] = ()
@@ -84,6 +121,7 @@ def task_execution(
     diff_summary: str = "",
     failed_checks: tuple[str, ...] = (),
     review_findings: tuple[str, ...] = (),
+    environment_refs: tuple[EnvironmentRef, ...] | None = None,
 ) -> TaskExecutionRequest:
     if repository_mode not in {"managed_clone", "existing_path"}:
         raise ValueError("task packet repository mode is invalid")
@@ -91,6 +129,9 @@ def task_execution(
     if role not in {"planner", "developer", "pipeline", "reviewer", "repairer"}:
         raise ValueError("task packet execution role is invalid")
     read_only = role in {"planner", "pipeline", "reviewer"}
+    may_push = role == "developer"
+    if environment_refs is None:
+        environment_refs = environment_refs_for(repository_mode=mode, may_push=may_push)
     return TaskExecutionRequest(
         job_id=job_id,
         execution_id=execution_id,
@@ -109,8 +150,9 @@ def task_execution(
         ),
         timeout_seconds=timeout_seconds,
         may_modify_files=not read_only,
-        may_push=role == "developer",
+        may_push=may_push,
         may_merge=False,
+        environment_refs=environment_refs,
         acceptance_criteria=acceptance_criteria,
         plan=plan,
         previous_failures=previous_failures,
@@ -182,6 +224,19 @@ def planner_task_execution(
     )
 
 
+def _validate_environment_refs(references: tuple[EnvironmentRef, ...]) -> None:
+    if len(references) > 64:
+        raise ValueError("task environment references are invalid")
+    names: set[str] = set()
+    for reference in references:
+        if not _ENVIRONMENT_NAME.fullmatch(reference.name) or reference.name in names:
+            raise ValueError("task environment references are invalid")
+        secret_ref = reference.secret_ref
+        if not secret_ref or secret_ref.strip() != secret_ref or len(secret_ref) > 512:
+            raise ValueError("task environment references are invalid")
+        names.add(reference.name)
+
+
 def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
     if not request.job_id or not request.execution_id:
         raise ValueError("task execution identifiers are required")
@@ -203,6 +258,7 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
     )
     if any(len(values) > 64 or any(not value.strip() for value in values) for values in context_lists):
         raise ValueError("task execution context is invalid")
+    _validate_environment_refs(request.environment_refs)
     return {
         "protocolVersion": "1.0",
         "jobId": request.job_id,
@@ -218,7 +274,7 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
         "promptPath": ".loop/prompt.md",
         "expectedOutput": ".loop/result.json",
         "timeoutSeconds": request.timeout_seconds,
-        "environmentRefs": [],
+        "environmentRefs": [reference.packet() for reference in request.environment_refs],
         "pipeline": [
             {"command": command.command, "timeoutSeconds": command.timeout_seconds}
             for command in request.pipeline

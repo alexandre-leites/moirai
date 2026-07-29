@@ -98,8 +98,10 @@ services:
       LOOP_RUNNER_NAME: "${LOOP_RUNNER_NAME:-runner-1}"
       LOOP_RUNNER_LABELS: "${LOOP_RUNNER_LABELS:-linux}"
       LOOP_RUNNER_CAPACITY: "${LOOP_RUNNER_CAPACITY:-1}"
+      LOOP_RUNNER_ALLOWED_ENVIRONMENT: "${LOOP_RUNNER_ALLOWED_ENVIRONMENT:-GITHUB_TOKEN}"
+      GITHUB_TOKEN_FILE: /run/secrets/github_token
       LOOP_RUNNER_AGENT_ARGUMENTS: "--model,opencode/deepseek-v4-flash-free,--auto"
-    secrets: [runner_registration_token]
+    secrets: [runner_registration_token, github_token]
     read_only: true
     tmpfs:
       - /run:mode=0755

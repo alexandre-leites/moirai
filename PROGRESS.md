@@ -2,6 +2,71 @@
 
 ## Current Status
 
+- Overall status: #109 implemented; branch `issue-109` pushed and PR opened
+- Current phase: Resolve GitHub issue #109 (P0 runner cannot authenticate to GitHub)
+- Active implementation: None
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/issue-109-runner-credentials
+
+## Done
+
+- [x] Populate task-packet `environmentRefs` and thread the credential through the runner's Git path (#109)
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/task_packets.py`,
+    `orchestrator/tests/test_task_packets.py`, `orchestrator/tests/test_asyncpg_control_plane.py`,
+    `orchestrator/tests/test_end_to_end.py`, `runner/internal/dispatch/dispatch.go`,
+    `runner/internal/repository/manager.go`, `runner/internal/repository/delivery.go`,
+    `runner/internal/config/config.go`, `runner/cmd/runner/main.go`,
+    `compose.yaml`, `.env.example`, `README.md`, `runner/README.md`
+  - Behavior delivered:
+    - `build_task_packet` emits real `environmentRefs` instead of a hardcoded `[]`.
+      `TaskExecutionRequest` carries `environment_refs`, and `environment_refs_for`
+      declares `GITHUB_TOKEN` (secretRef `github_token`) for any role that may push
+      and for every `managed_clone` repository. Emission is validated for name
+      pattern, uniqueness, `secretRef` shape, and count, matching the Go validator.
+    - The runner resolves the task environment *before* `Workspaces.Prepare`, so
+      `git clone --mirror` and `git fetch` receive the same credential the later
+      `git push` does. `repository.PrepareRequest` gained an `Environment` field and
+      `prepareSource` runs its networked Git commands through `gitWithEnv`.
+    - `pushEnvironment` became `credentialEnvironment`, now shared by clone, fetch,
+      and push; it injects `GIT_CONFIG_KEY_0=http.https://github.com/.extraheader`
+      so the token never appears in an argument list.
+    - `osEnvironmentResolver` resolves a reference from the plain variable or the
+      Docker-style `<NAME>_FILE` path, via the new `config.SecretValue`, so a Compose
+      secret can back the credential.
+    - An unresolvable or disallowed reference fails the execution before the
+      workspace exists; the control loop reports a terminal `failed` event whose
+      `error` payload names the variable, and no unauthenticated push is attempted.
+    - Compose mounts the shared `github_token` secret into the runner and sets
+      `LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN`. No token value is committed;
+      `.env.example` carries only the allow-list name.
+  - Validation performed: 292 orchestrator tests, full runner race suite, Ruff,
+    Mypy, and Compose rendering (runner service shows the `github_token` secret and
+    `LOOP_RUNNER_ALLOWED_ENVIRONMENT: GITHUB_TOKEN`).
+  - Commands executed: `make test-orchestrator`; `make test-runner`; `make lint`;
+    `make typecheck`; `make compose`; `cd runner && gofmt -l . && go vet ./...`.
+  - Notes: pipeline-command environment isolation stays open as #122; this change is
+    the dependency it names.
+
+## Decisions
+
+- Decision: declare `GITHUB_TOKEN` for any role that may push and for every `managed_clone` packet.
+  - Context: the runner clones and fetches from the code host during workspace preparation, and pushes during delivery.
+  - Alternatives considered: declaring the credential on every packet regardless of mode; sniffing the repository URL scheme.
+  - Reason: `managed_clone` is the GitHub-backed mode and always reaches the network, while a read-only `existing_path` role works inside an operator-provided checkout and should not receive a credential. URL sniffing would encode code-host specifics in the orchestrator, which #109 puts out of scope.
+  - Consequences: a runner serving `managed_clone` projects must have `GITHUB_TOKEN` allowed and configured; otherwise every such packet fails loudly, which is the requested behavior.
+
+- Decision: resolve the credential from `<NAME>_FILE` as well as the plain variable.
+  - Context: Compose delivers secrets as mounted files, but `osEnvironmentResolver` only read `os.LookupEnv`.
+  - Alternatives considered: passing the token to the runner as a plain Compose environment variable.
+  - Reason: a plain variable would put the token in `docker inspect` and in the Compose file or `.env`, which the repository explicitly forbids.
+  - Consequences: the runner reads `/run/secrets/github_token` on demand; the file indirection is documented in `runner/README.md`.
+
+- Overall status: Complete; PR #74 rebased onto current main and awaiting CI
+- Current phase: Resolve GitHub issues #40 and #70
+- Active implementation: None
+- Last updated: 2026-07-28
+- Agent/session identifier: agent/docs-contracts
 - Overall status: MVP audit complete (issue #87). The stack builds, boots and schedules, but the
   end-to-end flow **Web UI → API → Orchestrator → Runner → Orchestrator → API → Web UI** does not
   close: the runner cannot authenticate to GitHub, and the API/UI have no read path for a

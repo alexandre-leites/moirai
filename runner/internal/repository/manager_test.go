@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -152,6 +153,66 @@ func TestPrepareCreatesWorktreeFromExistingLocalPath(t *testing.T) {
 	}
 }
 
+func TestPrepareAuthenticatesManagedCloneAndFetchWithResolvedEnvironment(t *testing.T) {
+	binary, recorded := fakeGit(t)
+	dataDirectory := t.TempDir()
+	manager := Manager{DataDirectory: dataDirectory, GitBinary: binary}
+
+	if _, err := manager.Prepare(context.Background(), PrepareRequest{
+		ProjectID:     "project-1",
+		JobID:         "job-2",
+		RepositoryURL: "https://github.com/owner/repository.git",
+		DefaultBranch: "main",
+		Branch:        "agent/1234/run-a1b2c3",
+		Environment:   map[string]string{"GITHUB_TOKEN": "token-value"},
+	}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	commands := readGitCommands(t, recorded)
+	environments := readGitEnvironments(t, recorded)
+	if len(commands) != len(environments) {
+		t.Fatalf("recorded %d commands and %d environments", len(commands), len(environments))
+	}
+	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:token-value"))
+	authenticated := 0
+	for index, command := range commands {
+		verb := command[0]
+		if verb == "-C" {
+			verb = command[2]
+		}
+		networked := verb == "clone" || verb == "fetch"
+		hasHeader := gitEnvironmentContains(environments[index], "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader")
+		hasValue := gitEnvironmentContains(environments[index], "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+credential)
+		hasToken := gitEnvironmentContains(environments[index], "GITHUB_TOKEN=token-value")
+		if networked != (hasHeader && hasValue && hasToken) {
+			t.Fatalf("command %d (%#v) credential environment = %#v", index, command, environments[index])
+		}
+		if networked {
+			authenticated++
+		}
+	}
+	if authenticated != 2 {
+		t.Fatalf("authenticated git commands = %d, want clone and fetch: %#v", authenticated, commands)
+	}
+}
+
+func TestPrepareRejectsUnsafeResolvedEnvironment(t *testing.T) {
+	binary, _ := fakeGit(t)
+	manager := Manager{DataDirectory: t.TempDir(), GitBinary: binary}
+	_, err := manager.Prepare(context.Background(), PrepareRequest{
+		ProjectID:     "project-1",
+		JobID:         "job-2",
+		RepositoryURL: "https://github.com/owner/repository.git",
+		DefaultBranch: "main",
+		Branch:        "agent/1234/run-a1b2c3",
+		Environment:   map[string]string{"GITHUB_TOKEN": "token\nGIT_CONFIG_COUNT=0"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "git credential environment is invalid") {
+		t.Fatalf("Prepare() error = %v, want invalid credential environment", err)
+	}
+}
+
 func TestCleanupExistingRemovesOnlyManagedWorkspace(t *testing.T) {
 	binary, recorded := fakeGit(t)
 	dataDirectory := t.TempDir()
@@ -281,12 +342,28 @@ func fakeGit(t *testing.T) (string, string) {
 	directory := t.TempDir()
 	recorded := filepath.Join(directory, "arguments")
 	binary := filepath.Join(directory, "git")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$LOOP_GIT_ARGS\"\nprintf '\\036' >> \"$LOOP_GIT_ARGS\"\nfor argument in \"$@\"; do if [ \"$argument\" = fsck ] && [ \"$LOOP_GIT_FAIL_FSCK\" = 1 ]; then exit 1; fi; if [ \"$argument\" = status ] && [ \"$LOOP_GIT_STATUS\" = 1 ]; then printf ' M file\\000'; fi; if [ \"$argument\" = ls-remote ] && [ \"$LOOP_GIT_REMOTE_BRANCH\" = 1 ]; then printf 'revision\\trefs/heads/agent/issue-7/run-1\\n'; fi; if [ \"$argument\" = --git-common-dir ]; then printf '.git\\n'; fi; done\n"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$LOOP_GIT_ARGS\"\nprintf '\\036' >> \"$LOOP_GIT_ARGS\"\nenv >> \"$LOOP_GIT_ARGS.env\"\nprintf '\\036' >> \"$LOOP_GIT_ARGS.env\"\nfor argument in \"$@\"; do if [ \"$argument\" = fsck ] && [ \"$LOOP_GIT_FAIL_FSCK\" = 1 ]; then exit 1; fi; if [ \"$argument\" = status ] && [ \"$LOOP_GIT_STATUS\" = 1 ]; then printf ' M file\\000'; fi; if [ \"$argument\" = ls-remote ] && [ \"$LOOP_GIT_REMOTE_BRANCH\" = 1 ]; then printf 'revision\\trefs/heads/agent/issue-7/run-1\\n'; fi; if [ \"$argument\" = --git-common-dir ]; then printf '.git\\n'; fi; done\n"
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake git: %v", err)
 	}
 	t.Setenv("LOOP_GIT_ARGS", recorded)
 	return binary, recorded
+}
+
+// readGitEnvironments returns the environment of each recorded git invocation,
+// in the same order as readGitCommands.
+func readGitEnvironments(t *testing.T, path string) [][]string {
+	t.Helper()
+	return readGitCommands(t, path+".env")
+}
+
+func gitEnvironmentContains(environment []string, entry string) bool {
+	for _, value := range environment {
+		if value == entry {
+			return true
+		}
+	}
+	return false
 }
 
 func readGitCommands(t *testing.T, path string) [][]string {
