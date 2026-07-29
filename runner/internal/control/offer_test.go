@@ -236,6 +236,95 @@ func TestOfferStateWithCapacityAdmitsConcurrentOffersUpToCapacity(t *testing.T) 
 	}
 }
 
+func TestOfferStateExpiresUnacknowledgedReservationAndFreesCapacity(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state := newOfferState(t, client, &now)
+	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
+		t.Fatalf("Admit() = (%v, %v)", admitted, err)
+	}
+	if state.ReservedCount() != 1 || state.ActiveCount() != 0 {
+		t.Fatalf("reserved = %d, active = %d, want an unacknowledged reservation holding the slot", state.ReservedCount(), state.ActiveCount())
+	}
+
+	now = now.Add(DefaultOfferTimeout - time.Second)
+	if expired := state.ExpirePending(DefaultOfferTimeout); len(expired) != 0 {
+		t.Fatalf("ExpirePending() = %#v before the timeout elapsed", expired)
+	}
+
+	now = now.Add(time.Second)
+	expired := state.ExpirePending(DefaultOfferTimeout)
+	if len(expired) != 1 || expired[0].JobID != "job-1" || expired[0].Generation != 1 || expired[0].ExecutionID != "execution-1" {
+		t.Fatalf("ExpirePending() = %#v", expired)
+	}
+	if state.ReservedCount() != 0 {
+		t.Fatalf("ReservedCount() = %d after expiry", state.ReservedCount())
+	}
+	if admitted, err := state.Admit(validOffer(t, "job-2", 1)); err != nil || !admitted {
+		t.Fatalf("Admit() after expiry = (%v, %v), want the freed slot reused", admitted, err)
+	}
+	if len(client.rejected) != 0 {
+		t.Fatalf("rejected = %#v, want expiry handled locally without an offer rejection", client.rejected)
+	}
+}
+
+func TestOfferStateRejectsAcknowledgementForExpiredReservation(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state := newOfferState(t, client, &now)
+	if admitted, err := state.Admit(validOffer(t, "job-1", 4)); err != nil || !admitted {
+		t.Fatalf("Admit() = (%v, %v)", admitted, err)
+	}
+	now = now.Add(DefaultOfferTimeout)
+	if expired := state.ExpirePending(DefaultOfferTimeout); len(expired) != 1 {
+		t.Fatalf("ExpirePending() = %#v", expired)
+	}
+
+	acknowledgement := &runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 4, ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}
+	if state.ApplyAcknowledgement(acknowledgement) {
+		t.Fatal("acknowledgement resurrected an expired reservation")
+	}
+	if state.ReservedCount() != 0 || state.ActiveCount() != 0 {
+		t.Fatalf("reserved = %d, active = %d after a stale acknowledgement", state.ReservedCount(), state.ActiveCount())
+	}
+	if _, active := state.ActiveLease("job-1"); active {
+		t.Fatal("expired reservation became an active lease")
+	}
+}
+
+func TestOfferStateKeepsAcknowledgedLeaseThroughPendingExpirySweep(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state := newOfferState(t, client, &now)
+	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
+		t.Fatalf("Admit() = (%v, %v)", admitted, err)
+	}
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 1, ExpiresAtUnixMs: now.Add(time.Hour).UnixMilli()}) {
+		t.Fatal("ApplyAcknowledgement() rejected the normal acknowledgement path")
+	}
+
+	now = now.Add(10 * DefaultOfferTimeout)
+	if expired := state.ExpirePending(DefaultOfferTimeout); len(expired) != 0 {
+		t.Fatalf("ExpirePending() = %#v, want acknowledged leases untouched", expired)
+	}
+	if _, active := state.ActiveLease("job-1"); !active {
+		t.Fatal("pending expiry removed an acknowledged lease")
+	}
+}
+
+func TestOfferStateExpirePendingFallsBackToTheDefaultTimeout(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state := newOfferState(t, client, &now)
+	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
+		t.Fatalf("Admit() = (%v, %v)", admitted, err)
+	}
+	now = now.Add(DefaultOfferTimeout)
+	if expired := state.ExpirePending(0); len(expired) != 1 {
+		t.Fatalf("ExpirePending(0) = %#v, want the default timeout applied instead of no expiry", expired)
+	}
+}
+
 func newOfferState(t *testing.T, client OfferClient, now *time.Time) *OfferState {
 	t.Helper()
 	state, err := NewOfferState(client, func() time.Time { return *now }, time.Minute, 15*time.Second)
