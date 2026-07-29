@@ -114,6 +114,82 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["status"], "preparing")
         self.assertEqual(job["lease_expires_at"], _NOW + timedelta(minutes=10))
 
+    async def test_label_reconciliation_reads_only_the_newest_workflow_run_per_issue(self) -> None:
+        control_plane = AsyncpgControlPlane(self.pool)
+        suffix = uuid4().hex
+        project = await control_plane.create_project(
+            f"labels-{suffix}",
+            "managed_clone",
+            "https://example.test/labels.git",
+            None,
+            "main",
+            {"linux"},
+            _NOW,
+        )
+        project_id = project["id"]
+        self.addAsyncCleanup(self._delete_project, project_id)
+        delivered_issue = await self._create_issue(control_plane, project_id, "77")
+        blocked_issue = await self._create_issue(control_plane, project_id, "78")
+        await self._create_workflow_run(project_id, delivered_issue, "blocked", _NOW - timedelta(hours=2))
+        await self._create_workflow_run(project_id, delivered_issue, "implementing", _NOW - timedelta(hours=1))
+        await self._create_workflow_run(project_id, delivered_issue, "completed", _NOW)
+        await self._create_workflow_run(project_id, blocked_issue, "blocked", _NOW)
+
+        runs = await control_plane.list_latest_workflow_runs_for_project(project_id)
+
+        self.assertEqual(
+            {str(run["issue_id"]): run["status"] for run in runs},
+            {delivered_issue: "completed", blocked_issue: "blocked"},
+        )
+        self.assertEqual([run["issue_id"] for run in runs], sorted(str(run["issue_id"]) for run in runs))
+        self.assertEqual(runs, await control_plane.list_latest_workflow_runs_for_project(project_id))
+
+    async def _delete_project(self, project_id: str) -> None:
+        for table in ("workflow_runs", "issues"):
+            await self.pool.execute(f"DELETE FROM app.{table} WHERE project_id = $1", UUID(project_id))
+        await self.pool.execute("DELETE FROM app.projects WHERE id = $1", UUID(project_id))
+
+    async def _create_issue(self, control_plane: AsyncpgControlPlane, project_id: str, external_id: str) -> str:
+        await control_plane.upsert_issue(
+            project_id=project_id,
+            external_id=external_id,
+            title=f"Issue {external_id}",
+            body="",
+            state="open",
+            labels=["agent:ready", "bug"],
+            priority=10,
+            eligible=True,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+        record = await self.pool.fetchrow(
+            "SELECT id FROM app.issues WHERE project_id = $1 AND external_id = $2",
+            project_id,
+            external_id,
+        )
+        assert record is not None
+        return str(record["id"])
+
+    async def _create_workflow_run(
+        self, project_id: str, issue_id: str, status: str, created_at: datetime
+    ) -> None:
+        run_id = uuid4()
+        await self.pool.execute(
+            """
+            INSERT INTO app.workflow_runs
+                (id, project_id, issue_id, thread_id, status, current_phase, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $5, $6, $6)
+            """,
+            run_id,
+            UUID(project_id),
+            UUID(issue_id),
+            str(run_id),
+            status,
+            created_at,
+        )
+
 
 class OfferExpiryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Offer expiry and rejection must not destroy an in-flight workflow run.
@@ -436,7 +512,6 @@ class OfferExpiryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         run = await self._workflow_run(workflow_run_id)
         self.assertEqual(run["status"], "ai_review")
-
 
 if __name__ == "__main__":
     unittest.main()
