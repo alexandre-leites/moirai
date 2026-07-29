@@ -9,12 +9,20 @@ import (
 	"math/big"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
 )
 
 const defaultEventBufferSize = 128
+
+// A reduced terminal payload keeps its string fields within this budget so that
+// an unbounded one — `error` carries whatever the agent wrote to stderr — cannot
+// push the retry back over the event payload limit.
+const maxTerminalPayloadFieldBytes = 2048
+
+const truncationMarker = "… [truncated]"
 
 type ControlClient interface {
 	control.OfferClient
@@ -443,20 +451,50 @@ func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payloa
 
 // minimalTerminalPayload strips a terminal payload down to the fields the
 // orchestrator needs to classify the outcome, dropping the unbounded ones
-// (changed files, commands, the raw result document). It returns nil when the
-// payload is already minimal, so the caller does not re-emit an identical
-// event that would fail for the same reason.
+// (changed files, commands, the raw result document) and truncating the fields
+// it keeps. Keeping `error` is not enough on its own: it carries whatever the
+// agent wrote to stderr, so a wedged agent can blow the payload limit with that
+// field alone. It returns nil when nothing was dropped or truncated, so the
+// caller does not re-emit an identical event that would fail the same way.
 func minimalTerminalPayload(payload map[string]any) map[string]any {
-	reduced := make(map[string]any, 6)
-	for _, key := range []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch"} {
-		if value, ok := payload[key]; ok {
-			reduced[key] = value
+	reduced := make(map[string]any, len(minimalTerminalPayloadKeys))
+	truncated := false
+	for _, key := range minimalTerminalPayloadKeys {
+		value, present := payload[key]
+		if !present {
+			continue
+		}
+		if text, isText := value.(string); isText {
+			if shortened := truncateUTF8(text, maxTerminalPayloadFieldBytes); shortened != text {
+				value = shortened + truncationMarker
+				truncated = true
+			}
+		}
+		reduced[key] = value
+	}
+	for key := range payload {
+		if _, kept := reduced[key]; !kept {
+			return reduced
 		}
 	}
-	if len(reduced) == len(payload) {
-		return nil
+	if truncated {
+		return reduced
 	}
-	return reduced
+	return nil
+}
+
+var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch"}
+
+// truncateUTF8 shortens value to at most limit bytes without splitting a rune.
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func executionUsage(started time.Time, result Result) map[string]any {

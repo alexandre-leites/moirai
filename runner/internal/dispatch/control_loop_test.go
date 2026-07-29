@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
@@ -750,6 +751,92 @@ func TestControlLoopRescuesOversizedTerminalEventWithMinimalPayload(t *testing.T
 	}
 	if _, present := payload["result"]; present {
 		t.Fatalf("reduced terminal payload kept the oversized result document: %#v", payload)
+	}
+}
+
+func TestControlLoopRescuesTerminalEventWithOversizedErrorText(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	// A wedged agent that dumps its stderr into the returned error puts an
+	// unbounded string into the one field the reduced payload keeps verbatim.
+	oversized := strings.Repeat("x", 26*1024)
+	dispatcher := &staticDispatcher{result: Result{Status: "failed", ExitCode: 1}, err: errors.New(oversized)}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoopWithOutbox() error = %v", err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	terminal := client.events[1]
+	if terminal.GetType() != "failed" {
+		t.Fatalf("terminal event = %#v, want the outcome to survive an oversized error string", terminal)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(terminal.GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	if payload["status"] != "failed" || payload["exitCode"] != float64(1) {
+		t.Fatalf("reduced terminal payload lost its classification fields: %#v", payload)
+	}
+	if payload["failureFingerprint"] == nil || payload["failureFingerprint"] == "" {
+		t.Fatalf("reduced terminal payload lost its failure fingerprint: %#v", payload)
+	}
+	text, ok := payload["error"].(string)
+	if !ok {
+		t.Fatalf("reduced terminal payload lost its error field: %#v", payload)
+	}
+	if len(text) >= len(oversized) {
+		t.Fatalf("error text was not truncated: %d bytes", len(text))
+	}
+	if !contains(text, truncationMarker) {
+		t.Fatalf("truncated error text is not marked as truncated: %q", text[max(0, len(text)-64):])
+	}
+}
+
+func TestMinimalTerminalPayloadReducesOnlyWhenSomethingChanges(t *testing.T) {
+	if reduced := minimalTerminalPayload(map[string]any{"status": "failed", "exitCode": 1}); reduced != nil {
+		t.Fatalf("minimalTerminalPayload() reduced an already-minimal payload: %#v", reduced)
+	}
+
+	// Same key count as the whitelist, but a disjoint key set: a count
+	// comparison would wrongly report nothing to reduce.
+	disjoint := map[string]any{"changedFiles": []string{"a"}, "commandsRun": []string{"b"}, "committed": true, "pushed": false, "finalRevision": "abc", "result": map[string]any{}}
+	reduced := minimalTerminalPayload(disjoint)
+	if reduced == nil || len(reduced) != 0 {
+		t.Fatalf("minimalTerminalPayload(disjoint) = %#v, want an empty reduction", reduced)
+	}
+
+	// Truncation alone is a reduction even when no key is dropped.
+	long := strings.Repeat("y", maxTerminalPayloadFieldBytes+10)
+	reduced = minimalTerminalPayload(map[string]any{"error": long})
+	if reduced == nil {
+		t.Fatal("minimalTerminalPayload() did not reduce an oversized error field")
+	}
+	text := reduced["error"].(string)
+	if len(text) > maxTerminalPayloadFieldBytes+len(truncationMarker) || !contains(text, truncationMarker) {
+		t.Fatalf("truncated error field = %d bytes, marker present = %v", len(text), contains(text, truncationMarker))
+	}
+}
+
+func TestTruncateUTF8StopsOnARuneBoundary(t *testing.T) {
+	value := strings.Repeat("a", 5) + "界界界"
+	for limit := 5; limit <= len(value); limit++ {
+		truncated := truncateUTF8(value, limit)
+		if len(truncated) > limit {
+			t.Fatalf("truncateUTF8(%d) = %d bytes", limit, len(truncated))
+		}
+		if !utf8.ValidString(truncated) {
+			t.Fatalf("truncateUTF8(%d) split a rune: %q", limit, truncated)
+		}
 	}
 }
 
