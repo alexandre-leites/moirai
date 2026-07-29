@@ -8,6 +8,7 @@ import { loadHealth } from "./health";
 import type { HealthViewState } from "./health";
 import { LoginPage } from "./login";
 import { ProjectsPage } from "./projects";
+import { RunnersPage } from "./runners";
 import { TokensPage } from "./tokens";
 import { WorkflowsPage } from "./workflows";
 import "./styles.css";
@@ -85,6 +86,7 @@ function Layout({ children }: { children: React.ReactNode }) {
         {state && (
           <nav>
             <Link to="/projects">Projects</Link>
+            <Link to="/runners">Runners</Link>
             {isAdmin && <Link to="/tokens">Tokens</Link>}
             <Link to="/workflows">Workflows</Link>
             <HealthIndicator api={api} />
@@ -104,6 +106,7 @@ function Dashboard() {
       <h2>Dashboard</h2>
       <ul className="nav-list">
         <li><Link to="/projects">Projects</Link></li>
+        <li><Link to="/runners">Runners</Link></li>
         {isAdmin && <li><Link to="/tokens">Runner tokens</Link></li>}
         <li><Link to="/workflows">Workflows</Link></li>
       </ul>
@@ -120,6 +123,7 @@ function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
             <Route path="/projects" element={<ProtectedRoute><ProjectsPage api={api} /></ProtectedRoute>} />
+            <Route path="/runners" element={<ProtectedRoute><RunnersPage api={api} /></ProtectedRoute>} />
             <Route path="/tokens" element={<AdminRoute><TokensPage api={api} /></AdminRoute>} />
             <Route path="/workflows" element={<ProtectedRoute><WorkflowsPage api={api} /></ProtectedRoute>} />
           </Routes>
