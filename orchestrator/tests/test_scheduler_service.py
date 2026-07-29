@@ -76,16 +76,30 @@ class _RejectFailureControlPlane:
         raise RuntimeError("cleanup unavailable")
 
 
+class _RejectSpyControlPlane:
+    def __init__(self, delegate: InMemoryControlPlane) -> None:
+        self._delegate = delegate
+        self.rejected: list[str] = []
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
+
+    def reject_offer(self, job_id: str, runner_id: str, now: datetime) -> None:
+        self.rejected.append(job_id)
+        self._delegate.reject_offer(job_id, runner_id, now)
+
+
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
-    def _control_plane(self) -> InMemoryControlPlane:
+    def _control_plane(self, projects: int = 1) -> InMemoryControlPlane:
         control_plane = InMemoryControlPlane()
-        control_plane.add_project(Project("project-1", True, frozenset({"linux"})))
-        control_plane.add_issue(
-            Issue("issue-1", "project-1", "42", 10, NOW - timedelta(days=1), NOW, True)
-        )
-        control_plane._runners["runner-1"] = Runner(
-            "runner-1", frozenset({"linux"}), True, True, False, True
-        )
+        for index in range(1, projects + 1):
+            control_plane.add_project(Project(f"project-{index}", True, frozenset({"linux"})))
+            control_plane.add_issue(
+                Issue(f"issue-{index}", f"project-{index}", str(index), 10, NOW - timedelta(days=1), NOW, True)
+            )
+            control_plane._runners[f"runner-{index}"] = Runner(
+                f"runner-{index}", frozenset({"linux"}), True, True, False, True
+            )
         return control_plane
 
     async def test_tick_delivers_one_scheduled_offer(self) -> None:
@@ -141,25 +155,86 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runners[0].active_job_id)
         self.assertTrue(workflows[0].status.terminal)
 
-    async def test_packet_failure_releases_offer_and_project_lock(self) -> None:
-        control_plane = self._control_plane()
+    async def test_packet_failure_skips_the_candidate_without_terminating_it(self) -> None:
+        """A packet build error is an orchestrator-side fault, not a runner
+        decision: it must never reach the terminal reject path, and it must not
+        stop the tick from serving the remaining candidates (issue #91)."""
+        control_plane = _RejectSpyControlPlane(self._control_plane(projects=2))
+        builds = 0
 
-        async def deliver(offer: object, packet: dict[str, object]) -> bool:
+        async def deliver(offer: Any, packet: dict[str, object]) -> bool:
             del offer, packet
-            self.fail("delivery should not be called")
+            return True
 
         async def build_packet(scheduled: object) -> dict[str, object]:
             del scheduled
-            raise RuntimeError("packet unavailable")
+            nonlocal builds
+            builds += 1
+            if builds == 1:
+                raise RuntimeError("packet unavailable")
+            return {}
 
         scheduler = Scheduler(control_plane, deliver, build_packet, timedelta(seconds=30))
-        with self.assertRaises(OfferDeliveryError) as raised:
-            await scheduler.tick(NOW)
-        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
-        workflows, runners, locks = control_plane.snapshot()
-        self.assertEqual(locks, ())
-        self.assertFalse(runners[0].active_job_id)
-        self.assertTrue(workflows[0].status.terminal)
+        placed = await scheduler.tick(NOW)
+
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(control_plane.rejected, [])
+        workflows, _, _ = control_plane.snapshot()
+        self.assertFalse(any(workflow.status.terminal for workflow in workflows))
+
+    async def test_failed_delivery_still_serves_the_remaining_candidates(self) -> None:
+        control_plane = _RejectSpyControlPlane(self._control_plane(projects=2))
+        deliveries = 0
+
+        async def deliver(offer: Any, packet: dict[str, object]) -> bool:
+            del packet
+            nonlocal deliveries
+            deliveries += 1
+            return deliveries > 1
+
+        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
+        placed = await scheduler.tick(NOW)
+
+        # The old tick broke out of the loop on the first undelivered offer and
+        # placed nothing at all.
+        self.assertGreaterEqual(len(placed), 1)
+        self.assertEqual(len(control_plane.rejected), 1)
+        self.assertNotIn(control_plane.rejected[0], [job.offer.job_id for job in placed])
+
+    async def test_delivery_exception_releases_the_offer_and_keeps_scheduling(self) -> None:
+        control_plane = _RejectSpyControlPlane(self._control_plane(projects=2))
+        deliveries = 0
+
+        async def deliver(offer: Any, packet: dict[str, object]) -> bool:
+            del offer, packet
+            nonlocal deliveries
+            deliveries += 1
+            if deliveries == 1:
+                raise RuntimeError("stream unavailable")
+            return True
+
+        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
+        placed = await scheduler.tick(NOW)
+
+        self.assertGreaterEqual(len(placed), 1)
+        self.assertEqual(len(control_plane.rejected), 1)
+
+    async def test_tick_stops_after_consecutive_failures(self) -> None:
+        control_plane = _RejectSpyControlPlane(self._control_plane(projects=5))
+
+        async def deliver(offer: object, packet: dict[str, object]) -> bool:
+            del offer, packet
+            return False
+
+        scheduler = Scheduler(
+            control_plane,
+            deliver,
+            lambda scheduled: {},
+            timedelta(seconds=30),
+            max_consecutive_failures=2,
+        )
+        self.assertEqual(await scheduler.tick(NOW), [])
+        self.assertEqual(len(control_plane.rejected), 2)
 
     async def test_delivery_and_cleanup_failure_preserves_cleanup_cause(self) -> None:
         control_plane = _RejectFailureControlPlane(self._control_plane())
@@ -172,22 +247,6 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OfferDeliveryError, "delivery and cleanup failed") as raised:
             await scheduler.tick(NOW)
         self.assertEqual(str(raised.exception.__cause__), "cleanup unavailable")
-
-    async def test_delivery_exception_releases_offer_and_project_lock(self) -> None:
-        control_plane = self._control_plane()
-
-        async def deliver(offer: object, packet: dict[str, object]) -> bool:
-            del offer, packet
-            raise RuntimeError("stream unavailable")
-
-        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
-        with self.assertRaises(OfferDeliveryError) as raised:
-            await scheduler.tick(NOW)
-        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
-        workflows, runners, locks = control_plane.snapshot()
-        self.assertEqual(locks, ())
-        self.assertFalse(runners[0].active_job_id)
-        self.assertTrue(workflows[0].status.terminal)
 
     async def test_asyncpg_leader_holds_and_releases_one_connection_lock(self) -> None:
         pool = _LeaderPool()
@@ -239,7 +298,13 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
                 return False
             return leadership_checks == 2
 
-        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
+        scheduler = Scheduler(
+            control_plane,
+            deliver,
+            lambda scheduled: {},
+            timedelta(seconds=30),
+            max_consecutive_failures=1,
+        )
         await scheduler.run(stop_event, lambda: NOW, timedelta(milliseconds=1), is_leader)
         workflows, _, _ = control_plane.snapshot()
         self.assertEqual(leadership_checks, 3)
@@ -267,7 +332,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
 
     async def test_run_survives_tick_raising_offer_delivery_error(self) -> None:
-        control_plane = self._control_plane()
+        control_plane = _RejectFailureControlPlane(self._control_plane())
         stop_event = asyncio.Event()
         calls = 0
 

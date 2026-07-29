@@ -32,6 +32,11 @@ _DURABLE_COLUMNS: dict[str, str] = {
 
 _TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
 
+# Outcome-identity columns have exactly one encoding for "absent": SQL NULL.
+# An empty string from any caller is normalised here so this writer and the
+# control plane's own writer can never disagree about what "no diff" means.
+_NULL_WHEN_EMPTY_COLUMNS = frozenset({"last_diff_hash", "last_failure_fingerprint"})
+
 
 class AsyncpgWorkflowPersistence:
     def __init__(self, pool: Any, now: Callable[[], datetime] | None = None) -> None:
@@ -48,7 +53,10 @@ class AsyncpgWorkflowPersistence:
             set_clauses.append("last_progress_at = $3")
         for key, column in _DURABLE_COLUMNS.items():
             if key in updates:
-                params.append(updates[key])
+                value = updates[key]
+                if key in _NULL_WHEN_EMPTY_COLUMNS and value == "":
+                    value = None
+                params.append(value)
                 set_clauses.append(f"{column} = ${len(params)}")
         if status in _TERMINAL_STATUSES:
             params.append(now)
