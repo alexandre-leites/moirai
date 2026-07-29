@@ -165,3 +165,60 @@ td { font-size: 14px; }
 .nav-list { list-style: none; }
 .nav-list li { margin-bottom: 8px; }
 .nav-list a { font-size: 16px; }
+
+.page-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.page-header h2 { margin-bottom: 0; }
+.page-header-aside { display: flex; align-items: center; gap: 12px; }
+.page-hint { color: var(--text-dim); font-size: 13px; }
+
+.muted { color: var(--text-dim); }
+
+.table-wrap { overflow-x: auto; }
+
+.empty-state {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.error p { margin-bottom: 6px; }
+.error button { margin-top: 6px; background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+
+/* Status chip: a coloured dot plus a word, so state is never colour alone. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill--ok { color: var(--success); }
+.pill--warn { color: var(--warning); }
+.pill--bad { color: var(--danger); }
+.pill--idle { color: var(--text-dim); }
+
+.chip {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* A missed heartbeat is warn, not crit, per the console specification's
+   staleness rule for probes. The stripe and the tint only reinforce the
+   "Stale" pill: state is never carried by colour alone. */
+.stale-badge { margin-left: 8px; }
+.runner-row--stale { background: color-mix(in srgb, var(--warning) 10%, transparent); }
+.runner-row--stale > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }

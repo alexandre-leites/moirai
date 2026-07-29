@@ -61,6 +61,39 @@ JSON
 	}
 }
 
+// TestOpenCodeBackendReportsACleanBlockWithItsRemainingWork is the source of
+// the chain issue #97 restores: an agent that finished cleanly and declared
+// itself blocked reports that status, its reason, and what it says still has to
+// be done — none of it collapsed into a bare failure.
+func TestOpenCodeBackendReportsACleanBlockWithItsRemainingWork(t *testing.T) {
+	workspace := t.TempDir()
+	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+cat > .loop/result.json <<'JSON'
+{"protocolVersion":"1.0","executionId":"execution-1","status":"blocked","summary":"the deployment credential is missing","changedFiles":["a.go"],"commandsRun":[],"remainingWork":["obtain DEPLOY_KEY","re-run the migration"],"sessionId":"session-1"}
+JSON
+`)
+	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+	result, err := backend.Execute(context.Background(), Request{
+		ExecutionID: "execution-1",
+		Role:        RoleDeveloper,
+		Workspace:   workspace,
+		Prompt:      "implement the task",
+		Timeout:     time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a blocked result rather than a failure", err)
+	}
+	if result.Status != "blocked" || result.Summary != "the deployment credential is missing" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(result.RemainingWork) != 2 || result.RemainingWork[0] != "obtain DEPLOY_KEY" {
+		t.Fatalf("RemainingWork = %#v", result.RemainingWork)
+	}
+	if result.Raw == nil || result.Raw["status"] != "blocked" {
+		t.Fatalf("Raw result = %#v", result.Raw)
+	}
+}
+
 func TestOpenCodeBackendPassesConfiguredArgumentsBeforePrompt(t *testing.T) {
 	workspace := t.TempDir()
 	binary := writeFakeOpenCode(t, workspace, `printf '%s\n' "$@" > arguments
