@@ -2307,6 +2307,131 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 ---
 
+# Session: CI red on `main` — every Python job dies on the self-hosted Debian 13 runners (branch `fix/ci-self-hosted-python`)
+
+## Current Status
+
+Partially resolved. Four of the six broken jobs are fixed and verified green on PR #160; the remaining two are blocked on a runner-side change that cannot be made from this repository.
+
+CI had been red on `main` itself since `3ba81c2` ("Change CI runner to self-hosted Linux"), blocking every open PR. Investigation found **two independent root causes**, not the single one the failure pattern suggested.
+
+## Done
+
+- [x] Diagnosed and fixed `actions/setup-python` on Debian 13
+  - Completed: `test-orchestrator`, `lint`, `typecheck` and `vulnerability-scan` pass on the self-hosted runners.
+  - Relevant files: `.github/workflows/ci.yml`.
+  - Behavior delivered: `3ba81c2` moved every job to `runs-on: [self-hosted, linux]`. Those runners (`github-runner1`, `github-runner2`, runner v2.336.0) are Debian 13 (trixie), and `actions/setup-python` publishes no prebuilt CPython for that platform. Each affected job died in under ten seconds with `##[error]The version '3.12' with architecture 'x64' was not found for debian 13.` The four jobs that never touched `setup-python` (`runner`, `api`, `build-web`) were unaffected throughout, which is what isolated the cause.
+    Replaced `actions/setup-python` with `astral-sh/setup-uv` (v9.0.0, SHA `c771a70e6277c0a99b617c7a806ffedaca235ff9`) pinned to uv `0.11.33`, followed by `uv python install "$PYTHON_VERSION"` and prepending the resulting interpreter directory to `$GITHUB_PATH` under `UV_PYTHON_PREFERENCE: only-managed`. uv fetches `python-build-standalone` CPython, which is distro-independent. The workflow's contract with the `Makefile` — "there is a suitable `python3` on `PATH`" — is unchanged, so no job's behaviour changed.
+  - Validation performed: run `30471380437` on PR #160. CI logs confirm the venv is genuinely 3.12 (`.venv/lib/python3.12/site-packages`, `cp312` wheels), not the host's system 3.13.5.
+  - Commands executed:
+    - `gh api repos/alexandre-leites/moirai/actions/runs/30461468403/jobs` — established the failing set on `c67a881`.
+    - `gh api repos/alexandre-leites/moirai/actions/jobs/90608340039/logs` — the `lint` log carrying the verbatim `setup-python` error.
+    - `gh api repos/alexandre-leites/moirai/actions/runs/30471380437/jobs` — the green result.
+  - Notes: `PYTHON_VERSION` remains `3.12`, matching `requires-python = ">=3.12"`, `[tool.mypy] python_version = "3.12"` and ruff's `target-version = "py312"`.
+
+- [x] Removed a dead `pip install` step that PEP 668 turned into a hard failure
+  - Completed: `python3 -m pip install -e "./orchestrator[dev]"` dropped from `test-orchestrator`, `test-postgres-integration`, `lint` and `typecheck`; `pip-audit` in `vulnerability-scan` switched to `uv tool run pip-audit`.
+  - Relevant files: `.github/workflows/ci.yml`, `Makefile` (read only, not modified).
+  - Behavior delivered: uv-managed CPython is PEP 668 externally managed, so installing into the interpreter is refused with `error: externally-managed-environment`. The step was a no-op regardless: every `make` target it preceded depends on `dev-install`, which builds `.venv` and runs all tooling out of `$(VENV)/bin`, so the interpreter-level copy was never consulted. Removing it therefore drops no coverage.
+  - Validation performed: reproduced locally from a clean checkout with no prior install (`rm -rf .venv` first), proving the `make` targets self-bootstrap.
+  - Commands executed:
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-ci-fix` → `Success: no issues found in 48 source files`
+    - `make test-orchestrator` → `Ran 449 tests in 1.341s` / `OK (skipped=30)`
+  - Notes: CI reproduces the same numbers — `Ran 449 tests in 4.476s`, `OK (skipped=30)`.
+
+- [x] Pinned the last two unpinned actions
+  - Completed: `actions/checkout@v7` and `actions/setup-python@v7` in `test-postgres-integration` were the only floating `uses:` refs in the file; both are now full-SHA pinned, matching the repo standard. Every `uses:` in `ci.yml` is SHA-pinned.
+
+- [x] Established the second root cause with an on-runner probe
+  - Completed: identified that `compose-smoke` and `test-postgres-integration` fail for a reason unrelated to `setup-python`.
+  - Behavior delivered: a temporary `runner-probe` job (added in `ecd13bf`, removed in `0d64f33`) was pushed to read facts off the runner that are not otherwise observable. See Known Issues for the result.
+
+## Decisions
+
+- **uv, not the runner's system Python.** Trixie ships only `/usr/bin/python3.13` (3.13.5); there is no system 3.12. Using it would satisfy `requires-python = ">=3.12"` but would silently run tests, mypy and ruff on an interpreter the project does not pin, make `PYTHON_VERSION` meaningless, and hand control of the toolchain to the next distro upgrade. uv pins the exact interpreter from the repo and installs it in ~3s.
+- **uv, not moving the Python jobs back to `ubuntu-latest`.** This was not merely a question of respecting `3ba81c2`'s intent — the fallback does not work. GitHub-hosted runners are unavailable for this account. The pre-switch run on `5903aa0` (run `30446858812`) failed with every job at zero steps and no logs; the check annotation reads *"The job was not started because recent account payments have failed or your spending limit needs to be increased."* Retrieved with `gh api repos/alexandre-leites/moirai/check-runs/90580585820/annotations`. That billing failure is almost certainly why `3ba81c2` was written. Moving jobs back would leave them permanently un-startable.
+- **Removed the redundant `pip install` rather than forcing it through.** `--break-system-packages` would have kept a step that installs into an environment nothing reads. The `Makefile` owns the install; the workflow should not duplicate it badly.
+- **Left `compose-smoke` and `test-postgres-integration` failing.** Deleting them, marking them `continue-on-error`, or replacing the Postgres service container with a non-Docker Postgres would all have produced a green tick by testing less. The red signal is accurate and should persist until the runners are fixed.
+
+## Post-review corrections
+
+An adversarial review of the diff found two defects in the provisioning step, both fixed before the PR was finalised. Both were verified by direct experiment rather than by reading documentation.
+
+- **`dirname "$(uv python find …)"` swallowed a failed lookup** (critical). `dirname ""` prints `.` and exits `0`, and `bash -e` does not help because the line's exit status is `dirname`'s, not the substitution's. Confirmed: `bash -e -c 'dirname "$(false)" >> gp.txt; echo continued'` prints `continued` and exits `0`, leaving `.` in the file. Two consequences: CI would silently fall back to the host's Python 3.13.5 and still pass — the exact failure this change exists to prevent — and `.` on `PATH` ahead of `/usr/bin` means any executable committed at the repo root (`python3`, `make`, `git`, `docker`) would be run by every later step, on a `pull_request`-triggered workflow with a persistent self-hosted `$HOME`. Fixed by assigning first (`interpreter="$(…)"`, which *does* abort under `set -e`), then `test -x`, then `dirname`.
+- **`UV_PYTHON_PREFERENCE: only-managed` was the wrong guard** (high, latent). It filters toolchain *sources*, not virtualenv discovery. Reproduced against uv 0.11.33 with a `.venv` built from the uv-managed 3.12 — exactly what `make dev-install` creates in CI:
+
+  | invocation | result |
+  | --- | --- |
+  | `uv python find 3.12` | `.venv/bin/python3` |
+  | `UV_PYTHON_PREFERENCE=only-managed uv python find 3.12` | `.venv/bin/python3` |
+  | `uv python find --managed-python 3.12` | `.venv/bin/python3` |
+  | `uv python find --system --managed-python 3.12` | the managed interpreter |
+
+  Only `--system` excludes virtualenvs. A surviving `.venv` would have put `.venv/bin` — carrying `ruff`, `mypy` and `pytest` shims — on `PATH` ahead of everything. Latent today because `actions/checkout` runs `git clean -ffdx` and `.venv/` is gitignored (confirmed in job log `90637745448`), but the guard did not do what it claimed. Fixed by switching to `--system --managed-python` and deleting the misleading env block.
+
+The hardened step was then tested end to end as CI runs it (`/usr/bin/bash -e script`): the positive path exits `0` and writes the managed `bin` directory; the negative path (`PYTHON_VERSION=3.99`) exits `2` and leaves `$GITHUB_PATH` **empty** rather than injecting `.`.
+
+Also applied from the review: `version: "0.11.33"` was duplicated across all five provisioning blocks, so a bump needed five edits and a missed one would yield a mixed toolchain. Hoisted to a workflow-level `UV_VERSION`, matching how `PYTHON_VERSION` and `NODE_VERSION` are already handled.
+
+Three review findings were accepted without change, all pre-existing and out of scope for a CI-restoration fix: `pip-audit` is resolved unpinned by `uv tool run` (exactly as the previous `pip install pip-audit` was, so no regression); the audit derives its requirements from `orchestrator/uv.lock` while `make dev-install` resolves fresh from PyPI, so the gate audits versions CI does not actually install; and the provisioning block remains duplicated across five jobs, which a composite action would solve at the cost of a larger diff than this fix warrants.
+
+The review separately confirmed by experiment that the deleted install step was not load-bearing, that `uv tool run pip-audit` still exits non-zero on findings, that concurrent `uv python install` into a shared directory is serialised by an advisory lock, and that `validate`'s `needs:` list is byte-identical to `main`.
+
+## Validation Status
+
+- Targeted tests: Passed — `make test-orchestrator`, locally (`Ran 449 tests`, `OK (skipped=30)`) and in CI job `90642201723`.
+- Service tests: Not applicable — no service code changed; this is a CI-configuration fix only.
+- Full repository tests: Partially — the seven jobs that can run on these runners all pass in run `30471380437`. `test-postgres-integration` and `compose-smoke` cannot execute at all (see Known Issues).
+- Build: Passed — `build-web` (job `90642201904`).
+- Lint: Passed — `make lint` locally and CI job `90642201802` (`All checks passed!`).
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-ci-fix` locally and CI job `90642202104` (`Success: no issues found in 48 source files`).
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: **Not run — blocked.** `compose-smoke` cannot reach the Docker daemon on either runner.
+- End-to-end workflow: Not run — out of scope for a CI-configuration fix.
+
+Final per-job status on run `30471380437`, read from `gh api repos/alexandre-leites/moirai/actions/runs/30471380437/jobs`:
+
+| job | on `c67a881` | on this branch |
+| --- | --- | --- |
+| `test-orchestrator` | failure | success |
+| `lint` | failure | success |
+| `typecheck` | failure | success |
+| `vulnerability-scan` | failure | success |
+| `runner` | success | success |
+| `api` | success | success |
+| `build-web` | success | success |
+| `test-postgres-integration` | failure | failure (Docker, runner-side) |
+| `compose-smoke` | failure | failure (Docker, runner-side) |
+| `validate` | skipped | skipped (gated on `compose-smoke`) |
+
+## Known Issues
+
+- Issue: the runner user cannot reach the Docker socket, so `compose-smoke` and `test-postgres-integration` cannot run at all.
+  - Severity: P1 — two real gates are dark. The Compose stack and the Postgres integration suite are currently unverified by CI on every branch.
+  - Impact: `test-postgres-integration` dies during job initialization, before any step executes, because its `services:` container cannot be created. `compose-smoke` dies at `docker compose config`. Neither failure has anything to do with `setup-python`; both predate and outlast this fix.
+  - Evidence: `##[error]Value cannot be null. (Parameter 'network')`, preceded by `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock` (job `90642201874`). The on-runner probe (job `90637745398`) showed why: the runner process is `uid=1000(runner) gid=1000(runner) groups=1000(runner)`, `/var/run/docker.sock` is `srw-rw---- root:docker` mode `0660`, and `getent group docker` returns `docker:x:991:` — the group exists with **no members**. There is also no escape hatch: `sudo -n true` fails with `sudo: a password is required`, `/run/user/*/docker.sock` does not exist, and `podman` is not installed.
+  - Suggested resolution: **runner-side, not repo-side.** On each of `github-runner1` and `github-runner2`: `sudo usermod -aG docker runner`, then restart the runner service (`sudo systemctl restart 'actions.runner.*'`) — supplementary group membership only takes effect for a newly-spawned process. No repository change can substitute: `services:` containers are created by the runner process itself before any step runs, so workflow-level `env:`, `DOCKER_HOST` or a `sudo` wrapper cannot reach that code path.
+
+- Issue: `web/src/runners-page.test.tsx` → *"marks a runner that has stopped heartbeating as stale"* is racy and reddens `build-web` intermittently. **Pre-existing; not caused by and not fixed in this branch.**
+  - Severity: P2 — intermittent CI red on a job unrelated to this change. Observed passing 4 times and failing twice across six runs on this branch, on both runners, so it is load-sensitive rather than machine-specific.
+  - Impact: `make test-web` fails with `AssertionError: expected 'gonebbbb2222StalelinuxNo9m agoStale' to contain '10m ago'`. The product code is correct; the test is not.
+  - Evidence: the fixture pins `lastSeenAt: new Date(Date.now() - 10 * 60_000)` (`web/src/runners-page.test.tsx:140`) — computed *inside* the stubbed API callback. `runners.tsx:160` deliberately samples `const requestedAt = Date.now()` **before** issuing the request, and renders ages against that sample. So the rendered age is `requestedAt - lastSeenAt = 600000 - (T_stub - T_requestedAt)`, which is strictly *less* than 600000 whenever the stub callback runs even one millisecond later. `formatAge` (`web/src/runner-status.ts:59-64`) then floors: `floor(599999 / 1000 / 60) = 9` → `"9m ago"`. The test only passes when both `Date.now()` calls land in the same millisecond.
+  - Suggested resolution: give the fixture headroom instead of sitting exactly on the boundary — e.g. `Date.now() - 10 * 60_000 - 5_000`, which renders `10m ago` for any stub delay under five seconds. Deliberately not changed here: it is a different defect from the CI provisioning failure this branch fixes, and `web/` is under concurrent development, so an unrelated one-line edit there risks a conflict for no benefit to this PR.
+
+- Issue: the two self-hosted runners are the only capacity available; GitHub-hosted runners cannot be used as a fallback.
+  - Severity: P2 — an operational constraint on every future CI decision, not a defect in this branch.
+  - Impact: any job that cannot run on Debian 13 self-hosted has nowhere else to go. `runs-on: ubuntu-latest` is not an escape hatch for this repo until billing is resolved.
+  - Evidence: annotation on check-run `90580585820` (run `30446858812`, commit `5903aa0`, pre-switch): *"The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings"*.
+  - Suggested resolution: resolve the account billing state if GitHub-hosted capacity is wanted again; otherwise treat the self-hosted pool as the only target and provision it accordingly (starting with Docker group membership above).
+
+## Next Recommended Implementation
+
+- Fix Docker group membership on both runners, then confirm `compose-smoke` and `test-postgres-integration` go green — they need no repository change once the daemon is reachable.
+- Consider whether `validate` should also gate on `test-postgres-integration`; it currently does not appear in that job's `needs:` list, so a Postgres integration regression would not block the aggregate check even when the job can run.
+
+---
+
 # Session: issue #124 — API and runner Prometheus gauges are hardcoded to zero
 
 ## Current Status
