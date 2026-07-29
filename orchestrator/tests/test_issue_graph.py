@@ -3,6 +3,7 @@ import unittest
 from moirai.workflows.issue_graph import (
     route_checks,
     route_human,
+    route_merge,
     route_pipeline,
     route_plan,
     route_review,
@@ -68,6 +69,28 @@ class IssueGraphRouteTests(unittest.TestCase):
         self.assertEqual(route_human({}), "blocked")
         self.assertEqual(
             route_human({"human_approved": False, "human_changes_requested": False}),
+            "blocked",
+        )
+
+    def test_merge_route_completes_only_on_a_verified_merge(self) -> None:
+        """The merge node used to have an unconditional edge to `complete`.
+        Now `complete` -- which closes the issue and applies `agent:delivered`
+        -- is reachable only once the code host has confirmed the merge, and a
+        merge the node reported as blocked keeps its own reason."""
+        self.assertEqual(route_merge({"status": "merging", "pull_request_merged": True}), "complete")
+        self.assertEqual(route_merge({"status": "merging", "pull_request_merged": False}), "merge")
+        self.assertEqual(route_merge({"status": "merging"}), "merge")
+        self.assertEqual(
+            route_merge({"status": "blocked", "blocking_reason": "closed without being merged"}),
+            "blocked",
+        )
+
+    def test_a_blocked_merge_is_never_overridden_by_a_stale_merged_gate(self) -> None:
+        """The blocked short-circuit has to win: a run whose pull request was
+        closed after an earlier verified merge attempt must not be routed to
+        delivery by the gate that attempt left behind."""
+        self.assertEqual(
+            route_merge({"status": "blocked", "pull_request_merged": True, "blocking_reason": "x"}),
             "blocked",
         )
 

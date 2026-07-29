@@ -74,6 +74,67 @@ class GitHubCliCodeHostTests(unittest.TestCase):
         self.assertIn("edit", runner.commands[0])
         self.assertIn("close", runner.commands[2])
 
+    def test_get_pull_request_reports_a_merge_with_its_commit_and_timestamp(self) -> None:
+        """The workflow completes on this and nothing else, so the adapter has
+        to carry the evidence and not just the word MERGED."""
+        runner = FakeRunner([(0, json.dumps(_pull_request(
+            state="MERGED",
+            mergedAt="2026-01-02T03:04:05Z",
+            mergeCommit={"oid": "def456"},
+        )), "")])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        pull_request = asyncio.run(host.get_pull_request("42"))
+
+        self.assertTrue(pull_request.merged)
+        self.assertFalse(pull_request.closed)
+        self.assertEqual(pull_request.state, "merged")
+        self.assertEqual(pull_request.merged_at, "2026-01-02T03:04:05Z")
+        self.assertEqual(pull_request.merge_commit, "def456")
+
+    def test_get_pull_request_reports_closed_distinctly_from_merged(self) -> None:
+        """A pull request someone closed is not a delivery, and the two must
+        never collapse into one outcome."""
+        runner = FakeRunner([(0, json.dumps(_pull_request(state="CLOSED")), "")])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        pull_request = asyncio.run(host.get_pull_request("42"))
+
+        self.assertTrue(pull_request.closed)
+        self.assertFalse(pull_request.merged)
+        self.assertIsNone(pull_request.merged_at)
+        self.assertIsNone(pull_request.merge_commit)
+
+    def test_an_open_pull_request_carries_no_merge_evidence(self) -> None:
+        """`gh` answers an unmerged pull request with nulls on some subcommands
+        and Go's zero time on others; neither is a merge."""
+        runner = FakeRunner([
+            (0, json.dumps(_pull_request(mergedAt=None, mergeCommit=None)), ""),
+            (0, json.dumps(_pull_request(mergedAt="0001-01-01T00:00:00Z", mergeCommit={"oid": ""})), ""),
+        ])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        for _ in range(2):
+            pull_request = asyncio.run(host.get_pull_request("42"))
+            self.assertFalse(pull_request.merged)
+            self.assertIsNone(pull_request.merged_at)
+            self.assertIsNone(pull_request.merge_commit)
+
+    def test_every_pull_request_read_asks_for_the_merge_fields(self) -> None:
+        runner = FakeRunner([
+            (0, json.dumps(_pull_request()), ""),
+            (0, json.dumps([_pull_request()]), ""),
+        ])
+        host = GitHubCliCodeHost(GitHubRepository("owner", "repo"), runner)
+
+        asyncio.run(host.get_pull_request("42"))
+        asyncio.run(host.find_pull_request("agent/workflow-1"))
+
+        for command in runner.commands:
+            fields = command[command.index("--json") + 1]
+            self.assertIn("mergedAt", fields)
+            self.assertIn("mergeCommit", fields)
+
     def test_required_checks_keep_distinct_statuses(self) -> None:
         runner = FakeRunner([(0, json.dumps([
             {"name": "unit", "bucket": "pass", "link": "https://checks/1", "state": "SUCCESS"},
@@ -186,13 +247,16 @@ class ChecksPassTests(unittest.TestCase):
         self.assertFalse(checks_pass(checks))
 
 
-def _pull_request() -> dict[str, object]:
+def _pull_request(**overrides: object) -> dict[str, object]:
     return {
         "number": 42,
         "url": "https://github.example/owner/repo/pull/42",
         "state": "OPEN",
         "headRefName": "agent/workflow-1",
         "headRefOid": "abc123",
+        "mergedAt": None,
+        "mergeCommit": None,
+        **overrides,
     }
 
 

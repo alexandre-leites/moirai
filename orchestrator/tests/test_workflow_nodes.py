@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from moirai.code_hosts import CheckStatus, GitHubCliError, PullRequest, PullRequestCheck
-from moirai.workflows.issue_graph import IssueWorkflowState
+from moirai.workflows.issue_graph import IssueWorkflowState, route_merge
 from moirai.workflows.nodes import PersistedWorkflowNodes
 from moirai.workflows.policy import RetryBudget
 
@@ -350,7 +350,10 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             (self.nodes.create_pull_request, "pr_created", {}),
             (self.nodes.wait_for_checks, "waiting_github_checks", {}),
             (self.nodes.wait_for_human, "waiting_human", {"human_approved": False}),
-            (self.nodes.merge, "merging", {}),
+            # Merge is the exception: with no code host there is nothing to
+            # confirm the merge against, so it waits rather than reporting a
+            # merge it never saw.
+            (self.nodes.merge, "merging", {"merge_verification_attempts": 1, "pull_request_merged": False}),
             (self.nodes.complete, "completed", {}),
         ):
             expected = {"status": status, **extra_fields}
