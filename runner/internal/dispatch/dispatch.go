@@ -178,9 +178,10 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	if err != nil {
 		return Result{}, err
 	}
-	// A job ID reused by this execution must not stay registered as a retained
-	// workspace: the record would then point at the live workspace and a
-	// concurrent sweep could delete it mid-execution.
+	// This execution supersedes anything retained under the same job ID, so the
+	// old record goes rather than describing a directory that is about to be
+	// replaced. Safety against a concurrent sweep comes from the claim above;
+	// this keeps the registry truthful and its count bound honest.
 	dispatcher.forgetRetainedWorkspace(packet.JobID)
 	workspace, err := dispatcher.Workspaces.Prepare(ctx, request)
 	if err != nil {
