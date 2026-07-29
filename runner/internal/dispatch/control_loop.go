@@ -43,6 +43,12 @@ const truncationMarker = "… [truncated]"
 type ControlClient interface {
 	control.OfferClient
 	control.EventClient
+	// SetDraining reports whether the runner wants new work. It is part of the
+	// interface rather than an optional capability discovered by type assertion
+	// because a client that cannot report its drain state silently strands the
+	// runner: `app.runners.draining` gates every placement query and nothing
+	// else clears it (issue #148).
+	SetDraining(bool) error
 	Receive() (*runnerv1.OrchestratorToRunner, error)
 	Disconnect()
 }
@@ -53,10 +59,6 @@ type executionDispatcher interface {
 
 type cancellableDispatcher interface {
 	Cancel(context.Context, control.Lease) error
-}
-
-type drainingClient interface {
-	SetDraining(bool) error
 }
 
 type activeExecution struct {
@@ -83,6 +85,20 @@ type ControlLoop struct {
 	mu       sync.Mutex
 	draining bool
 	active   map[string]*activeExecution
+
+	// drainReports serializes each drain report with the read of the state it
+	// reports, so no delivered report can be overtaken by a staler one. Without
+	// it a Drain() concurrent with a reconnect could set the flag and send
+	// `true`, only for the reconnect's already-read `false` to land afterwards
+	// and advertise a draining runner as available. It orders delivery, not
+	// success: a report lost on a dying stream is re-asserted by the next
+	// Resume, which is the recovery this whole mechanism rests on.
+	//
+	// Deliberately not `mu`: a report blocks for as long as a gRPC send does,
+	// and `mu` also guards the active-execution map that WaitForIdle and every
+	// terminal execution touch. Nothing acquires `drainReports` while holding
+	// `mu`, so the two never deadlock.
+	drainReports sync.Mutex
 }
 
 func NewControlLoop(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration) (*ControlLoop, error) {
@@ -281,13 +297,62 @@ func (loop *ControlLoop) Drain() {
 	alreadyDraining := loop.draining
 	loop.draining = true
 	loop.mu.Unlock()
-	if !alreadyDraining {
-		if client, ok := loop.Client.(drainingClient); ok {
-			if err := client.SetDraining(true); err != nil {
-				loop.logger().Warn("report runner draining", "error", err)
-			}
-		}
+	if alreadyDraining {
+		return
 	}
+	// A failed report is not fatal here: the drain still holds locally, so no
+	// new offer is accepted, and the next stream Resume re-asserts it. That
+	// recovery is the whole point of reporting the state on connect — before
+	// it existed, a report lost on a dying stream was lost for good.
+	if err := loop.reportDrainState(); err != nil {
+		loop.logger().Warn("report runner draining", "error", err)
+	}
+}
+
+// Resume re-establishes this runner's state on a freshly connected control
+// stream: it reports the runner's drain state, then delivers any events
+// buffered while the stream was down.
+//
+// The drain report is what keeps the orchestrator's view of the runner honest
+// across a restart. `app.runners.draining` gates every placement query and the
+// runner is its only writer today, so a runner that reported `true`, exited,
+// and came back with the same identity would otherwise reconnect into a
+// permanent `true` and never be offered work again (issue #148).
+//
+// It reports Draining(), never a bare `false`: a runner that reconnects while
+// genuinely draining — a network blip mid-drain, or an orchestrator-initiated
+// drain whose report never left the old stream — re-asserts the drain instead
+// of advertising itself as available.
+//
+// The report precedes the flush so the orchestrator stops placing work before
+// the runner spends the fresh stream on a backlog of events. A failed report
+// fails the resume — continuing would leave the orchestrator with a stale view
+// for the whole life of the connection — which makes StreamSupervisor drop the
+// stream and retry when the failure is transient, and stop the runner when it
+// is not. That is the same treatment the buffered-event flush already got.
+func (loop *ControlLoop) Resume() error {
+	if err := loop.validate(); err != nil {
+		return err
+	}
+	if err := loop.reportDrainState(); err != nil {
+		return fmt.Errorf("report runner drain state: %w", err)
+	}
+	return loop.FlushEvents()
+}
+
+// reportDrainState sends the runner's current drain state. The state is read
+// while drainReports is held so a concurrent reporter cannot send a value that
+// is already stale by the time it reaches the wire; see the field's comment.
+func (loop *ControlLoop) reportDrainState() error {
+	// Resume validates first, and the constructors reject a nil client, so this
+	// only covers a ControlLoop assembled field by field calling Drain() —
+	// which guards its own receiver and nothing else. An error beats a panic.
+	if loop == nil || loop.Client == nil {
+		return errors.New("runner control client is required")
+	}
+	loop.drainReports.Lock()
+	defer loop.drainReports.Unlock()
+	return loop.Client.SetDraining(loop.Draining())
 }
 
 func (loop *ControlLoop) Draining() bool {

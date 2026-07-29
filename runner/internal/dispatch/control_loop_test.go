@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,6 +30,13 @@ type loopClient struct {
 	events      []*runnerv1.ExecutionEvent
 	sendErr     error
 	disconnects int
+	// drainReports records every drain state the runner reported, in the order
+	// the orchestrator would observe them.
+	drainReports []bool
+	drainErr     error
+	// sends records drain reports and execution events on one timeline, so a
+	// test can assert their relative order.
+	sends []string
 }
 
 func (client *loopClient) AcceptOffer(jobID string) error {
@@ -61,7 +69,25 @@ func (client *loopClient) SendExecutionEvent(event *runnerv1.ExecutionEvent) err
 		return client.sendErr
 	}
 	client.events = append(client.events, event)
+	client.sends = append(client.sends, "event:"+event.GetType())
 	return nil
+}
+
+func (client *loopClient) SetDraining(draining bool) error {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if client.drainErr != nil {
+		return client.drainErr
+	}
+	client.drainReports = append(client.drainReports, draining)
+	client.sends = append(client.sends, fmt.Sprintf("draining:%t", draining))
+	return nil
+}
+
+func (client *loopClient) reportedDrainStates() []bool {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	return append([]bool(nil), client.drainReports...)
 }
 
 type staticDispatcher struct {
