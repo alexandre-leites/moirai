@@ -1512,6 +1512,69 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 
 Issue #96 (finding F9) — make transition replay idempotent. It is the highest-priority platform-review issue with no `ai-working` label as of this session (#90, #92, #94 and #100 were all claimed). The transition outbox is at-least-once, but `_dispatch` in `workflows/nodes.py` increments attempt counters and `total_agent_executions` even when it reuses a queued request, and creates a duplicate request for the same role when the previous one already moved to `dispatched`; outbox rows set to `processing` are never retried after a crash. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice. Those budgets are what open a project circuit in the first place, so double-counting them is what makes the breaker above fire early.
 
+# Session: issue #144 — Require `ai-doable` on agent-opened issues; land the open pull requests (branch `issue-144`)
+
+## Current Status
+
+Done. `AGENTS.md` states the labelling rule, the three non-dependabot pull requests are merged, and every open issue carries `ai-doable`.
+
+## Done
+
+- `AGENTS.md` §1.3 (Shared state) gains one rule: whenever an agent opens a GitHub issue it must add the `ai-doable` label. Placed beside the existing "GitHub issues are the backlog" bullet, because that is where the document already explains what the backlog is and how an agent claims from it — an agent reading how to pick work reads the rule for filing it.
+- Merged PR #139 (`issue-100`, retain and publish failed-run work) and PR #140 (`issue-98`, `ci_repair_attempts` as a real counter), both squashed, both 10/10 green at merge time.
+- Merged PR #142 (`issue-94`, close execution requests so stalled-run recovery fires) after resolving its conflicts against `main`.
+- Added `ai-doable` to the 17 open issues that lacked it: #110–#114, #116–#124, #136, #141, #143.
+
+## Decisions
+
+- Decision: `PROGRESS.md` conflicts are resolved by union, never by choosing a side.
+  - Context: merging #139 put `issue-98` into conflict, and merging both put `issue-94` into conflict. In each case the only overlap was that two agents appended a session section at the end of the file.
+  - Alternatives considered: take ours, take theirs, or hand-pick sections.
+  - Reason: the file is append-only per agent and is the coordination point named in `AGENTS.md` §1.3. Dropping a section destroys another agent's handoff record, which is exactly what the file exists to prevent.
+  - Consequences: resolved with `git merge-file --union`, then verified mechanically — no conflict markers, and zero lines lost from either side (`comm -23` against both index stages returned empty for each merge).
+
+- Decision: the two integration-test suites that collided in `test_postgres_integration.py` were both kept in full, and the interaction between them was fixed rather than papered over.
+  - Context: this branch appended `StalledRunRecoveryIntegrationTests` (5 tests) plus the `_PLANNER_READY` fixture and `_SingleIterationLeader` helper; `main` had appended `CircuitBreakerIntegrationTests` (10 tests) plus an `AsyncpgWorkflowPersistence` import, to the same end-of-file region. Git produced five interleaved conflict hunks because the two classes share unittest boilerplate.
+  - Alternatives considered: (a) keep one side and re-add the other later; (b) scope the stall-recovery assertions to their own project so foreign rows are ignored; (c) give the circuit-breaker class the per-fixture teardown the module already expects.
+  - Reason: (a) loses tested behaviour that CI had already proved on both PRs. (b) weakens the assertions of the very tests this branch exists to add — a stall sweep that only looks at its own project no longer tests the global sweep the orchestrator actually runs. (c) restores an invariant this module already documents: `StalledRunRecoveryIntegrationTests._delete_fixture` states that the control plane's sweeps "are global queries against a database shared with every other integration test, so the fixture cannot be left behind". The circuit-breaker class disabled its projects and cleared both circuit tables but never removed the projects, issues or workflow runs it seeded, including one deliberately left in `implementing`.
+  - Consequences: the file was rebuilt deterministically from the three index stages rather than by editing the interleaved hunks — `main`'s header and shared body, then this branch's block, then `main`'s block — and the result was checked to contain the exact union of test names from both sides: 24 unique tests, none missing, none invented. `CircuitBreakerIntegrationTests` now records each seeded project and runner and deletes them on cleanup, locks and jobs first because their references to `workflow_runs` do not cascade. Both suites pass together.
+
+- Decision: the merge is a merge commit into the branch, not a rebase.
+  - Context: `issue-94` was already pushed and under review as PR #142.
+  - Reason: rebasing a published branch rewrites commits other agents and the PR review may already reference.
+  - Consequences: PR #142 carries an explicit merge commit recording how each conflict was resolved.
+
+## Validation Status
+
+- Targeted tests: Passed — the interference this merge exposed was reproduced and then fixed. Before the fix, `CircuitBreakerIntegrationTests` followed by `StalledRunRecoveryIntegrationTests` on a fresh database gave `Ran 15 tests … FAILED (failures=2)`; after, `Ran 15 tests … OK`. The stall-recovery class alone was `Ran 5 tests … OK` both before and after, which is what identified the cause as foreign rows rather than a bad resolution.
+- Service tests: Passed — `make test-orchestrator` → `Ran 412 tests … OK (skipped=24)`; `make test-postgres-integration` → `Ran 24 tests … OK` against a throwaway PostgreSQL 16 container on a private port, repeated on three separate fresh databases.
+- Full repository tests: Not run — the documentation change touches no code, and the merge resolution is Python and Markdown only.
+- Build: Not applicable.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-144` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Not applicable — no schema change; migrations ran against the throwaway database via the integration suite.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run.
+
+## Known Issues
+
+- Issue: adding `ai-doable` to #110–#124 reverses a deliberate curation.
+  - Severity: P3 — process, not code.
+  - Impact: those issues had `ai-doable` removed by the repository owner earlier the same day. Issue #144 asks for every open issue without the label to receive it, which is what was done, but the two intents contradict each other for exactly that range.
+  - Evidence: all 17 issues read back as having no labels at all before the change; #136, #141 and #143 are ordinary unlabelled issues, whereas #110–#124 are the deliberately cleared ones.
+  - Suggested resolution: for the owner to decide. Re-clearing them is a single `gh issue edit --remove-label ai-doable` per issue; this is called out in the comment on #144 so the decision is not silently buried.
+
+- Issue: `make test-postgres-integration` is still not repeatable against the same database.
+  - Severity: P3
+  - Impact: a second run against an already-used database fails `OfferExpiryIntegrationTests.test_expired_recovery_offer_returns_the_run_to_recovering`.
+  - Evidence: pre-existing and unrelated to this merge — reproduced on `main`'s own unmodified copy of the file, where run 1 was `Ran 19 tests … OK` and run 2 `Ran 19 tests … FAILED (failures=1)` on the same database. Already recorded under the issue #92 session, which attributes the leftover to `PostgreSQLPersistenceIntegrationTests`'s lifecycle test. CI creates a fresh Postgres service per job, so it is green there. The circuit-breaker teardown added in this merge fixes only the leak that affected the stall-recovery sweeps; it does not address this one.
+  - Suggested resolution: unchanged from the earlier entry — have the lifecycle test clean up its job and workflow run, or truncate the `app` schema in `asyncSetUp`.
+
+## Next Recommended Implementation
+
+Issue #96 (finding F9) — make transition replay idempotent, still the highest-priority platform-review issue that no branch has claimed. It was already the recommendation of the issue #92 session and nothing in this session touched it. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice.
+
+
 ---
 
 # Session: issue #111 — Orchestrator aborts the runner stream when a runner reports draining (branch `issue-111`)
