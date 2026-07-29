@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from moirai.workflows.policy import (
     GateState,
@@ -56,6 +57,34 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(route_after_checks(approved, budget), WorkflowRoute.MERGE)
         self.assertEqual(route_after_human_response(False, True), WorkflowRoute.REPAIR)
         self.assertEqual(route_after_human_response(False, False), WorkflowRoute.BLOCKED)
+
+    def test_failing_checks_route_to_the_ci_repair_node_and_stop_at_its_own_budget(self) -> None:
+        """Failing checks must reach a route that spends `ci_repair_attempts`,
+        and that counter alone must decide when the CI loop stops."""
+        budget = RetryBudget(ci_repair_attempts=2)
+        delivered = GateState(pipeline_passed=True, review_approved=True)
+        self.assertEqual(route_after_checks(delivered, budget), WorkflowRoute.CI_REPAIR)
+        self.assertEqual(
+            route_after_checks(replace(delivered, ci_repair_attempts=1), budget),
+            WorkflowRoute.CI_REPAIR,
+        )
+        self.assertEqual(
+            route_after_checks(replace(delivered, ci_repair_attempts=2), budget),
+            WorkflowRoute.BLOCKED,
+        )
+
+    def test_ci_and_pipeline_repair_budgets_are_independent(self) -> None:
+        """Neither failure source may block on -- or be blocked by -- the
+        other's counter."""
+        budget = RetryBudget(pipeline_repair_attempts=2, ci_repair_attempts=2)
+        drained_pipeline = GateState(
+            pipeline_passed=True, review_approved=True, pipeline_repair_attempts=2
+        )
+        self.assertEqual(route_after_checks(drained_pipeline, budget), WorkflowRoute.CI_REPAIR)
+        self.assertEqual(
+            route_after_pipeline(GateState(ci_repair_attempts=2, pipeline_repair_attempts=1), budget),
+            WorkflowRoute.REPAIR,
+        )
 
 
 if __name__ == "__main__":

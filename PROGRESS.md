@@ -1063,6 +1063,118 @@ Issues [#114](https://github.com/alexandre-leites/moirai/issues/114) (a write pa
 
 ---
 
+# Session: F11 / issue #98 — `ci_repair_attempts` is never incremented; CI repairs consume the local pipeline budget (branch `issue-98`)
+
+## Current Status
+
+- Overall status: implemented and validated on branch `issue-98`.
+- Current phase: complete — orchestrator workflow graph.
+- Active implementation: none (issue-98 agent session, 2026-07-29).
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-98 agent, branch `issue-98`, based on `30d8483`.
+
+## Done
+
+- [x] Split the repair phase into two nodes so each repair source spends its own budget.
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/workflows/policy.py`, `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/tests/test_workflow_policy.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_end_to_end.py`, `orchestrator/README.md`.
+  - Behavior delivered: `WorkflowRoute.CI_REPAIR` is a new route; `route_after_checks` returns it for failing required checks (it used to return `REPAIR`); the graph has a new `ci_repair` node that dispatches the same `repairer` role and `repairing` phase as `repair` but increments `ci_repair_attempts`, and its outgoing edge rejoins at `pipeline` through the same `suspend_after_dispatch` wrapper. `repair` is unchanged and still owns `pipeline_repair_attempts`. `ci_repair_attempts` now has exactly one writer (`PersistedWorkflowNodes.ci_repair`); before this change it had none, so `route_after_checks` gated on a counter frozen at 0 and every CI repair spent the local pipeline's repair budget instead.
+  - Validation performed: see `Validation Status` below — full orchestrator suite, lint, mypy, plus two mutation runs that reintroduce the bug in two different ways.
+  - Commands executed: `make test-orchestrator`, `make lint`, `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-98`.
+  - Notes: no migration and no configuration change was needed. `app.workflow_runs.ci_repair_attempts` already exists (`migrations/001_initial.sql:116`), `workflows/persistence.py::_DURABLE_COLUMNS` already maps it, `grpc/protocol.py` already carries it, and `RetryBudget.ci_repair_attempts` already defaulted to 3 — the column and the bound were real all along; only the writer was missing. The `repairer` role and the `repairing` status are deliberately shared, so nothing outside the graph (task packets, `schemas/task-packet.schema.json`, `runner/`, `issue_sync.py`'s status list, the web console's status map) needed a matching change.
+
+## Post-review corrections
+
+Two independent adversarial reviews ran against the full diff before the commit. Both mutation-tested the change against throwaway copies of the repository and both returned **no blockers**; both independently confirmed that `total_agent_executions` accounting is byte-identical before and after the diff (the same `repairer` dispatch costs the same unit either way), that the happy path is still 4 agent runs, and that no other file in the repository needed a matching change. What they found, and what was changed in response:
+
+- **The README's arithmetic claim was an overclaim.** "A workflow that reached a pull request can afford two CI cycles" holds only for the cheapest path to a pull request (4 agent runs); a run that already took one local repair reaches its pull request at 7 and affords one. Rewritten.
+- **A CI cycle also spends a `review_cycles` unit**, which the first draft never said. That is a *second*, independent reason `ci_repair_attempts = 3` cannot bind under the shipped defaults: `review_cycles = 3` allows at most two CI cycles regardless of the global budget. Documented in `orchestrator/README.md` and in `Known Issues`, and the corresponding claim in the `Decisions` section was corrected.
+- **The end-to-end budget test seeds a state production cannot produce.** A real workflow row with `ci_repair_attempts = 2` would also carry roughly eight agent executions, so with realistic companion counters the global budget would stop the loop first. The test is still valid and mutation-verified, but its docstring claimed more than it proves; it now states plainly that the seed exists to isolate the CI bound from the other two, and asserts `review_cycles = 2` alongside `total_agent_executions = 7` to show both had headroom.
+- **`README.md` line 23, which this diff edited, called `pipeline` a node that "queues an agent execution"** — contradicting line 44 and `_NON_AGENT_ROLES` in the same repository. Reworded.
+- **"A run that exhausted its local repair budget can still repair a CI failure" was too strong**: it can *dispatch* the CI repair, but the repaired tree still meets `route_after_pipeline`, which blocks on the exhausted local counter. Reworded.
+- **Sharing the `repairer` role weakens `_dispatch`'s replay guard**, which identifies "my own queued request" by role and so can no longer distinguish a replayed `repair` from a replayed `ci_repair`. Neither review could construct a reachable sequence, and the reason is now written down in `nodes.py`: reaching the other repair node requires a terminal event for the first execution, and `_resolve_execution_identity` only accepts a terminal event for a request row still in `dispatched` — never one that offer recovery returned to `queued`. Documented rather than changed, because tightening the guard would touch the shared `_dispatch` path used by every node and would key on `execution_id`, which is not a durable column.
+- **`ci_repair`'s node-level budget guard is defensive, not load-bearing** (the route gates on the same counter with the same limit and blocks first), while `repair`'s is genuinely reachable via `route_after_human_response`. The test docstring now says so instead of implying both are live product paths.
+- **Three pre-existing defects surfaced** that bear on this change's practical value — pending checks are never re-polled, `merge` can report `blocked` and still fall through to `complete`, and repairer task packets carry no signal about which failure they are repairing. All three are recorded under `Known Issues` with evidence; none is introduced here and none is fixed here.
+
+Not changed in response to review: the suggestion to make the `_dispatch` replay guard key on execution identity (shared code, non-durable key, no reachable defect), and the suggestion to lower `ci_repair_attempts` to 2 or raise the other budgets so the CI bound binds (a product decision, argued against in `Decisions`).
+
+## Decisions
+
+- Decision: two distinct nodes (`repair` and `ci_repair`) rather than a `repair_source` marker carried in state.
+  - Context: issue #98 offers both and calls the split "arguably cleaner". The marker approach would have `wait_for_checks` write something like `repair_source: "ci"` into its updates, and the single `repair` node branch on it.
+  - Alternatives considered: (1) the `repair_source` state marker; (2) leaving one node and having it pick a counter from `status`/`checks_passed`.
+  - Reason: the marker adds a second, order-dependent piece of state that must be written by one node, read by another, and *cleared* — a stale `repair_source` would silently misattribute the next local repair, which is the same class of bug as the one being fixed. It also has no durable column, so after a resume it would live only in the LangGraph checkpoint while the counters it selects live in `app.workflow_runs`. With two nodes, the graph edge *is* the marker: it cannot go stale, it cannot be forgotten, and it is visible in the graph topology rather than in a state key. Option (3) is worse still — it re-derives intent from gates that other nodes own.
+  - Consequences: `IssueWorkflowNodes` gains a `ci_repair` field and the graph gains one node and one edge. Both repair nodes dispatch the same `repairer` role and report the same `repairing` phase, so no runner, schema, API or UI change is required and `runner_events.py` translates their terminal events identically (`resolved_role == "repairer"` → `local_pipeline`, gate untouched). The cost is that "which repair is this?" is answered by the node, not by anything persisted: `workflow_events` shows two `repairing` transitions that differ only in which counter moved. That is enough, because the counter is exactly the thing the routing reads back.
+
+- Decision: a CI repair is an agent execution and spends `total_agent_executions`.
+  - Context: issue #90 established that the `pipeline` role is *not* an agent run and is excluded from the global budget via `_NON_AGENT_ROLES`. The new node had to be classified explicitly rather than by accident.
+  - Alternatives considered: excluding `ci_repair` from the global budget so the configured CI bound of 3 becomes reachable under the default `total_agent_executions = 10`.
+  - Reason: `ci_repair` dispatches the `repairer` role, which is an OpenCode agent run in `runner/internal/agents` exactly like the repairs the local pipeline triggers. `_NON_AGENT_ROLES` exists to name the one role the runner executes *without* an agent backend; adding an agent role to it would make the global budget stop meaning "agent runs" and would let the CI loop run 3 repair cycles beyond the cap. This required no code change — `_dispatch` counts every role outside `_NON_AGENT_ROLES` — but it is the load-bearing reason the change is safe, and it is asserted in `test_each_repair_node_spends_only_its_own_budget`.
+  - Consequences: one CI repair cycle costs three agent runs (repairer, reviewer, push; the pipeline run is free) *and* one `review_cycles` unit, so under the shipped defaults `ci_repair_attempts = 3` is never the bound that stops the loop — see `Known Issues`. Recorded there and in `orchestrator/README.md`, and *not* papered over by raising the defaults, for the reason the #90 session already recorded: choosing numbers to make a gate reachable is how the accounting drifted in the first place. What this change fixes is the misattribution: the CI loop no longer drains the local pipeline's repair budget, and the CI bound is now enforceable — `test_the_ci_repair_budget_stops_the_failing_check_loop` blocks at `ci_repair_attempts = 3` with `total_agent_executions = 7` of 10 and `review_cycles = 2` of 3, proving the CI counter is what stopped it.
+
+- Decision: the human-requested-changes repair keeps spending `pipeline_repair_attempts`.
+  - Context: `route_after_human_response(approved=False, changes_requested=True)` also routes to a repair. It is a third failure source, after the pull request exists, so it could arguably belong with the CI repairs.
+  - Alternatives considered: routing it to `CI_REPAIR`; adding a third counter.
+  - Reason: a human asking for changes is not a CI failure, so counting it against the CI budget would recreate the exact defect this issue is about, one gate silently draining another's budget. A third counter needs a `RetryBudget` field and an `app.workflow_runs` column, i.e. a migration, for a source the issue does not mention. Leaving it on `pipeline_repair_attempts` is unchanged behaviour, so nothing regresses.
+  - Consequences: `pipeline_repair_attempts` means "repairs requested before the work is accepted" rather than strictly "repairs after a local pipeline failure". Stated in the `Retry budgets` table in `orchestrator/README.md` and in a comment on `route_after_human_response`, so the next reader is not surprised.
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed — `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p 'test_end_to_end.py' -v` → `Ran 14 tests ... OK`, including the two new `EndToEndWorkflowTests`.
+- Service tests: Passed — `make test-orchestrator` → `Ran 366 tests in 1.216s ... OK (skipped=9)` (359 before this change; +7 new tests, the 9 skips are the pre-existing Postgres-integration skips).
+- Mutation checks: two, each reintroducing the bug in a different place, run against the full `make test-orchestrator` and then restored (`git diff` re-checked, sources compared byte-for-byte against a pre-mutation copy).
+  - `ci_repair` increments `pipeline_repair_attempts` again (the literal original defect) → `FAILED (failures=2, errors=2)`: `test_dispatch_nodes_increment_the_matching_attempt_and_total_budget`, `test_each_repair_node_spends_only_its_own_budget`, `test_failing_checks_spend_the_ci_budget_and_leave_the_pipeline_budget_alone`, `test_the_ci_repair_budget_stops_the_failing_check_loop`.
+  - The failing-checks edge points back at the `repair` node (`"ci_repair": "repair"` in the `wait_for_checks` path map) → `FAILED (failures=2)`: both new end-to-end tests. This one is the important half: the node-level unit tests pass under it, so the end-to-end tests are what prove the *wiring*, not just the node.
+- Lint: Passed — `make lint` → `All checks passed!`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-98` → `Success: no issues found in 47 source files` (private cache so it cannot race sibling worktrees).
+- Full repository tests: Not run. No Go, web, proto, Compose, schema or configuration file changed; `make test-runner` / `test-api` / `test-web` / `compose` / `proto-check` were deliberately skipped.
+- Database migrations: Not applicable — `ci_repair_attempts` is an existing column (`orchestrator/migrations/001_initial.sql:116`) already mapped by `workflows/persistence.py::_DURABLE_COLUMNS`. Nothing persisted changes shape; the column simply stops being permanently 0.
+- End-to-end workflow: Not run against live services. Exercised against the real compiled LangGraph graph in `orchestrator/tests/test_end_to_end.py`, driven one simulated runner terminal event at a time through `workflow_transition_for_terminal_event` and `PersistedWorkflowRuntime.run`, with a code host whose required checks fail.
+- Adversarial review: two independent reviews against the full diff before committing, both mutation-testing on throwaway copies. Neither found a blocker. Both reproduced the budget arithmetic by driving the real graph, and one also verified checkpoint compatibility in both directions by resuming an old-topology checkpoint under the new graph and vice versa. Their findings and the resulting corrections are listed under `Post-review corrections`.
+
+## Known Issues
+
+- Issue: under the shipped default budgets, `ci_repair_attempts = 3` still cannot be the bound that stops a CI repair loop. The second consequence the issue describes — "the CI-repair bound of 3 can never trip on its own" — is therefore only **partially** addressed: the counter is now real, single-writer and enforceable, but two other budgets bind before it.
+  - Severity: P3.
+  - Impact: two independent caps come first. (1) Each CI cycle spends one `review_cycles` unit on its way back through AI review, so `review_cycles = 3` allows at most two CI cycles after the initial review, whatever else is configured. (2) Each CI cycle costs three agent runs (repairer, reviewer, push), so `total_agent_executions = 10` allows two cycles only for a run that reached its pull request on the cheapest path (4 runs); a run that already took one local repair reaches the pull request at 7 and affords one. `RetryBudget` is not wired to configuration at all — `build_persisted_runtime` constructs both the graph and the nodes with the defaults — so today `ci_repair_attempts` is a knob with no way to turn it.
+  - Evidence: measured against the real compiled graph, not inferred. A from-scratch run with permanently failing checks completes exactly two CI cycles and then blocks in `_agent_budget_route` with `ci_repair_attempts = 2`, `pipeline_repair_attempts = 0`, `review_cycles = 3`, `total_agent_executions = 10`. `test_the_ci_repair_budget_stops_the_failing_check_loop` reaches the CI bound only because it seeds `ci_repair_attempts = 2` on the workflow row — a deliberately synthetic state, labelled as such in the test's docstring, that isolates the CI bound from the other two.
+  - Suggested resolution: a follow-up that sizes the budgets deliberately (and probably makes `RetryBudget` configurable per project) — `total_agent_executions >= 13` and `review_cycles >= 4` would be needed for `ci_repair_attempts = 3` to bind. Explicitly **not** done here: the #90 session's decision record already argues that picking budget numbers to make a gate reachable is how this accounting drifted, and doing it in the same change as the attribution fix would confuse a correctness fix with a product decision. Both acceptance criteria of #98 are met without it.
+
+- Issue: rolling **back** past this commit while a workflow is suspended on a `ci_repair` dispatch duplicates that repair.
+  - Severity: P3 — operational, only on rollback.
+  - Impact: the checkpoint's last node is `ci_repair`, which the older graph does not have; resuming under the old code silently runs `repair` instead and dispatches a second `repairer` for the same logical repair (`total_agent_executions` +1, `pipeline_repair_attempts` +1). No crash, no stuck run. The forward direction is safe — no node was removed or renamed, so every old checkpoint resumes cleanly under the new graph (verified by resuming an old-topology checkpoint against the new graph on the same saver and thread).
+  - Evidence: reproduced by the adversarial review against a copy of the repository, in both directions.
+  - Suggested resolution: drain in-flight runs before rolling back past this commit. Inherent to adding a node to a checkpointed graph; not worth code.
+
+- Issue (pre-existing, not introduced here): a run parked on **pending** GitHub checks never re-polls them, so the failing-checks gate — and therefore `ci_repair` — is close to unreachable in production.
+  - Severity: P2. It caps the practical value of this fix in the same way #114/#136 cap the value of the pipeline gate.
+  - Impact: `wait_for_checks` writes `checks_pending = True` and `route_checks` ends the invocation. The stall sweeper re-invokes the run, but `aupdate_state` + `ainvoke(None, config)` re-evaluates only the *edge* out of `wait_for_checks` — the node itself never runs again, `required_checks` is never called a second time, and the stale `checks_pending` routes straight back to END. The failing-checks branch is then only reached when GitHub already reports a conclusive failure in the same invocation as `create_pull_request`, which a just-pushed branch normally does not.
+  - Evidence: reproduced by the adversarial review on both `origin/main` and this branch — `checked_prs` stayed at 1 across three sweeper ticks.
+  - Suggested resolution: wants its own issue (re-enter the node, or have the poller write fresh `checks_*` into the resume state). Possibly overlapping with [#94](https://github.com/alexandre-leites/moirai/issues/94)'s stalled-run recovery, which another agent owns right now, so it is recorded rather than filed from here.
+
+- Issue (pre-existing, not introduced here): `merge` can report `blocked` and still fall through to `complete`.
+  - Severity: P2.
+  - Impact: `nodes.merge` returns `status: "blocked"` when the code host refuses the merge, but `graph.add_edge("merge", "complete")` is unconditional, so the run closes the issue and applies `agent:delivered` for a pull request that was never merged. This is the one edge where the #88 invariant "a node reporting `blocked` short-circuits to the terminal node" does not hold, because it is a plain edge rather than a `suspend_after_dispatch` one.
+  - Evidence: `workflows/nodes.py` merge branch versus `workflows/issue_graph.py`'s `merge -> complete` edge.
+  - Suggested resolution: its own issue; the fix is a conditional edge, but it is outside #98's scope and would change terminal behaviour.
+
+- Issue (pre-existing, not introduced here): a repairer task packet carries no signal about *which* failure it is repairing.
+  - Severity: P3.
+  - Impact: `build_task_packet` derives everything from the request's role, so a CI repair and a local-pipeline repair produce byte-identical packets. The agent gets no CI logs and cannot behave differently. This change records *why* a repair happened in the counter, not in the work order.
+  - Evidence: `persistence/control_plane.py` builds packets from `role` alone; both repair nodes dispatch `repairer`.
+  - Suggested resolution: the natural follow-up to this split, and the point at which a distinct role or a packet field would start to earn its keep. Out of scope: it needs runner and schema changes, both owned elsewhere.
+
+- Issue: `repair` and `ci_repair` are indistinguishable in the persisted phase (`repairing`) and in `app.workflow_execution_requests.role` (`repairer`).
+  - Severity: P3.
+  - Impact: an operator reading `workflow_events` cannot tell a CI repair from a local one except by which counter moved in the same transition payload. The web console shows both as "Repairing".
+  - Evidence: `workflows/nodes.py` — both nodes call `self._dispatch(state, "repairer", "repairing", ...)`.
+  - Suggested resolution: deliberate. A distinct status would have to be added to `runner_events.WorkflowPhase`, `domain/models.py`, `services/issue_sync.py`'s status list, the API and the web console's status map — several of them owned by other agents right now — for a labelling improvement. The counters already carry the information the routing needs.
+
+## Next Recommended Implementation
+
+Unchanged from the previous session: [#114](https://github.com/alexandre-leites/moirai/issues/114) (a write path for `app.project_pipeline_steps`, so the local pipeline gate runs actual commands) and [#136](https://github.com/alexandre-leites/moirai/issues/136) (stop force-resetting each execution's workspace to the default branch). Both are what make the pipeline verdict — and therefore the repair budgets this change now attributes correctly — mean something.
 # Session: retain and commit failed work so retries can build on it (#100 / F13)
 
 - Agent/session identifier: runner-agent-issue-100

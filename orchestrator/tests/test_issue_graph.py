@@ -31,7 +31,7 @@ class IssueGraphRouteTests(unittest.TestCase):
     def test_checks_route_requires_prior_gates_then_human_or_merge(self) -> None:
         budget = RetryBudget(ci_repair_attempts=2, total_agent_executions=3)
         self.assertEqual(route_checks({}, budget), "blocked")
-        self.assertEqual(route_checks({"pipeline_passed": True, "review_approved": True}, budget), "repair")
+        self.assertEqual(route_checks({"pipeline_passed": True, "review_approved": True}, budget), "ci_repair")
         self.assertEqual(
             route_checks({"pipeline_passed": True, "review_approved": True, "checks_passed": True}, budget),
             "merge",
@@ -40,6 +40,16 @@ class IssueGraphRouteTests(unittest.TestCase):
             route_checks({"pipeline_passed": True, "review_approved": True, "checks_passed": True, "human_approval_required": True}, budget),
             "wait_for_human",
         )
+
+    def test_failing_checks_route_to_ci_repair_on_the_ci_budget_alone(self) -> None:
+        """The failing-checks edge is the only entry to the `ci_repair` node,
+        and it is bounded by `ci_repair_attempts` -- not by the local pipeline's
+        repair budget, which a CI failure must never touch."""
+        budget = RetryBudget(pipeline_repair_attempts=3, ci_repair_attempts=2, total_agent_executions=10)
+        delivered = {"pipeline_passed": True, "review_approved": True}
+        self.assertEqual(route_checks({**delivered, "ci_repair_attempts": 1}, budget), "ci_repair")
+        self.assertEqual(route_checks({**delivered, "ci_repair_attempts": 2}, budget), "blocked")
+        self.assertEqual(route_checks({**delivered, "pipeline_repair_attempts": 3}, budget), "ci_repair")
 
     def test_dispatching_edge_ends_the_invocation_while_an_execution_is_pending(self) -> None:
         route = suspend_after_dispatch(lambda state: "pipeline")

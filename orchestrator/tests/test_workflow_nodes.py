@@ -105,6 +105,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             (self.nodes.implement, "developer", "implementing", "implementation_attempts"),
             (self.nodes.review, "reviewer", "ai_review", "review_cycles"),
             (self.nodes.repair, "repairer", "repairing", "pipeline_repair_attempts"),
+            (self.nodes.ci_repair, "repairer", "repairing", "ci_repair_attempts"),
         ]
         for node, role, status, counter in cases:
             update = await node(cast(IssueWorkflowState, {"workflow_run_id": "workflow-1", counter: 1, "total_agent_executions": 4}))
@@ -112,7 +113,48 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(update[counter], 2)
             self.assertEqual(update["total_agent_executions"], 5)
             self.assertEqual(update["execution_id"], f"workflow-1-{role}")
-        self.assertEqual([role for _, role in self.dispatcher.dispatches], ["planner", "developer", "reviewer", "repairer"])
+        self.assertEqual(
+            [role for _, role in self.dispatcher.dispatches],
+            ["planner", "developer", "reviewer", "repairer", "repairer"],
+        )
+
+    async def test_each_repair_node_spends_only_its_own_budget(self) -> None:
+        """`ci_repair_attempts` has exactly one writer, the `ci_repair` node,
+        and a CI repair leaves the local pipeline's repair budget untouched."""
+        ci = await self.nodes.ci_repair({"workflow_run_id": "workflow-1", "pipeline_repair_attempts": 2})
+        local = await self.nodes.repair({"workflow_run_id": "workflow-1", "ci_repair_attempts": 2})
+
+        self.assertEqual(ci["ci_repair_attempts"], 1)
+        self.assertNotIn("pipeline_repair_attempts", ci)
+        self.assertEqual(local["pipeline_repair_attempts"], 1)
+        self.assertNotIn("ci_repair_attempts", local)
+        # A CI repair is an agent run like any other repair: it dispatches the
+        # repairer role, so it spends the global agent budget too.
+        self.assertEqual(ci["total_agent_executions"], 1)
+        self.assertEqual([role for _, role in self.dispatcher.dispatches], ["repairer", "repairer"])
+
+    async def test_each_repair_node_blocks_on_its_own_exhausted_budget_only(self) -> None:
+        """The node-level guard mirrors the routing gate: an exhausted CI budget
+        stops CI repairs and nothing else, and vice versa.
+
+        `ci_repair`'s own guard is defensive rather than load-bearing --
+        `route_after_checks` gates on the same counter with the same limit, so
+        the graph blocks on the edge before reaching the node. `repair`'s guard
+        is genuinely reachable, because `route_after_human_response` routes to a
+        repair without consulting any counter. Both are pinned here so a future
+        routing change cannot make a repair node dispatch past its budget."""
+        ci_exhausted = await self.nodes.ci_repair({"workflow_run_id": "workflow-1", "ci_repair_attempts": 3})
+        self.assertEqual(ci_exhausted["status"], "blocked")
+        self.assertEqual(ci_exhausted["blocking_reason"], "workflow retry budget exhausted")
+        self.assertFalse(ci_exhausted["awaiting_execution"])
+        self.assertEqual(self.dispatcher.dispatches, [])
+
+        # The other counter being drained must not stop either node.
+        ci_free = await self.nodes.ci_repair({"workflow_run_id": "workflow-1", "pipeline_repair_attempts": 3})
+        local_free = await self.nodes.repair({"workflow_run_id": "workflow-1", "ci_repair_attempts": 3})
+        self.assertEqual(ci_free["status"], "repairing")
+        self.assertEqual(local_free["status"], "repairing")
+        self.assertEqual([role for _, role in self.dispatcher.dispatches], ["repairer", "repairer"])
 
     async def test_pipeline_dispatches_a_dedicated_pipeline_execution(self) -> None:
         update = await self.nodes.pipeline(self.state)
@@ -156,7 +198,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatching_marks_the_workflow_as_awaiting_the_execution(self) -> None:
         """The gate the graph reads to end the invocation after a dispatch."""
         for node in (self.nodes.plan, self.nodes.implement, self.nodes.pipeline, self.nodes.review,
-                     self.nodes.repair, self.nodes.push):
+                     self.nodes.repair, self.nodes.ci_repair, self.nodes.push):
             update = await node({"workflow_run_id": "workflow-1"})
             self.assertTrue(update["awaiting_execution"], node)
 
