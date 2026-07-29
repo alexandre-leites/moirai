@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,9 +144,11 @@ func TestPushWorkInProgressFromManagedCloneWorkspacePublishesTheWipBranch(t *tes
 }
 
 // TestCleanupRemoteBranchFromManagedCloneWorkspaceDeletesTheBranch covers the
-// third refspec-bearing push. It is not named in the acceptance criteria, but
-// it failed for the same reason, and a delete that cannot run leaves an
-// abandoned branch on the code host for every execution.
+// third refspec-bearing push. It is not named in the acceptance criteria, and
+// CleanupRemoteBranch has no production caller yet — it is absent from
+// dispatch.DeliveryManager — but it failed for exactly the same reason as the
+// other two, and this is the test that will already be in place when something
+// does start calling it.
 func TestCleanupRemoteBranchFromManagedCloneWorkspaceDeletesTheBranch(t *testing.T) {
 	const branch = "agent/issue-147/run-1"
 	root := t.TempDir()
@@ -179,22 +182,60 @@ func TestCleanupRemoteBranchFromManagedCloneWorkspaceDeletesTheBranch(t *testing
 // other half of the investigation #147 asked for: the mirror setting is a push
 // setting, so the remaining refspec-bearing commands the runner issues against
 // origin — the fetch that refreshes the cache and the ls-remote that guards the
-// branch deletion — keep working from inside a mirror. It is here to stop a
-// future change from "fixing" them too, or from assuming they were ever broken.
+// branch deletion — keep working from inside a mirror.
+//
+// It asserts what those commands achieve, not merely that they exit zero. A
+// fetch that silently updated nothing also exits zero, and the pruning half is
+// the sharper hazard: a mirror's refspec is "+refs/*:refs/*", so a prune is one
+// missing argument away from deleting every ref origin does not have —
+// including the runner's own refs/moirai-wip/* anchors.
 func TestManagedCloneMirrorConfigurationDoesNotBreakFetchOrLsRemote(t *testing.T) {
 	root := t.TempDir()
 	origin := managedCloneOrigin(t, root)
 	manager, workspace := prepareManagedCloneWorkspace(t, root, origin, "agent/issue-147/run-1")
-
 	cache := filepath.Join(root, "data", "repositories", "project-project-1", "repo.git")
+
+	// A local-only anchor, as a failed execution leaves behind. Origin has no
+	// such ref, so a prune that ranged over all of refs/* would delete it.
+	if err := manager.RecordWorkInProgress(context.Background(), workspace, "refs/moirai-wip/execution-earlier"); err != nil {
+		t.Fatalf("RecordWorkInProgress() error = %v", err)
+	}
+	anchored := readRemoteRevision(t, cache, "refs/moirai-wip/execution-earlier")
+	if anchored == "" {
+		t.Fatal("the anchor was not written to the cache")
+	}
+
+	// Origin moves on, so a working fetch has something to observe.
+	seed := filepath.Join(root, "seed")
+	if err := os.WriteFile(filepath.Join(seed, "second.txt"), []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, seed, "add", "second.txt")
+	runRealGit(t, seed, "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid", "commit", "-qm", "second")
+	runRealGit(t, seed, "push", "-q", "origin", "main")
+	advanced := readRemoteRevision(t, origin, "refs/heads/main")
+
 	if err := manager.git(context.Background(), "-C", cache, "fetch", "--prune", "origin", "main"); err != nil {
 		t.Fatalf("fetch from a mirror cache failed: %v", err)
+	}
+	if refreshed := readRemoteRevision(t, cache, "refs/heads/main"); refreshed != advanced {
+		t.Fatalf("cache refs/heads/main = %q after fetch, want origin's tip %q", refreshed, advanced)
+	}
+	if survived := readRemoteRevision(t, cache, "refs/moirai-wip/execution-earlier"); survived != anchored {
+		t.Fatalf("the prune destroyed the local-only anchor: %q, want %q", survived, anchored)
 	}
 	if err := manager.git(context.Background(), "-C", workspace.Repository, "fetch", "--prune", "origin", "main"); err != nil {
 		t.Fatalf("fetch from a mirror worktree failed: %v", err)
 	}
-	if _, err := manager.gitOutput(context.Background(), "-C", workspace.Repository, "ls-remote", "--heads", "origin", "refs/heads/main"); err != nil {
+
+	// ls-remote is the guard CleanupRemoteBranch runs before deleting, so it
+	// has to report the branch, not merely succeed.
+	listed, err := manager.gitOutput(context.Background(), "-C", workspace.Repository, "ls-remote", "--heads", "origin", "refs/heads/main")
+	if err != nil {
 		t.Fatalf("ls-remote from a mirror worktree failed: %v", err)
+	}
+	if !strings.Contains(listed, "refs/heads/main") {
+		t.Fatalf("ls-remote from a mirror worktree = %q, want it to report refs/heads/main", listed)
 	}
 }
 
@@ -246,24 +287,48 @@ func prepareManagedCloneWorkspace(t *testing.T, root, origin, branch string) (Ma
 }
 
 // readGitConfiguration returns a configuration value as the workspace resolves
-// it, or "" when it is unset — "git config --get" exits non-zero for a missing
-// key, which is not an error here.
+// it, or "" when the key is unset.
+//
+// "git config --get" exits 1 for a missing key, which is an answer rather than
+// a failure. Every other exit status is a failure and is reported as one: the
+// caller turns "" into "the cache is no longer a mirror", and an unreadable
+// repository or an unrunnable git must not be able to masquerade as that.
 func readGitConfiguration(t *testing.T, directory, key string) string {
 	t.Helper()
 	command := exec.Command("git", "-C", directory, "config", "--get", key)
 	output, err := command.Output()
-	if err != nil {
+	if err == nil {
+		return strings.TrimSpace(string(output))
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 		return ""
 	}
-	return strings.TrimSpace(string(output))
+	t.Fatalf("git config --get %s in %s: %v", key, directory, err)
+	return ""
 }
 
 // isAncestor reports whether one revision is reachable from another, which is
 // what decides whether a push is a fast-forward.
+//
+// Only exit status 1 means "not an ancestor". Anything else — 128 for an
+// unknown revision or an unusable directory — is a broken question, not a
+// negative answer, and is fatal: the sole caller treats false as the passing
+// direction, so silently mapping an error to false would retire the guard
+// without ever failing.
 func isAncestor(t *testing.T, repository, ancestor, descendant string) bool {
 	t.Helper()
 	command := exec.Command("git", "-C", repository, "merge-base", "--is-ancestor", ancestor, descendant)
-	return command.Run() == nil
+	err := command.Run()
+	if err == nil {
+		return true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false
+	}
+	t.Fatalf("git merge-base --is-ancestor %s %s in %s: %v", ancestor, descendant, repository, err)
+	return false
 }
 
 // readRemoteFile reads a file from a reference in a bare repository.

@@ -103,9 +103,12 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 // override does.
 //
 // The override is deliberately per invocation rather than a write to the
-// cache's config: the cache stays a faithful mirror for fetching, nothing has
-// to be migrated for caches already on disk, and existing_path workspaces —
-// ordinary checkouts that never carry the setting — are unaffected either way.
+// cache's config: remote.origin.mirror keeps its value, so the cache still
+// fetches as a mirror, nothing has to be migrated for caches already on disk,
+// and existing_path workspaces — ordinary checkouts that never carry the
+// setting — are unaffected either way. (The push does still write to the shared
+// config by other means: --set-upstream records branch.<name>.remote and
+// branch.<name>.merge there, as "git worktree add -B" already does.)
 //
 // Disabling it is also what makes these pushes mean what they say. A mirror
 // push publishes every local ref, which would put the runner's private

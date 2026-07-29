@@ -2064,6 +2064,17 @@ The new tests were mutation-tested against four deliberate defects injected into
 
 Two further mutations were already caught and needed no change: removing `-c remote.origin.mirror=false` (the original bug — fails with the issue's exact `fatal:`), and making `Push` report `Pushed: true` without running git at all (caught by reading origin rather than trusting the return value).
 
+Two independent adversarial reviews of the committed diff were then run. Both confirmed the fix itself is complete and correct — the three pushes in `delivery.go` are the only `git push` invocations in the repository's production code (the orchestrator moves refs through `gh api repos/.../git/refs/...`, never `git push`), `-c` and the `GIT_CONFIG_*` credential injection provably coexist (one review captured the `AUTHORIZATION: basic …` header on the wire against a local HTTP listener), `pushCommand`'s `append` cannot alias across calls, and the error-message prefix is byte-identical. What they found, and what was done:
+
+- **`TestManagedCloneMirrorConfigurationDoesNotBreakFetchOrLsRemote` asserted only exit status 0** (minor, raised by both). A fetch that updates nothing also exits 0, so the test could not fail for the reason its comment gave. It now advances origin, asserts the cache's `refs/heads/main` really moves to the new tip, and asserts a planted `refs/moirai-wip/*` anchor survives the `--prune`. That last assertion guards a real hazard: a mirror's refspec is `+refs/*:refs/*`, and `git fetch --prune origin '+refs/*:refs/*'` does delete the anchor (`- [deleted] (none) -> refs/moirai-wip/exec-1`), while the `git fetch --prune origin <branch>` the runner actually issues preserves it. `ls-remote` is now asserted to report the branch, not merely to succeed.
+- **`isAncestor` swallowed errors, and `false` was the passing direction** (minor). `git merge-base --is-ancestor` exits 1 for "not an ancestor" but 128 for a bad revision or unusable directory, so any git-level error silently *satisfied* the non-fast-forward guard protecting the `--force` assertion. It now returns false only on exit 1 and is fatal otherwise.
+- **`readGitConfiguration` conflated "key unset" with "git failed"** (minor). Its caller turns `""` into "the cache is no longer a mirror", so an unreadable repository could masquerade as that verdict. Same treatment: exit 1 is an answer, anything else is fatal.
+- **Two comments claimed more than the code did** (minor). The `CleanupRemoteBranch` test said a failed delete "leaves an abandoned branch for every execution"; in fact `CleanupRemoteBranch` has no production caller at all — it is absent from `dispatch.DeliveryManager`. And `pushCommand`'s comment read as "we write nothing to the cache config", when `--set-upstream` does write `branch.<name>.remote`/`.merge` there. Both corrected rather than the code changed.
+- **One review argued the `remote.origin.mirror == "true"` precondition should be *established* rather than asserted**, so that a future `--bare` clone in `manager.go` does not turn four tests red. Kept as an assertion deliberately: if the cache stops being a mirror, these tests genuinely stop covering the bug they were written for, and a loud failure saying so is the correct signal — silently forcing the setting would leave a suite that no longer tests what the runner does. The misleading-diagnosis half of that objection was real and is fixed above.
+- **A dead assertion was noted** (`!push.Pushed` cannot fail, since `Push` returns `Pushed: true` unconditionally on its success path). Kept: the issue's acceptance criterion is worded as "reports `pushed: true`", so the assertion is traceable to the criterion and costs nothing.
+
+Both reviews also surfaced adjacent, pre-existing defects that this change does not cause; see Known Issues.
+
 ## Validation Status
 
 - Targeted tests: Passed — the four tests in `runner/internal/repository/delivery_mirror_test.go`. The three push tests were each confirmed failing with the `-c remote.origin.mirror=false` removed from `pushCommand`, with the exact `fatal: --mirror can't be combined with refspecs` from the issue. See Post-review corrections above for the full mutation matrix.
@@ -2083,6 +2094,24 @@ Two further mutations were already caught and needed no change: removing `-c rem
   - Impact: a new refspec-bearing push written as `manager.git(ctx, "-C", workspace.Repository, "push", …)` would fail in `managed_clone` mode and pass every test that uses an ordinary checkout, exactly as this bug did.
   - Evidence: `Manager.prepareSource` (`runner/internal/repository/manager.go`) still clones with `--mirror`; nothing prevents a push from bypassing the helper.
   - Suggested resolution: the root-cause fix is candidate (2) from the issue — clone the cache with `git clone --bare` and an explicit `remote.origin.fetch = +refs/heads/*:refs/heads/*`. It belongs in `manager.go`, which PR #146 owns, and needs a migration path for caches already on disk (detect `remote.origin.mirror=true` and rewrite the remote, or re-clone). Worth doing once #146 has landed; the per-invocation override above is correct in the meantime and does not conflict with it.
+
+- Issue: the second delivery to a workflow's execution branch is rejected non-fast-forward, so only the first completed execution of a workflow ever reaches the code host.
+  - Severity: P1 — pre-existing and not caused by this change, but it is the next wall in the default repository mode now that pushes work at all.
+  - Impact: every repair-loop iteration and every retry after the first delivery fails in `deliver`. Affects `existing_path` identically; it was simply unreachable in `managed_clone` while every push failed earlier.
+  - Evidence: `Manager.Prepare` force-resets the branch to the base revision (`git worktree add -B <branch> <path> <base>`, `manager.go:103`), while the orchestrator reuses one `branch_name` per workflow run (`orchestrator/src/moirai/workflows/persistence.py:250`). Reproduced in plain git: execution 1 pushes fine, execution 2 gets `! [rejected] agent/x -> agent/x (non-fast-forward)`.
+  - Suggested resolution: tracked as [#156](https://github.com/alexandre-leites/moirai/issues/156). Needs a decision rather than a patch — `--force-with-lease` on the delivery push, or preparing from the published branch (which is what #136 / PR #146 is about, and would make repair loops cumulative). Not attempted here: the fix lives in `manager.go` or the orchestrator, neither of which this session owns.
+
+- Issue: `CleanupRemoteBranch` runs its `ls-remote` and its delete push without the resolved credential environment.
+  - Severity: P3 — unreachable today.
+  - Impact: against a real GitHub remote both would fail on authentication rather than on anything else. It is the one of the three pushes that never reaches the authenticated path added by #109.
+  - Evidence: `delivery.go` uses `manager.gitOutput`/`manager.git` there, not `gitWithEnv`, and the method takes no `environment` argument. It also has no production caller — it is absent from `dispatch.DeliveryManager` — so nothing exercises it yet.
+  - Suggested resolution: give it the same `environment map[string]string` parameter the other two take, at the same time as whatever starts calling it. Deliberately not widened here: changing its signature for no caller is churn, and this session's change is a bug fix.
+
+- Issue: `runner/README.md:118` describes a completed delivery as leaving `origin/<branch>` with upstream set, which is not true in `managed_clone` mode.
+  - Severity: P3 — documentation only.
+  - Impact: a mirror has no `refs/remotes/origin/*` at all, so there is no `origin/<branch>`; `--set-upstream` records `branch.<name>.merge = refs/heads/<name>` in the shared cache config instead. Misleading now that the push actually runs.
+  - Evidence: verified against a real mirror worktree — `git rev-parse --symbolic-full-name @{upstream}` returns `refs/heads/agent/…`, not `refs/remotes/origin/…`.
+  - Suggested resolution: correct that row. Not done here because `runner/README.md` is owned by open PR #146.
 
 - Issue: `runner/README.md` describes the workspace lifecycle but not the mirror constraint on pushes.
   - Severity: P3 — documentation only.
