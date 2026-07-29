@@ -290,3 +290,93 @@ Record only validation that was actually run.
 
 Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce it in this worktree, make a focused fix, rerun the relevant checks, and update this record before the next commit.
 
+
+---
+
+# Session: issue-103 — bootstrap NameError and step order-dependence (F16)
+
+## Current Status
+
+- Overall status: Complete; branch `issue-103` pushed with a PR open against `main`.
+- Current phase: Platform review remediation, finding F16 (GitHub issue #103).
+- Active implementation: None.
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/issue-103
+
+## Done
+
+- [x] Make `_bootstrap_initial_setup` restartable and its steps order-independent
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/main.py`, `orchestrator/tests/test_main_bootstrap.py`, `orchestrator/README.md`, `.env.example`, `compose.yaml`
+  - Behavior delivered:
+    - `uuid4` is imported at module scope. The pre-fix conditional import made both `uuid4`
+      and (via a redundant local `import json`) `json` function-locals bound only inside the
+      "seed project is missing" branch, so a database holding the seed project with no users
+      raised `UnboundLocalError: cannot access local variable 'uuid4'` (a `NameError` subclass)
+      before the runner registration token was seeded. Confirmed pre-fix with
+      `_bootstrap_initial_setup.__code__.co_varnames` containing `uuid4` and `json`.
+    - Bootstrap is now three independent steps — `_bootstrap_admin_user`,
+      `_bootstrap_seed_project`, `_bootstrap_registration_token` — each guarded by its own
+      existence check and its own configuration. Previously one early return for "any user
+      exists" and another for "no admin password" silently skipped the project and token
+      steps, so a bootstrap interrupted after creating the admin user never seeded the rest,
+      and a deployment that configured `RUNNER_REGISTRATION_TOKEN` after first start never
+      seeded a token at all.
+    - Both seed inserts carry `ON CONFLICT DO NOTHING` on their unique columns, and the admin
+      step treats a lost insert race as satisfied only after re-reading `app.users`, so two
+      instances starting against the same empty database cannot duplicate rows or crash.
+    - The token existence check deliberately still ignores `used_at`/`expires_at`: registration
+      tokens are single-use, so re-seeding a spent hash would re-open it.
+    - Dead code removed: the `else` branch re-read a `project_id` nothing used.
+    - `_seed_issue_if_needed` uses the module-scope `uuid4` instead of its `_uuid4` alias, the
+      pattern the conditional import came from.
+    - `LOOP_SEED_PROJECT_NAME=""` now disables seed-project bootstrap; `compose.yaml` uses
+      `${LOOP_SEED_PROJECT_NAME-demo}` so an empty value in `.env` survives substitution.
+      Because each step re-checks every start, a seeded row deleted by hand is otherwise
+      re-created; this is the documented opt-out.
+  - Validation performed:
+    - Regression proof: the new tests run against the pre-fix `main.py` produce
+      `ERROR ... UnboundLocalError: cannot access local variable 'uuid4'` plus 5 failures for
+      the order-dependent steps; against the fixed file all 15 pass.
+    - Real PostgreSQL (`postgres:16-alpine`, throwaway container) driving the real SQL after
+      `MigrationRunner`: F16 state (project, no users) -> users/projects/tokens `(1, 1, 1)`;
+      two further runs -> `(1, 1, 1)`; user-only state -> `(1, 1, 1)`; no admin password ->
+      `(0, 1, 1)`; four concurrent bootstraps -> `(1, 1, 1)`; seed issue inserted once; blank
+      seed project name -> `(1, 0, 1)`. Pre-fix code on the same database raised
+      `UnboundLocalError` with 0 registration tokens seeded.
+  - Commands executed:
+    - `make test-orchestrator` — `Ran 301 tests ... OK (skipped=2)`
+    - `make lint` — `All checks passed!`
+    - `make typecheck` — `Success: no issues found in 47 source files`
+    - `make compose` — renders; `LOOP_SEED_PROJECT_NAME= docker compose config` renders `""`
+    - `LOOP_TEST_DATABASE_URL='postgresql://loop:loop@127.0.0.1:55403/loop' make test-postgres-integration` — `Ran 2 tests ... OK`
+  - Notes: `make test-runner`, `make test-api`, `make test-web` and `make proto-check` were not
+    run; this change touches no Go, web, or protobuf source.
+
+## Validation Status
+
+- Targeted tests: Passed — `test_main_bootstrap.py`, 15 tests.
+- Service tests: Passed — `make test-orchestrator`, 301 tests, 2 skipped.
+- Full repository tests: Not run (no Go/web/proto changes).
+- Build: Not run.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck`.
+- Database migrations: Passed — `make test-postgres-integration` against a throwaway PostgreSQL 16.
+- Docker Compose: Passed — `make compose`.
+
+## Known Issues
+
+- Issue: The seeded runner registration token still expires 15 minutes after it is written and
+  is consumed by the first registration, so a runner that first registers later needs a token
+  minted through the API.
+  - Severity: P3
+  - Impact: Only affects a stack whose runner starts long after the orchestrator's first boot.
+  - Evidence: `_bootstrap_registration_token` TTL and `persistence/control_plane.register_runner`
+    stamping `used_at`.
+  - Suggested resolution: Out of scope for F16 — deliberately unchanged, since re-seeding a
+    consumed hash would re-open a spent secret.
+
+## Next Recommended Implementation
+
+Continue the 2026-07-29 platform review remediation queue in
+`docs/reviews/2026-07-29-platform-review.md` (recommended order: #88 → #89/#90 → #104 + #106).
