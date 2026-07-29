@@ -201,7 +201,12 @@ def _terminal_event_transition(
 
     resolved_role = role if role is not None else execution_role_from_id(summary.execution_id)
 
-    if resolved_role == "pipeline" and summary.terminal:
+    # The one and only producer of `pipeline_passed`. The local pipeline is the
+    # workflow's deterministic completion gate, so the gate may only be written
+    # by the execution that actually ran those commands: never inferred from
+    # another role's exit code (an agent process exiting 0 is evidence that the
+    # process ended, not that the change builds or passes its tests).
+    if resolved_role == "pipeline":
         return WorkflowTransition(
             new_status="local_pipeline",
             state_updates={"status": "local_pipeline", "pipeline_passed": summary.succeeded},
@@ -258,12 +263,14 @@ def _terminal_event_transition(
 
     if resolved_role == "developer":
         if current_status == "implementing":
+            # Hand the run to the local_pipeline phase without touching
+            # `pipeline_passed`: the developer's exit code is not evidence that
+            # the deterministic checks pass. Leaving the gate to the pipeline
+            # execution is what makes the `pipeline` node dispatch a real run
+            # instead of short-circuiting into AI review.
             return WorkflowTransition(
                 new_status="local_pipeline",
-                state_updates={
-                    "status": "local_pipeline",
-                    "pipeline_passed": summary.exit_code == 0,
-                },
+                state_updates={"status": "local_pipeline"},
             )
         if current_status == "pushing":
             return WorkflowTransition(
@@ -298,6 +305,9 @@ def _terminal_event_transition(
         )
 
     if resolved_role == "repairer":
+        # Like the developer branch: back to local_pipeline with the gate
+        # untouched, so the repaired tree is re-validated by a real pipeline
+        # execution before the workflow can advance.
         return WorkflowTransition(
             new_status="local_pipeline",
             state_updates={"status": "local_pipeline"},

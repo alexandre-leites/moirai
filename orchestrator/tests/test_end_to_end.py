@@ -457,20 +457,35 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["status"], "implementing")
         self.assertEqual(workflow.store.roles, ["planner", "developer"])
 
+        # A clean developer exit queues the local pipeline; it never satisfies
+        # the pipeline gate on its own.
         state = await workflow.deliver("developer", "implement")
+        self.assertEqual(state["status"], "local_pipeline")
+        self.assertNotIn("pipeline_passed", state)
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "pipeline"])
+
+        state = await workflow.deliver("pipeline", "pipeline")
         self.assertEqual(state["status"], "ai_review")
-        self.assertEqual(workflow.store.roles, ["planner", "developer", "reviewer"])
+        self.assertIs(state["pipeline_passed"], True)
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "pipeline", "reviewer"])
 
         state = await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
         self.assertEqual(state["status"], "pushing")
-        self.assertEqual(workflow.store.roles, ["planner", "developer", "reviewer", "developer"])
+        self.assertEqual(
+            workflow.store.roles, ["planner", "developer", "pipeline", "reviewer", "developer"]
+        )
 
         state = await workflow.deliver("developer", "implement")
         self.assertEqual(state["status"], "completed")
-        self.assertEqual(workflow.store.roles, ["planner", "developer", "reviewer", "developer"])
+        self.assertEqual(
+            workflow.store.roles, ["planner", "developer", "pipeline", "reviewer", "developer"]
+        )
         self.assertEqual(len(workflow.code_host.created_prs), 1)
         self.assertEqual(workflow.code_host.merged_prs, [("42", "squash")])
         self.assertEqual(workflow.issue_tracker.closed_issues, ["42"])
+        # Five executions ran, but the deterministic pipeline is not an agent
+        # run and does not spend the agent budget.
+        self.assertEqual(workflow.store.roles.count("pipeline"), 1)
         self.assertEqual(workflow.store.durable["total_agent_executions"], 4)
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
@@ -496,6 +511,88 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow.store.durable["total_agent_executions"], 2)
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_a_clean_developer_exit_cannot_reach_review_without_the_pipeline(self) -> None:
+        """Regression for the inferred pipeline gate: a developer that exits 0
+        without changing anything used to satisfy `pipeline_passed` and sail
+        into AI review. The deterministic pipeline must run first and its
+        verdict alone must decide where the workflow goes next."""
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+
+        state = await workflow.deliver("developer", "implement", exit_code=0)
+
+        self.assertEqual(state["status"], "local_pipeline")
+        self.assertTrue(state["awaiting_execution"])
+        self.assertNotIn("pipeline_passed", state)
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "pipeline"])
+        self.assertNotIn("reviewer", workflow.store.roles)
+        # Suspended on the pipeline execution: nothing advances until it reports.
+        self.assertEqual(await workflow.pending_nodes(), ())
+
+        state = await workflow.deliver("pipeline", "pipeline", event_type="failed", exit_code=1)
+
+        self.assertEqual(state["status"], "repairing")
+        self.assertIs(state["pipeline_passed"], False)
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "pipeline", "repairer"])
+        self.assertNotIn("reviewer", workflow.store.roles)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_a_repair_gets_its_own_pipeline_execution_despite_an_earlier_pass(self) -> None:
+        """A repair triggered by AI review re-enters the pipeline phase while an
+        earlier `pipeline_passed = True` is still in state. That stale gate must
+        not skip the run: the repaired tree gets its own pipeline verdict."""
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        state = await workflow.deliver("pipeline", "pipeline")
+        self.assertIs(state["pipeline_passed"], True)
+
+        changes_requested = {"verdict": "changes_requested", "acceptanceCriteria": [], "findings": []}
+        state = await workflow.deliver("reviewer", "review", result=changes_requested)
+        self.assertEqual(state["status"], "repairing")
+
+        state = await workflow.deliver("repairer", "repair")
+
+        self.assertEqual(state["status"], "local_pipeline")
+        self.assertEqual(workflow.store.roles[-1], "pipeline")
+        self.assertEqual(workflow.store.roles.count("pipeline"), 2)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_full_review_cycle_still_reaches_delivery_on_the_agent_budget(self) -> None:
+        """Making the pipeline mandatory added an execution to every
+        review-driven repair cycle. If those pipeline runs spent
+        `total_agent_executions`, the third review cycle would exhaust the
+        budget and a workflow the reviewer just APPROVED would block at `push`
+        with no pull request. Every review cycle the budget allows must still
+        reach delivery."""
+        workflow = _EventDrivenWorkflow(code_host=_FakeCodeHost(), issue_tracker=_FakeIssueTracker())
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+
+        changes_requested = {"verdict": "changes_requested", "acceptanceCriteria": [], "findings": []}
+        for _ in range(2):
+            state = await workflow.deliver("reviewer", "review", result=changes_requested)
+            self.assertEqual(state["status"], "repairing")
+            await workflow.deliver("repairer", "repair")
+            state = await workflow.deliver("pipeline", "pipeline")
+            self.assertEqual(state["status"], "ai_review")
+
+        state = await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        self.assertEqual(state["status"], "pushing")
+        self.assertNotIn("blocking_reason", state)
+
+        state = await workflow.deliver("developer", "implement")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(len(workflow.code_host.created_prs), 1)
+        self.assertEqual(workflow.store.durable["review_cycles"], 3)
+        self.assertEqual(workflow.store.roles.count("pipeline"), 3)
+        self.assertEqual(workflow.store.durable["total_agent_executions"], 8)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_repair_cycle_blocks_only_after_every_counted_attempt_really_ran(self) -> None:
         """Each counted repair attempt is preceded by a real repairer execution,
         and each pipeline verdict comes from a pipeline execution that reported
@@ -504,7 +601,7 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await workflow.start()
         await workflow.deliver("planner", "plan", result=_PLANNER_READY)
 
-        state = await workflow.deliver("developer", "implement", exit_code=1)
+        state = await workflow.deliver("developer", "implement")
         self.assertEqual(state["status"], "local_pipeline")
         self.assertEqual(workflow.store.roles[-1], "pipeline")
 
@@ -535,6 +632,7 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await workflow.start()
         await workflow.deliver("planner", "plan", result=_PLANNER_READY)
         await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
         await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
 
         state = await workflow.deliver("developer", "implement")
@@ -562,6 +660,7 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await workflow.start()
         await workflow.deliver("planner", "plan", result=_PLANNER_READY)
         await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
         state = await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
         self.assertEqual(state["status"], "pushing")
         workflow.store.claim_queued()
