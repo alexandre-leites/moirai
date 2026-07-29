@@ -290,3 +290,68 @@ Record only validation that was actually run.
 
 Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce it in this worktree, make a focused fix, rerun the relevant checks, and update this record before the next commit.
 
+
+---
+
+# Issue #88 — Event-driven issue workflow (platform review finding F1)
+
+## Current Status
+
+- Overall status: Complete; branch `issue-88` pushed and PR opened against `main`
+- Current phase: Workflow-engine correctness (2026-07-29 platform review, finding F1)
+- Active implementation: None
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/issue-88
+
+## Done
+
+- [x] Suspend the LangGraph issue workflow after every execution dispatch
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/runner_events.py`, `orchestrator/src/moirai/workflows/runtime.py`, `orchestrator/tests/test_end_to_end.py`, `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_runtime.py`, `orchestrator/tests/test_runner_events.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `README.md`, `PROJECT.md`, `orchestrator/README.md`
+  - Behavior delivered:
+    - `_dispatch` sets `awaiting_execution` on the graph state; `suspend_after_dispatch` wraps the outgoing edge of every dispatching node (`plan`, `implement`, `pipeline`, `review`, `repair`, `push`) so the invocation ends at `END` while an execution is pending. The previously unconditional `implement -> pipeline`, `repair -> pipeline`, and `push -> create_pull_request` edges are now conditional, and a node that reports `blocked` instead of dispatching routes to the terminal node instead of falling through into the next dispatching node.
+    - `workflow_transition_for_terminal_event` clears `awaiting_execution` on every terminal transition, so `PersistedWorkflowRuntime.run` -> `aupdate_state` + `ainvoke(None, config)` resumes the graph from that same edge (verified against langgraph 1.2.10: `update_state` re-evaluates the last node's branch, so the run continues rather than replaying from `START`).
+    - `_dispatch` replay guard: a node re-entered while its own request is still `queued` reuses that request and does not re-increment `implementation_attempts`/`review_cycles`/`pipeline_repair_attempts`/`planning_attempts`/`total_agent_executions`. Broader replay idempotency stays with issue #96.
+    - Checkpointer decision: production requires one. Without a checkpointer the runtime now leaves a suspended run untouched (instead of replaying from `START` and re-dispatching) and logs a warning at construction. Documented in `orchestrator/README.md`, `README.md`, and `PROJECT.md`; Compose never sets `LOOP_ALLOW_NO_CHECKPOINTER`.
+  - Validation performed:
+    - `make test-orchestrator` — 298 tests, `OK (skipped=2)`.
+    - `make lint` — `All checks passed!`.
+    - `make typecheck` — `Success: no issues found in 47 source files`.
+    - `make compose` — `docker compose config` rendered successfully.
+    - Regression proof: with only `orchestrator/src/moirai/workflows/` stashed, the five new/rewritten workflow tests fail — `test_sequential_runner_events_drive_the_workflow_to_completed` reports `AssertionError: 'blocked' != 'planning'` and `test_one_terminal_event_dispatches_one_execution_and_ends_the_invocation` reports `AssertionError: 'blocked' != 'implementing'`, reproducing F1 exactly.
+  - Commands executed: `make dev-install`; `make test-orchestrator`; `make lint`; `make typecheck`; `make compose`; `git stash push -- orchestrator/src/moirai/workflows/ && PYTHONPATH=orchestrator/src .venv/bin/python -m unittest discover -s orchestrator/tests -p test_end_to_end.py && git stash pop`.
+
+## Decisions
+
+- Decision: Suspend with a conditional edge to `END` rather than langgraph's static `interrupt_after`.
+  - Context: Issue #88 suggested `interrupt_after` on the dispatching nodes as the smaller change.
+  - Alternatives considered: `interrupt_after` on `plan`/`implement`/`pipeline`/`review`/`repair`/`push`; per-node no-op "await" nodes listed in `interrupt_before`.
+  - Reason: `interrupt_after` is unconditional. `pipeline` short-circuits without dispatching when `pipeline_passed` is already set, and `plan` does the same when `plan_valid` is set; interrupting there would suspend a run that no runner event will ever wake. A state gate keeps suspension tied to a dispatch actually having happened.
+  - Consequences: Suspension is visible in graph state (`awaiting_execution`), works identically with and without a checkpointer for the *stopping* half, and the resume half remains a checkpointer capability.
+
+- Decision: Clear `awaiting_execution` in `workflow_transition_for_terminal_event`, not in `PersistedWorkflowRuntime.run`.
+  - Context: Something has to clear the gate before the graph can advance.
+  - Alternatives considered: Clearing it unconditionally on every `run()` call.
+  - Reason: `run()` is also the human-decision entry point. Clearing there would resume a run suspended on an agent execution with unchanged gates, which routes into a repair dispatch — a phantom execution of exactly the kind this issue removes.
+  - Consequences: Only a terminal runner execution event advances a suspended run; a human decision that arrives while an agent is in flight is a no-op on the graph.
+
+## Validation Status
+
+- Targeted tests: Passed — `test_end_to_end.py` 9 tests, plus `test_workflow_nodes.py`, `test_issue_graph.py`, `test_workflow_runtime.py`, `test_runner_events.py`.
+- Service tests: Passed — `make test-orchestrator`, 298 tests, `OK (skipped=2)`.
+- Full repository tests: Not run (no Go or TypeScript source changed).
+- Build: Not run.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck`.
+- Database migrations: Not applicable; no schema change.
+- Docker Compose: Passed — `make compose`.
+- End-to-end workflow: Passed — `test_sequential_runner_events_drive_the_workflow_to_completed` drives planner/developer/reviewer/push terminal events through `workflow_transition_for_terminal_event` and `PersistedWorkflowRuntime` with a real langgraph checkpointer and reaches `completed` with no pre-seeded gate booleans.
+- Runner tests: Not run (runner unchanged).
+
+## Known Issues
+
+- Issue: A duplicated terminal event can still advance the graph one step past the request it queued.
+  - Severity: P2
+  - Impact: A replayed transition for a role whose *next* request is already queued dispatches a request for the following role.
+  - Evidence: `_dispatch` only deduplicates against a queued request with a matching role.
+  - Suggested resolution: Issue #96 (replay idempotency); this change deliberately implements only the same-role guard.

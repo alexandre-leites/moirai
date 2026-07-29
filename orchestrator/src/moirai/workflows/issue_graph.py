@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
 
@@ -22,6 +23,12 @@ class IssueWorkflowState(TypedDict, total=False):
     project_id: str
     issue_id: str
     status: str
+    # Set by the nodes that queue an agent execution and cleared by the runner's
+    # terminal event (see runner_events.workflow_transition_for_terminal_event).
+    # While it is set the graph must not walk downstream nodes: their gates are
+    # decided by an execution that has not run yet.
+    awaiting_execution: bool
+    execution_id: str
     planning_attempts: int
     implementation_attempts: int
     pipeline_repair_attempts: int
@@ -122,6 +129,39 @@ def route_human(
     )
 
 
+# Branch name meaning "this node queued an agent execution; end the invocation".
+# It is not a node: every path map below points it at END. Prefixed so it can
+# never collide with a real node name.
+_SUSPEND = "__awaiting_execution__"
+
+
+def suspend_after_dispatch(
+    router: Callable[[IssueWorkflowState], str],
+) -> Callable[[IssueWorkflowState], str]:
+    """Wraps a phase router so a node that just queued an agent execution ends
+    the graph invocation instead of walking downstream nodes.
+
+    The gates those nodes read (`plan_valid`, `pipeline_passed`, ...) are
+    produced by the execution that was only just queued, so continuing would
+    route on stale defaults, dispatch phantom executions and burn the retry
+    budget before any agent ran. The next terminal runner event clears
+    `awaiting_execution` and resumes the graph from this same edge.
+
+    A node that reports `blocked` instead of dispatching short-circuits to the
+    terminal node, so an exhausted budget can never fall through an
+    unconditional edge into another dispatching node.
+    """
+
+    def route(state: IssueWorkflowState) -> str:
+        if state.get("status") == "blocked":
+            return "blocked"
+        if state.get("awaiting_execution"):
+            return _SUSPEND
+        return router(state)
+
+    return route
+
+
 def build_issue_graph(
     nodes: IssueWorkflowNodes,
     budget: RetryBudget = _DEFAULT_BUDGET,
@@ -149,22 +189,34 @@ def build_issue_graph(
     graph.add_edge("prepare", "plan")
     graph.add_conditional_edges(
         "plan",
-        lambda state: route_plan(state, budget),
-        {"plan": "plan", "implement": "implement", "blocked": "blocked"},
+        suspend_after_dispatch(lambda state: route_plan(state, budget)),
+        {"plan": "plan", "implement": "implement", "blocked": "blocked", _SUSPEND: END},
     )
-    graph.add_edge("implement", "pipeline")
+    graph.add_conditional_edges(
+        "implement",
+        suspend_after_dispatch(lambda state: "pipeline"),
+        {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+    )
     graph.add_conditional_edges(
         "pipeline",
-        lambda state: route_pipeline(state, budget),
-        {"review": "review", "repair": "repair", "blocked": "blocked"},
+        suspend_after_dispatch(lambda state: route_pipeline(state, budget)),
+        {"review": "review", "repair": "repair", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "review",
-        lambda state: route_review(state, budget),
-        {"push": "push", "repair": "repair", "blocked": "blocked"},
+        suspend_after_dispatch(lambda state: route_review(state, budget)),
+        {"push": "push", "repair": "repair", "blocked": "blocked", _SUSPEND: END},
     )
-    graph.add_edge("repair", "pipeline")
-    graph.add_edge("push", "create_pull_request")
+    graph.add_conditional_edges(
+        "repair",
+        suspend_after_dispatch(lambda state: "pipeline"),
+        {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+    )
+    graph.add_conditional_edges(
+        "push",
+        suspend_after_dispatch(lambda state: "create_pull_request"),
+        {"create_pull_request": "create_pull_request", "blocked": "blocked", _SUSPEND: END},
+    )
     graph.add_edge("create_pull_request", "wait_for_checks")
     graph.add_conditional_edges(
         "wait_for_checks",

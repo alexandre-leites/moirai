@@ -938,7 +938,7 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("INSERT INTO app.ai_reviews" in query for query, _ in pool.calls))
         self.assertTrue(any("INSERT INTO app.workflow_transition_outbox" in query for query, _ in pool.calls))
-        self.assertEqual(transitions, [("00000000-0000-0000-0000-000000000001", "pushing", {"status": "pushing", "review_approved": True})])
+        self.assertEqual(transitions, [("00000000-0000-0000-0000-000000000001", "pushing", {"status": "pushing", "review_approved": True, "awaiting_execution": False})])
         self.assertTrue(any("status = 'processed'" in query for query, _ in pool.calls))
 
     async def test_outbox_entry_stays_pending_when_on_transition_raises(self) -> None:

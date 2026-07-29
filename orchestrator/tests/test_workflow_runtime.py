@@ -136,6 +136,35 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(graph.calls[0][0], {"status": "offered", "workflow_run_id": "wf-1"})
         self.assertEqual(result["status"], "planning")
 
+    async def test_without_a_checkpointer_a_suspended_run_is_not_replayed_from_the_start(self) -> None:
+        """Replaying from START would re-enter the node that queued the
+        execution the run is still waiting on, dispatching it a second time."""
+        checkpoints = _Checkpoints(
+            (2, {"status": "implementing", "awaiting_execution": True}),
+            seed={"status": "implementing"},
+        )
+        graph = _Graph({"status": "local_pipeline"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run("workflow-1", {"human_approved": True})
+
+        self.assertEqual(graph.calls, [])
+        self.assertEqual(result["status"], "implementing")
+        self.assertEqual(checkpoints.saved, [("workflow-1", result)])
+
+    async def test_a_cleared_awaiting_gate_lets_the_run_advance_again(self) -> None:
+        checkpoints = _Checkpoints(
+            (2, {"status": "implementing", "awaiting_execution": True}),
+            seed={"status": "implementing"},
+        )
+        graph = _Graph({"status": "local_pipeline"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run("workflow-1", {"status": "local_pipeline", "awaiting_execution": False})
+
+        self.assertEqual(len(graph.calls), 1)
+        self.assertEqual(result["status"], "local_pipeline")
+
     async def test_node_exception_transitions_run_to_failed_instead_of_propagating(self) -> None:
         checkpoints = _TransitioningCheckpoints()
         graph = _FailingGraph(RuntimeError("node exploded"))
