@@ -1159,6 +1159,9 @@ class _EventPool:
         }
         self.has_existing_requests = True
         self.dispatched: dict[str, dict[str, object]] = {}
+        # Whether this process wins the outbox row's processing lease; False
+        # models a background drain having claimed it first.
+        self.outbox_claimed = True
 
     def acquire(self) -> _EventConnection:
         return _EventConnection(self)
@@ -1166,6 +1169,10 @@ class _EventPool:
     async def execute(self, query: str, *arguments: object) -> str:
         self.calls.append((query, arguments))
         return "INSERT 0 1"
+
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        self.calls.append((query, arguments))
+        return {"id": arguments[0]} if self.outbox_claimed else None
 
 
 class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
@@ -1294,6 +1301,118 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any("attempts = attempts + 1" in query for query, _ in pool.calls))
         self.assertFalse(any("status = 'processed'" in query for query, _ in pool.calls))
+
+    async def test_the_inline_drain_takes_the_processing_lease_before_delivering(self) -> None:
+        """Both drainers claim through the same lease, so a maintenance tick
+        landing between accept_event's commit and this delivery cannot deliver
+        the same transition a second time."""
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+        delivered: list[str] = []
+
+        async def on_transition(workflow_run_id: str, *_args: object) -> None:
+            delivered.append(workflow_run_id)
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=on_transition,
+        )
+
+        self.assertEqual(len(delivered), 1)
+        claim = next(
+            (query, arguments) for query, arguments in pool.calls
+            if "SET status = 'processing'" in query
+        )
+        self.assertIn("WHERE id = $1 AND status = 'pending'", claim[0])
+        self.assertEqual(claim[1][1], NOW)
+        self.assertTrue(any("status = 'processed'" in query for query, _ in pool.calls))
+
+    async def test_the_inline_drain_delivers_nothing_when_it_loses_the_claim(self) -> None:
+        """Another drainer already holds the row. Delivering anyway would be the
+        duplicate delivery the lease exists to prevent, and marking the row
+        processed would cut that drainer's own delivery short."""
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        pool.outbox_claimed = False
+        control_plane = AsyncpgControlPlane(pool)
+        delivered: list[str] = []
+
+        async def on_transition(workflow_run_id: str, *_args: object) -> None:
+            delivered.append(workflow_run_id)
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=on_transition,
+        )
+
+        self.assertEqual(delivered, [])
+        self.assertFalse(any("status = 'processed'" in query for query, _ in pool.calls))
+        self.assertFalse(any("attempts = attempts + 1" in query for query, _ in pool.calls))
+
+    async def test_completing_an_outbox_row_is_fenced_on_the_claim_it_took(self) -> None:
+        """A delivery that outlives its own lease has had the row reclaimed by
+        another drainer. Completing or releasing it on `id` alone would knock
+        the current holder's claim out from under it and hand the same
+        transition to a third drainer."""
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def on_transition(*_args: object) -> None:
+            return None
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=on_transition,
+        )
+
+        complete, arguments = next(
+            (query, arguments) for query, arguments in pool.calls
+            if "status = 'processed'" in query
+        )
+        self.assertIn("AND status = 'processing' AND processing_started_at = $2", complete)
+        self.assertEqual(arguments[1], NOW)
+
+    async def test_releasing_a_failed_outbox_row_is_fenced_on_the_claim_it_took(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "reviewer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def failing(*_args: object) -> None:
+            raise RuntimeError("graph runtime unavailable")
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-review",
+                "completed",
+                {"result": {"verdict": "approved", "acceptanceCriteria": [], "findings": []}},
+            ),
+            NOW,
+            on_transition=failing,
+        )
+
+        release, arguments = next(
+            (query, arguments) for query, arguments in pool.calls
+            if "attempts = attempts + 1" in query
+        )
+        self.assertIn("AND status = 'processing' AND processing_started_at = $2", release)
+        self.assertEqual(arguments[1], NOW)
 
     def _request_status_writes(self, pool: _EventPool) -> list[tuple[object, ...]]:
         return [
@@ -1443,7 +1562,57 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
 
         processed = await control_plane.drain_pending_transitions(failing, NOW)
         self.assertEqual(processed, 0)
-        self.assertTrue(any("attempts = attempts + 1" in query for query, _ in pool.calls))
+        release = next(
+            query for query, _ in pool.calls if "attempts = attempts + 1" in query
+        )
+        # Released, not left claimed: the row goes back to pending with its
+        # lease cleared so the next pass picks it up immediately.
+        self.assertIn("SET status = 'pending', processing_started_at = NULL", release)
+
+    async def test_drain_reclaims_processing_rows_whose_lease_expired(self) -> None:
+        """Issue #96: `processing` is committed before the delivery starts, so a
+        drainer that dies mid-delivery cannot release its own row. Selecting
+        `pending` alone dropped that transition forever."""
+        pool = _OutboxPool()
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def on_transition(*_args: object) -> None:
+            return None
+
+        await control_plane.drain_pending_transitions(
+            on_transition, NOW, processing_lease=timedelta(seconds=90)
+        )
+
+        claim, arguments = next(
+            (query, arguments) for query, arguments in pool.calls
+            if "UPDATE app.workflow_transition_outbox" in query and "FOR UPDATE SKIP LOCKED" in query
+        )
+        self.assertIn("status = 'pending'", claim)
+        self.assertIn("status = 'processing'", claim)
+        self.assertIn("processing_started_at IS NULL OR processing_started_at <= $3", claim)
+        self.assertIn("SET status = 'processing', processing_started_at = $2", claim)
+        self.assertEqual(arguments[1], NOW)
+        self.assertEqual(arguments[2], NOW - timedelta(seconds=90))
+
+    async def test_the_drain_lease_defaults_to_a_bounded_window(self) -> None:
+        """The caller in main.py does not pass one, so the default is what
+        actually bounds how long a row can stay in `processing`."""
+        pool = _OutboxPool()
+        control_plane = AsyncpgControlPlane(pool)
+
+        async def on_transition(*_args: object) -> None:
+            return None
+
+        await control_plane.drain_pending_transitions(on_transition, NOW)
+
+        arguments = next(
+            arguments for query, arguments in pool.calls
+            if "FOR UPDATE SKIP LOCKED" in query and "workflow_transition_outbox" in query
+        )
+        reclaim_before = arguments[2]
+        self.assertIsInstance(reclaim_before, datetime)
+        self.assertGreater(NOW - reclaim_before, timedelta())
+        self.assertLessEqual(NOW - reclaim_before, timedelta(minutes=2))
 
     async def test_find_stalled_workflow_runs_returns_ids(self) -> None:
         pool = _OutboxPool()
@@ -1695,6 +1864,10 @@ class _ProgressPool:
     async def execute(self, query: str, *arguments: object) -> str:
         self.calls.append((query, arguments))
         return "INSERT 0 1"
+
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        self.calls.append((query, arguments))
+        return {"id": arguments[0]}
 
     def apply_progress_update(self, query: str, arguments: tuple[object, ...]) -> None:
         diff_hash = arguments[1]

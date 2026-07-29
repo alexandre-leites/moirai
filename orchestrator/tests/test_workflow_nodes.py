@@ -5,27 +5,35 @@ from typing import Any, cast
 from moirai.code_hosts import CheckStatus, GitHubCliError, PullRequest, PullRequestCheck
 from moirai.workflows.issue_graph import IssueWorkflowState
 from moirai.workflows.nodes import PersistedWorkflowNodes
+from moirai.workflows.policy import RetryBudget
+
+
+def _request(identifier: str, role: str, created: bool = False) -> dict[str, Any]:
+    return {"id": identifier, "role": role, "attempt": 1, "created": created}
 
 
 class _Persistence:
-    def __init__(self, queued: dict[str, Any] | None = None) -> None:
+    def __init__(self, open_request: dict[str, Any] | None = None) -> None:
         self.transitions: list[tuple[str, str, dict[str, object]]] = []
-        self.queued = queued
+        self.open_request = open_request
 
     async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
         self.transitions.append((workflow_run_id, status, updates))
 
-    async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
-        return self.queued
+    async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
+        return self.open_request
 
 
 class _Dispatcher:
-    def __init__(self) -> None:
+    def __init__(self, lost_race_to: dict[str, Any] | None = None) -> None:
         self.dispatches: list[tuple[str, str]] = []
+        self.lost_race_to = lost_race_to
 
-    async def dispatch(self, workflow_run_id: str, role: str) -> str:
+    async def dispatch(self, workflow_run_id: str, role: str) -> dict[str, Any]:
         self.dispatches.append((workflow_run_id, role))
-        return f"{workflow_run_id}-{role}"
+        if self.lost_race_to is not None:
+            return self.lost_race_to
+        return _request(f"{workflow_run_id}-{role}", role, created=True)
 
 
 @dataclass
@@ -210,32 +218,99 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exhausted["status"], "blocked")
         self.assertEqual(self.dispatcher.dispatches, [])
 
-    async def test_replayed_node_reuses_its_queued_request_without_respending_budget(self) -> None:
-        """A node re-entered while its own request is still queued must not
-        duplicate the agent run nor count a second attempt against the budget."""
-        persistence = _Persistence(queued={"id": "queued-1", "role": "developer", "attempt": 1})
-        nodes = PersistedWorkflowNodes(persistence, self.dispatcher)
-        state: IssueWorkflowState = {
-            "workflow_run_id": "workflow-1", "implementation_attempts": 1, "total_agent_executions": 2,
-        }
+    async def test_replayed_node_reuses_its_open_request_without_respending_budget(self) -> None:
+        """A node re-entered while its own request is still open must not
+        duplicate the agent run nor count a second attempt against the budget.
 
-        update = await nodes.implement(state)
+        `dispatched` counts as open: the scheduler claims a request the moment
+        it offers the work, and before issue #96 a replay that landed after
+        that claim queued a second request for the same role -- the same agent
+        work offered twice."""
+        for status in ("queued", "dispatched"):
+            with self.subTest(request_status=status):
+                dispatcher = _Dispatcher()
+                persistence = _Persistence(open_request=_request("open-1", "developer"))
+                nodes = PersistedWorkflowNodes(persistence, dispatcher)
+                state: IssueWorkflowState = {
+                    "workflow_run_id": "workflow-1", "implementation_attempts": 1,
+                    "total_agent_executions": 2,
+                }
 
-        self.assertEqual(update["execution_id"], "queued-1")
-        self.assertTrue(update["awaiting_execution"])
-        self.assertNotIn("implementation_attempts", update)
-        self.assertNotIn("total_agent_executions", update)
-        self.assertEqual(self.dispatcher.dispatches, [])
+                update = await nodes.implement(state)
 
-    async def test_a_queued_request_for_another_role_still_dispatches(self) -> None:
-        persistence = _Persistence(queued={"id": "queued-1", "role": "planner", "attempt": 1})
+                self.assertEqual(update["execution_id"], "open-1")
+                self.assertEqual(update["status"], "implementing")
+                self.assertTrue(update["awaiting_execution"])
+                self.assertNotIn("implementation_attempts", update)
+                self.assertNotIn("total_agent_executions", update)
+                self.assertEqual(dispatcher.dispatches, [])
+                self.assertEqual(persistence.transitions[-1][1], "implementing")
+
+    async def test_a_replay_never_blocks_a_run_on_the_budget_it_already_spent(self) -> None:
+        """The dispatch that spends the last unit of a budget writes the counter
+        that makes the same node read "exhausted" on the way back in. A replay
+        must therefore be recognised before any budget gate, or the run is
+        blocked for retries that never happened -- the whole point of issue #96.
+        """
+        budget = RetryBudget()
+        for node_name, role, counter in (
+            ("plan", "planner", "planning_attempts"),
+            ("implement", "developer", "implementation_attempts"),
+            ("review", "reviewer", "review_cycles"),
+            ("repair", "repairer", "pipeline_repair_attempts"),
+            ("ci_repair", "repairer", "ci_repair_attempts"),
+        ):
+            with self.subTest(node=node_name):
+                dispatcher = _Dispatcher()
+                persistence = _Persistence(open_request=_request("open-1", role))
+                nodes = PersistedWorkflowNodes(persistence, dispatcher)
+
+                # Both budgets read exactly as this node's own last dispatch
+                # left them: its counter at its limit and the global agent
+                # budget fully spent.
+                update = await getattr(nodes, node_name)(
+                    cast(IssueWorkflowState, {
+                        "workflow_run_id": "workflow-1",
+                        counter: getattr(budget, counter),
+                        "total_agent_executions": budget.total_agent_executions,
+                    })
+                )
+
+                self.assertNotEqual(update["status"], "blocked")
+                self.assertEqual(update["execution_id"], "open-1")
+                self.assertEqual(dispatcher.dispatches, [])
+                self.assertNotIn(counter, update)
+                self.assertNotIn("total_agent_executions", update)
+
+    async def test_an_open_request_for_another_role_suspends_instead_of_dispatching(self) -> None:
+        """One workflow run has at most one execution in flight. A node reached
+        while another phase's execution is still open can only be a replay that
+        walked the graph forward, so it queues nothing, spends nothing, and
+        leaves the committed phase alone -- the run belongs to the execution
+        that is actually running."""
+        persistence = _Persistence(open_request=_request("open-1", "planner"))
         nodes = PersistedWorkflowNodes(persistence, self.dispatcher)
 
         update = await nodes.implement({"workflow_run_id": "workflow-1"})
 
-        self.assertEqual(update["execution_id"], "workflow-1-developer")
-        self.assertEqual(update["implementation_attempts"], 1)
-        self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "developer")])
+        self.assertEqual(update, {"execution_id": "open-1", "awaiting_execution": True})
+        self.assertEqual(self.dispatcher.dispatches, [])
+        self.assertEqual(persistence.transitions, [])
+
+    async def test_a_dispatch_that_loses_the_insert_race_spends_no_budget(self) -> None:
+        """Two deliveries of one transition can both find no open request. The
+        dispatcher settles it under the workflow run's row lock and tells the
+        loser it reused a row rather than creating one; the loser must not
+        charge an attempt for an execution it did not queue."""
+        dispatcher = _Dispatcher(lost_race_to=_request("winner-1", "developer", created=False))
+        nodes = PersistedWorkflowNodes(self.persistence, dispatcher)
+
+        update = await nodes.implement({"workflow_run_id": "workflow-1"})
+
+        self.assertEqual(update["execution_id"], "winner-1")
+        self.assertNotIn("implementation_attempts", update)
+        self.assertNotIn("total_agent_executions", update)
+        self.assertEqual(dispatcher.dispatches, [("workflow-1", "developer")])
 
     async def test_push_and_blocked_persist_deterministic_terminal_states(self) -> None:
         push = await self.nodes.push(self.state)

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from moirai.code_hosts import ChecksResult, CodeHost, GitHubCliError, checks_result
 from moirai.issue_trackers import IssueTracker
@@ -10,8 +11,23 @@ from moirai.issue_trackers import IssueTracker
 from .issue_graph import IssueWorkflowNodes, IssueWorkflowState, WorkflowUpdate
 from .policy import RetryBudget
 
+_LOGGER = logging.getLogger(__name__)
+
 CodeHostFactory = Callable[[str], "CodeHost | None | Awaitable[CodeHost | None]"]
 IssueTrackerFactory = Callable[[str], "IssueTracker | None | Awaitable[IssueTracker | None]"]
+
+
+class AttemptBudget(NamedTuple):
+    """A phase's own retry counter and the limit that bounds it.
+
+    One value rather than two parameters so "a counter with no limit" -- which
+    would increment forever with nothing to stop it -- cannot be expressed. The
+    phases that have neither (`pipeline`, `push`) pass None.
+    """
+
+    counter: str
+    limit: int
+
 
 # Single source of truth for retry limits, shared with policy.py's routing
 # functions so the two can no longer drift out of sync by coincidence.
@@ -36,13 +52,13 @@ class WorkflowPersistence(Protocol):
         self, workflow_run_id: str, status: str, updates: dict[str, object]
     ) -> None: ...
 
-    async def get_queued_execution_request(
+    async def get_open_execution_request(
         self, workflow_run_id: str
     ) -> dict[str, Any] | None: ...
 
 
 class ExecutionDispatcher(Protocol):
-    async def dispatch(self, workflow_run_id: str, role: str) -> str: ...
+    async def dispatch(self, workflow_run_id: str, role: str) -> dict[str, Any]: ...
 
 
 async def _await(value: Any) -> Any:
@@ -86,14 +102,16 @@ class PersistedWorkflowNodes:
             return await self._transition(
                 state, "planning", {"status": "planning", "plan_valid": True, "awaiting_execution": False}
             )
-        if int(state.get("planning_attempts", 0)) >= _BUDGET.planning_attempts:
-            return await self._budget_exhausted(state)
-        return await self._dispatch(state, "planner", "planning", "planning_attempts")
+        return await self._dispatch(
+            state, "planner", "planning",
+            AttemptBudget("planning_attempts", _BUDGET.planning_attempts),
+        )
 
     async def implement(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("implementation_attempts", 0)) >= _BUDGET.implementation_attempts:
-            return await self._budget_exhausted(state)
-        return await self._dispatch(state, "developer", "implementing", "implementation_attempts")
+        return await self._dispatch(
+            state, "developer", "implementing",
+            AttemptBudget("implementation_attempts", _BUDGET.implementation_attempts),
+        )
 
     async def pipeline(self, state: IssueWorkflowState) -> WorkflowUpdate:
         # Unconditional: the local pipeline is the deterministic gate that
@@ -107,16 +125,18 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "pipeline", "local_pipeline", None)
 
     async def review(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        if int(state.get("review_cycles", 0)) >= _BUDGET.review_cycles:
-            return await self._budget_exhausted(state)
-        return await self._dispatch(state, "reviewer", "ai_review", "review_cycles")
+        return await self._dispatch(
+            state, "reviewer", "ai_review",
+            AttemptBudget("review_cycles", _BUDGET.review_cycles),
+        )
 
     async def repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
         # Repairs asked for before the work leaves the machine: a failing local
         # pipeline, an AI review requesting changes, a human requesting changes.
-        if int(state.get("pipeline_repair_attempts", 0)) >= _BUDGET.pipeline_repair_attempts:
-            return await self._budget_exhausted(state)
-        return await self._dispatch(state, "repairer", "repairing", "pipeline_repair_attempts")
+        return await self._dispatch(
+            state, "repairer", "repairing",
+            AttemptBudget("pipeline_repair_attempts", _BUDGET.pipeline_repair_attempts),
+        )
 
     async def ci_repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
         # Repairs asked for by failing GitHub checks. Same repairer role and
@@ -129,18 +149,19 @@ class PersistedWorkflowNodes:
         # every CI repair quietly spent the local pipeline's repair budget.
         #
         # Sharing the role costs one invariant: `_dispatch`'s replay guard
-        # identifies "my own queued request" by role, so it can no longer tell
-        # a replayed `repair` from a replayed `ci_repair`. Adopting the other
-        # node's queued request would skip an attempt increment. It is
-        # unreachable today because reaching the other repair node requires a
-        # terminal event for the first execution, and a terminal event is only
-        # accepted for a request whose row is still `dispatched`
-        # (`_resolve_execution_identity` in persistence/control_plane.py) --
-        # never for one that offer recovery returned to `queued`. Anything that
-        # relaxes that has to give the two nodes distinguishable requests.
-        if int(state.get("ci_repair_attempts", 0)) >= _BUDGET.ci_repair_attempts:
-            return await self._budget_exhausted(state)
-        return await self._dispatch(state, "repairer", "repairing", "ci_repair_attempts")
+        # identifies "my own open request" by role, so it cannot tell a
+        # replayed `repair` from a replayed `ci_repair`, and adopting the other
+        # node's request would skip an attempt increment. Reaching the other
+        # repair node requires a terminal event for the first execution, and
+        # `accept_event` closes the request row in the same transaction that
+        # records that event (issue #94), so by the time the graph resumes
+        # there is no open request left to adopt. Anything that lets the graph
+        # reach one repair node while the other's request is still open has to
+        # give the two nodes distinguishable requests.
+        return await self._dispatch(
+            state, "repairer", "repairing",
+            AttemptBudget("ci_repair_attempts", _BUDGET.ci_repair_attempts),
+        )
 
     async def push(self, state: IssueWorkflowState) -> WorkflowUpdate:
         return await self._dispatch(state, "developer", "pushing", None)
@@ -241,9 +262,24 @@ class PersistedWorkflowNodes:
         state: IssueWorkflowState,
         role: str,
         status: str,
-        attempt_counter: str | None,
+        attempts: AttemptBudget | None,
     ) -> WorkflowUpdate:
+        """Queues one execution for this phase, exactly once.
+
+        Every delivery of a workflow transition may happen twice -- the outbox
+        is at-least-once by design -- so a node may be entered again with an
+        execution it already queued still in flight. The replay check therefore
+        comes first, ahead of the retry-budget gates: a replay spends nothing,
+        so re-testing a budget the first pass already charged would block a run
+        for an exhaustion that never happened (the node that dispatched the
+        last affordable execution reads its own increment back as "exhausted").
+        """
         workflow_run_id = _workflow_run_id(state)
+        open_request = await _await(self.persistence.get_open_execution_request(workflow_run_id))
+        if open_request is not None:
+            return await self._reuse(workflow_run_id, open_request, role, status)
+        if attempts is not None and _attempts(state, attempts.counter) >= attempts.limit:
+            return await self._budget_exhausted(state)
         # The exhaustion check applies to every role, including the ones that do
         # not spend the budget: once no agent run is affordable, the pipeline's
         # verdict has nowhere to route (both of its successors dispatch agents),
@@ -251,43 +287,81 @@ class PersistedWorkflowNodes:
         # same blocked state.
         if int(state.get("total_agent_executions", 0)) >= _BUDGET.total_agent_executions:
             return await self._budget_exhausted(state)
-        existing = await _await(self.persistence.get_queued_execution_request(workflow_run_id))
-        if existing is not None and existing["role"] == role:
-            # This node already queued its request and the scheduler has not
-            # claimed it yet, so the node is being replayed (at-least-once
-            # transition delivery, or a resume that re-entered the node).
-            # Queueing a second request would duplicate the agent run, and
-            # re-counting the attempt would spend two units of retry budget on
-            # one execution.
-            reused: WorkflowUpdate = {
-                "status": status,
-                "execution_id": existing["id"],
-                "awaiting_execution": True,
-            }
-            await _await(self.persistence.transition(workflow_run_id, status, reused))
-            return reused
-        execution_id = await _await(self.dispatcher.dispatch(workflow_run_id, role))
+        request = await _await(self.dispatcher.dispatch(workflow_run_id, role))
+        if not request["created"]:
+            # A concurrent delivery of the same transition won the race and
+            # queued the execution between the check above and this call. The
+            # dispatcher decided that under the run's row lock, so exactly one
+            # of the two callers is here and neither inserted a second row.
+            return await self._reuse(workflow_run_id, request, role, status)
         # `awaiting_execution` suspends the graph on the outgoing edge: the
         # gates the downstream nodes read only exist once this execution
         # reports a terminal event.
         updates: WorkflowUpdate = {
             "status": status,
-            "execution_id": execution_id,
+            "execution_id": request["id"],
             "awaiting_execution": True,
         }
-        if attempt_counter is not None:
-            current_attempts = state.get(attempt_counter, 0)
-            updates[attempt_counter] = (current_attempts if isinstance(current_attempts, int) else 0) + 1
+        if attempts is not None:
+            updates[attempts.counter] = _attempts(state, attempts.counter) + 1
         if role not in _NON_AGENT_ROLES:
             updates["total_agent_executions"] = int(state.get("total_agent_executions", 0)) + 1
         await _await(self.persistence.transition(workflow_run_id, status, updates))
         return updates
+
+    async def _reuse(
+        self, workflow_run_id: str, request: dict[str, Any], role: str, status: str
+    ) -> WorkflowUpdate:
+        """Adopts an execution request this run already has open.
+
+        No counter moves: the attempt was charged when the request row was
+        inserted, and charging it again is what turned a replayed transition
+        into a workflow blocked "for exhausted retries" that never ran.
+
+        When the open request is this node's own role, the phase is re-stated
+        so a first pass that queued the execution and then died before writing
+        the transition still lands the status it was moving to.
+
+        A role mismatch is not a normal outcome. It means the graph walked onto
+        a node whose phase never started while another phase's execution is
+        still running, which the runtime's own replay gate is supposed to make
+        unreachable. Suspending is the least destructive response -- the
+        committed phase belongs to the execution that is actually running, and
+        that execution's terminal event will resume the graph -- but it leaves
+        the run parked on an edge it never earned, so it is logged rather than
+        swallowed. It is not raised: the caller is the outbox, and an exception
+        here would redeliver the same transition into the same state until the
+        lease gave up.
+        """
+        reused: WorkflowUpdate = {"execution_id": request["id"], "awaiting_execution": True}
+        if str(request["role"]) == role:
+            reused["status"] = status
+            await _await(self.persistence.transition(workflow_run_id, status, reused))
+            return reused
+        _LOGGER.error(
+            "workflow node reached while another phase's execution is still open",
+            extra={
+                "workflow_run_id": workflow_run_id,
+                "node_role": role,
+                "node_status": status,
+                "open_request_id": str(request["id"]),
+                "open_request_role": str(request["role"]),
+            },
+        )
+        return reused
 
     async def _transition(
         self, state: IssueWorkflowState, status: str, updates: WorkflowUpdate
     ) -> WorkflowUpdate:
         await _await(self.persistence.transition(_workflow_run_id(state), status, updates))
         return updates
+
+
+def _attempts(state: IssueWorkflowState, counter: str | None) -> int:
+    if counter is None:
+        return 0
+    value = state.get(counter, 0)
+    return value if isinstance(value, int) else 0
 
 
 def _workflow_run_id(state: IssueWorkflowState) -> str:

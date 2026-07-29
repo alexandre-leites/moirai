@@ -13,6 +13,28 @@ export type Workflow = {
   phase: string;
 };
 
+// Mirrors the `Runner` schema in api/openapi.yaml, served by
+// GET /api/v1/runners (api/internal/http/handlers/runners.go). `status` is the
+// orchestrator's own column, currently "online" or "offline"; it is typed as a
+// plain string so a value added server-side does not break the client.
+// `lastSeenAt` is an ISO-8601 timestamp with an offset, or "" when the runner
+// has never reported a heartbeat. `labels` is always an array here — see
+// `listRunners`, which normalizes the wire's `null`.
+export type Runner = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  draining: boolean;
+  status: string;
+  labels: string[];
+  lastSeenAt: string;
+};
+
+// What the wire actually carries. The handler marshals the protobuf's repeated
+// `labels` field straight to JSON, and an empty repeated field is a nil slice
+// in Go, which encoding/json writes as `null` rather than `[]`.
+type RunnerPayload = Omit<Runner, "labels"> & { labels: string[] | null };
+
 export type RunnerToken = {
   id: string;
   allowedLabels: string[];
@@ -76,6 +98,8 @@ export type ApiClient = {
     requiredRunnerLabels?: string[];
   }): Promise<Project>;
   setProjectEnabled(id: string, enabled: boolean): Promise<Project>;
+
+  listRunners(signal?: AbortSignal): Promise<Runner[]>;
 
   listTokens(signal?: AbortSignal): Promise<RunnerToken[]>;
   createToken(allowedLabels?: string[]): Promise<CreatedToken>;
@@ -206,6 +230,21 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       });
       const body: Project = await json(res);
       return body;
+    },
+
+    async listRunners(signal?: AbortSignal): Promise<Runner[]> {
+      const res = await fetchClient("/api/v1/runners", { signal, credentials: "include" });
+      const body: { runners?: RunnerPayload[] } = await json(res);
+      // `runners` is required by the OpenAPI schema. If it is missing the
+      // response is not the one we asked for, and returning [] here would
+      // render the "no runner is registered" empty state for what is really a
+      // broken response — the exact silent failure the runners view must not
+      // have. Not an ApiError: the server answered 200, this is our own read of
+      // the body failing, and claiming an HTTP status it never sent would lie.
+      if (!Array.isArray(body.runners)) {
+        throw new Error("The runner list response was malformed.");
+      }
+      return body.runners.map((runner) => ({ ...runner, labels: runner.labels ?? [] }));
     },
 
     async listTokens(signal?: AbortSignal): Promise<RunnerToken[]> {

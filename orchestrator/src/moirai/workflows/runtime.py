@@ -16,6 +16,8 @@ class WorkflowCheckpointStore(Protocol):
 
     async def load_state(self, workflow_run_id: str) -> dict[str, object]: ...
 
+    async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None: ...
+
 
 class WorkflowGraph(Protocol):
     def ainvoke(
@@ -94,6 +96,32 @@ class PersistedWorkflowRuntime:
                 terminal_state = {**state_updates, "workflow_run_id": workflow_run_id}
                 await self._checkpoints.checkpoint(workflow_run_id, terminal_state)
                 return terminal_state
+            if state_updates.get("awaiting_execution") is False and await self._execution_in_flight(
+                workflow_run_id
+            ):
+                # This caller is delivering a runner transition: only those
+                # clear the suspension gate (`runner_events` puts
+                # `awaiting_execution: False` on every terminal transition, and
+                # the stalled-run repair passes it explicitly). Yet the run
+                # still has an execution open, so the transition has already
+                # been applied and is being delivered a second time -- the
+                # outbox is at-least-once. Advancing would walk the graph one
+                # node past the execution it is actually waiting on: a phase
+                # whose gates nobody has produced yet would be entered, and the
+                # terminal event that eventually arrives would resume from that
+                # wrong edge and skip the phase entirely. Re-assert the gate
+                # instead, so the replay ends exactly where the first delivery
+                # did.
+                #
+                # Testing for `is False` rather than "not True" keeps every
+                # other entry point out of it. A human decision arrives with no
+                # `awaiting_execution` key at all and has nothing to do with
+                # the outbox, so it must not be gated on an execution request.
+                #
+                # Nothing can wedge here: the only ways a request stays open
+                # are an execution that is genuinely running and one the
+                # maintenance loop will close as `orphaned`.
+                state_updates["awaiting_execution"] = True
             if self._has_checkpointer:
                 app_checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
                 if app_checkpoint is None:
@@ -135,6 +163,9 @@ class PersistedWorkflowRuntime:
         state["workflow_run_id"] = workflow_run_id
         await self._checkpoints.checkpoint(workflow_run_id, state)
         return state
+
+    async def _execution_in_flight(self, workflow_run_id: str) -> bool:
+        return (await self._checkpoints.get_open_execution_request(workflow_run_id)) is not None
 
     async def _fail(
         self, workflow_run_id: str, initial_state: dict[str, object], error: Exception

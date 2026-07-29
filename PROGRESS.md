@@ -1662,3 +1662,423 @@ Done. `AGENTS.md` states the labelling rule, the three non-dependabot pull reque
 ## Next Recommended Implementation
 
 Issue #96 (finding F9) — make transition replay idempotent, still the highest-priority platform-review issue that no branch has claimed. It was already the recommendation of the issue #92 session and nothing in this session touched it. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice.
+
+---
+
+# Session: issue #96 — transition replay idempotency (agent `issue-96`, 2026-07-29)
+
+## Current Status
+
+- Overall status: complete, pending review.
+- Current phase: platform-review remediation (finding F9).
+- Active implementation: none — issue #96 finished by agent session `issue-96` at 2026-07-29T08:20Z.
+- Last updated: 2026-07-29
+- Agent/session identifier: `issue-96`
+
+## Done
+
+- [x] Issue [#96](https://github.com/alexandre-leites/moirai/issues/96) — make transition replay idempotent (double-counted budgets, duplicate requests, stuck outbox rows).
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/persistence.py`, `orchestrator/src/moirai/workflows/runtime.py`, `orchestrator/src/moirai/persistence/control_plane.py` (outbox drain only), `orchestrator/migrations/007_outbox_processing_lease.sql`, `orchestrator/README.md`, `README.md`, and the five test modules listed under Validation.
+  - Behavior delivered:
+    - **One open execution request per run, enforced where it is decided.** `AsyncpgWorkflowPersistence.dispatch` now looks for an open (`queued` *or* `dispatched`) request inside the transaction that already holds the workflow run's `FOR UPDATE` lock, and returns it with `created = False` instead of inserting a second row. The dispatching node reads `created` to decide whether an attempt was really spent. Closed rows (`completed`/`failed`/`cancelled`/`orphaned`/`expired`) are never open, so this composes with #94 rather than resurrecting finished work.
+    - **The replay check moved ahead of the retry-budget gates.** The per-node counter checks (`planning_attempts`, `implementation_attempts`, `review_cycles`, `pipeline_repair_attempts`, `ci_repair_attempts`) and the `total_agent_executions` check now live inside `_dispatch`, after the replay lookup. This was a second, unlisted half of the same bug: the dispatch that spends the last unit of a budget writes the counter that makes the *same node* read "exhausted" on the way back in, so a replay blocked the run for retries that never happened. Each repair node still spends only its own counter (#98) and `pipeline` still spends none (#90).
+    - **A node that finds another phase's request open suspends instead of dispatching.** It writes nothing: the committed phase belongs to the execution that is actually running.
+    - **A replayed transition no longer advances the graph.** `PersistedWorkflowRuntime.run` re-asserts `awaiting_execution` when a caller *clearing* it (`awaiting_execution: False` — only a runner transition does that, which is also the only thing the outbox replays) hands in a run that still has an open request. This is what a duplicate delivery actually did before: it walked the graph one node *past* the execution it was waiting on, so the developer's own terminal event then resumed from the `pipeline` edge and routed out of the phase without the deterministic pipeline ever running — silently re-opening finding F3. Deliberately not stated more broadly than that: the gate is scoped to those callers so a human decision, which carries no such key, is never held back by a request the maintenance loop has not closed yet; and `plan`'s `plan_valid` short-circuit still clears the gate on its own, so a graph re-entered from `START` can walk one node before `_dispatch` stops it.
+    - **A node reached while another phase's execution is open is logged, not swallowed.** That branch of `_reuse` writes nothing and suspends, which is the least destructive response, but it means an invariant the runtime is supposed to enforce was violated, so it emits an error with the run, the node's role and the open request's role.
+    - **`processing` is a lease, not a state.** `drain_pending_transitions` stamps `processing_started_at` when it claims a row and reclaims any claim older than 90 seconds; `accept_event`'s inline delivery takes the same lease, so a maintenance tick landing between its commit and its delivery cannot deliver the same transition twice, and a drainer that loses the claim does nothing rather than duplicating work.
+  - Validation performed: see Validation Status below. Failing-test-first evidence is recorded there.
+  - Commands executed: `make dev-install`, `make test-orchestrator`, `make lint`, `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-96`, `LOOP_TEST_DATABASE_URL=… make test-postgres-integration`.
+  - Adversarial review: run against the full diff before the PR was opened. It found no budget-accounting defect (it re-derived the counter/limit pairing for all seven dispatching nodes and confirmed each matches `origin/main` and `policy.py`'s routing gates), and confirmed both acceptance criteria are met — including by reverting each half of the fix in memory and watching the matching test fail. Six findings were acted on: the unfenced lease (P2-2, fixed), a silently-swallowed invariant violation (P2-4, now logged), the replay gate applying to the human-decision path (P2-5, scoped to callers clearing `awaiting_execution`), a replay test that passed with the runtime gate reverted (P2-6, now asserts on the log), the migration's index column order and a false claim in its comment (P3-2/P3-3, both fixed), and two wrong facts in this file (P3-1, corrected above). Two were answered with a recorded decision instead of a change: the unenforced one-open-request invariant (P2-1, see Decisions) and the arm-1-before-arm-3 ordering, which the review correctly identified as a consequence of two timeout constants rather than a guarantee — `orchestrator/README.md` and the `_OUTBOX_PROCESSING_LEASE` comment now say so. Two were left alone: deleting the dead `AsyncpgControlPlane.get_queued_execution_request` (P3-4) would edit `control_plane.py` outside this session's region for no functional gain, and arm 3's advancing branch losing its dedicated coverage is worth its own test but not a change to this fix.
+  - Notes: `orchestrator/src/moirai/persistence/control_plane.py` was touched only in the outbox-drain region (`_drain_outbox_entry`, `drain_pending_transitions`, and the new `_OUTBOX_PROCESSING_LEASE` constant) to stay clear of the concurrent session on issue #111, which owns `set_runner_state` ~1100 lines away. `get_queued_execution_request` on `AsyncpgControlPlane` (line ~873) is dead code — nothing calls it — and was deliberately left alone for the same reason; the live copy is the one on `AsyncpgWorkflowPersistence`.
+
+## Decisions
+
+- Decision: the outbox uses a lease on `processing`, not a transaction that reverts to `pending` on failure.
+  - Context: step 3 of issue #96 offered either. `drain_pending_transitions` already reverts to `pending` when the delivery *raises*; the transition that was lost forever is the one whose drainer died.
+  - Alternatives considered: (a) hold the row in an open transaction for the whole delivery and let a rollback revert it; (b) never mark `processing` at all and rely on the delivery being idempotent; (c) a lease column with a reclaim window.
+  - Reason: (a) cannot work — the delivery invokes the graph runtime, which reaches GitHub, so it would hold a database transaction open across an unbounded external call, and a killed process still commits nothing while blocking every other drainer on the row's lock. It also does not solve the actual failure: a process that dies does not roll back, it simply disappears, and the row's `processing` mark was committed before the delivery began. (b) leaves the row `pending` for its whole delivery, so every maintenance tick re-delivers a slow transition — safe now that replay is idempotent, but it converts a rare duplicate into a routine one. (c) is the only option that bounds recovery for a crashed drainer while still excluding a live one.
+  - Consequences: a new nullable column, `app.workflow_transition_outbox.processing_started_at` (migration `007_outbox_processing_lease.sql`), and a 90-second constant, `_OUTBOX_PROCESSING_LEASE`. The lease must outlast a real delivery and stay inside the 2-minute stall window, so a stranded transition is always recovered by the drain arm rather than by the stalled-run arm — which recovers it *without* the state updates that rode on the row. A crashed drainer costs at most 90 seconds; a delivery slower than that is delivered twice, which is now harmless. The migration also hands back any row already sitting in `processing` with no claim time, since migrations run at startup before this process drains anything, so such a row is stranded by definition.
+
+- Decision: the "don't advance past an open execution" rule lives in the runtime, not only in the nodes.
+  - Context: the node-level guard alone satisfies the issue's acceptance criterion on counters, request rows and status — but the reproduction test showed the replay still dispatched an extra `pipeline` execution, because the graph had already advanced a node before any guard could run.
+  - Alternatives considered: (a) node-level guard only, accepting that the graph position drifts by one node per duplicate delivery; (b) deduplicate deliveries so a transition is never replayed at all.
+  - Reason: (b) is impossible — a crash after `on_transition` returns and before the row is marked processed is exactly the window the outbox exists to cover, so at-least-once is a property, not a defect. Under (a) the drifted position is not cosmetic: the run ends up suspended on the `pipeline` edge while the developer execution is still running, and that execution's terminal event then routes straight out of the phase, so the deterministic pipeline gate is skipped — the defect finding F3 exists to prevent. `test_a_replayed_transition_never_skips_the_pipeline_gate` pins it.
+  - Consequences: one extra indexed lookup per graph invocation, and `WorkflowCheckpointStore` gains `get_open_execution_request`. It cannot wedge a run: the only ways a request stays open are an execution that is genuinely running and one the maintenance loop closes as `orphaned`. Terminal runs short-circuit before the check, so a leaked request cannot delay the checkpoint that records a finished run.
+
+- Decision: the dedup key is "any open request for this run", not "an open request with this role".
+  - Context: `repair` and `ci_repair` share the `repairer` role (#98), and `implement` and `push` share `developer`, so role alone is not a node identity.
+  - Alternatives considered: persist a per-node dispatch key on the request row and guard the insert with `INSERT … ON CONFLICT`, as the issue's step 2 suggests.
+  - Reason: a workflow run has at most one execution in flight — one job per run, one active run per project — so "this run has an open request" is the stronger and simpler invariant, and it needs no new column. `(workflow_run_id, role, attempt)` is already unique, but `attempt` is a per-role sequence and cannot be derived from a node's counter, so an `ON CONFLICT` guard would have needed a synthetic key for a case the run-level rule already covers.
+  - Consequences: a role match additionally re-states the phase, so a first pass that queued the execution and then died before writing its transition still lands the status it was moving to; a role mismatch writes nothing and logs an error. One accepted gap, narrower than the bug being fixed: a crash *between* the request insert and the counter write leaves that attempt uncharged, because the replay correctly sees `created = False`. Under-counting is the safe direction — over-counting is what blocked runs for exhausted retries that never ran — and the execution itself still runs exactly once.
+
+- Decision: "at most one open execution request per run" is enforced by `dispatch()`, not by a partial unique index.
+  - Context: raised by the adversarial review as P2-1. The invariant is now load-bearing for budget accounting, dispatch dedup and the runtime's replay gate, and `dispatch()` is not its only writer — `_requeue_lost_execution` also inserts.
+  - Alternatives considered: `CREATE UNIQUE INDEX ... ON app.workflow_execution_requests (workflow_run_id) WHERE status IN ('queued','dispatched')` in migration `007`.
+  - Reason: the index would refuse to build on exactly the databases that most need this fix. The bug being fixed here *is* duplicate open requests, so any existing deployment that has hit it already holds rows the index cannot accept, and the migration — which runs at startup — would fail and stop the orchestrator from booting. Making it safe would mean a data-repair step deciding which of two open requests to close, on evidence that no longer exists. Beyond that, a unique violation at runtime surfaces as an `asyncpg.UniqueViolationError` out of a graph node, which `PersistedWorkflowRuntime._fail` turns into a `failed` workflow run: a hard stop for a condition the reuse path already handles softly.
+  - Consequences: the invariant is a convention held by two writers rather than a constraint. `_requeue_lost_execution` only runs when the run's newest request is `orphaned`, so it cannot add a second open row; `dispatch()` checks under the run's row lock. If it is ever broken anyway, `_OPEN_EXECUTION_REQUEST_QUERY`'s `ORDER BY created_at DESC` picks the newest, and the role-mismatch branch of `_reuse` now logs an error rather than parking the run silently. Worth revisiting as a separate hardening issue with a repair step, once no deployment predates this fix.
+
+- Decision: the outbox claim stamp is a fence, checked on completion and release.
+  - Context: also from the adversarial review (P2-2). The first version matched `WHERE id = $1 AND status = 'processing'` on release and on `id` alone on completion, so a delivery that outlived its own 90-second lease could act on a row another drainer had since reclaimed.
+  - Alternatives considered: leave it — duplicate delivery is now harmless — or hold the row in a transaction for the whole delivery.
+  - Reason: harmless is not the same as correct, and the docstring and README both claimed the lease made the inline and background drains mutually exclusive. Without the fence the claimed property was false: a stale drainer releasing a row under a live claim hands the same transition to a third drainer. A transaction is not available — the delivery invokes the graph and can reach GitHub.
+  - Consequences: `_claim_outbox_entry` returns the stamp it wrote, and `_complete_outbox_entry`/`_release_outbox_entry` both require `processing_started_at = $claim`. A drainer whose lease expired mid-delivery now silently does nothing, which is right: the row belongs to whoever holds it. `drain_pending_transitions` stamps every row in one pass with the same `now`, so one value fences the whole batch.
+
+## Validation Status
+
+- Targeted tests: Passed. Failing-test-first evidence, captured with only the new tests added and no source change, on the branch's then-base `09a6c1b` (`origin/main`'s tip when this branch was cut; the merge base is now `ffb4bc4`): `test_replaying_a_transition_is_identical_to_delivering_it_once` failed on both subtests with `AssertionError: Lists differ: ['planner', 'developer', 'pipeline'] != ['planner', 'developer']` (the replay queued a third execution), and `test_a_replayed_transition_never_skips_the_pipeline_gate` failed with `AssertionError: terminal developer event produced no workflow transition` (the run had been moved to `local_pipeline` behind the developer's back). `Ran 16 tests … FAILED (failures=3)`.
+  Re-confirmed after the adversarial review, by neutralising `PersistedWorkflowRuntime._execution_in_flight` in memory and running only those two tests: `Ran 2 tests … FAILED (failures=3)` — three, because the identity test fails on both subtests. That second run is the one that matters: the review showed the identity test originally passed with the runtime gate reverted, because a drifted node writes no counter, no request row and no transition. It now asserts on the error `_reuse` logs when a node is reached while another phase's execution is open, which is the only observable trace such a node leaves.
+- Service tests: Passed — `make test-orchestrator` → `Ran 431 tests … OK (skipped=27)`, against `Ran 412 tests … OK (skipped=24)` on `origin/main` (measured in a throwaway `git worktree` at `ffb4bc4`, since removed): **19 tests added**, across `test_end_to_end.py`, `test_workflow_nodes.py`, `test_workflow_persistence.py`, `test_workflow_runtime.py`, `test_asyncpg_control_plane.py` and `test_postgres_integration.py`. Two pre-existing node tests were renamed or replaced rather than added, so the count of new `def test_` lines in the diff (21) is larger than the net delta.
+- Full repository tests: Not run — no Go, proto or web change; `make test` deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint` → `All checks passed!`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-96` → `Success: no issues found in 48 source files` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Passed — `007_outbox_processing_lease.sql` applied by `MigrationRunner` against a throwaway PostgreSQL 16 container bound to port 55496, removed afterwards. `test_migrations_are_recorded_and_idempotent` covers the version being recorded and the re-run being a no-op.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Partially — `LOOP_TEST_DATABASE_URL=… make test-postgres-integration` → `Ran 27 tests in 4.161s … OK` against a fresh database. Four of those exercise the real drain: a redelivered outbox row (queued and dispatched variants), a row stranded in `processing`, and the maintenance loop's recovery of a run whose graph invocation was lost.
+
+## Known Issues
+
+- Issue: `007` is the next free migration version, and nothing prevents a concurrent session from claiming it too.
+  - Severity: P3
+  - Impact: two files with the same numeric prefix do not conflict in git, but `MigrationRunner._discover_migrations` raises `ValueError: duplicate migration version: 7` and the orchestrator fails to start. This has happened in this repository before.
+  - Evidence: at the time of writing, `git ls-tree origin/<branch> orchestrator/migrations/` shows nothing above `006` on any of `issue-97`, `issue-111`, `issue-113`, `issue-136`, `issue-109` or `issue-144`, and no open PR touches `orchestrator/migrations/`.
+  - Suggested resolution: whoever merges second renumbers to the next free version. `test_discovery_rejects_duplicate_versions` already fails loudly rather than silently skipping a migration.
+
+- Issue: arm 3's advancing branch no longer has a dedicated test.
+  - Severity: P3
+  - Impact: `test_committed_transition_without_a_graph_invocation_is_recovered` used to be the only test of `recover_stalled_workflow_run`'s "the execution reported, only the graph invocation was lost" branch. With the lease in place, arm 1 reclaims the stranded outbox row first, so that test now exercises the drain instead. The branch is still reachable — the outbox row can genuinely be `processed` while the graph invocation was lost — but nothing pins it.
+  - Evidence: raised by the adversarial review; confirmed by reading the rewritten test, which now asserts `_outbox_statuses(...) == ["processed"]` and a `developer` request rather than a second `planner` attempt.
+  - Suggested resolution: a test that marks the outbox row `processed` before running the maintenance loop, so only arm 3 can repair the run. Left out here because it belongs to issue #94's recovery code rather than to this fix.
+
+- Issue: `make test-postgres-integration` is still not repeatable against the same database.
+  - Severity: P3
+  - Impact: unchanged from the issue #92 session — the second run against one database fails `OfferExpiryIntegrationTests.test_expired_recovery_offer_returns_the_run_to_recovering` with two expired leases instead of one.
+  - Evidence: re-confirmed pre-existing in this worktree. With the whole change stashed: run 1 `Ran 24 tests … OK`, run 2 `Ran 24 tests … FAILED (failures=1)`. With the change applied the behaviour is identical (run 1 `Ran 27 tests … OK`, run 2 same single failure), so it is not a regression. CI creates a fresh PostgreSQL service per job.
+  - Suggested resolution: as previously recorded — have `PostgreSQLPersistenceIntegrationTests.test_control_plane_persists_project_runner_issue_and_lease_lifecycle` clean up its job and workflow run, or truncate the `app` schema in `asyncSetUp`.
+
+## Next Recommended Implementation
+
+Issue [#101](https://github.com/alexandre-leites/moirai/issues/101) (finding F14) — fix non-progress fingerprinting. `_record_progress_evidence` in `orchestrator/src/moirai/persistence/control_plane.py` is the closest remaining orchestrator-side correctness item to the work just finished: it decides when a workflow is blocked for repeating itself, using the same terminal-event path this session's outbox lease now delivers exactly once. Relevant files: `orchestrator/src/moirai/persistence/control_plane.py` (`_record_progress_evidence`, `_success_outcome_hash`, `_failure_outcome_hash`), `orchestrator/tests/test_asyncpg_control_plane.py` (`NonProgressEvidenceTests`). Expected behavior: an outcome identity that distinguishes real repetition from incidental payload variation, so a workflow making genuine progress is never blocked and a stuck one still is. Targeted validation: extend `NonProgressEvidenceTests`, which already replays whole terminal-event sequences against a stateful fake.
+# Session: F10 / issue #97 — Forward blocked results, summary and remainingWork (branch `issue-97`)
+
+## Current Status
+
+- Overall status: Complete for finding F10.
+- Current phase: Bug fix from the 2026-07-29 platform review (`docs/reviews/2026-07-29-platform-review.md`, F10, P2, marked *(verify)*).
+- Active implementation: issue-97 agent session, 2026-07-29 — none remaining.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-97.
+
+## Done
+
+- [x] An agent-reported block reaches the orchestrator with its reason and remaining work intact
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/dispatch/control_loop.go`, `runner/internal/dispatch/dispatch.go`, `runner/internal/control/events.go`, `orchestrator/src/moirai/workflows/runner_events.py`, their tests, `runner/internal/agents/opencode_test.go`, `runner/README.md`, `orchestrator/README.md`.
+  - Behavior delivered:
+    - **Runner — the block is no longer flattened.** A clean agent exit whose result document says `blocked` reports `status: "blocked"` and `blocked: true` in the terminal payload. The event *type* stays `failed`; see Decisions. A failing *process* never reports a block whatever its document claims, so a crash and a deliberate stop stay distinguishable (`TestControlLoopReportsAProcessFailureAsAFailureEvenWhenTheDocumentSaysBlocked`).
+    - **Runner — the agent's account crosses the wire.** `terminalPayload` attaches `result` (the raw document), `summary`, and `remainingWork` for every outcome the agent itself reached, where previously `result` was attached only for `completed` and the other two never. A `cancelled` run reports none of them: it reached no outcome of its own, and see Decisions for the fingerprint reason.
+    - **Runner — all three are bounded as JSON encodes them.** `boundedAgentText`/`boundedList` sanitise terminal escapes, control bytes and invalid UTF-8, then keep the longest prefix fitting a 2 KiB *encoded* budget (20 entries for the list), reusing `logtail.go`'s `jsonEncodedSize`/`sanitizeLogText`. `minimalTerminalPayload` keeps the three fields on the reduced-payload retry and re-bounds every field it keeps, including `error`, which no other path measures.
+    - **Runner — a non-`completed` agent result skips the packet's pipeline commands**, so a pipeline verdict cannot overwrite the agent's status, reason and remaining work with a generic failure.
+    - **Event redaction — two real holes closed.** `redactPayloadWithPrefixes` had a `[]any` arm but no `[]string` arm, and terminal payloads are built in Go, so every `[]string` value bypassed redaction entirely: `changedFiles` and `commandsRun` always did, and `remainingWork` would have. Redaction now also requires a token boundary before a prefix — `sk-` matched inside `task-runner.py`, `disk-usage.ts` and `make task-build`, which would have corrupted the path and command lists the new arm routes through it.
+    - **Orchestrator.** `validate_runner_event` parses the result document for every terminal event and validates `blocked`/`summary`/`remainingWork`; `RunnerEventSummary` carries them. `_terminal_event_transition` routes a block ahead of the generic failure arm, to the terminal `blocked` status with a `blocking_reason` composed from the agent's summary and outstanding work (bounded to 1024 characters, the width the circuit writer stores), clearing the gate the reporting role owns. The `pipeline` role is resolved first, so the deterministic gate cannot be diverted.
+  - Validation performed: failing-test-first on both sides, then the runner suite with the race detector, the full orchestrator suite, lint, type check, `gofmt`, `go vet`.
+  - Commands executed:
+    - Failing-test-first (runner), before any behaviour change: `cd runner && go test ./internal/dispatch/ -run 'TestTerminalPayload…|TestControlLoopReportsAnAgentReportedBlock…'` → `--- FAIL: TestControlLoopReportsAnAgentReportedBlockDistinctlyFromAFailure` with the payload printed as `{… "error":"the deployment credential is missing", "status":"failed"}` — no `result`, no `summary`, no `remainingWork`, no `blocked`: the flattening, reproduced. Also `--- FAIL: TestTerminalPayloadCarriesTheAgentAccountForEveryOutcome: terminalPayload(completed) summary = <nil>` and `--- FAIL: TestMinimalTerminalPayloadKeepsTheBlockedExplanation: reduced payload lost the block: map[…]{"status":"blocked"}`.
+    - Failing-test-first (orchestrator): `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p test_runner_events.py` → `Ran 45 tests … FAILED (failures=2, errors=28)`, including `test_result_document_is_parsed_for_every_terminal_event: AssertionError` (`summary.result is None` on a `failed` event) and `test_rejects_malformed_block_fields: RunnerEventError not raised`.
+    - Failing-test-first (dispatcher pipeline skip): `go test -run TestDispatcherSkipsThePipelineWhenTheAgentReportedABlock` → `Execute() error = execute agent: pipeline command failed with exit code 1: go test ./..., want a blocked result rather than a failure`.
+    - Encoded-size regression, proved twice by reverting only the measurement to raw bytes: `TestTerminalPayloadBoundsTheAgentAccount/angle_brackets` → `summary encodes to 6113 bytes`, `/ansi_escapes` → `3648 bytes`; and end to end, `TestReducedTerminalPayloadIsAcceptedByTheEventReporter` → `ERROR terminal execution event lost … error="execution event payload is too large"` followed by `timed out waiting for execution events`. Both pass with the encoded-size bound.
+    - `make test-runner` (`go test -race ./...`) → all 10 packages `ok`.
+    - `make test-orchestrator` → `Ran 425 tests … OK (skipped=24)`.
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-97` → `Success: no issues found in 48 source files`.
+    - `cd runner && gofmt -l .` → no output; `go vet ./...` → clean.
+  - Notes: no migration, no new configuration, no proto change. `runner/internal/agents/opencode.go` needed no change — #89 already returns the document's own status when the process exits cleanly — so it only gained a characterisation test pinning that contract at the source of the chain.
+
+## Post-review corrections
+
+An adversarial review of the first draft confirmed the routing and the delivery semantics but found two P1 defects, two P2 defects and several P3 issues. All were fixed before the PR was opened.
+
+- **P1, the exact trap #93 left behind.** `summary`, `remainingWork` and `error` were bounded by *raw* byte length. Go's encoder spends six bytes on each `<`, `>`, `&` and control byte, so three raw-measured 2 KiB fields of angle brackets encode to ~36 KiB — over the 16 KiB cap the reduced-payload retry exists to get under. A blocked agent whose summary was angle-bracket-heavy, ANSI-coloured, or not valid UTF-8 therefore had its terminal event *rejected twice* and logged as `terminal execution event lost`: the run's outcome destroyed by the change meant to enrich it. Fixed by measuring the JSON-encoded size and sanitising first, reusing `logtail.go`'s existing `jsonEncodedSize` and `sanitizeLogText` rather than writing a second bound. `logtail.go:16-23` had already documented this exact rule.
+- **P1, the test that claimed to guard it could not fail.** `TestTerminalPayloadBoundsTheAgentAccount` asserted the right thing — reduced payload under 16 KiB encoded — but filled with characters that encode 1:1 and omitted `error`, the largest contributor and the one field `terminalPayload` never builds. It passed against the defect above. Rewritten as a table over plain / angle-bracket / invalid-UTF-8 / ANSI fills, including `error` and `failureFingerprint`, plus `TestReducedTerminalPayloadIsAcceptedByTheEventReporter`, which drives the real reporter end to end and fails with `terminal execution event lost` against the raw-byte bound.
+- **P2, the new `[]string` redaction arm corrupted ordinary data.** Routing `changedFiles`/`commandsRun` through `redactKnownSecretValues` exposed a pre-existing substring match: `sk-` matches inside `task-runner.py`, `docs/risk-register.md`, `src/disk-usage.ts` and `make task-build`, rewriting them to `ta[REDACTED].py` and so on, into `app.executions.result`, the success outcome hash, and the UI. Fixed at the root with a token-boundary check rather than by narrowing the arm — `commandsRun` can legitimately contain a bearer token, so it must be redacted. Both sides are pinned: `TestEventReporterLeavesOrdinaryPathsAndCommandsIntact` and `TestEventReporterStillRedactsSecretsAtTokenBoundaries`.
+- **P2, attaching `summary` to a cancelled payload destabilised its fingerprint.** The orchestrator's `_failure_message` prefers `error`, then `summary`. A cancelled payload has no `error`, so it used to fall through to a stable `cancelled exit=N`; adding `summary` replaced that with free text that varies per run, so repeated cancellations would no longer match and the non-progress breaker would never trip. Fixed by reporting no agent account on `cancelled` at all — which is also the honest reading, since an interrupted agent reached no conclusion of its own.
+- **P3, fixed.** `boundedList` emitted `["", ""]` for an all-blank list; it now drops blank entries and returns nothing when none remain. Five inaccurate README claims were corrected, including one that asserted the very property the P1 defect broke, and two payload-table rows that were wrong by omission. A tautological orchestrator test (`assertLessEqual` on a dict literal defined 20 lines above) was replaced with one that proves the widened payload is still accepted whole and that one more field would be rejected.
+
+## Decisions
+
+- Decision: an agent-reported block is a `failed` event refined by a `blocked` payload marker, not a new event type.
+  - Context: step 1 of issue #97 asks to check `VALID_EVENT_TYPES` (`workflows/runner_events.py`) before adding a type.
+  - Alternatives considered: (a) add `blocked` to the event vocabulary; (b) reuse `failed` and carry the distinction in the payload.
+  - Reason: the vocabulary is not one list. It is replicated across `control.validEventType` and `eventPriority`/`IsTerminalEventType` in the runner, the `ExecutionEvent` proto and its generated Go and Python bindings, `VALID_EVENT_TYPES`/`TERMINAL_EVENT_TYPES` in the orchestrator, the `app.jobs.status` and `app.workflow_execution_requests.status` check constraints that `accept_event` writes the event type straight into, and the web UI. Adding a type means a migration and a coordinated change across four modules — three of which are owned by concurrent agents this session — to express something that is a *refinement* of an existing outcome: the run did not deliver. The issue itself notes the payload is the smaller protocol change.
+  - Consequences: no migration, no proto change, no orchestrator persistence change, and an old orchestrator reading a new runner's event still classifies it correctly as a failure rather than rejecting it as an unknown type. The marker is honoured only on `failed`, since a `completed` or `cancelled` event claiming a block contradicts the outcome the runner reported and the outcome wins. Cost: `RunnerEventSummary.failed` stays true for a block, so any future consumer must check `blocked` first, as `_terminal_event_transition` now does.
+
+- Decision: step 4 of the issue — "should a blocked developer result still push its branch?" — was already settled by #100 and was deliberately not re-decided.
+  - Context: the issue text (written before #100 merged) reports `dispatch.go:230` as a bonus defect: a blocked result still commits and pushes the delivery branch because `executeErr` is nil.
+  - Reason: verified against the current code, not the issue text. `dispatch.go` gates delivery on `executeErr == nil && result.Status == "completed"`, with the comment "Only a completed run delivers to the agent branch"; a blocked run instead goes through `retainWorkInProgress`, whose `workInProgressCommitMessage` maps the status to an explicit `wip(blocked): …`, anchors it at `refs/moirai-wip/<executionId>`, and publishes it to `wip/<executionId>` when the packet grants `mayPush`. `terminalPayload` already recorded `wipCommit`/`wipBranch`/`wipPushed`. The issue's requirement — "if kept, make it explicit rather than accidental, and record the branch in the payload" — is met in full.
+  - Consequences: no change was made to the delivery path. `TestDispatcherRetainsWorkInProgressWithoutDeliveringWhenExecutionFails` already covered the blocked case; it was extended to assert the block also survives the dispatcher with its summary, so the property is pinned as a *blocked* property and not only as a *failed* one.
+
+- Decision: a blocked payload is not attached to a `cancelled` event.
+  - Context: found by adversarial review — see Post-review corrections.
+  - Alternatives considered: attach the agent account uniformly to all four outcomes; attach it to everything except the summary; attach nothing on cancellation.
+  - Reason: two arguments agree. A cancelled execution was interrupted, so whatever its half-written result document says is not a conclusion the agent reached. And `_failure_message` (`persistence/control_plane.py`) prefers `error` then `summary`, so a summary on a cancelled payload displaces the stable `cancelled exit=N` text that makes repeated cancellations fingerprint identically — silently disabling the non-progress breaker for a cancellation loop.
+  - Consequences: cancelled payloads are byte-identical to before this change. The asymmetry is documented in the runner README's push-semantics table and in `terminalPayload`'s comment.
+
+- Decision: an agent-reported block is terminal, not a retry.
+  - Context: before this change, a developer or repairer whose document said `blocked` produced `recovering`, which stalled-run recovery re-dispatches. It now ends the run at `blocked`. Raised by the adversarial review as a behaviour change worth stating.
+  - Alternatives considered: (a) route a block to `recovering` and keep retrying; (b) gate it on `implementation_attempts`/`pipeline_repair_attempts` the way the planner's block is gated; (c) terminal `blocked`.
+  - Reason: (a) is the "same prompt, count to 3, block" pattern the platform review's executive summary calls out as the core autonomy failure — re-dispatching an identical packet against an agent that has explained why it cannot proceed cannot succeed, and burns budget doing it. (b) adds a counter for a signal that is not attempt-shaped: the agent is not failing, it is telling the operator something is missing. (c) matches the precedent the file already sets for the planner's `blocked` and the reviewer's `human_required`, both terminal, and produces the state a human can act on — `blocking_reason` populated, the `agent:blocked` label, the project circuit's failure reason.
+  - Consequences: one agent writing `"status": "blocked"` ends the workflow. That is the intended trade — it is the difference between an informed escalation and a blind retry — but it does make the block a load-bearing word in the agent prompt. The escalation ladder that should eventually park such a run on a *question* rather than end it is issue [#107](https://github.com/alexandre-leites/moirai/issues/107) (Autonomy L4), which the review lists as depending on this issue.
+
+- Decision: the secret-prefix set was not widened, only the matching rule was corrected.
+  - Context: the review noted that forwarding `summary`, `remainingWork` and the result document on failed runs widens the surface for a credential an agent echoes into its own prose, and that the redactor only knows `ghp_`, `github_pat_`, `glpat-`, `sk-` plus operator-configured prefixes — not AWS keys, Slack tokens, JWTs, PEM blocks or `://user:pass@` URLs.
+  - Alternatives considered: add `AKIA`, `xox` and `-----BEGIN ` here; leave the set alone.
+  - Reason: the default prefix set is a platform-wide security policy that applies to every field of every event on every runner, and `-----BEGIN ` in particular does not work with the token-run algorithm at all (it would redact `BEGIN` and leave the key body). Changing it belongs in a change that can be reasoned about and tested as a security change, not smuggled into a feature. `LOOP_RUNNER_REDACTION_PREFIXES` already lets an operator add their own today. The marginal widening here is genuinely small: `error` and `logTail` — the agent's own stderr — already crossed the wire on failed runs under exactly this redactor.
+  - Consequences: recorded in Quality Backlog below. What this session did change is strictly a correctness fix in both directions: `[]string` values are redacted at all now, and prefixes no longer match mid-identifier.
+
+## Quality Backlog
+
+- [ ] Widen the runner's default secret-prefix set and give it a non-prefix rule
+  - Category: security hardening.
+  - Risk: low to implement, moderate to get wrong — a rule that is too eager corrupts ordinary output, which is exactly the defect the token-boundary fix above had to repair.
+  - Expected benefit: `AKIA…`, `xox[baprs]-…`, JWTs, `-----BEGIN … PRIVATE KEY-----` blocks and `scheme://user:pass@host` credentials are currently forwarded verbatim in `error`, `logTail`, and now `summary`/`remainingWork`/`result` whenever an agent quotes them.
+  - Recommended timing: as its own change, with tests that pin both the redaction and the non-corruption of ordinary text. The PEM and URL cases need a delimiter-aware rule rather than a prefix plus token run.
+
+## Validation Status
+
+- Targeted tests: Passed. New: 9 Go tests in `internal/dispatch` (block routing, the agent account on every outcome, encoded-size bounding across four hostile fills, the end-to-end reduced-payload delivery, blank-entry handling, the rune-boundary and sanitisation properties), 3 in `internal/control` (list redaction, path/command non-corruption, boundary redaction), 1 in `internal/agents`, 1 in `internal/dispatch` for the pipeline skip; 14 orchestrator tests across `ValidateRunnerEventTests`, `WorkflowTransitionTests` and the new `AgentBlockEndToEndTests`. Every behavioural one was confirmed failing first — outputs quoted under Commands executed.
+- Service tests: Passed — `make test-runner` (race detector, 10 packages `ok`); `make test-orchestrator` → `Ran 425 tests … OK (skipped=24)`.
+- Full repository tests: Not run — `make test-api` and `make test-web` were deliberately not invoked; no `api/` or `web/` file is touched.
+- Build: Covered by `go test` and `go vet ./...`.
+- Lint: Passed — `make lint` → `All checks passed!`
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-97` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Not applicable — no schema change, by design (see Decisions).
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. `AgentBlockEndToEndTests` covers the wire shape the runner builds through `validate_runner_event` to `workflow_transition_for_terminal_event`, but the payload there is a literal, not one produced by the Go code.
+
+## Known Issues
+
+- Issue: the runner's terminal payload and the orchestrator's parser agree only by hand.
+  - Severity: P3
+  - Impact: `AgentBlockEndToEndTests.BLOCKED_PAYLOAD` transcribes what `dispatch.terminalPayload` builds. A future field rename on either side passes both suites and fails in production.
+  - Evidence: `orchestrator/tests/test_runner_events.py` and `runner/internal/dispatch/control_loop.go` share no generated artefact; the `ExecutionEvent` proto types the payload as an opaque JSON string.
+  - Suggested resolution: a golden-file fixture written by a Go test and read by the Python one, or a schema for the terminal payload alongside `schemas/agent-result.schema.json`.
+
+- Issue: `EventReporter.Flush` is not a delivery barrier — root-caused this session, filed as [#152](https://github.com/alexandre-leites/moirai/issues/152).
+  - Severity: P2 — it is the cause of the runner CI flake recorded by the issue #92 session, and it may be a real durability defect at shutdown.
+  - Impact: `Flush()` returns `nil` while another goroutine is mid-`SendExecutionEvent`, having delivered nothing itself. `ControlLoop.FlushEvents()` propagates that, so every caller that treats it as "the queue is drained" — including `cmd/runner`'s shutdown path, the last chance to drain the outbox before exit — can be wrong.
+  - Evidence: reproduced deterministically with a throwaway probe in `internal/dispatch` using a client whose first send blocks → `Flush() returned nil having delivered 0 events while a send was in flight`. In the flaky test the window opens because `waitForOutboxEvent` observes the terminal event on disk as soon as `Emit` calls `persistLocked()`, which is *before* `Emit` releases the mutex and enters `flush()`; the test then clears `sendErr` and calls `FlushEvents()` while the execute goroutine still holds `sending`. That matches the symptom the issue #92 session recorded exactly and answers the question it left open. This PR's CI hit it once (`TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected`, `delivered events = [one event], want the terminal event last`) and passed on re-run with all 10 checks green; the diff touches neither that test nor its code path, and `GOMAXPROCS=2 go test -race -count=12 ./internal/dispatch/` is `ok` locally.
+  - Suggested resolution: see #152 — make `Flush` wait on the in-flight send (a `sync.Cond` on `sending`, or a single-flight token a waiter can block on) and pin the barrier property with a test. Not attempted here: it is a concurrency change to the event reporter, issue #93's area, and #97 touches none of that path.
+
+- Issue: the planner result document cannot satisfy both schemas it is validated against.
+  - Severity: P2 — it makes the planner's `ready` verdict unreachable, independently of this issue.
+  - Impact: `schemas/agent-result.schema.json` requires `status ∈ {completed, blocked, failed}` and the runner enforces it in `readResultDocument`; `schemas/planner-result.schema.json` requires `status ∈ {ready, human_required, blocked, invalid}` and `_schema_field` enforces that. One `status` field serves both, so `blocked` is the only value that satisfies them together. A planner writing `ready` has its document rejected by the runner as invalid; one writing `completed` fails `planner-result` validation in the orchestrator and is routed back to `planning` with `plan_valid = False`.
+  - Evidence: `runner/internal/agents/opencode.go` `readResultDocument`'s status switch; `orchestrator/src/moirai/workflows/runner_events.py` `_schema_field(summary.result, "planner-result", "status")`; the two schema files.
+  - Suggested resolution: separate the transport status from the role verdict — keep `status` for the agent-result envelope and give the planner its own `verdict` field, as `review-result` already does. Out of scope here: it changes the agent protocol and both schemas, and this issue's acceptance criteria are met without it (the block path is role-independent by construction, precisely so it does not depend on this).
+
+## Next Recommended Implementation
+
+Issue [#104](https://github.com/alexandre-leites/moirai/issues/104) (Autonomy L1) — the runner-side goal gate and session-resume continuation loop. It is the review's highest-priority runner task, it depends only on #89 (merged), and it is the natural continuation of this session: after the agent exits, check that the result document is valid, `status == "completed"`, `remainingWork` is empty, and — for mutating roles — that a non-empty diff exists; if the gate fails and a continuation budget remains, re-invoke the agent resuming the captured `sessionId` with a prompt naming the missing evidence. Relevant files: `runner/internal/dispatch/dispatch.go`, `runner/internal/agents/opencode.go` (`Result.SessionID` is already captured and still unused), `runner/internal/config`. Expected behaviour: an agent that stops early with outstanding `remainingWork` is continued rather than reported, and the continuation is bounded and counted separately from the workflow's retry budgets. Targeted validation: new cases in `runner/internal/dispatch/dispatch_test.go` covering gate pass, gate fail with budget, and budget exhaustion. This session makes the failing case legible — `remainingWork` now reaches the orchestrator — and #104 is what acts on it inside the run.
+# Session: issue #113 — Web UI has no runners page although `GET /api/v1/runners` already exists (branch `issue-113`)
+
+## Current Status
+
+- Overall status: Complete for issue #113.
+- Current phase: MVP web surface — `PROJECT.md:62,90` require a runner status view that did not exist.
+- Active implementation: issue-113 agent session, 2026-07-29 — `/runners` page.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-113.
+
+## Done
+
+- [x] `/runners` lists the runner fleet
+  - Completed: 2026-07-29.
+  - Relevant files: `web/src/api.ts`, `web/src/runner-status.ts` (new), `web/src/runners.tsx` (new), `web/src/main.tsx`, `web/src/styles.css`, `web/src/vite-env.d.ts` (new), `web/src/runner-status.test.ts` (new), `web/src/runners.test.tsx` (new), `web/src/runners-page.test.tsx` (new), `web/vitest.config.ts` (new), `web/package.json`, `web/package-lock.json`, `web/README.md`, `README.md`, `Makefile`, `.github/workflows/ci.yml`.
+  - Behavior delivered:
+    - **Integration only, no new server surface.** `ListRunners`, `GET /api/v1/runners` and the `Runner` schema in `api/openapi.yaml` already existed; nothing in `web/` called them. No API, orchestrator, proto or schema file was touched. (Issue #57 covered the same ground and was auto-closed by PR #81, whose merge produced a tree identical to its first parent, so none of it was on `main`. Written from scratch.)
+    - `api.ts` gains a `Runner` type and `listRunners(signal?)`. Two boundary decisions: a body without a `runners` array raises instead of unwrapping to `[]`, because returning `[]` would render "no runner is registered" for what is really a broken response; and `labels` is normalized from the wire's `null` to `[]`, because the handler marshals the protobuf's repeated field directly and Go writes a nil slice as `null`, contradicting the OpenAPI schema.
+    - `runner-status.ts` holds the fleet's pure logic — heartbeat age formatting, the staleness rule, the status-pill mapping, `countOnline`, error copy, and a `loadRunners` that resolves to an error result rather than rejecting.
+    - `runners.tsx` splits into `RunnersView` (pure, every state directly renderable) and `RunnersPage` (fetching). One row per runner: name + short id, status pill, labels, draining flag, heartbeat age with the absolute time in `title`. Stale rows carry a warn stripe, a "Stale" badge beside the age, and a "Stale" status pill — three signals, none of them colour alone. Loading, empty and failure states are explicit; a failed *refresh* keeps the last known rows behind a warning instead of blanking them.
+    - Polling per specification §4.5 interim mode: 10s while the tab is visible, paused on `document.hidden`, resumed on `visibilitychange`, one request at a time, cleaned up on unmount.
+    - `/runners` is routed inside `ProtectedRoute` and linked from the nav and the dashboard link list.
+  - Validation performed: 53 web unit tests, all three acceptance criteria mutation-tested, typecheck, lint, production build.
+  - Commands executed:
+    - `make test-web` → `tsc --noEmit` clean; `eslint .` → `✖ 10 problems (0 errors, 10 warnings)`, all ten pre-existing in `auth.tsx`/`main.tsx`/`tokens.tsx` and none in new files; `vitest run` → `Test Files 3 passed (3) / Tests 53 passed (53)`.
+    - `make build-web` → `tsc && vite build` → `✓ 26 modules transformed … built in 48ms`.
+    - Mutation testing (each mutation applied to the source, suite re-run, source restored) — every one is caught, so no acceptance criterion rests on a vacuous test:
+      - `stale` forced to `false` → 10 failures. `heartbeat.stale` ignored by the status pill → 2. `countOnline` replaced by `runners.length` → 2. The heartbeat cell's `title` removed → 1. The draining cell blanked → 1.
+      - The error block never rendered → 7 failures. A malformed body returning `[]` instead of raising → 1.
+      - The in-flight guard removed → 2. `setNow(requestedAt)` changed to `setNow(Date.now())` → 1. `clearInterval` removed → 1. The `!document.hidden` pause removed → 1. The `cancelled` guard removed → 1. The `labels ?? []` normalization removed → 1.
+      - Restored tree: `Tests 53 passed (53)`.
+  - Notes: no migration, no Compose change. One new build-time variable, `VITE_RUNNER_HEARTBEAT_INTERVAL_MS`, documented in `web/README.md`.
+
+- [x] Web unit tests now exist and run in CI
+  - Completed: 2026-07-29.
+  - Behavior delivered: Vitest is wired in (`web/vitest.config.ts`, `npm test`), `make test-web` runs `tsc --noEmit`, `eslint .` and `vitest run`, and the CI `build-web` job now runs `make test-web` before `make build-web`. Until this change CI ran neither eslint nor `tsc` for `web/` — only the production build. Two new dev dependencies: `vitest` and `jsdom` (169 packages, no package removed, no unrelated version bump, `npm audit --audit-level=high` clean; the two pre-existing moderate `react-router` advisories are unchanged).
+  - Notes: this is a deliberately minimal slice of what `docs/design/web-console/tasks.md` C2 and issue #123 ask for. There is no MSW layer — components take an `ApiClient` prop, so a stub object suffices. Whoever takes #123 should widen this rather than start over.
+
+## Decisions
+
+- Decision: the page follows specification §5.5's information architecture and status vocabulary but keeps the existing pages' chrome, rather than porting the console design system.
+  - Context: `docs/design/web-console/` does specify a runners view (§5.5, task D5). D5 is written against a widened `GET /api/v1/runners` (task A12: capacity, activeJobs, reservedOffers, version) and a new `POST /api/v1/runners/{id}/state` (task B1), and it assumes the C-phase foundation — design tokens (C3) and the component library (C4) — which is not ported. `web/` is still the old four-page SPA the console is meant to replace.
+  - Alternatives considered: (a) port the C3 token sheet and C4 components for this one page; (b) build the §5.5 fleet cards with the fields that do exist and leave the capacity meter out; (c) invent a layout.
+  - Reason: the issue is explicit that no API change is needed, and A12/B1 are other people's tasks; (a) is C3+C4, multi-day, and would leave one page in a visual language no other page speaks. (c) is what the design package exists to prevent. What §5.5 *can* be honoured on today's payload is its information architecture (name, status pill Online/Draining/Offline, heartbeat age, labels) and §5's global rules (relative timestamps with the absolute time in `title`, explicit loading/empty/error states, "never a silent blank"), and those are followed exactly. The card-vs-table shape follows the issue's own acceptance criterion ("one row per runner") and the three existing pages.
+  - Consequences: capacity, version, backend and "Working on" are absent, and there are no drain/disable/revoke controls. When A12 and B1 land, D5 replaces this page rather than extending it; the pure logic in `runner-status.ts` survives that.
+
+- Decision: a stale heartbeat overrides `runners.status` in the pill and in the online count.
+  - Context: `runners.status` is a lagging column. `record_heartbeat` sets it to `online`, but only `expire_leases` (600s, and only for a runner holding a lease) or revocation sets it back to `offline`; `sessions.disconnect()` is in-memory and never writes. An *idle* runner that is killed keeps `status = 'online'` forever.
+  - Alternatives considered: render the pill straight off `status` and let the "Stale" badge carry the contradiction.
+  - Reason: an operator opening this page is asking "is anything actually connected". A green `Online` pill beside "7d ago" answers that wrongly, and the header count would have said `3/3 online` for a fleet with nothing alive. Warn rather than crit, because §5.1 assigns warn to a stale probe.
+  - Consequences: `describeRunnerStatus` takes the heartbeat as a second argument and `countOnline` takes `now`. A runner whose row genuinely is `offline` still reads `Offline`; stale only outranks `online`.
+
+- Decision: the staleness budget is a build-time constant with an escape hatch, not a hard-coded 30s.
+  - Context: the rule is three missed heartbeats, and the interval is `LOOP_RUNNER_HEARTBEAT_INTERVAL` — per-runner env configuration that `GET /api/v1/runners` does not report.
+  - Alternatives considered: hard-code the 10s default; wait for A12.
+  - Reason: hard-coding means a fleet configured to 60s renders every runner permanently stale, which is a page that cries wolf until nobody reads it. `VITE_RUNNER_HEARTBEAT_INTERVAL_MS` costs eight lines and removes that failure mode.
+  - Consequences: it is read at build time (Vite), so a Compose deployment overriding it must rebuild the image. Documented as such. It is deleted when A12 puts the interval in the payload.
+
+- Decision: heartbeat ages are measured from when the request was sent, not when it returned.
+  - Context: found by the adversarial review. `setNow(Date.now())` ran after `await`, so every age carried the full round-trip.
+  - Reason: with a 30s budget, roughly 6s of latency was enough to flip a runner that beat 25s ago into "Stale" — and it fires precisely when the orchestrator is struggling, which is when the page is being read. Sampling before the request is both correct and free.
+  - Consequences: ages can lag by up to one poll interval, which is honest: they are as fresh as the answer they came from.
+
+## Post-review corrections
+
+An adversarial review of the first commit found six P2s and a list of P3s. All were fixed before the PR.
+
+- **Ages inflated by request latency** (above). Reproduced by the reviewer under fake timers: a runner 2s old at request time rendered `37s ago` + stale when the response took 35s. Now covered by `measures heartbeat age from when the orchestrator was asked, not when it answered`, which fails against the old code.
+- **Polls could stack and resolve out of order.** With nothing resolving, four concurrent requests had accumulated after 30s, and resolving the newest then the oldest left the *oldest* snapshot on screen. Fixed with a one-request-at-a-time gate and a per-request `AbortController`; `never stacks requests when the orchestrator is slow to answer` and `does not let an abandoned request overwrite a newer one` pin both halves. The related wedge — `loading` stuck `true` disabling Refresh forever behind a hung request — is fixed by never disabling the control; a click restarts the load from scratch.
+- **The pill contradicted the badge** (above).
+- **The 10s heartbeat interval was hard-coded** (above).
+- **The abort test was vacuous.** `expect(container.textContent).toBe("")` after `root.unmount()` is trivially true, and React 18 removed the setState-after-unmount warning, so deleting the guard left all tests green. Replaced with the out-of-order test on a live component.
+- **`labels` is typed non-nullable but arrives as `null`.** Go marshals a nil `[]string` as `null`, so an unlabelled runner would have thrown on `labels.length` — and because `main.tsx` wraps the whole app in the ErrorBoundary, that replaces the *entire console*, nav included, with "Something went wrong". The view's `?? []` was load-bearing while the type said the branch was unreachable and no test covered it. Now normalized in the API client and covered by `normalizes the null the Go handler emits for a runner with no labels`.
+- **P3s fixed:** an unknown future `status` value now renders `idle` rather than painting the fleet critical; an unreadable timestamp says "unknown" instead of being conflated with "never reported"; the malformed-body rejection is a plain `Error` rather than an `ApiError` claiming status 200 (which the server never sent); the clock-skew comment named the wrong two clocks (the timestamp is stamped by the orchestrator, not the runner); the stale row tint uses `color-mix` on `--warning` instead of a literal rgba; the count is in an `aria-live="polite"` region; the `vitest.config.ts` comment claimed no test needs a DOM, which the same commit contradicted.
+- **P3s accepted, not fixed:** `eslint .` exits 0 on warnings, so `react-hooks/exhaustive-deps` cannot fail CI; `--max-warnings 0` needs the ten pre-existing warnings resolved first and belongs with #123. `npm ci` now runs twice in the `build-web` job (once per make target), costing a few seconds. The job is still named `build-web` though it now gates tests; renaming it would break `validate`'s `needs` list and any branch protection.
+
+## Validation Status
+
+- Targeted tests: Passed — `make test-web` → `Tests 53 passed (53)` across `runner-status.test.ts` (26), `runners.test.tsx` (14) and `runners-page.test.tsx` (13). Thirteen mutations of the source were each confirmed to fail the suite (see Commands executed).
+- Service tests: Not applicable beyond `web/` — no Python or Go file changed. `make test-orchestrator`, `make test-runner` and `make test-api` were deliberately not invoked.
+- Full repository tests: Not run.
+- Build: Passed — `make build-web`.
+- Lint: Passed — `eslint .`, 0 errors. Ten warnings, all pre-existing and none in the new files.
+- Type checks: Passed — `tsc --noEmit`.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose change. The new `VITE_RUNNER_HEARTBEAT_INTERVAL_MS` is optional and defaults to the runner's own default, so the existing image build is unaffected.
+- End-to-end workflow: Not run. The page was not exercised against a live orchestrator in a browser; the fleet, empty, stale, failed-load and failed-refresh states were verified by mounting the real component under jsdom with a stubbed `ApiClient`, not by clicking through the Compose stack.
+
+## Known Issues
+
+- Issue: the runners page cannot know a runner's real heartbeat interval.
+  - Severity: P3
+  - Impact: the staleness rule assumes the runner default (10s) unless the bundle is built with `VITE_RUNNER_HEARTBEAT_INTERVAL_MS`. A fleet running a longer interval without that build flag reports every runner stale.
+  - Evidence: `LOOP_RUNNER_HEARTBEAT_INTERVAL` is runner-side env configuration (`runner/README.md`); `GET /api/v1/runners` does not carry it.
+  - Suggested resolution: `docs/design/web-console/tasks.md` A12 already plans to widen the payload — add the interval there, then delete the variable.
+
+- Issue: `runners.status` cannot distinguish a disconnected idle runner from a live one.
+  - Severity: P3 — worked around in the UI, not fixed at the source.
+  - Impact: the column stays `online` indefinitely for a killed runner that held no lease, so every consumer of it other than this page (including the scheduler's `JOIN app.runners AS r ON r.status = 'online'`) treats it as connected.
+  - Evidence: `record_heartbeat` writes `status = 'online'`; only `expire_leases` and revoke write it back; `sessions.disconnect()` is in-memory only.
+  - Suggested resolution: belongs to whoever owns `orchestrator/` — either flip the column on stream disconnect, or have the scheduler's candidate query gate on `last_seen_at` freshness rather than the column.
+
+## Next Recommended Implementation
+
+Issue #123 (web test infrastructure) is now much cheaper: Vitest and jsdom are installed, `make test-web` runs them, and CI gates on them. What remains of `docs/design/web-console/tasks.md` C2 is Testing Library, MSW, and raising `eslint` to `--max-warnings 0` after clearing the ten existing warnings. Doing it before more D-phase views land means each view arrives with the "renders / empty / error / primary action" bar the specification asks for rather than retrofitting it.
+---
+
+# Session: issue #111 — Orchestrator aborts the runner stream when a runner reports draining (branch `issue-111`)
+
+## Current Status
+
+- Overall status: Complete for issue #111.
+- Current phase: P1 bug fix found while auditing the MVP end-to-end flow for #87.
+- Active implementation: issue-111 agent session, 2026-07-29 — runner-reported drain state.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-111.
+
+## Done
+
+- [x] A runner-reported drain no longer aborts the control stream, and now stops scheduling
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/grpc/runner_control.py`, `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/domain/control_plane.py`, `orchestrator/tests/test_runner_grpc.py`, `orchestrator/tests/test_postgres_integration.py`, `docs/architecture.md`.
+  - Behavior delivered:
+    - `RunnerControlService._handle_message` has a `runner_draining` branch. Before it, `RunnerToOrchestrator.runner_draining` fell through to the catch-all `_StreamFailure(INVALID_ARGUMENT, "runner stream message is invalid")`, which `Connect` turns into `context.abort` — so a runner announcing it was draining ended its own bidirectional stream as a protocol violation, and nothing was recorded.
+    - The branch persists the reported flag and returns, leaving the stream open. That matters beyond tidiness: a draining runner still has to renew leases and report execution events for work it already holds, and aborting the stream took that channel away mid-execution.
+    - `AsyncpgControlPlane.set_runner_draining(runner_id, draining)` writes `app.runners.draining` and nothing else. All three placement queries already gate on `r.draining = false` (`schedule()` at `control_plane.py:1118`, `schedule_execution()` at `:1247`, `recover_one()` at `:1647`), so the next scheduling pass simply stops considering the runner. `draining=false` clears it.
+    - It is narrower than `set_runner_state` *in the columns it touches* — that method also writes `enabled`, `revoked_at` and `status`, so routing a runner's report through it would let a runner re-enable a runner an operator had deliberately disabled, in both directions. It is **not** narrower in `draining` itself; see Known Issues.
+    - A revoked runner (`revoked_at IS NOT NULL`) matches no row, and a report that matches no row raises `ValueError("runner is unknown or revoked")`, which the handler maps to `FAILED_PRECONDITION` rather than letting an unhandled exception take down the receive task. The stream ends, which is what that runner's next message would do anyway — `_load_runner_credential` refuses revoked rows.
+    - The handler logs `runner reported its drain state` with the runner id and the reported value. Nothing else records the transition and it silently stops all placement on that runner, so without it an operator has no trace of why a runner went quiet.
+    - `InMemoryControlPlane.set_runner_draining` mirrors it so the domain reference implementation stays in parity; `Runner.available` already excludes `draining`, so the in-memory scheduler drops the runner for the same reason the SQL one does.
+  - Validation performed: two gRPC tests against a real `grpc.aio` server and three PostgreSQL integration tests, all five confirmed failing without the change; full orchestrator suite; full PostgreSQL integration suite; lint; type check.
+  - Commands executed (all after merging `origin/main` at `ffb4bc4`):
+    - `make test-orchestrator` → `Ran 417 tests in 1.303s / OK (skipped=27)`.
+    - `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@127.0.0.1:55411/loop_test make test-postgres-integration` → `Ran 27 tests in 3.975s / OK`, against a fresh throwaway `postgres:16-alpine` container on port 55411, removed afterwards.
+    - `make lint` → `All checks passed!`.
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-111` → `Success: no issues found in 48 source files`.
+    - Regression proof, gRPC: with `orchestrator/src/moirai/grpc/runner_control.py` restored from `origin/main` and the new tests kept, `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p test_runner_grpc.py` → `Ran 7 tests / FAILED (failures=2)`, both new tests failing on the aborted stream.
+    - Regression proof, SQL: with `AsyncpgControlPlane.set_runner_draining` monkeypatched to a no-op, `RunnerDrainIntegrationTests` → `Ran 3 tests / FAILED (failures=3)`; the placement test fails with `schedule()` handing back the drained runner. None of the three assert anything the production method does not have to do.
+  - Notes: `proto/runner_control.proto` already defined `RunnerDraining` (`:21`, `:40`) and the generated code already carried it, so no contract changed. Orchestrator-initiated drain (`OrchestratorToRunner.drain`) and the operator drain/revoke API stayed out of scope — issue #119.
+
+## Decisions
+
+- Decision: a new `set_runner_draining` rather than reusing `set_runner_state("drain")`.
+  - Context: the issue offered either. `set_runner_state` maps `"drain"` to `(enabled=True, draining=True)` and `"enable"` to `(enabled=True, draining=False)`, and also writes `revoked_at` and `status`.
+  - Alternatives considered: (a) call `set_runner_state(runner_id, "drain" if draining else "enable", None, now)`; (b) add a `draining`-only branch inside `set_runner_state`.
+  - Reason: (a) is wrong on the clear path — a runner reporting `draining=false` would re-`enable` a runner an operator had deliberately disabled, and on the drain path it would re-enable a disabled runner too. The runner is authoritative about its own drain state and about nothing else. (b) widens a method #119 is about to build the operator API on, for a caller that shares none of its audit or revocation behavior.
+  - Consequences: two methods write the same column with different scopes, which is the point. `set_runner_state` keeps its operator semantics untouched for #119; the runner path cannot reach `enabled`, `revoked_at` or `status`.
+
+- Decision: an unknown or revoked runner fails the stream rather than being ignored.
+  - Context: `set_runner_draining` raises `ValueError` when the `UPDATE` matches no row.
+  - Alternatives considered: swallow it, since the runner authenticated moments earlier and the case is near-unreachable.
+  - Reason: near-unreachable is not unreachable — a concurrent revoke between `authenticate_runner` and the write produces exactly this. Silently discarding it would leave the runner believing the orchestrator agreed to stop sending it work.
+  - Consequences: the handler maps `ValueError` to `_StreamFailure(FAILED_PRECONDITION, "runner drain report was rejected")`, matching how `offer_accepted`, `offer_rejected` and `lease_renewal` already report rejected control messages. The stream ends, which is correct for a runner that no longer exists.
+
+- Decision: work already leased to a draining runner is left alone.
+  - Context: the acceptance criteria only require the flag and the open stream, and the obvious extra step would be to release or recover the runner's in-flight leases.
+  - Alternatives considered: cancel or requeue the runner's `offered`/`preparing`/`running` jobs on the drain report.
+  - Reason: draining means "no *new* work". The runner's own `Drain()` finishes what it holds and then exits (`WaitForIdle`), so cancelling on the orchestrator side would destroy work that is about to succeed, and would do it on a message the runner sends routinely. If the runner dies instead, `expire_leases` already recovers the job on the lease clock. See Known Issues for the one hazard this leaves.
+  - Consequences: no change to in-flight behavior; drain is purely a placement signal.
+
+## Post-review corrections
+
+An adversarial review of the first draft was run before committing. It found ten items; the substantive ones and what was done about each:
+
+- **`draining` has two writers and one bit** (major). The first draft's documentation claimed "only the runner clears it", which is false: `set_runner_state("enable")` also writes `draining`, so a runner reporting `draining=false` clears an operator drain and an operator `enable` clears a runner's. The claim was wrong, not the code — the issue's own acceptance criteria specify that a runner's `draining=false` clears the flag, and giving the two owners separate bits needs a second column plus a change to the three placement predicates, which is #119's decision and outside this session's region of `persistence/control_plane.py`. The false claim is removed from `docs/architecture.md` and from the docstring, both of which now state the conflict explicitly, and it is recorded under Known Issues. Nothing depends on it today: `set_runner_state` still has no callers.
+- **Permanent-wedge risk** (major). Recorded under Known Issues with the full evidence chain and escalated on the issue rather than fixed here; the sound fix is in `runner/`, which this session does not own. `docs/architecture.md` now carries it as an explicit warning to whoever changes the runner's shutdown ordering.
+- **The persistence test was vacuous** (major). Every assertion in the first draft's integration test would also have passed against `set_runner_state("drain")`/`("enable")`, so it did not test the method that was written. Replaced: `test_a_drain_report_writes_only_the_draining_column` disables the runner first and asserts `enabled` stays `false` across a report in *both* directions, which is exactly what `set_runner_state` would break.
+- **The load-bearing claim had no test** (minor). "The scheduler stops offering work" was asserted only against the in-memory control plane; the predicate that matters in production is `r.draining = false` in the SQL. `test_a_drained_runner_is_not_selected_and_a_cleared_one_is` now drives real `schedule()` calls either side of a drain report, and fails when the write is removed.
+- **The docstring described behavior the code did not have** (minor). It said a revoked runner "is left alone"; the code raises, which ends the stream. The docstring and the doc now say what happens, and the error message reads `runner is unknown or revoked` instead of `runner is unknown`.
+- **`OrchestratorToRunner.drain` described as "not wired"** (minor). One-sided: the runner end is wired (`control_loop.go` calls `Drain()` on receipt) and is in fact the only path that delivers a drain report over a live stream today. Corrected.
+- **No trace of the transition** (nit). Added the `runner reported its drain state` log line.
+- Two items were accepted as-is: the in-memory control plane has no runner revocation to refuse (a comment now says so), and the integration test leaves a consumed registration-token row behind, which every test in that file does.
+
+## Validation Status
+
+- Targeted tests: Passed — `test_connect_drain_report_keeps_the_stream_open_and_stops_scheduling` and `test_connect_drain_report_of_false_clears_the_flag` (`orchestrator/tests/test_runner_grpc.py`), both confirmed failing with the handler reverted; the three cases in the new `RunnerDrainIntegrationTests` (`orchestrator/tests/test_postgres_integration.py`), all three confirmed failing with the persistence method neutered.
+- Service tests: Passed — `make test-orchestrator` → `Ran 417 tests … OK (skipped=27)`; `make test-postgres-integration` → `Ran 27 tests … OK` against a fresh throwaway database.
+- Full repository tests: Not run — no Go, proto, or web change. `make test` was deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-111` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Not applicable — `app.runners.draining` already exists (migration `001_initial.sql`). Migrations were run against the throwaway database by the integration suite.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run.
+
+## Known Issues
+
+- Issue: `app.runners.draining` has two writers and one bit, so a runner's report and an operator's drain overwrite each other.
+  - Severity: P2 — no impact today, a correctness problem the moment #119 ships.
+  - Impact: a runner reporting `draining=false` clears a drain an operator set with `set_runner_state("drain")`, and `set_runner_state("enable")` clears a drain a runner reported. Whichever wrote last wins, with no record that the other owner disagreed.
+  - Evidence: `set_runner_state` maps `"drain"` to `(enabled=True, draining=True)` and `"enable"` to `(enabled=True, draining=False)`; `set_runner_draining` writes the same column. Harmless today only because `set_runner_state` has no callers — the operator API it exists for is #119.
+  - Suggested resolution: belongs to #119, which owns the operator side and has to pick the model. A separate `runner_reported_draining` column with the three placement predicates gating on `draining OR runner_reported_draining` separates the owners cleanly, and would also make "clear the runner's bit when a fresh control stream connects" sound, which is what closes the wedge below. Not attempted here: it needs a migration and edits to `schedule()`, `schedule_execution()` and `recover_one()`, none of which are in this session's region of the file. This session's change was implemented exactly as issue #111 specifies (`draining=false` clears the flag) rather than pre-empting that design.
+
+- Issue: nothing clears a runner-reported drain automatically, so a runner that reports draining and later restarts comes back with `draining = true`.
+  - Severity: P2 — latent today, live as soon as the runner's shutdown ordering is fixed or #119 lands.
+  - Impact: the scheduler would never offer that runner work again until an operator cleared the flag, and the operator API that would clear it (#119) does not exist yet.
+  - Evidence: `ControlLoop.Drain()` (`runner/internal/dispatch/control_loop.go:260`) only ever calls `SetDraining(true)`; nothing in `runner/` sends `draining: false`. The wedge does not fire today only by accident: `StreamSupervisor.Run` calls `s.Client.Disconnect()` on `ctx.Done()` (`runner/internal/control/stream.go:103-106`) *before* `main` reaches `loop.Drain()` (`runner/cmd/runner/main.go:300-308`), so `Client.send` hits `c.stream == nil` and returns `ErrNotConnected` (`runner/internal/control/client.go:196-205`) — the SIGTERM path the issue describes never actually delivers the message. The path that does deliver it is the orchestrator-initiated drain at `control_loop.go:208`, which is unwired pending #119.
+  - Suggested resolution: belongs in `runner/`, which is outside this session's ownership and was being worked on concurrently (#97, #136) — have the runner report `draining: false` once a fresh control stream is established, so its own state is what the orchestrator mirrors. Fixing it orchestrator-side is not sound while `draining` is one shared bit: clearing on reconnect would also erase an operator drain, and the stream reconnects every few seconds during a network blip. Tracked as [#148](https://github.com/alexandre-leites/moirai/issues/148) so it is not buried here.
+- Issue: a scheduling pass that selected a runner just before its drain report still delivers that offer.
+  - Severity: P3
+  - Impact: the offer is placed on a runner that is going away. No work is lost — the runner rejects it (`control_loop.go:198`, `"runner is draining"`) and `reject_offer` requeues the run.
+  - Evidence: the drain report and the candidate query are separate transactions; there is no lock spanning them.
+  - Suggested resolution: none needed. This is the ordinary offer-rejection path, and the unanswered-offer bounds already cover the case where the runner dies without answering.
