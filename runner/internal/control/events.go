@@ -439,6 +439,17 @@ func redactPayloadWithPrefixes(value any, prefixes []string) any {
 			redacted[index] = redactPayloadWithPrefixes(item, prefixes)
 		}
 		return redacted
+	case []string:
+		// Terminal payloads are built in Go, not decoded from JSON, so their
+		// string lists arrive as []string and never match the []any arm. Every
+		// one of them — changed files, commands run, the remaining work an
+		// agent reports — is agent-authored text that can carry a credential,
+		// so they are redacted rather than passed through by the default arm.
+		redacted := make([]string, len(current))
+		for index, item := range current {
+			redacted[index] = redactKnownSecretValues(item, prefixes)
+		}
+		return redacted
 	case string:
 		return redactKnownSecretValues(current, prefixes)
 	default:
@@ -458,19 +469,38 @@ func validRedactionPrefixes(prefixes []string) bool {
 func redactKnownSecretValues(value string, configured []string) string {
 	prefixes := append([]string{"ghp_", "github_pat_", "glpat-", "sk-"}, configured...)
 	for _, prefix := range prefixes {
-		for {
-			start := strings.Index(value, prefix)
-			if start < 0 {
+		searched := 0
+		for searched < len(value) {
+			offset := strings.Index(value[searched:], prefix)
+			if offset < 0 {
 				break
 			}
+			start := searched + offset
+			// A match that continues an identifier is part of a longer word, not
+			// the start of a token. Without this, `sk-` matches inside ordinary
+			// paths and commands — `task-runner.py`, `disk-usage.ts`, `make
+			// task-build` — and redacting there corrupts the changed-file and
+			// command lists a terminal payload carries.
+			if start > 0 && secretTokenByte(value[start-1]) {
+				searched = start + len(prefix)
+				continue
+			}
 			end := start + len(prefix)
-			for end < len(value) && ((value[end] >= 'a' && value[end] <= 'z') || (value[end] >= 'A' && value[end] <= 'Z') || (value[end] >= '0' && value[end] <= '9') || value[end] == '_' || value[end] == '-') {
+			for end < len(value) && secretTokenByte(value[end]) {
 				end++
 			}
 			value = value[:start] + "[REDACTED]" + value[end:]
+			searched = start + len("[REDACTED]")
 		}
 	}
 	return value
+}
+
+// secretTokenByte reports whether a byte can appear inside a credential token,
+// and therefore whether it continues one rather than delimiting it.
+func secretTokenByte(character byte) bool {
+	return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+		(character >= '0' && character <= '9') || character == '_' || character == '-'
 }
 
 func sensitivePayloadKey(key string) bool {

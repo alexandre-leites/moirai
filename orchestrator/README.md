@@ -24,6 +24,12 @@ The issue workflow is an event-driven state machine, not a run-to-completion fun
 
 The runner's terminal event clears `awaiting_execution` (`workflows/runner_events.py`), and `PersistedWorkflowRuntime.run` resumes the graph from the same edge with `aupdate_state` + `ainvoke(None, config)`. One terminal event therefore advances the workflow by at most one queued execution.
 
+### Agent-reported blocks
+
+A `failed` terminal event carrying `blocked: true` is not a crash: the agent finished cleanly and wrote `status: blocked` in its result document, saying why it stopped and what remains. `validate_runner_event` parses the result document for every terminal event (not only a success), and validates the payload's `blocked`, `summary`, and `remainingWork` wherever they appear, so a malformed one is rejected on any event rather than only on the terminal ones. Then `workflow_transition_for_terminal_event` routes the block ahead of the generic failure arm — to the terminal `blocked` status, with `blocking_reason` composed from the agent's own summary and outstanding work (bounded to 1024 characters, the width the circuit writer stores). The reporting role's own gate is cleared with it: a blocked planner sets `plan_valid = False`, a blocked reviewer `review_approved = False`.
+
+The `blocked` marker is deliberately not a new event type. The event vocabulary is a contract shared with the runner (`control.validEventType`), the `ExecutionEvent` proto, and `app.jobs.status`; a block is a refinement of a non-delivering outcome, so it travels in the payload of the existing `failed` event. The marker is honoured only on `failed`: a `completed` or `cancelled` event that claims a block contradicts the outcome the runner reported, and the outcome wins. `pipeline` executions are routed by role before the marker is read, so nothing can divert the deterministic gate's own verdict.
+
 Resuming from that edge is a checkpointer capability. Without a checkpointer the only way forward is replaying the graph from its start node, which would re-enter nodes whose executions already ran, so a suspended run is left untouched and a warning is logged instead. Deployments that must make progress require a checkpointer; Compose never sets `LOOP_ALLOW_NO_CHECKPOINTER`.
 
 ### Execution request lifecycle

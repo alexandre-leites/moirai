@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -20,7 +21,22 @@ const defaultEventBufferSize = 128
 // A reduced terminal payload keeps its string fields within this budget so that
 // an unbounded one — `error` carries whatever the agent wrote to stderr — cannot
 // push the retry back over the event payload limit.
+//
+// The budget is the JSON-*encoded* size, for the same reason maxLogTailBytes is
+// (see logtail.go): the 16 KiB event cap applies to the encoded payload, and
+// Go's encoder spends six bytes on each `<`, `>`, `&`, and control byte. Three
+// raw-measured 2 KiB fields of angle brackets encode to 36 KiB — over the cap
+// the reduction exists to get under, which would lose the run's outcome
+// entirely.
 const maxTerminalPayloadFieldBytes = 2048
+
+// `remainingWork` is written by the agent and is kept by the reduced payload,
+// so — unlike the raw result document, which the reduction drops — it has to be
+// bounded where it is built. Both bounds apply: the entry count keeps the
+// encoded list short, the byte budget keeps a single verbose entry from
+// spending the whole payload. Measured encoded, as above.
+const maxTerminalPayloadListItems = 20
+const maxTerminalPayloadListBytes = 2048
 
 const truncationMarker = "… [truncated]"
 
@@ -422,11 +438,28 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 		payload := terminalPayload("cancelled", result, usage)
 		loop.emitEvent(lease, "cancelled", payload)
 	} else if err != nil || result.Status != "completed" {
+		// An agent that ended cleanly and wrote `blocked` in its result
+		// document stopped deliberately and said why. Reporting that as an
+		// anonymous failure throws away the most actionable signal a run can
+		// produce, so the payload keeps the distinction. The event *type* stays
+		// `failed`: it is a shared contract with the orchestrator
+		// (VALID_EVENT_TYPES), the transport, and the job status column, and a
+		// block is a refinement of a non-delivering outcome rather than a new
+		// kind of one. A failing process is never trusted to report a block —
+		// its own account of why it stopped is not evidence.
+		blocked := err == nil && result.Status == "blocked"
+		status := "failed"
+		if blocked {
+			status = "blocked"
+		}
 		failure := err
 		if failure == nil {
-			failure = errors.New(result.Summary)
+			failure = errors.New(agentFailureText(result))
 		}
-		payload := terminalPayload("failed", result, usage)
+		payload := terminalPayload(status, result, usage)
+		if blocked {
+			payload["blocked"] = true
+		}
 		payload["failureFingerprint"] = FailureFingerprint("execution", failure)
 		payload["error"] = failure.Error()
 		loop.emitEvent(lease, "failed", payload)
@@ -497,9 +530,18 @@ func minimalTerminalPayload(payload map[string]any) map[string]any {
 		if !present {
 			continue
 		}
-		if text, isText := value.(string); isText {
-			if shortened := truncateUTF8(text, maxTerminalPayloadFieldBytes); shortened != text {
-				value = shortened + truncationMarker
+		// Every kept field is re-bounded here rather than trusted: `error` is
+		// built by the caller and never passed through terminalPayload, so this
+		// is the only place it is measured at all.
+		switch typed := value.(type) {
+		case string:
+			if shortened := boundedAgentText(typed, maxTerminalPayloadFieldBytes); shortened != typed {
+				value = shortened
+				truncated = true
+			}
+		case []string:
+			if shortened := boundedList(typed); !equalStrings(shortened, typed) {
+				value = shortened
 				truncated = true
 			}
 		}
@@ -518,19 +560,80 @@ func minimalTerminalPayload(payload map[string]any) map[string]any {
 
 // The work-in-progress fields are kept because they are short and are the only
 // pointer to a failed run's surviving work; the log tail is not, since it is the
-// kind of unbounded detail the reduced payload exists to shed.
-var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch", "wipBranch", "wipCommit", "wipPushed"}
+// kind of unbounded detail the reduced payload exists to shed. The block fields
+// are kept for the same reason as the work-in-progress ones: the reduction runs
+// exactly when a verbose agent produced an oversized payload, which is when
+// dropping its explanation would leave the orchestrator with nothing but a
+// fingerprint. They are safe to keep because terminalPayload bounds them; the
+// raw result document is dropped because nothing bounds it.
+var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch", "wipBranch", "wipCommit", "wipPushed", "blocked", "summary", "remainingWork"}
 
-// truncateUTF8 shortens value to at most limit bytes without splitting a rune.
-func truncateUTF8(value string, limit int) string {
-	if len(value) <= limit {
-		return value
+// boundedAgentText renders agent-written text as a payload-safe string: it
+// drops terminal escape sequences and other control characters, replaces
+// invalid UTF-8, and keeps the longest prefix whose JSON encoding fits budget,
+// marking it when anything was cut. It is boundedLogTail's mirror image —
+// a log tail is interesting at its end, an agent's prose at its beginning.
+func boundedAgentText(value string, budget int) string {
+	sanitized := strings.TrimSpace(strings.ToValidUTF8(sanitizeLogText(value), ""))
+	if jsonEncodedSize(sanitized) <= budget {
+		return sanitized
 	}
-	end := limit
-	for end > 0 && !utf8.RuneStart(value[end]) {
-		end--
+	remaining := budget - jsonEncodedSize(truncationMarker)
+	end := 0
+	for end < len(sanitized) {
+		next := end + 1
+		for next < len(sanitized) && !utf8.RuneStart(sanitized[next]) {
+			next++
+		}
+		cost := jsonEncodedSize(sanitized[end:next])
+		if remaining < cost {
+			break
+		}
+		remaining -= cost
+		end = next
 	}
-	return value[:end]
+	return sanitized[:end] + truncationMarker
+}
+
+// boundedList caps an agent-written list of strings by entry count and by the
+// total JSON-encoded size of the agent text it may carry, so neither a long
+// list nor one verbose entry can spend the whole event payload. What was cut is
+// stated in a trailing entry, so a reader can tell a complete list from a
+// truncated one. Blank entries are dropped rather than forwarded as empty
+// strings. The result encodes to at most maxTerminalPayloadListBytes bytes plus
+// one trailing marker.
+func boundedList(values []string) []string {
+	bounded := make([]string, 0, min(len(values), maxTerminalPayloadListItems)+1)
+	budget := maxTerminalPayloadListBytes
+	for index, value := range values {
+		if len(bounded) >= maxTerminalPayloadListItems || budget <= 0 {
+			return append(bounded, fmt.Sprintf("%s %d more", truncationMarker, len(values)-index))
+		}
+		// Bounded against what is left rather than dropped: one long entry is
+		// often the whole of what the agent had to say about the work ahead.
+		entry := boundedAgentText(value, budget)
+		if entry == "" {
+			continue
+		}
+		budget -= jsonEncodedSize(entry)
+		bounded = append(bounded, entry)
+	}
+	if len(bounded) == 0 {
+		return nil
+	}
+	return bounded
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func executionUsage(started time.Time, result Result) map[string]any {
@@ -546,10 +649,27 @@ func terminalStatus(cancelled bool, err error, result Result) string {
 	if cancelled {
 		return "cancelled"
 	}
+	if err == nil && result.Status == "blocked" {
+		return "blocked"
+	}
 	if err != nil || result.Status != "completed" {
 		return "failed"
 	}
 	return "completed"
+}
+
+// agentFailureText names a non-delivering outcome the executor did not itself
+// fail on. The agent's summary is the reason when it wrote one; without it the
+// status alone is reported, since an empty error string would yield an
+// uninformative event and a fingerprint shared by every empty failure.
+func agentFailureText(result Result) string {
+	if result.Summary != "" {
+		return result.Summary
+	}
+	if result.Status != "" {
+		return "agent reported status " + result.Status + " without a summary"
+	}
+	return "agent reported no result status"
 }
 
 func terminalPayload(status string, result Result, usage map[string]any) map[string]any {
@@ -578,8 +698,27 @@ func terminalPayload(status string, result Result, usage map[string]any) map[str
 	if result.LogTail != "" {
 		payload["logTail"] = result.LogTail
 	}
-	if status == "completed" && result.Raw != nil {
-		payload["result"] = result.Raw
+	// The agent's own account of the run travels with every outcome the agent
+	// itself reached. Withholding it from anything but a success is what made an
+	// agent-reported block indistinguishable from a crash (issue #97): the
+	// reason it stopped and the work it says remains are precisely what an
+	// informed retry or escalation is built from.
+	//
+	// A cancelled run reached no outcome of its own — it was interrupted — so it
+	// keeps reporting none. That is also what keeps repeated cancellations
+	// identifiable: the orchestrator fingerprints them from the stable
+	// `cancelled exit=N` text it derives when no `error` or `summary` is
+	// present, and an interrupted agent's summary varies run to run.
+	if status != "cancelled" {
+		if result.Raw != nil {
+			payload["result"] = result.Raw
+		}
+		if summary := boundedAgentText(result.Summary, maxTerminalPayloadFieldBytes); summary != "" {
+			payload["summary"] = summary
+		}
+		if remaining := boundedList(result.RemainingWork); len(remaining) > 0 {
+			payload["remainingWork"] = remaining
+		}
 	}
 	for key, value := range usage {
 		payload[key] = value

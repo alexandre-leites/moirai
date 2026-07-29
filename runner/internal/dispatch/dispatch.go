@@ -253,7 +253,11 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		InitialRevision: initial.Revision,
 		Raw:             backendResult.Raw,
 	}
-	if executeErr == nil && len(packet.Pipeline) > 0 {
+	// Only a completed agent run is worth validating. Running the pipeline over
+	// an agent-reported block would replace its status, reason, and remaining
+	// work with a generic pipeline failure — destroying the very signal the
+	// block exists to deliver.
+	if executeErr == nil && result.Status == "completed" && len(packet.Pipeline) > 0 {
 		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
 		result.PipelineResults = pipelineResults
 		if pipelineErr != nil {

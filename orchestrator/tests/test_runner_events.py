@@ -1,8 +1,9 @@
 import unittest
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 from moirai.workflows.runner_events import (
+    MAX_PAYLOAD_FIELDS,
     RunnerEventError,
     RunnerEventSummary,
     execution_role_from_id,
@@ -89,6 +90,63 @@ class ValidateRunnerEventTests(unittest.TestCase):
         summary = validate_runner_event("completed", "job-1-plan", {"exitCode": 0})
         self.assertEqual(summary.changed_files, [])
         self.assertEqual(summary.commands_run, [])
+        self.assertFalse(summary.blocked)
+        self.assertIsNone(summary.summary_text)
+        self.assertEqual(summary.remaining_work, [])
+
+    def test_agent_reported_block_is_parsed_from_a_failed_event(self) -> None:
+        """The runner reports an agent-reported block as a `failed` event
+        refined by a `blocked` marker; its own account of the block has to
+        survive validation intact."""
+        summary = validate_runner_event(
+            "failed",
+            "job-1-plan",
+            {
+                "status": "blocked",
+                "blocked": True,
+                "exitCode": 0,
+                "summary": "the deployment credential is missing",
+                "remainingWork": ["obtain DEPLOY_KEY", "re-run the migration"],
+                "result": {"status": "blocked", "summary": "the deployment credential is missing"},
+            },
+        )
+        self.assertTrue(summary.terminal)
+        self.assertTrue(summary.blocked)
+        self.assertEqual(summary.summary_text, "the deployment credential is missing")
+        self.assertEqual(summary.remaining_work, ["obtain DEPLOY_KEY", "re-run the migration"])
+        assert summary.result is not None
+        self.assertEqual(summary.result["status"], "blocked")
+
+    def test_result_document_is_parsed_for_every_terminal_event(self) -> None:
+        for event_type in ("failed", "cancelled"):
+            summary = validate_runner_event(
+                event_type, "job-1-review", {"result": {"verdict": "invalid"}}
+            )
+            assert summary.result is not None
+            self.assertEqual(summary.result["verdict"], "invalid")
+
+    def test_non_terminal_event_carries_no_result_document(self) -> None:
+        summary = validate_runner_event("progress", "job-1-plan", {"result": {"status": "blocked"}})
+        self.assertIsNone(summary.result)
+
+    def test_rejects_malformed_block_fields(self) -> None:
+        with self.assertRaisesRegex(RunnerEventError, "blocked must be a boolean"):
+            validate_runner_event("failed", "job-1-plan", {"blocked": "yes"})
+        with self.assertRaisesRegex(RunnerEventError, "summary must be a string"):
+            validate_runner_event("failed", "job-1-plan", {"summary": ["blocked"]})
+        with self.assertRaisesRegex(RunnerEventError, "remainingWork must be a list"):
+            validate_runner_event("failed", "job-1-plan", {"remainingWork": "one thing"})
+        with self.assertRaisesRegex(RunnerEventError, "remainingWork must be a list"):
+            validate_runner_event("failed", "job-1-plan", {"remainingWork": [1]})
+        with self.assertRaisesRegex(RunnerEventError, "result must be an object"):
+            validate_runner_event("failed", "job-1-plan", {"result": "blocked"})
+
+    def test_block_marker_is_only_honoured_on_a_failed_event(self) -> None:
+        """A completed or cancelled execution contradicts a block: the outcome
+        the runner reported wins over a marker in the payload."""
+        for event_type in ("completed", "cancelled"):
+            summary = validate_runner_event(event_type, "job-1-plan", {"blocked": True})
+            self.assertFalse(summary.blocked)
 
 
 class ExecutionRoleFromIdTests(unittest.TestCase):
@@ -111,6 +169,9 @@ class WorkflowTransitionTests(unittest.TestCase):
         execution_id: str = "job-1-plan",
         exit_code: int | None = 0,
         result: dict[str, Any] | None = None,
+        blocked: bool = False,
+        summary_text: str | None = None,
+        remaining_work: list[str] | None = None,
     ) -> RunnerEventSummary:
         return RunnerEventSummary(
             event_type=event_type,
@@ -120,6 +181,9 @@ class WorkflowTransitionTests(unittest.TestCase):
             commands_run=[],
             terminal=event_type in {"completed", "failed", "cancelled"},
             result=result,
+            blocked=blocked,
+            summary_text=summary_text,
+            remaining_work=list(remaining_work or []),
         )
 
     def test_non_terminal_event_returns_none(self) -> None:
@@ -135,6 +199,84 @@ class WorkflowTransitionTests(unittest.TestCase):
     def test_failed_event_transitions_to_recovering(self) -> None:
         summary = self._summary("failed", exit_code=1)
         transition = workflow_transition_for_terminal_event(summary, "planning")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "recovering")
+
+    def _blocked(self, execution_id: str = "job-1-plan") -> RunnerEventSummary:
+        return self._summary(
+            "failed",
+            execution_id,
+            exit_code=0,
+            blocked=True,
+            summary_text="the deployment credential is missing",
+            remaining_work=["obtain DEPLOY_KEY", "re-run the migration"],
+            result={"status": "blocked", "summary": "the deployment credential is missing"},
+        )
+
+    def test_agent_reported_block_transitions_to_blocked_with_its_own_reason(self) -> None:
+        """An agent-reported block is not an anonymous failure: the agent said
+        why it stopped and what remains, and both have to reach the workflow."""
+        for execution_id, role in (
+            ("job-1-plan", "planner"),
+            ("job-1-implement", "developer"),
+            ("job-1-review", "reviewer"),
+            ("job-1-repair", "repairer"),
+        ):
+            transition = workflow_transition_for_terminal_event(
+                self._blocked(execution_id), "planning", role=role
+            )
+            assert transition is not None, role
+            self.assertEqual(transition.new_status, "blocked", role)
+            reason = str(transition.state_updates["blocking_reason"])
+            self.assertIn("the deployment credential is missing", reason, role)
+            self.assertIn("obtain DEPLOY_KEY", reason, role)
+            self.assertIn("re-run the migration", reason, role)
+            self.assertIs(transition.state_updates["awaiting_execution"], False, role)
+
+    def test_agent_reported_block_clears_the_role_gate_it_owns(self) -> None:
+        planner = workflow_transition_for_terminal_event(
+            self._blocked("job-1-plan"), "planning", role="planner"
+        )
+        assert planner is not None
+        self.assertIs(planner.state_updates["plan_valid"], False)
+        reviewer = workflow_transition_for_terminal_event(
+            self._blocked("job-1-review"), "ai_review", role="reviewer"
+        )
+        assert reviewer is not None
+        self.assertIs(reviewer.state_updates["review_approved"], False)
+
+    def test_agent_reported_block_without_a_reason_still_names_the_role(self) -> None:
+        summary = self._summary("failed", "job-1-implement", exit_code=0, blocked=True)
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "blocked")
+        self.assertIn("developer", str(transition.state_updates["blocking_reason"]))
+
+    def test_blocking_reason_is_bounded(self) -> None:
+        summary = self._summary(
+            "failed",
+            "job-1-implement",
+            exit_code=0,
+            blocked=True,
+            summary_text="x" * 4000,
+            remaining_work=["y" * 4000],
+        )
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
+        assert transition is not None
+        self.assertLessEqual(len(str(transition.state_updates["blocking_reason"])), 1024)
+
+    def test_pipeline_role_keeps_its_gate_even_if_a_block_is_marked(self) -> None:
+        """`pipeline_passed` has exactly one producer; a marker in the payload
+        must not divert the deterministic gate's own execution."""
+        summary = self._summary("failed", "job-1-pipeline", exit_code=1, blocked=True)
+        transition = workflow_transition_for_terminal_event(summary, "local_pipeline", role="pipeline")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "local_pipeline")
+        self.assertIs(transition.state_updates["pipeline_passed"], False)
+
+    def test_unmarked_failure_still_recovers_rather_than_blocking(self) -> None:
+        summary = self._summary("failed", "job-1-implement", exit_code=1)
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
         assert transition is not None
         self.assertEqual(transition.new_status, "recovering")
 
@@ -300,6 +442,69 @@ class WorkflowTransitionTests(unittest.TestCase):
         transition = workflow_transition_for_terminal_event(summary, "repairing")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
+
+
+class AgentBlockEndToEndTests(unittest.TestCase):
+    """Issue #97 acceptance: an agent-reported block reaches
+    `workflow_transition_for_terminal_event` with its summary and
+    `remainingWork` intact. The payload below is the wire shape the runner
+    builds in `dispatch.terminalPayload` for a blocked outcome."""
+
+    BLOCKED_PAYLOAD: ClassVar[dict[str, Any]] = {
+        "status": "blocked",
+        "blocked": True,
+        "exitCode": 0,
+        "changedFiles": ["migrations/003.sql"],
+        "commandsRun": [],
+        "finalRevision": "cafebabe",
+        "committed": True,
+        "pushed": False,
+        "wipCommit": "cafebabe",
+        "wipBranch": "wip/job-1-implement",
+        "wipPushed": True,
+        "summary": "the deployment credential is missing",
+        "remainingWork": ["obtain DEPLOY_KEY", "re-run the migration"],
+        "result": {
+            "protocolVersion": "1.0",
+            "executionId": "job-1-implement",
+            "status": "blocked",
+            "summary": "the deployment credential is missing",
+            "remainingWork": ["obtain DEPLOY_KEY", "re-run the migration"],
+        },
+        "failureFingerprint": "execution:0123456789abcdef",
+        "error": "the deployment credential is missing",
+        "durationMs": 4200,
+        "changedFileCount": 1,
+        "commandCount": 0,
+        "pipelineCommandCount": 0,
+    }
+
+    def test_blocked_payload_survives_the_whole_path(self) -> None:
+        summary = validate_runner_event("failed", "job-1-implement", self.BLOCKED_PAYLOAD)
+        self.assertTrue(summary.blocked)
+        self.assertEqual(summary.summary_text, "the deployment credential is missing")
+        self.assertEqual(summary.remaining_work, ["obtain DEPLOY_KEY", "re-run the migration"])
+        assert summary.result is not None
+        self.assertEqual(summary.result["status"], "blocked")
+
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "blocked")
+        reason = str(transition.state_updates["blocking_reason"])
+        self.assertIn("developer reported blocked", reason)
+        self.assertIn("the deployment credential is missing", reason)
+        self.assertIn("obtain DEPLOY_KEY", reason)
+        self.assertIn("re-run the migration", reason)
+
+    def test_the_wire_payload_is_accepted_whole(self) -> None:
+        """The runner attaches the block fields on top of an already-populated
+        failure payload, so the widened payload must still clear the field limit
+        that would otherwise reject the event outright."""
+        self.assertLessEqual(len(self.BLOCKED_PAYLOAD), MAX_PAYLOAD_FIELDS)
+        padded = dict(self.BLOCKED_PAYLOAD)
+        padded.update({f"future{index}": index for index in range(MAX_PAYLOAD_FIELDS - len(padded) + 1)})
+        with self.assertRaisesRegex(RunnerEventError, "too many fields"):
+            validate_runner_event("failed", "job-1-implement", padded)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .schema_validation import SchemaNotFoundError, load_schema, validate
 
+# The runner event vocabulary is a shared contract (runner
+# control.validEventType, the ExecutionEvent proto, app.jobs.status). An
+# agent-reported block is deliberately *not* a new type: it is a `failed`
+# event refined by the `blocked` marker in its payload. See the decision
+# recorded in PROGRESS.md for issue #97.
 VALID_EVENT_TYPES = frozenset({"started", "progress", "log", "completed", "failed", "cancelled"})
 TERMINAL_EVENT_TYPES = frozenset({"completed", "failed", "cancelled"})
 MAX_PAYLOAD_FIELDS = 32
+# app.workflow_runs.blocking_reason is TEXT but is truncated to 1024 characters
+# by the circuit writer; composing a longer reason here would only be cut later.
+MAX_BLOCKING_REASON_CHARS = 1024
 
 
 class RunnerEventError(ValueError):
@@ -23,6 +31,13 @@ class RunnerEventSummary:
     commands_run: list[str]
     terminal: bool
     result: dict[str, Any] | None = None
+    # The agent's own account of a non-delivering outcome. `blocked` marks the
+    # run as "the agent stopped and said why" rather than "the process died";
+    # `summary_text` and `remaining_work` carry the explanation, and survive the
+    # runner's reduced-payload retry that drops `result`.
+    blocked: bool = False
+    summary_text: str | None = None
+    remaining_work: list[str] = field(default_factory=list)
 
     @property
     def succeeded(self) -> bool:
@@ -56,6 +71,22 @@ def validate_runner_event(
     changed_files: list[str] = []
     commands_run: list[str] = []
     result: dict[str, Any] | None = None
+    summary_text: str | None = None
+    remaining_work: list[str] = []
+
+    raw_blocked = payload.get("blocked")
+    if raw_blocked is not None and not isinstance(raw_blocked, bool):
+        raise RunnerEventError("runner event blocked must be a boolean")
+    raw_summary = payload.get("summary")
+    if raw_summary is not None:
+        if not isinstance(raw_summary, str):
+            raise RunnerEventError("runner event summary must be a string")
+        summary_text = raw_summary
+    raw_remaining = payload.get("remainingWork")
+    if raw_remaining is not None:
+        if not isinstance(raw_remaining, list) or any(not isinstance(w, str) for w in raw_remaining):
+            raise RunnerEventError("runner event remainingWork must be a list of strings")
+        remaining_work = list(raw_remaining)
 
     if terminal:
         raw_exit = payload.get("exitCode")
@@ -63,6 +94,15 @@ def validate_runner_event(
             if not isinstance(raw_exit, int):
                 raise RunnerEventError("runner event exitCode must be an integer")
             exit_code = int(raw_exit)
+        # The result document is the agent's structured account of what it did.
+        # It is read for every terminal outcome, not only a success: a run that
+        # stopped without delivering is exactly when the orchestrator most needs
+        # the agent's own reasoning (issue #97).
+        raw_result = payload.get("result")
+        if raw_result is not None:
+            if not isinstance(raw_result, dict):
+                raise RunnerEventError("runner event result must be an object")
+            result = raw_result
 
     if event_type == "completed":
         raw_files = payload.get("changedFiles")
@@ -75,11 +115,6 @@ def validate_runner_event(
             if not isinstance(raw_cmds, list) or any(not isinstance(c, str) for c in raw_cmds):
                 raise RunnerEventError("runner event commandsRun must be a list of strings")
             commands_run = list(raw_cmds)
-        raw_result = payload.get("result")
-        if raw_result is not None:
-            if not isinstance(raw_result, dict):
-                raise RunnerEventError("runner event result must be an object")
-            result = raw_result
 
     return RunnerEventSummary(
         event_type=event_type,
@@ -89,6 +124,12 @@ def validate_runner_event(
         commands_run=commands_run,
         terminal=terminal,
         result=result,
+        # A block refines a failure. A `completed` or `cancelled` event carrying
+        # the marker contradicts the outcome the runner reported, and the
+        # outcome wins.
+        blocked=bool(raw_blocked) and event_type == "failed",
+        summary_text=summary_text,
+        remaining_work=remaining_work,
     )
 
 
@@ -173,6 +214,37 @@ def _schema_field(result: dict[str, Any] | None, schema_name: str, field: str) -
     return value if isinstance(value, str) else None
 
 
+def _agent_block_transition(
+    summary: RunnerEventSummary,
+    role: str | None,
+) -> WorkflowTransition:
+    """Routes an agent-reported block to the terminal `blocked` status with the
+    agent's own reason recorded, and clears the gate the reporting role owns so
+    a resumed graph can never read a stale approval."""
+    state_updates: dict[str, object] = {
+        "status": "blocked",
+        "blocking_reason": _agent_blocking_reason(summary, role),
+    }
+    if role == "planner":
+        state_updates["plan_valid"] = False
+    elif role == "reviewer":
+        state_updates["review_approved"] = False
+    return WorkflowTransition(new_status="blocked", state_updates=state_updates)
+
+
+def _agent_blocking_reason(summary: RunnerEventSummary, role: str | None) -> str:
+    """Renders the block as one durable line. `remaining_work` is folded in
+    rather than stored separately: `blocking_reason` is the only queryable
+    column a blocked run has, and a reason without the outstanding work is the
+    degraded signal this issue exists to remove."""
+    explanation = (summary.summary_text or "").strip() or "no reason was supplied"
+    reason = f"{role or 'agent'} reported blocked: {explanation}"
+    outstanding = [item.strip() for item in summary.remaining_work if item.strip()]
+    if outstanding:
+        reason = f"{reason} | remaining work: " + "; ".join(outstanding)
+    return reason[:MAX_BLOCKING_REASON_CHARS]
+
+
 def workflow_transition_for_terminal_event(
     summary: RunnerEventSummary,
     current_status: str,
@@ -211,6 +283,14 @@ def _terminal_event_transition(
             new_status="local_pipeline",
             state_updates={"status": "local_pipeline", "pipeline_passed": summary.succeeded},
         )
+
+    # An agent that reported `blocked` stopped deliberately and said why. That
+    # is a materially different outcome from a crash: "blocked, here is the
+    # reason, here is what remains" is the difference between an informed
+    # escalation and a blind retry, so it is routed before the generic failure
+    # arm rather than being folded into it (issue #97).
+    if summary.blocked:
+        return _agent_block_transition(summary, resolved_role)
 
     if summary.cancelled:
         return WorkflowTransition(
