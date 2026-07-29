@@ -22,6 +22,7 @@ class _Connection:
     def __init__(self) -> None:
         self.known = True
         self.queries: list[str] = []
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.attempt = 1
 
     def transaction(self) -> _Transaction:
@@ -29,6 +30,7 @@ class _Connection:
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
         self.queries.append(query)
+        self.calls.append((query, args))
         if "JOIN app.issues AS i" in query:
             return {
                 "id": args[0], "project_id": "00000000-0000-0000-0000-000000000002",
@@ -113,6 +115,33 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pull_request_external_id = $7", update_query)
         self.assertIn("pull_request_url = $8", update_query)
         self.assertIn("completed_at = COALESCE(completed_at, $9)", update_query)
+
+    async def test_transition_stores_an_empty_outcome_hash_as_null(self) -> None:
+        """Issue #101: "no diff" had two encodings. The control plane's own
+        writer uses SQL NULL, so this writer must never persist "" instead."""
+        await self.store.transition(
+            WORKFLOW_ID,
+            "blocked",
+            {"status": "blocked", "last_diff_hash": "", "last_failure_fingerprint": ""},
+        )
+        query, arguments = next(
+            call for call in self.pool.connection.calls if "UPDATE app.workflow_runs" in call[0]
+        )
+        self.assertIn("last_diff_hash = $4", query)
+        self.assertIn("last_failure_fingerprint = $5", query)
+        self.assertIsNone(arguments[3])
+        self.assertIsNone(arguments[4])
+
+    async def test_transition_preserves_a_real_outcome_hash(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "blocked",
+            {"status": "blocked", "last_diff_hash": "a" * 64},
+        )
+        _, arguments = next(
+            call for call in self.pool.connection.calls if "UPDATE app.workflow_runs" in call[0]
+        )
+        self.assertEqual(arguments[3], "a" * 64)
 
     async def test_transition_upserts_pull_request_when_pull_request_id_present(self) -> None:
         await self.store.transition(
