@@ -1150,11 +1150,13 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 
 ## Known Issues
 
-- Issue: `TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected` is flaky in CI.
-  - Severity: P3
-  - Impact: it failed the `runner` job on the first CI run of PR #138 (`delivered events = []*runnerv1.ExecutionEvent(nil), want the terminal event`, 0.62s) and passed on a re-run of the same commit, 23s. Unrelated to this change: the branch modifies zero Go files (`git diff origin/main...HEAD --name-only` lists only Python, tests and Markdown).
-  - Evidence: `cd runner && go test -race -count=3 -run TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected ./internal/dispatch/` → `ok` locally; `gh run rerun 30426255735 --failed` → `runner pass 23s`, whole run `success`. The test drives a lease expiry against a disconnected stream and asserts on delivery timing, so it is time-dependent on a loaded runner.
-  - Suggested resolution: belongs to whoever owns `runner/internal/dispatch` (issue #93's area) — wait on the delivered-event condition rather than a fixed window.
+- Issue: `runner/internal/dispatch`'s disconnected-delivery tests are flaky on GitHub-hosted runners.
+  - Severity: P2 — it failed two consecutive CI runs of PR #138, on a different test each time, so it will keep costing re-runs on unrelated PRs.
+  - Impact: the `runner` job failed on both CI runs of this branch and passed on a re-run of the same commit each time. Unrelated to this change: the branch modifies zero Go files (`git diff origin/main...HEAD --name-only` lists only Python, tests and Markdown).
+    - Run 30426255735: `--- FAIL: TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected (0.62s)` → `control_loop_test.go:656: delivered events = []*runnerv1.ExecutionEvent(nil), want the terminal event`. Re-run: `runner pass 23s`.
+    - Run 30426469159: `--- FAIL: TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected (0.01s)` → `control_loop_test.go:718: delivered events = […two events…], want the terminal event last`. Re-run: `runner pass`.
+  - Evidence: both pass locally under load — `cd runner && go test -race -count=20 -run 'TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected|TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected' ./internal/dispatch/` → `ok`. Both assert on what the fake transport has received at the moment of the check, while delivery is driven by a reconnecting background loop, so they depend on the scheduler catching up rather than on an observable condition. Both were added by issue #93 (`8956d84`); `main` has not flaked yet, but its runs are far fewer.
+  - Suggested resolution: belongs to whoever owns `runner/internal/dispatch` — poll the delivered-event slice until it satisfies the condition (with a deadline) instead of reading it once.
 
 - Issue: `make test-postgres-integration` is not repeatable against the same database.
   - Severity: P3
