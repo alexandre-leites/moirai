@@ -9,6 +9,7 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 - `api/` is the Go HTTP gateway. It authenticates browser sessions and proxies management operations to the orchestrator over gRPC.
 - `web/` is a React dashboard served by nginx. In Compose, nginx proxies `/api/` to the API service.
 - `proto/` contains the gRPC contracts; `api/openapi.yaml` is the maintained HTTP contract.
+- `docs/design/web-console/` is the approved management-console design package: benchmark mockup, UI specification, and implementation task breakdown.
 
 ## Local stack
 
