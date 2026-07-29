@@ -31,7 +31,9 @@ services:
       LOOP_INITIAL_ADMIN_PASSWORD_FILE: /run/secrets/initial_admin_password
       LOOP_GITHUB_TOKEN_FILE: /run/secrets/github_token
       RUNNER_REGISTRATION_TOKEN_FILE: /run/secrets/runner_registration_token
-      LOOP_SEED_PROJECT_NAME: "${LOOP_SEED_PROJECT_NAME:-demo}"
+      # `-` and not `:-`: an empty LOOP_SEED_PROJECT_NAME in .env is the documented
+      # way to turn seed-project bootstrap off, so it must survive substitution.
+      LOOP_SEED_PROJECT_NAME: "${LOOP_SEED_PROJECT_NAME-demo}"
       LOOP_SEED_PROJECT_REPOSITORY_URL: "${LOOP_SEED_PROJECT_REPOSITORY_URL}"
       LOOP_SEED_TOKEN_LABELS: "${LOOP_SEED_TOKEN_LABELS:-linux}"
       LOOP_SEED_ISSUE_TITLE: "${LOOP_SEED_ISSUE_TITLE:-}"

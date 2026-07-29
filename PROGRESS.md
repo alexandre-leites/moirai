@@ -536,6 +536,20 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
 
 ---
 
+## Issue #103 — Bootstrap NameError and step order-dependence (F16)
+
+### Done
+
+- [x] Make `_bootstrap_initial_setup` restartable and its steps order-independent
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/main.py`, `orchestrator/tests/test_main_bootstrap.py`, `orchestrator/README.md`, `.env.example`, `compose.yaml`
+  - Behavior delivered:
+    - `uuid4` imported at module scope. Pre-fix conditional import caused `UnboundLocalError`.
+    - Bootstrap split into three independent steps (`_bootstrap_admin_user`, `_bootstrap_seed_project`, `_bootstrap_registration_token`), each with its own existence check. Previously one early return silently skipped downstream steps, so interrupt or deferred config never seeded the rest.
+    - Seed inserts carry `ON CONFLICT DO NOTHING`; admin step re-reads after insert race. Token check ignores `used_at`/`expires_at` (single-use).
+    - `LOOP_SEED_PROJECT_NAME=""` disables seed-project bootstrap; `compose.yaml` uses `${LOOP_SEED_PROJECT_NAME-demo}`.
+  - Validation: `make test-orchestrator` (301 tests, OK), `make test-postgres-integration` (2 tests, OK), `make lint`, `make typecheck`, `make compose`.
+
 ## Issue #88 — Event-driven issue workflow (platform review finding F1)
 
 ### Done
@@ -549,7 +563,6 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
     - `_dispatch` replay guard: a node re-entered while its own request is still `queued` reuses that request.
     - Checkpointer decision: production requires one. Without a checkpointer the runtime leaves a suspended run untouched and logs a warning.
   - Validation: `make test-orchestrator` (298 tests, OK), `make lint`, `make typecheck`, `make compose`.
-  - Commands: `make dev-install`; `make test-orchestrator`; `make lint`; `make typecheck`; `make compose`.
 
 ### Decisions
 
@@ -557,7 +570,6 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
 - Decision: Clear `awaiting_execution` in `workflow_transition_for_terminal_event`, not in `PersistedWorkflowRuntime.run`.
 
 ## Issue #91 — Offer expiry must not cancel in-flight workflows (finding F4)
-
 ### Done
 
 - [x] Offer expiry and rejection no longer cancel in-flight workflow runs

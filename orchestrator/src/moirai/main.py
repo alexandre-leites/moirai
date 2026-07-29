@@ -10,8 +10,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from .config import OrchestratorConfig
+from .config import OrchestratorConfig, read_optional_secret
 from .observability import CorrelationLoggingInterceptor, Metrics, configure_logging
 
 configure_logging()
@@ -76,44 +77,81 @@ async def _build_checkpointer(database_url: str) -> Any | None:
     return checkpointer
 
 
+_DEFAULT_SEED_PROJECT_NAME = "demo"
+_DEFAULT_SEED_REPOSITORY_URL = "https://github.com/example/demo.git"
+# Matches the 15-minute TTL the API mints for interactively-created runner
+# registration tokens (moirai.grpc.control_plane.ControlPlaneService).
+_SEED_TOKEN_TTL = timedelta(minutes=15)
+
+
 async def _bootstrap_initial_setup(pool: Any) -> None:
+    """Seeds the initial admin user, the seed project, and the runner registration token.
+
+    The three steps are deliberately independent: each decides on its own whether it
+    still has work to do, and none is gated on another having run. Bootstrap is the
+    code whose job is initial recovery, so it must be able to recover itself — a first
+    start interrupted halfway (a crash, or a secret that was not configured yet)
+    completes on the next start instead of leaving the database permanently
+    half-seeded with no way back other than manual SQL.
+    """
+    await _bootstrap_admin_user(pool)
+    await _bootstrap_seed_project(pool)
+    await _bootstrap_registration_token(pool)
+
+
+async def _bootstrap_admin_user(pool: Any) -> None:
     user_count = await pool.fetchval("SELECT COUNT(*) FROM app.users")
-    if user_count and user_count > 0:
+    if user_count:
         return
-    from moirai.config import read_optional_secret
-    from moirai.persistence.authentication import AsyncpgAuthentication
-    username = os.environ.get("LOOP_INITIAL_ADMIN_USERNAME", "admin")
     password = read_optional_secret(os.environ, "LOOP_INITIAL_ADMIN_PASSWORD")
     if not password:
         _LOGGER.warning("LOOP_INITIAL_ADMIN_PASSWORD unset — skipping admin bootstrap")
         return
+    from moirai.persistence.authentication import AsyncpgAuthentication
+
+    username = os.environ.get("LOOP_INITIAL_ADMIN_USERNAME", "admin")
     auth = AsyncpgAuthentication(pool)
-    await auth.create_user(username, password, role="admin", now=datetime.now(UTC))
+    try:
+        await auth.create_user(username, password, role="admin", now=datetime.now(UTC))
+    except ValueError:
+        # create_user reports a unique-username violation as ValueError, which is what
+        # a second instance racing this same empty database gets. Re-read rather than
+        # assume which ValueError it was: the step's goal is that an admin exists.
+        if await pool.fetchval("SELECT COUNT(*) FROM app.users"):
+            _LOGGER.info("initial admin user already exists", extra={"username": username})
+            return
+        raise
     _LOGGER.info("created initial admin user", extra={"username": username})
-    seed_project = os.environ.get("LOOP_SEED_PROJECT_NAME", "demo")
-    seed_repo = os.environ.get("LOOP_SEED_PROJECT_REPOSITORY_URL")
+
+
+async def _bootstrap_seed_project(pool: Any) -> None:
+    seed_project = os.environ.get("LOOP_SEED_PROJECT_NAME", _DEFAULT_SEED_PROJECT_NAME).strip()
+    if not seed_project:
+        _LOGGER.info("LOOP_SEED_PROJECT_NAME is empty — skipping seed project bootstrap")
+        return
     existing = await pool.fetchval("SELECT COUNT(*) FROM app.projects WHERE name = $1", seed_project)
-    if existing is None or existing == 0:
-        from uuid import uuid4
-        project_id = uuid4()
-        import json
-        now = datetime.now(UTC)
-        await pool.execute(
-            """
-            INSERT INTO app.projects
-                (id, name, enabled, repository_mode, repository_url, default_branch, configuration, created_at, updated_at)
-            VALUES ($1, $2, true, 'managed_clone', $3, 'main', $4::jsonb, $5, $5)
-            """,
-            project_id, seed_project,
-            seed_repo or "https://github.com/example/demo.git",
-            json.dumps({"required_runner_labels": ["linux"]}),
-            now,
-        )
-        _LOGGER.info("created seed project", extra={"project": seed_project})
-    else:
-        project_id = await pool.fetchval("SELECT id FROM app.projects WHERE name = $1", seed_project)
-    seed_labels = os.environ.get("LOOP_SEED_TOKEN_LABELS", "linux")
-    labels = [label.strip() for label in seed_labels.split(",") if label.strip()]
+    if existing:
+        return
+    seed_repo = os.environ.get("LOOP_SEED_PROJECT_REPOSITORY_URL")
+    now = datetime.now(UTC)
+    # ON CONFLICT, rather than the SELECT above alone, is what makes the insert
+    # idempotent: two orchestrator instances starting together both pass the check.
+    await pool.execute(
+        """
+        INSERT INTO app.projects
+            (id, name, enabled, repository_mode, repository_url, default_branch, configuration, created_at, updated_at)
+        VALUES ($1, $2, true, 'managed_clone', $3, 'main', $4::jsonb, $5, $5)
+        ON CONFLICT (name) DO NOTHING
+        """,
+        uuid4(), seed_project,
+        seed_repo or _DEFAULT_SEED_REPOSITORY_URL,
+        json.dumps({"required_runner_labels": ["linux"]}),
+        now,
+    )
+    _LOGGER.info("created seed project", extra={"project": seed_project})
+
+
+async def _bootstrap_registration_token(pool: Any) -> None:
     # RUNNER_REGISTRATION_TOKEN is the single source of truth in .env / compose.yaml: it
     # is what the runner container presents to register (LOOP_RUNNER_REGISTRATION_TOKEN),
     # so the orchestrator must seed a token hash for that same value, not a separate,
@@ -123,25 +161,30 @@ async def _bootstrap_initial_setup(pool: Any) -> None:
         _LOGGER.warning("RUNNER_REGISTRATION_TOKEN unset — skipping runner registration token bootstrap")
         return
     token_hash = hashlib.sha256(seed_token_value.encode()).hexdigest()
+    # Counts rows with this hash whatever their state, including already used or
+    # expired ones: registration tokens are single-use (persistence.control_plane's
+    # register_runner stamps used_at), so re-seeding a consumed hash would silently
+    # hand a spent secret a second registration.
     existing_token = await pool.fetchval(
         "SELECT COUNT(*) FROM app.runner_registration_tokens WHERE token_hash = $1", token_hash
     )
-    if existing_token is None or existing_token == 0:
-        token_id = uuid4()
-        now = datetime.now(UTC)
-        await pool.execute(
-            """
-            INSERT INTO app.runner_registration_tokens
-                (id, token_hash, allowed_labels, created_at, expires_at)
-            VALUES ($1, $2, $3::jsonb, $4, $5)
-            """,
-            token_id, token_hash,
-            json.dumps(labels),
-            # Matches the 15-minute TTL the API mints for interactively-created runner
-            # registration tokens (moirai.grpc.control_plane.ControlPlaneService).
-            now, now + timedelta(minutes=15),
-        )
-        _LOGGER.info("created seed registration token", extra={"labels": labels})
+    if existing_token:
+        return
+    seed_labels = os.environ.get("LOOP_SEED_TOKEN_LABELS", "linux")
+    labels = [label.strip() for label in seed_labels.split(",") if label.strip()]
+    now = datetime.now(UTC)
+    await pool.execute(
+        """
+        INSERT INTO app.runner_registration_tokens
+            (id, token_hash, allowed_labels, created_at, expires_at)
+        VALUES ($1, $2, $3::jsonb, $4, $5)
+        ON CONFLICT (token_hash) DO NOTHING
+        """,
+        uuid4(), token_hash,
+        json.dumps(labels),
+        now, now + _SEED_TOKEN_TTL,
+    )
+    _LOGGER.info("created seed registration token", extra={"labels": labels})
 
 
 async def _seed_issue_if_needed(pool: Any) -> None:
@@ -150,7 +193,7 @@ async def _seed_issue_if_needed(pool: Any) -> None:
         return
     project_id_from_db = await pool.fetchval(
         "SELECT id FROM app.projects WHERE name = $1",
-        os.environ.get("LOOP_SEED_PROJECT_NAME", "demo"),
+        os.environ.get("LOOP_SEED_PROJECT_NAME", _DEFAULT_SEED_PROJECT_NAME).strip(),
     )
     if project_id_from_db is None:
         _LOGGER.info("no seed project found — skipping seed issue")
@@ -161,9 +204,8 @@ async def _seed_issue_if_needed(pool: Any) -> None:
     )
     if existing_issue is not None and existing_issue > 0:
         return
-    from uuid import uuid4 as _uuid4
     now = datetime.now(UTC)
-    issue_id = _uuid4()
+    issue_id = uuid4()
     await pool.execute(
         """
         INSERT INTO app.issues
