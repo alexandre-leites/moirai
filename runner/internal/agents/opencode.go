@@ -54,6 +54,17 @@ type Backend interface {
 	Cancel(string) error
 }
 
+// ErrNoResultEvidence reports an agent process that ended successfully without
+// leaving a valid result document. Deterministic gates decide completion, so an
+// execution with no evidence is a failure rather than a silent success.
+//
+// It is deliberately distinct from a process failure: a failing process reports
+// the executor error instead, so the two produce different failure fingerprints
+// downstream and the orchestrator can tell "the agent crashed" apart from "the
+// agent claimed nothing". Failure text stays free of absolute workspace paths
+// to keep those fingerprints stable across executions.
+var ErrNoResultEvidence = errors.New("agent exited 0 without a valid result document")
+
 type OpenCodeBackend struct {
 	Binary     string
 	Arguments  []string
@@ -143,15 +154,23 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 		}, err
 	}
 
-	status := "completed"
-	if err != nil {
-		status = "failed"
+	// Without a valid result document there is no evidence of what the agent
+	// did, so the execution can never be reported as completed. A failing
+	// process is the root cause when the command itself failed; otherwise the
+	// agent ended its own loop early, refused, or crashed its reasoning while
+	// exiting cleanly.
+	failure := err
+	summary := ""
+	if failure == nil {
+		failure = fmt.Errorf("%w (%s): %w", ErrNoResultEvidence, workspaceRelativePath(request.Workspace, resultPath), docErr)
+		summary = failure.Error()
 	}
 	return Result{
-		Status:   status,
+		Status:   "failed",
 		ExitCode: executionResult.ExitCode,
+		Summary:  summary,
 		Raw:      raw,
-	}, err
+	}, failure
 }
 
 func (backend OpenCodeBackend) Cancel(executionID string) error {
@@ -210,6 +229,22 @@ func resultPathWithinWorkspace(workspace, path string) (string, error) {
 	return candidate, nil
 }
 
+// workspaceRelativePath renders a workspace file location for failure messages.
+// The relative form names the missing evidence without embedding the volatile
+// absolute workspace path, which would otherwise make every failure fingerprint
+// unique and defeat non-progress detection.
+func workspaceRelativePath(workspace, path string) string {
+	root, err := filepath.Abs(filepath.Clean(workspace))
+	if err != nil {
+		return filepath.Base(path)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	return relative
+}
+
 // readRawResultDocument returns the agent's .loop/result.json contents as a
 // generic object so role-specific fields (e.g. a reviewer's verdict) reach
 // the orchestrator even though resultDocument only decodes the fields common
@@ -229,6 +264,11 @@ func readRawResultDocument(path string) map[string]any {
 func readResultDocument(path, executionID string) (resultDocument, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Reported without the path so repeated no-evidence failures share
+			// one stable failure fingerprint.
+			return resultDocument{}, errors.New("agent result was not written")
+		}
 		return resultDocument{}, fmt.Errorf("read agent result: %w", err)
 	}
 	var document resultDocument
