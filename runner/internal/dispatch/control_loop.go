@@ -14,6 +14,7 @@ import (
 
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
+	"github.com/loop-engineering/runner/internal/metrics"
 )
 
 const defaultEventBufferSize = 128
@@ -82,6 +83,12 @@ type ControlLoop struct {
 	// back to control.DefaultOfferTimeout.
 	OfferTimeout time.Duration
 
+	// Metrics records the execution counters and the busy state this loop is
+	// the only component that observes. Set it through UseMetrics so the event
+	// reporter is pointed at the same recorder; nil falls back to the
+	// process-wide recorder the metrics server exports.
+	Metrics *metrics.Recorder
+
 	mu       sync.Mutex
 	draining bool
 	active   map[string]*activeExecution
@@ -99,6 +106,16 @@ type ControlLoop struct {
 	// terminal execution touch. Nothing acquires `drainReports` while holding
 	// `mu`, so the two never deadlock.
 	drainReports sync.Mutex
+
+	// busyReports serializes the read of the capacity state with the gauge
+	// write that reports it, for the same reason drainReports exists. Without
+	// it, a publisher that read "at capacity" can be overtaken by one that read
+	// "idle" a moment later and land afterwards, leaving the gauge asserting a
+	// busy runner that has been idle since. `Handle`'s publish races exactly
+	// that way against a fast execution finishing on its own goroutine.
+	// Nothing acquires busyReports while holding `mu` or the offer state's
+	// lock, so it cannot deadlock either.
+	busyReports sync.Mutex
 }
 
 func NewControlLoop(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration) (*ControlLoop, error) {
@@ -202,6 +219,44 @@ func (loop *ControlLoop) Run(ctx context.Context) error {
 	}
 }
 
+// UseMetrics directs this loop and its event reporter at one recorder. Call it
+// before Run; a nil recorder restores the process-wide default.
+func (loop *ControlLoop) UseMetrics(recorder *metrics.Recorder) {
+	if loop == nil {
+		return
+	}
+	loop.Metrics = recorder
+	if loop.Reporter != nil {
+		loop.Reporter.Metrics = recorder
+		// The reporter published whatever it recovered from the outbox before
+		// this recorder existed; republish so the new one starts from the truth
+		// rather than from zero.
+		loop.Reporter.PublishMetrics()
+	}
+	loop.publishBusy()
+}
+
+func (loop *ControlLoop) recorder() *metrics.Recorder {
+	if loop != nil && loop.Metrics != nil {
+		return loop.Metrics
+	}
+	return metrics.Default()
+}
+
+// publishBusy republishes the busy gauge from Busy() rather than tracking the
+// transitions itself, so the gauge cannot drift out of step with the predicate
+// OfferState.Admit actually uses. It is called wherever capacity can change:
+// after handling a control message, after an expiry sweep, and once an
+// execution has released its lease.
+func (loop *ControlLoop) publishBusy() {
+	if loop == nil || loop.Offers == nil {
+		return
+	}
+	loop.busyReports.Lock()
+	defer loop.busyReports.Unlock()
+	loop.recorder().SetBusy(loop.Busy())
+}
+
 func (loop *ControlLoop) reconnectMin() time.Duration {
 	if loop != nil && loop.ReconnectMin > 0 {
 		return loop.ReconnectMin
@@ -221,6 +276,9 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 	if err := loop.validate(); err != nil {
 		return err
 	}
+	// Admissions, acknowledgements and abandonments all change capacity, and
+	// each has several exits; publishing once on the way out covers them all.
+	defer loop.publishBusy()
 	if message == nil {
 		return errors.New("orchestrator control message is required")
 	}
@@ -398,6 +456,7 @@ func (loop *ControlLoop) Reconcile() error {
 	if _, err := loop.Offers.RenewDue(); err != nil {
 		return fmt.Errorf("renew active lease: %w", err)
 	}
+	loop.publishBusy()
 	return nil
 }
 
@@ -419,6 +478,7 @@ func (loop *ControlLoop) expire() {
 	if loop == nil || loop.Offers == nil || loop.Reporter == nil {
 		return
 	}
+	defer loop.publishBusy()
 	// A reservation has no execution and no event lease — Reporter.Begin runs
 	// only once the acknowledgement lands — so releasing the slot and recording
 	// the offer is the whole of the work here.
@@ -495,6 +555,7 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 	}()
 	started := time.Now()
 	loop.logger().Info("runner execution started", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
+	loop.recorder().RecordExecutionStarted()
 	loop.emitEvent(lease, "started", map[string]any{"status": "running"})
 	result, err := loop.Dispatcher.Execute(ctx, lease)
 	usage := executionUsage(started, result)
@@ -532,8 +593,11 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 		payload := terminalPayload(result.Status, result, usage)
 		loop.emitEvent(lease, "completed", payload)
 	}
-	loop.logger().Info("runner execution terminal", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation, "status", terminalStatus(cancelled, err, result))
+	status := terminalStatus(cancelled, err, result)
+	loop.logger().Info("runner execution terminal", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation, "status", status)
+	loop.recorder().RecordExecutionCompleted(status)
 	loop.Offers.Abandon(lease.JobID, lease.Generation)
+	loop.publishBusy()
 }
 
 // emitEvent reports an execution lifecycle event and, unlike a discarded
@@ -570,9 +634,18 @@ func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payloa
 		"error", err,
 	}
 	if sequence > 0 {
+		// Queued but not yet delivered: the outbox will retry it, so this is
+		// not a loss and must not be counted as one.
 		loop.logger().Warn("execution event queued for delivery after a transport failure", append(fields, "event_sequence", sequence)...)
 		return
 	}
+	// Nothing was queued and the retry above — where there was one — did not
+	// save it either, so the event is gone. This is the only place a rejected
+	// lifecycle event is counted: the reporter deliberately does not count its
+	// own rejections, because the reduced-payload retry above turns the most
+	// common one into a delivered event, and counting at rejection would book a
+	// drop against a run that reported its outcome perfectly well.
+	loop.recorder().RecordEventDropped(control.DropReason(err))
 	if control.IsTerminalEventType(eventType) {
 		loop.logger().Error("terminal execution event lost", fields...)
 		return

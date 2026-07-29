@@ -24,6 +24,21 @@ The issue workflow is an event-driven state machine, not a run-to-completion fun
 
 The runner's terminal event clears `awaiting_execution` (`workflows/runner_events.py`), and `PersistedWorkflowRuntime.run` resumes the graph from the same edge with `aupdate_state` + `ainvoke(None, config)`. One terminal event therefore advances the workflow by at most one queued execution.
 
+### Run status versus run phase
+
+`app.workflow_runs` carries two columns that used to be written together, and separating them is what makes the loop work (issue #141).
+
+| Column | Written by | Meaning |
+| --- | --- | --- |
+| `status` | the scheduler (`schedule`, `accept_offer`, `expire_leases`, `recover_one`, the offer-release paths) and every phase transition | Where the run sits in the *scheduling* lifecycle: `offered` after `schedule` creates the run and again while `recover_one` re-places a fenced job, `preparing` from the moment a runner accepts until its execution reports, `recovering` while a fenced job waits for `recover_one`, otherwise the phase the graph last committed, or a terminal status. An offer for a *queued execution request* does not touch it — `schedule_execution` leaves the committed phase in place until the runner accepts. |
+| `current_phase` | `schedule` (the initial `offered`), `AsyncpgWorkflowPersistence.transition`, `accept_event`'s terminal-event transition, and the two paths that end a run outright (`_cancel_offered_job`, `_block_unanswered_run`) | Which node of the workflow the run is in. Placing or re-placing a job on a runner never writes it. |
+
+`current_phase` is the only durable record of which node a suspended run is waiting on, and `implement` and `push` both dispatch the `developer` role — so the phase is the one thing that tells their terminal events apart (`workflow_transition_for_terminal_event`). `accept_offer` used to stamp both columns `preparing`, so a successful developer execution produced no transition at all: the graph was never resumed, the job stayed `running` until its lease expired, and `recover_one` re-offered the same work forever. `expire_leases` and `recover_one` leave the phase alone for the same reason — a recovery re-offer carries the *same* dispatched execution request, so the phase that queued it has to survive for the terminal event to mean anything.
+
+`preparing` and `recovering` still go on `status`: they are what `find_stalled_workflow_runs` reads, and what the console renders while a runner is preparing a workspace or a fenced job is waiting to be re-offered. A run whose two columns differ is therefore normal, and the console's workflow table shows both.
+
+One predicate had to be re-grounded. `_release_unanswered_offer` cancels a *bootstrap* run — one that has never accepted a job — and it used to recognise that by `current_phase = 'offered'`, which held only because `accept_offer` overwrote the phase. With the phase preserved, the acceptance is tested directly instead, against `app.job_offers`. The distinction is not cosmetic: cancelling releases the project lock and leaves the issue eligible, so `schedule()` immediately builds a new run with a new job, and the unanswered-offer streak is counted per job — so a run cancelled by mistake churns forever instead of blocking at the limit. A runner that accepts an offer and then dies silently therefore keeps its bounded outcome: re-offered by `recover_one`, and eventually blocked.
+
 ### Agent-reported blocks
 
 A `failed` terminal event carrying `blocked: true` is not a crash: the agent finished cleanly and wrote `status: blocked` in its result document, saying why it stopped and what remains. `validate_runner_event` parses the result document for every terminal event (not only a success), and validates the payload's `blocked`, `summary`, and `remainingWork` wherever they appear, so a malformed one is rejected on any event rather than only on the terminal ones. Then `workflow_transition_for_terminal_event` routes the block ahead of the generic failure arm — to the terminal `blocked` status, with `blocking_reason` composed from the agent's own summary and outstanding work (bounded to 1024 characters, the width the circuit writer stores). The reporting role's own gate is cleared with it: a blocked planner sets `plan_valid = False`, a blocked reviewer `review_approved = False`.

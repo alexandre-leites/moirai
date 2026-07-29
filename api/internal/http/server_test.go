@@ -79,19 +79,31 @@ func TestDefaultConfigIsValid(t *testing.T) {
 	}
 }
 
-func TestMetricsExposesCoreGauges(t *testing.T) {
+// The API exports only the metrics it owns. Queue depth, active workflow
+// counts and the fleet-wide runner heartbeat age are derived from the database
+// the API cannot reach, and used to be registered here as gauges permanently
+// stuck at zero; the orchestrator exports the real ones (issue #124).
+func TestMetricsExposesOnlyApiOwnedSeries(t *testing.T) {
 	s, err := apiserver.New(apiserver.DefaultConfig(), nil)
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
+	// A request-scoped metric has no series until a request has been served, so
+	// one is served before the scrape.
+	s.Handler().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/live", nil))
 	rec := httptest.NewRecorder()
-	s.Mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /metrics: got %d", rec.Code)
 	}
-	for _, name := range []string{"moirai_queue_depth", "moirai_active_workflow_count", "moirai_runner_heartbeat_age_seconds"} {
+	for _, name := range []string{"moirai_api_requests_total", "moirai_api_request_duration_seconds"} {
 		if !strings.Contains(rec.Body.String(), name) {
 			t.Errorf("metrics response missing %s", name)
+		}
+	}
+	for _, name := range []string{"moirai_queue_depth", "moirai_active_workflow_count", "moirai_runner_heartbeat_age_seconds"} {
+		if strings.Contains(rec.Body.String(), name) {
+			t.Errorf("metrics response still exports orchestrator-owned %s", name)
 		}
 	}
 }

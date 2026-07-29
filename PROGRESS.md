@@ -2432,6 +2432,83 @@ Autonomy L2, issue [#105](https://github.com/alexandre-leites/moirai/issues/105)
 
 ---
 
+# Session: issue #141 — `accept_offer` clobbered the workflow phase, so successful developer executions produced no transition (branch `issue-141`)
+
+## Current Status
+
+- Overall status: complete, pending review.
+- Current phase: core-loop correctness.
+- Active implementation: none — issue #141 delivered (session `issue-141`, 2026-07-29).
+- Last updated: 2026-07-29.
+- Agent/session identifier: `issue-141`.
+
+## Done
+
+- [x] `app.workflow_runs.current_phase` belongs to the graph alone, so a terminal developer event can transition.
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_postgres_integration.py`, `orchestrator/README.md`, `docs/design/web-console/specification.md`.
+  - Behavior delivered:
+    - `accept_offer` writes only `app.workflow_runs.status = 'preparing'`. It no longer touches `current_phase`. Acceptance is a fact about the *job* (`app.jobs.status` already records it); the phase is the graph's, and it is the only durable record of which node a suspended run is waiting on.
+    - `accept_event` decides the terminal-event transition from `w.current_phase`, not `w.status`. `implement` and `push` both dispatch the `developer` role, so the phase is the one thing that separates their terminal events; the status is `preparing` for the whole life of an execution and can never read `implementing` or `pushing` when the event lands.
+    - `expire_leases` and `recover_one` likewise write only `status` (`recovering`, then `offered`). This is not cosmetic: a recovery re-offer carries the **same** `dispatched` execution request, so the phase that queued it has to survive for the terminal event it eventually produces to mean anything. Without this the fix would have held for the first attempt and the identical loop would have reappeared one lease expiry deeper.
+    - The invariant is now: `status` is the scheduling lifecycle (`offered` / `preparing` / `recovering` / the committed phase / terminal); `current_phase` is written only by `AsyncpgWorkflowPersistence.transition` and by `accept_event`'s own transition. `_cancel_offered_job` and `_block_unanswered_run` still write both, because `cancelled` and `blocked` are genuine terminal workflow outcomes rather than job lifecycle events.
+    - Consequence, deliberate and documented: `_release_unanswered_offer`'s `bootstrap` predicate reads `current_phase = 'offered'`, which now means exactly "no graph node has ever committed a phase for this run" instead of "`accept_offer` has never run". A run whose very first offer was accepted by a runner that then died without reporting anything is therefore cancelled and its issue returned to the global queue rather than re-offered until the unanswered-offer limit blocks it. The predicate's other guards (no branch, no pull request, `total_agent_executions = 0`, no `app.executions` row, no execution request) are unchanged, so a run with any work at all still cannot match it.
+    - No migration: both columns already exist (`001_initial.sql`) and no schema change was needed. `preparing` and `recovering` remain valid `status` values, so `find_stalled_workflow_runs`' allow-list, `services/issue_sync.py`'s active-status list, `recover_one`'s `w.status = 'recovering'` predicate and the console's status pills are all untouched.
+  - Validation performed: failing-test-first against real PostgreSQL and against the query fakes, then the full orchestrator suite, the Postgres integration suite on a fresh database, lint and type checks.
+  - Commands executed:
+    - Failing-first, real PostgreSQL, before the fix — the two new integration tests failed, and instrumenting `test_successful_developer_execution_advances_to_the_local_pipeline` printed exactly the outcome issue #141 describes:
+      `AFTER DEVELOPER EVENT -> run status: preparing | phase: preparing | job status: running | graph nodes run since dispatch: 0 | requests: [('developer', 1, 'completed'), ('planner', 1, 'completed')] | outbox: ['processed']`
+      No transition, no new outbox row, no `pipeline` request, job left `running` for `expire_leases` to sweep.
+    - Failing-first, fakes, before the fix — `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p test_asyncpg_control_plane.py` → `Ran 75 tests ... FAILED (failures=5)`, the five being the new `test_successful_developer_event_advances_the_implementing_phase`, `..._the_pushing_phase`, `test_accept_offer_records_readiness_without_clobbering_the_phase`, `test_expire_leases_preserves_the_phase_of_the_run_it_fences`, `test_recovery_reoffer_preserves_the_phase_it_is_recovering`.
+    - `make test-orchestrator` → `Ran 458 tests in 1.372s ... OK (skipped=33)` (449 before this change).
+    - `LOOP_TEST_DATABASE_URL="postgresql://moirai:moirai@127.0.0.1:55141/moirai" make test-postgres-integration` → `Ran 33 tests in 5.054s ... OK`, against a freshly created throwaway PostgreSQL 16 container on a port unique to this session, removed afterwards. (30 before this change.)
+    - Each half of the fix was proved load-bearing independently. With only the `accept_offer`/`accept_event` half applied and the two recovery sweeps reverted, `test_developer_execution_recovered_from_a_lease_expiry_still_transitions` fails with `'recovering' != 'implementing'` while the direct test passes. With the `app.job_offers` guard removed, `test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap` fails with `'cancelled' != 'recovering'`. With the production `SELECT` mutated back to `w.status AS workflow_phase`, the two developer-transition unit tests fail.
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-141` → `Success: no issues found in 48 source files` (own cache directory, so it cannot collide with a sibling worktree).
+  - Notes:
+    - The issue's claim held exactly as written on `5903aa0`, including the reproduction it quotes. Its "How to tackle" section is stale in one detail: it says `current_phase = 'preparing'` is read by `_release_unanswered_offer`'s bootstrap predicate, but #91 reworked that predicate to read `current_phase = 'offered'`. That is what made option 1 (stop the clobber) viable without touching `runner_events.py` at all — the whole fix is inside `persistence/control_plane.py`.
+    - Option 2 from the issue (make the `developer` branch phase-independent) was rejected: `implement` and `push` dispatch the same role with the same request shape, so nothing in the request distinguishes them. Deriving it from the graph's suspension point would mean reading the LangGraph checkpoint from the control plane, which is a much larger coupling than keeping one column honest.
+
+## Post-review corrections
+
+An adversarial review of the diff was run before committing. Its substantive finding, and what was done about it:
+
+- **The widened bootstrap arm turned a bounded failure into an unbounded loop** (major, self-inflicted). `_release_unanswered_offer`'s `bootstrap` predicate reads `current_phase = 'offered'`, which used to mean "never accepted a job" only because `accept_offer` overwrote the phase. Preserving the phase made that proxy also match a run whose first offer *was* accepted by a runner that then died silently — no `started` event, so no `app.executions` row, no branch, no request — and the first draft accepted that as "nothing to preserve, so cancelling is fine". It is not fine, and the review proved why against real PostgreSQL: cancelling releases the project lock and leaves the issue eligible, so `schedule()` immediately builds a **new** run with a **new** job, and the unanswered-offer streak is counted per job — so `unanswered_offer_limit`, the bound that is supposed to stop exactly this, resets on every cycle. A bad runner image would churn runs forever instead of blocking one. Fixed by grounding the predicate in the fact it actually means: `NOT EXISTS (SELECT 1 FROM app.job_offers WHERE job_id = j.id AND status = 'accepted')`, keeping `current_phase = 'offered'` alongside it. That restores the pre-change reachability of the arm exactly. Covered by `test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap` (PostgreSQL) and `test_expire_offers_never_cancels_a_run_a_runner_already_accepted` (fake), both confirmed failing with the new guard removed.
+- **The unit fakes did not test the SQL** (minor). The review demonstrated that changing the production `SELECT` to `w.status AS workflow_phase` — the exact bug, reintroduced — left the whole `test_asyncpg_control_plane.py` suite green, because the fakes returned a `workflow_phase` key regardless of what the query asked for. Only the PostgreSQL tests caught it. The three fakes that answer that query now resolve the alias from the statement (`_selected_phase`), so whichever `app.workflow_runs` column the SELECT names is what they serve; the same mutation now fails `test_successful_developer_event_advances_the_implementing_phase` and `..._the_pushing_phase`. `_DurableConnection` likewise now parses the literal each column is actually assigned (`_assigned_literal`) instead of assuming `current_phase` always receives the same value as `status`.
+- **Three documentation claims were wrong or overstated** (minor). `status` is not `offered` "while an offer is outstanding" — `schedule_execution` leaves the committed phase in place until the runner accepts; the `phase` field is `workflow_runs.current_phase` in the workflow *list* only, since `SubmitHumanDecision` echoes the graph state's status into both fields; and the paragraph describing the widened bootstrap arm described behaviour that the fix above removes. All three corrected.
+- Two findings were confirmed as clean by the review and needed no change: no remaining job-lifecycle writer of `current_phase`, and no consumer of either column that breaks now that they can differ (`find_stalled_workflow_runs`, `close_orphaned_execution_requests`, `recover_one`'s candidate query, `schedule`/`schedule_execution`, `issue_sync`, `load_state` and the runtime all read `status`, which is unchanged).
+
+## Validation Status
+
+- Targeted tests: Passed — three new PostgreSQL integration tests (`test_successful_developer_execution_advances_to_the_local_pipeline`, `test_developer_execution_recovered_from_a_lease_expiry_still_transitions`, `test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap`) and six new unit tests, every one confirmed failing with the production change it covers reverted.
+- Service tests: Passed — `make test-orchestrator` → `Ran 458 tests ... OK (skipped=33)`; `make test-postgres-integration` → `Ran 33 tests ... OK` against a fresh throwaway database.
+- Full repository tests: Not run — no Go, proto, or web change. `make test` was deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-141`.
+- Database migrations: None added. `MigrationRunner` ran `001`–`007` against the throwaway database as part of the integration suite.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Partially — `test_successful_developer_execution_advances_to_the_local_pipeline` drives seed → `schedule` → `accept_offer` → graph → planner event → `schedule_execution` → `accept_offer` → developer event → `pipeline` dispatch through the real control plane, real graph runtime and real PostgreSQL, with nothing about `app.workflow_runs` patched by hand.
+
+## Known Issues
+
+- Issue: `recover_stalled_workflow_run` hands `wr.status` to the graph runtime, which can now be a scheduling state rather than a phase.
+  - Severity: P3 — pre-existing, unchanged by this session.
+  - Impact: the "transition committed but never invoked" branch calls `on_transition(run, status, {"awaiting_execution": False})`, so the graph state's `status` key can read `preparing`. Harmless today: nothing routes on `status` except `issue_graph`'s `blocked` check and `runtime`'s terminal-status check, and the node the graph resumes into writes its own status immediately.
+  - Evidence: `persistence/control_plane.py` `recover_stalled_workflow_run` selects `wr.status`; that branch is only reachable when the run has no job in `offered`/`preparing`/`running`/`recovering`, which is exactly when the status and the phase are already in agreement.
+  - Suggested resolution: pass `current_phase` instead, once something depends on the distinction. Not changed here: it would widen this diff into #94's recovery machinery with no demonstrated defect.
+
+- Issue: `_release_unanswered_offer`'s two early-return arms commit no `offer_unanswered` workflow event.
+  - Severity: P3 — pre-existing, unchanged by this session.
+  - Impact: a bootstrap run cancelled by an unanswered offer, and an offer released for an already-terminal run, leave no entry in `app.workflow_events`. The audit trail only records the requeue/block arms, so the console shows a run vanishing with `terminal_reason = 'offer_expired'` and nothing explaining the decision.
+  - Evidence: `persistence/control_plane.py` `_release_unanswered_offer` — both `return True` branches sit above the `INSERT INTO app.workflow_events ... 'offer_unanswered'`. Identical at `5903aa0`.
+  - Suggested resolution: emit the event before each early return. Not done here: this session narrowed that arm rather than widening it, so it adds no new instances, and the change belongs with #91's paths.
+
+- Issue: `InMemoryControlPlane` cannot express the status/phase split, so it still models the bug this issue fixes.
+  - Severity: P3 — test double only, never constructed by `main.py`.
+  - Impact: `domain/control_plane.py` stores one `WorkflowStatus` per run, sets it to `PREPARING` on `accept_offer`, and feeds it to `workflow_transition_for_terminal_event`. Any future test written against that double would see a developer terminal event produce no transition, and would "prove" behaviour the real control plane no longer has.
+  - Evidence: `domain/control_plane.py` — `accept_offer` assigns `WorkflowStatus.PREPARING`; there is no phase field to preserve.
+  - Suggested resolution: give the double a `current_phase` alongside `status` and mirror the invariant. Not done here: the file is outside this issue's ownership and the fix needs no change to it.
 # Session: CI red on `main` — every Python job dies on the self-hosted Debian 13 runners (branch `fix/ci-self-hosted-python`)
 
 ## Current Status
@@ -2554,3 +2631,105 @@ Final per-job status on run `30471380437`, read from `gh api repos/alexandre-lei
 
 - Fix Docker group membership on both runners, then confirm `compose-smoke` and `test-postgres-integration` go green — they need no repository change once the daemon is reachable.
 - Consider whether `validate` should also gate on `test-postgres-integration`; it currently does not appear in that job's `needs:` list, so a Postgres integration regression would not block the aggregate check even when the job can run.
+
+---
+
+# Session: issue #124 — API and runner Prometheus gauges are hardcoded to zero
+
+## Current Status
+
+Implemented. Branch `issue-124`, opened as a pull request against `main`. Repository CI is red for a pre-existing reason unrelated to this change (see Known Issues), so the PR is deliberately left open and unmerged; validation below is local and real.
+
+## Done
+
+- [x] Replaced the API's and the runner's placeholder gauges with metrics each service can actually populate
+  - Completed: issue #124 in full — every acceptance criterion, plus the two hazards an adversarial review of the diff was asked to look for.
+  - Relevant files:
+    - `api/internal/http/server.go` — removed `moirai_queue_depth`, `moirai_active_workflow_count` and `moirai_runner_heartbeat_age_seconds`; registered `moirai_api_requests_total` and `moirai_api_request_duration_seconds` and recorded both in `withMiddleware`; added `Server.Handler()` so the middleware chain is reachable from a test.
+    - `api/internal/orchestrator/client.go` — `moirai_api_orchestrator_calls_total{rpc,code}`, recorded by a `callMetricsInterceptor` on the dial-time unary chain, exported through `Collectors()`.
+    - `runner/internal/metrics/metrics.go` — rewritten around a `Recorder` holding the runner-owned collectors and an injectable clock; `Server` serves a recorder's registry.
+    - `runner/internal/dispatch/control_loop.go` — execution start/outcome counters, the busy gauge, `UseMetrics`.
+    - `runner/internal/control/events.go` — dropped-event counter by reason and the pending-queue gauge, recorded where the queue actually changes.
+    - `api/README.md`, `runner/README.md` — the exported metric names, their labels, and why each label set is bounded.
+    - New tests: `runner/internal/metrics/metrics_test.go`, `runner/internal/control/events_metrics_test.go`, `runner/internal/dispatch/control_loop_metrics_test.go`, `api/internal/http/request_metrics_test.go`, `api/internal/orchestrator/client_metrics_test.go`; `api/internal/http/server_test.go` updated (its `TestMetricsExposesCoreGauges` asserted the placeholders were present).
+  - Behavior delivered:
+    - **API** exports `moirai_api_requests_total{method,route,status}`, `moirai_api_request_duration_seconds{method,route}` and `moirai_api_orchestrator_calls_total{rpc,code}`. Nothing orchestrator-owned is re-exported: the API has no database access (`PROJECT.md:134`, "Public API (Go) … Has no database access"), and `orchestrator/src/moirai/observability.py:49-52` already exports the real `moirai_queue_depth`, `moirai_active_workflow_count` and fleet-wide `moirai_runner_heartbeat_age_seconds` from a 15 s snapshot loop.
+    - **Runner** exports `moirai_runner_heartbeat_age_seconds`, `moirai_runner_busy`, `moirai_runner_executions_started_total`, `moirai_runner_executions_completed_total{outcome}`, `moirai_runner_pending_events` and `moirai_runner_events_dropped_total{reason}`.
+    - The heartbeat age is a `GaugeFunc` computed at scrape time from the recorder's clock, not a stored value. `MarkHeartbeat` — already wired from `main.go:283`/`main.go:314` through `StreamSupervisor.OnHeartbeat` — records the clock reading; the gauge subtracts it at every scrape. It starts at construction time, so a runner that never reaches the orchestrator ages from process start rather than sitting at zero, which is the case an age alert most needs to catch.
+    - `metrics.New(bind)` serves the process-wide `metrics.Default()` recorder, and the control loop and event reporter fall back to that same recorder when no other is assigned. `runner/cmd/runner/main.go` therefore needed no change and is not in the diff; three tests assert the identity that makes this wiring hold.
+  - Validation performed: see Validation Status. Every new assertion was confirmed to fail against a deliberate mutation of the code it covers (list below).
+  - Commands executed:
+    - `make test-api` — all packages `ok`.
+    - `cd api && go test -race -count=1 ./...` (what CI runs) — all packages `ok`.
+    - `make test-runner` — all 11 packages `ok`.
+    - `cd api && go vet ./...`, `cd runner && go vet ./...` — no output.
+    - `cd api && gofmt -l .`, `cd runner && gofmt -l .` — no output.
+    - `cd api && go build ./cmd/api`, `cd runner && go build ./cmd/runner` — both succeeded; the produced binaries were deleted, not committed.
+    - `go test -race -count=3` over the three new runner packages and the two new API packages — no flakes.
+    - `grep -rn "Set(0)" api/internal/http/server.go runner/internal/metrics/metrics.go` — no matches (exit 1).
+  - Notes: `runner/internal/dispatch/dispatch.go` was deliberately not edited — it is owned by concurrent work on issue #104, and this issue's Scope list does not include it. It is cited in the issue only as evidence that drop counters exist. The dropped-event counter did not need it; see Known Issues for the one drop path that consequently remains uncounted.
+
+## Decisions
+
+- **Removing a placeholder is the fix, not a regression.** The API no longer exports queue depth, workflow counts, or a fleet-wide heartbeat age, and the runner no longer exports the first two. A gauge stuck at zero is worse than an absent one, because `alert: moirai_queue_depth > N` can never fire and reads as healthy. Verified that nothing else in the repository scrapes those names: `grep -rn` across the whole tree finds only `orchestrator/src/moirai/observability.py`, which is the service that owns them. There are no dashboards or alert rules in the repository to update.
+- **Heartbeat age as a `GaugeFunc`, with an injectable clock.** An age is only correct at the instant it is read, so it is computed during the scrape rather than stored. The clock is a `func() time.Time` on the recorder, which is what lets `TestHeartbeatAgeGaugeAgesWithTheInjectedClock` observe the gauge grow to 30 s and then 120 s without a single wall-clock sleep, and what makes the test deterministic regardless of how long the test binary itself takes.
+- **The route label is the matched pattern, never the request path.** `net/http` assigns `Request.Pattern` on the request itself before invoking the matched handler (`net/http/server.go:2859`), and the middleware wraps the mux, so the pattern is readable in the deferred block once the chain has returned. `/api/v1/projects/{project_id}` is therefore one series regardless of how many project IDs are requested; a request that matched nothing is labelled `unmatched`. The method label is likewise folded to `other` outside the standard verbs, because a request line may carry any token as its method — labelling with `r.Method` directly would let any client mint a series per request against the API's own metrics endpoint.
+- **Every label set on the new metrics is closed.** `outcome`, `reason`, `rpc` and `code` are all bounded by construction, and the runner's recorder resolves each label child once at construction into a map, so an unrecognised value is counted under `unknown` rather than creating a series. That also removes the per-call `WithLabelValues` map lookup from the recording path.
+- **Drops are counted in the event reporter, not in the control loop.** `control.EventReporter` owns the pending queue and is the only component that can distinguish an event that was queued from one that was discarded. Counting there covers the log-forwarding path too, which calls `EventReporter.EmitLog` directly and never passes through `ControlLoop.emitEvent`. Counting in both places would double-count.
+- **The busy gauge is republished from `Busy()`, not tracked incrementally.** `Busy()` is the same predicate `OfferState.Admit` uses, so a gauge derived from it cannot drift out of step with the runner's real admission behaviour. The cost is a re-read at each of four call sites instead of a transition count that could desynchronise.
+- **A `busyReports` mutex, mirroring the existing `drainReports` one.** See Post-review corrections.
+
+## Post-review corrections
+
+Self-review of the diff before commit found one real defect, fixed before this was claimed done:
+
+- **A newly introduced stale-write race on the busy gauge** (medium). `publishBusy` read `Busy()` and then wrote the gauge as two separate steps, and it is called from several goroutines — `Handle`, the expiry sweep, and the tail of every execution. A publisher that read "at capacity" could be overtaken by one that read "idle" a moment later and land afterwards, leaving the gauge asserting a busy runner that had been idle since. `Handle`'s publish races exactly that way against a fast execution finishing on its own goroutine. It was not a data race — the race detector would never have caught it — and it self-corrected only at the next expiry sweep or heartbeat, up to one `LOOP_RUNNER_HEARTBEAT_INTERVAL` later. Fixed with a `busyReports` mutex that makes the read and the write atomic with respect to each other, exactly as `drainReports` already does for the drain report in the same file for the same class of bug. `TestControlLoopBusyGaugeConvergesUnderConcurrentPublishers` drives four publisher goroutines against twenty concurrent executions and asserts the gauge agrees with `Busy()` once the dust settles; the guarantee that no *individual* interleaving can strand the gauge is structural, from the mutex, and is not claimed to be proven by that test.
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed. Each new assertion was confirmed to fail against a mutation of the code it covers, run against an isolated copy of both modules so the working tree was never mutated:
+  - heartbeat age frozen at `0` (the original bug) → 3 metrics tests fail.
+  - route label taken from `r.URL.Path` instead of `r.Pattern` → `TestRequestMetricsSeparateStatusesAndMethods` fails.
+  - method label taken straight from `r.Method` → `TestRequestMetricsDoNotGrowWithCallerControlledInput` fails ("series grew from 2 to 4").
+  - buffer-full drop not counted → `TestDroppedLogEventIncrementsTheDroppedEventCounter` fails.
+  - pending gauge not republished after delivery → `TestPendingEventGaugeFollowsTheQueueDown` fails.
+  - `publishBusy` removed from the tail of `execute` → `TestControlLoopPublishesBusyStateInBothDirections` fails on the down direction.
+  - `RecordExecutionCompleted` removed → `TestControlLoopCountsExecutionsByOutcome` and the busy test fail.
+  - orchestrator call counter never incremented → both `client_metrics_test.go` tests fail.
+  - API request counter incremented by zero → all four `request_metrics_test.go` tests fail.
+- Service tests: Passed — `make test-runner` (race detector on, 11 packages `ok`) and `make test-api` (5 packages `ok`). `cd api && go test -race ./...` also passed, which is the stricter form CI runs.
+- Full repository tests: Not run. No orchestrator, web, or proto change, so `make test` and `make validate` were deliberately not invoked; `make lint` and `make typecheck` cover the orchestrator only and nothing there changed.
+- Build: Passed — `go build ./cmd/api` and `go build ./cmd/runner`.
+- Lint: Passed — `gofmt -l .` produced no output in either module.
+- Type checks: Passed — `go vet ./...` in both modules.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run — no Compose or configuration change. `LOOP_RUNNER_METRICS_BIND` already existed and is unchanged.
+- End-to-end workflow: Not run. The production wiring is covered by the three tests asserting that `metrics.New`, `ControlLoop` and `EventReporter` all resolve to `metrics.Default()`, which is what makes `runner/cmd/runner/main.go` correct without being edited.
+
+## Known Issues
+
+- Issue: one dropped-log path is still uncounted — the log forwarder's own queue overflow.
+  - Severity: P3.
+  - Impact: `runner/internal/dispatch/dispatch.go:494-503` buffers agent output in a 128-slot channel and increments a private `dropped` counter when that channel is full, before the event ever reaches `EventReporter`. Those drops are still visible only in the `runner log events dropped` warning at the end of the execution, not in `moirai_runner_events_dropped_total`. Everything downstream of the forwarder — a log event the bounded event buffer rejects, evicts, or discards on lease expiry — is counted.
+  - Evidence: `logForwarder.Write` (`dispatch.go:494-503`) selects on `forwarder.queue` and falls through to `forwarder.dropped.Add(1)`; the emit-failure branch at `dispatch.go:515-518` is already covered, since it reaches `EventReporter.Emit`.
+  - Suggested resolution: one line in `logForwarder`, calling `metrics.Default().RecordEventsDropped(metrics.DropBufferFull, n)` where it already logs the total. Deliberately not done here: `runner/internal/dispatch/dispatch.go` is owned by concurrent work on issue #104 and is not in this issue's Scope list, so editing it would have created a conflict. Duplicating the forwarder's logic elsewhere to avoid touching the file was rejected as worse.
+- Issue: repository CI is red on every branch, including `main`'s own HEAD.
+  - Severity: blocks merge, not this change.
+  - Impact: six jobs fail in under 10 s at `actions/setup-python` with `The version '3.12' with architecture 'x64' was not found for debian 13`. Introduced by `3ba81c2` ("Change CI runner to self-hosted Linux"); the identical six jobs fail the same way on `main`. The PR for this issue is therefore left open and unmerged rather than merged on red.
+  - Suggested resolution: owned by the concurrent `fix/ci-self-hosted-python` branch. Not touched here.
+
+## Post-review corrections (issue #124, second pass)
+
+An adversarial review of the committed diff (`ae07534`) found three more issues. All were fixed in a follow-up commit before the work was claimed done.
+
+- **A successfully delivered run was counted as a dropped event** (high — the defect actively poisoned the one alert the metric exists for). `EventReporter.Emit` counted `reason="invalid"` whenever a payload exceeded the 16 KiB limit. But that is precisely the case `ControlLoop.emitEvent` exists to retry, stripped to its classification fields — its own comment calls it "the failure mode a successful large run is most likely to hit". So a healthy run with a verbose agent incremented `moirai_runner_events_dropped_total`, and `rate(moirai_runner_events_dropped_total[5m]) > 0` — the obvious alert — fired on healthy runners. If the retry also failed, one logical event booked two drops.
+  - Fixed by moving the accounting to the callers that know whether a loss is final. `Emit` now counts nothing it merely *rejects*; it counts only the queued event it *evicts*, which is gone whatever the caller does next. `ControlLoop.emitEvent` counts once, only on the branches where the event is finally lost, and never when the reduced retry succeeded or when the event was queued for later delivery. `EventReporter.EmitLog` counts immediately, since nothing retries log output. `control.DropReason(err)` classifies the loss, which needed two new sentinels (`ErrInvalidExecutionEvent`, `ErrEventOutboxUnavailable`) so a persist failure and an oversized payload stay distinguishable through a wrapped error.
+  - Covered by `TestRetriedTerminalEventIsNotCountedAsADrop` (whose payload is built from the unbounded `changedFiles` list — `summary` is already bounded to 2 KiB by `terminalPayload`, so an earlier version of this test never reached the retry at all and proved nothing; it now asserts the delivered payload lost `changedFiles`, which is proof the reduction ran), `TestTerminalEventLostAfterTheRetryIsCountedOnce`, and `TestEmitDoesNotCountRejectionsTheCallerMayRetry`. Confirmed failing against a revert of the fix and against two different double-counting mutations.
+- **`EmitLog` under-counted multi-chunk losses** (medium). It returned on the first failing chunk, so a >6 KiB log message hitting a full buffer lost several chunks and booked one drop. It now counts the chunks never attempted as well, and does not count a chunk that was queued but whose delivery failed, since the outbox retries that one. `TestDroppedMultiChunkLogCountsEveryLostChunk` fails against the previous behaviour (1 vs 4).
+- **The heartbeat age was wall-clock arithmetic** (medium). It stored `time.Now().UnixNano()`, which strips the monotonic reading, and subtracted via `time.Unix(0, …)`. An NTP correction or a suspend/resume stepping the clock backwards by Δ would make the gauge read 0 — "the heartbeat just happened" — for Δ, which is a narrower version of the exact lie this issue exists to remove, and the negative clamp masked it. It now stores the `time.Time` in an `atomic.Pointer`, so with the process clock the subtraction is monotonic. **This is not covered by a test**: a test clock built from `time.Date` carries no monotonic reading, and Go offers no way to step the wall clock independently of the monotonic one, so the mutation that reverts it is not detectable. The correctness here rests on the type, not on an assertion.
+- **The busy-gauge convergence test was vacuous** (medium). It called `loop.publishBusy()` itself immediately before asserting the gauge was 0, so the assertion could not fail; the reviewer confirmed empirically that deleting the `busyReports` lock still passed it. The forced publish is gone — the asserted value now comes only from the racing publishers, so a stranded gauge fails the test. It still detects the interleaving only probabilistically, and the comment now says so rather than implying the test proves the mutex.
+- **The advertised metrics seam had no production caller** (medium-low). `loop.Metrics` and `Reporter.Metrics` were nil in production and fell back to `metrics.Default()`, which `metrics.New(bind)` happens to serve — correct today, but the `ControlLoop.Metrics` doc comment described wiring through `UseMetrics` that nothing performed, and building the server with a recorder of its own would have silently sent every runner metric except the heartbeat age to an unscraped registry. `runner/cmd/runner/main.go` now calls `loop.UseMetrics(metricsServer.Recorder())`. `UseMetrics` also republishes the queue depth, so a depth recovered from the outbox before the recorder was assigned is carried across rather than stranded on the default recorder.
+
+Review findings accepted without change: the API's request metrics cannot pre-materialise their label children the way the runner's do (routes are registered by handlers after the server is built, and the RPC-by-status-code cross product is large) — `api/README.md` now explains the asymmetry and says to alert on `absent()` rather than assume a series exists; `orchestratorCalls` stays a package variable because the interceptor that writes it is installed at dial time, before any server exists to hold it; a 405 lands in `route="unmatched"` because the mux answers it from a handler it never registered, which the route-label comment and the README now state.

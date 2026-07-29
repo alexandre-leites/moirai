@@ -63,33 +63,6 @@ In Compose the runner receives it as `GITHUB_TOKEN_FILE=/run/secrets/github_toke
 
 
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `LOOP_ORCHESTRATOR_ENDPOINT` | `orchestrator:50051` | Orchestrator host and port. |
-| `LOOP_RUNNER_DATA_DIR` | `/data` | Absolute directory for identity, event outbox, and workspaces. |
-| `LOOP_RUNNER_NAME` | hostname | Runner display identity. |
-| `LOOP_RUNNER_LABELS` | empty | Comma-separated runner capability labels. |
-| `LOOP_RUNNER_REGISTRATION_TOKEN_FILE` | empty | Absolute path to the one-time registration-token secret file. |
-| `LOOP_RUNNER_HEARTBEAT_INTERVAL` | `10s` | Heartbeat interval. |
-| `LOOP_RUNNER_RECONNECT_MIN` | `1s` | Initial reconnect backoff. |
-| `LOOP_RUNNER_RECONNECT_MAX` | `1m` | Maximum reconnect backoff. |
-| `LOOP_RUNNER_CAPACITY` | `1` | Concurrent execution capacity; must be positive. |
-| `LOOP_RUNNER_MINIMUM_FREE_BYTES` | `1073741824` | Required free space in the runner data directory. |
-| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | empty | Comma-separated environment variable names a task packet may request. |
-| `GITHUB_TOKEN` / `GITHUB_TOKEN_FILE` | empty | Code-host credential resolved for task packets that declare `GITHUB_TOKEN`; the `_FILE` form reads a mounted secret. |
-| `LOOP_RUNNER_REDACTION_PREFIXES` | empty | Comma-separated sensitive-variable prefixes removed from logs. |
-| `LOOP_RUNNER_RETAIN_WORKSPACES` | `failed` | Comma-separated terminal states to retain: `succeeded`, `failed`, `abandoned`, or `none`. |
-| `LOOP_RUNNER_DOCKER_ENABLED` | `false` | Allow Docker-backed execution. |
-| `LOOP_RUNNER_AGENT_BACKEND` | `opencode` | Agent backend: `opencode`, `cli`, or `docker`. |
-| `LOOP_RUNNER_AGENT_BINARY` | empty | Required executable name when `LOOP_RUNNER_AGENT_BACKEND=cli`. |
-| `LOOP_RUNNER_AGENT_ARGUMENTS` | empty | Comma-separated agent arguments. |
-| `LOOP_RUNNER_AGENT_DOCKER_IMAGE` | empty | Required image when `LOOP_RUNNER_AGENT_BACKEND=docker`. |
-| `LOOP_ORCHESTRATOR_TLS` | `false` | Enable TLS for the orchestrator connection. |
-| `LOOP_ORCHESTRATOR_TLS_CA_FILE` | empty | Absolute CA bundle path; requires TLS. |
-| `LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE` | empty | Absolute client certificate path; requires TLS and a matching key. |
-| `LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE` | empty | Absolute client key path; requires TLS and a matching certificate. |
-| `LOOP_ORCHESTRATOR_TLS_SERVER_NAME` | empty | TLS server name override; requires TLS. |
-
 Registration credentials must be provided through `LOOP_RUNNER_REGISTRATION_TOKEN_FILE`; raw registration-token environment variables are not read. In Compose, this is mounted as a Docker secret at `/run/secrets/runner_registration_token`, alongside the shared `github_token` secret at `/run/secrets/github_token`.
 
 ## Agent Result Document
@@ -189,6 +162,39 @@ Execution events are queued in a bounded in-memory buffer (`LOOP_RUNNER_EVENT_BU
 - A terminal event that still cannot be queued is logged at `ERROR` with `msg="terminal execution event lost"` plus the job, execution, lease generation, and reason. One that is queued but not yet delivered is logged at `WARN` and retried from the outbox.
 
 The orchestrator remains authoritative: it fences every event on the lease generation. Note that it currently *rejects* an event whose lease has expired — `expire_leases` bumps the generation, so a terminal event reported after expiry is discarded and the control stream is aborted. The runner still records and offers the outcome; accepting it as recovery evidence is tracked as the orchestrator half of #93.
+
+## Metrics
+
+`LOOP_RUNNER_METRICS_BIND` (default `:9091`) serves `GET /metrics` in the Prometheus text format. The runner exports only values it holds itself; queue depth and active workflow counts are orchestrator-owned state it cannot populate, and it no longer exports placeholders for them ([#124](https://github.com/alexandre-leites/moirai/issues/124)).
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `moirai_runner_heartbeat_age_seconds` | gauge | | Seconds since this runner last completed a control-stream heartbeat. Computed at scrape time from the process clock's monotonic reading, so a wall-clock correction cannot affect it, and counting from process start until the first heartbeat, so a runner that never connects still ages. |
+| `moirai_runner_busy` | gauge | | `1` when the runner is at `LOOP_RUNNER_CAPACITY` and would reject the next offer, `0` when it can accept work. Published from the same predicate the offer admission uses, so the two cannot disagree. |
+| `moirai_runner_executions_started_total` | counter | | Executions started. |
+| `moirai_runner_executions_completed_total` | counter | `outcome` | Executions that reached a terminal outcome: `completed`, `failed`, `blocked`, or `cancelled`. |
+| `moirai_runner_pending_events` | gauge | | Execution events queued for delivery, republished from the queue at every change. |
+| `moirai_runner_events_dropped_total` | counter | `reason` | Execution events discarded rather than delivered. |
+
+`reason` is one of:
+
+| `reason` | Meaning |
+| --- | --- |
+| `buffer_full` | The bounded buffer had no room and nothing lower-priority to evict. |
+| `evicted` | A queued event gave up its slot to a higher-priority one, in practice a terminal event. |
+| `lease_expired` | A job's queued log and progress events were discarded when its lease expired. Its terminal events are kept. |
+| `invalid` | The event type or its payload was unusable — most often a payload over the size limit. |
+| `no_lease` | No lease of the reported generation was held: either none at all, or one at a different generation. |
+| `persist_failed` | The crash-safe outbox write failed and the event was rolled back out of the queue. |
+| `unknown` | The event was lost for a reason outside this vocabulary — in practice, the remainder of a multi-chunk log message abandoned after the control stream failed mid-delivery. |
+
+Both label sets are closed: an unrecognised value is counted as `unknown` rather than creating a new series.
+
+**A rejected event is not always a lost one, and only lost ones are counted.** A terminal event whose payload exceeds the limit is re-emitted stripped to its classification fields, and that retry usually succeeds — so it is counted only if the retry fails too. This is what keeps `rate(moirai_runner_events_dropped_total[5m]) > 0` a usable alert instead of something that fires whenever an agent is verbose. Log output has no such retry, so a rejected log chunk is counted immediately, together with the chunks of the same message that are consequently never attempted.
+
+One drop path is **not** yet counted: when agent output arrives faster than it can be forwarded, the runner's in-process log forwarder discards chunks before they reach the event buffer, and reports that only as a `runner log events dropped` warning at the end of the execution. See [#124](https://github.com/alexandre-leites/moirai/issues/124).
+
+Note that this runner's `moirai_runner_heartbeat_age_seconds` reports *its own* last heartbeat. The orchestrator exports a series of the same name meaning the age of the oldest heartbeat across the fleet; the scrape's `job`/`instance` labels distinguish them.
 
 ## Health Probes
 
