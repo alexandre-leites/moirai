@@ -137,7 +137,7 @@ describe("RunnersPage", () => {
         fleet({
           id: "bbbb2222-0000-0000-0000-000000000002",
           name: "gone",
-          lastSeenAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+          lastSeenAt: new Date(Date.now() - 10 * 60_000 - 5_000).toISOString(),
         }),
       ])
     );
