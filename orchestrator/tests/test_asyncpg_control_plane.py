@@ -303,8 +303,13 @@ class _DurableConnection:
         self.pool.queries.append(query)
         if "SET state = 'half_open'" in query:
             if "provider_circuit_state" in query and self.pool.provider_claim_fails:
-                # What a lost race looks like to the claimer: the row was open
-                # when it was read, and the claiming UPDATE matched nothing.
+                # Drives the defensive `claimed != "UPDATE 1"` arm. Both rows
+                # are held by `SELECT … FOR UPDATE` before either write, so
+                # under READ COMMITTED no concurrent claim can produce this;
+                # what can is a write the database refuses or suppresses, which
+                # is what the PostgreSQL test injects with a BEFORE UPDATE
+                # trigger. The arm exists so that arriving here still cannot
+                # commit the claim that already succeeded.
                 return "UPDATE 0"
             if "project_circuit_state" in query and self.pool.project_circuit is not None:
                 self.pool.project_circuit["state"] = "half_open"

@@ -354,6 +354,26 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
         # The broken project is still backed off on its own.
         self.assertEqual([failure[0] for failure in control_plane.sync_failures], ["project-1"])
 
+    async def test_a_full_outage_records_a_failure_on_every_pass(self) -> None:
+        """The suppression above must not disarm the circuit during a real
+        outage. Every project fails together, so every project's backoff is
+        the same, and the first delays (5s, 10s, 20s) are all shorter than the
+        one-minute sync interval `main.py` runs this on -- no project is
+        skipped while the circuit is being opened. Three recorded failures is
+        what `record_provider_failure` needs to move the state to `open`."""
+        sync, control_plane = self._two_project_sync(
+            {
+                "project-1": _FakeTracker([_external_issue()], fail=True),
+                "project-2": _FakeTracker([_external_issue()], fail=True),
+            }
+        )
+
+        for minute in range(3):
+            await sync.sync_all_projects(NOW + timedelta(minutes=minute))
+
+        self.assertEqual(len(control_plane.provider_failures), 3)
+        self.assertEqual(control_plane.provider_clears, [])
+
     async def test_a_pass_where_every_project_fails_records_one_provider_failure(self) -> None:
         """Every attempted project failing is the only evidence issue sync has
         that the provider itself is down -- and it is recorded once for the
@@ -390,6 +410,37 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(control_plane.provider_failures, [])
         self.assertEqual(len(control_plane.provider_clears), 6)
+
+    async def test_a_backed_off_project_suppresses_the_provider_verdict(self) -> None:
+        """The hole an "every *attempted* project failed" rule leaves open.
+
+        A project that is backing off drops out of later passes, so the
+        remaining projects become the only evidence. With one project stuck in
+        a long backoff (here a token that cannot write `agent:*` labels, which
+        must never touch the provider circuit) and one project that then breaks
+        on its own, every pass in the gap would read as "every attempted
+        project failed" and open the shared circuit while GitHub was healthy.
+        Requiring the whole fleet closes it: a pass that skipped a project
+        writes no verdict at all.
+        """
+        broken = _FakeTracker([_external_issue()])
+        sync, control_plane = self._two_project_sync(
+            {"project-1": _FakeTracker([_external_issue()], label_writes_fail=True), "project-2": broken}
+        )
+        control_plane.active_workflows = [_workflow("completed", issue_id="issue-42")]
+
+        # project-1 fails its label write and backs off; project-2 is healthy.
+        await sync.sync_all_projects(NOW)
+        self.assertIn("project-1", [failure[0] for failure in control_plane.sync_failures])
+        control_plane.provider_clears.clear()
+
+        # project-2 now breaks too, while project-1 is still inside its backoff.
+        broken._fail = True
+        for second in range(1, 5):
+            await sync.sync_all_projects(NOW + timedelta(seconds=second))
+
+        self.assertEqual(control_plane.provider_failures, [])
+        self.assertEqual(control_plane.provider_clears, [])
 
     async def test_a_clean_pass_clears_the_provider_circuit_once(self) -> None:
         sync, control_plane = self._two_project_sync(

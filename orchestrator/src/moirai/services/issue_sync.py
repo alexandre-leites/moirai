@@ -132,32 +132,45 @@ class IssueSync:
 
         The provider circuit is global -- it gates scheduling for every project
         on that provider -- so it is decided once, from the whole pass, and only
-        on evidence about the provider itself (issue #92):
+        on evidence that is about the provider rather than about one project
+        (issue #92):
 
         - any project synced: the provider answered, so the circuit is cleared;
-        - every project attempted failed: one failure is recorded for the pass;
-        - nothing was attempted (all backing off): no verdict, nothing written.
+        - *every* enabled project was attempted and failed: one failure is
+          recorded for the pass;
+        - anything else -- including a pass that skipped a project because it
+          was backing off -- writes nothing.
 
-        Deciding it per project was incoherent in both directions. One
+        Deciding it per project was incoherent in both directions: one
         project's success erased the failure another had just recorded in the
         same pass, and one project's permanent fault -- a deleted repository, a
-        bad URL -- looked exactly like a provider outage and halted scheduling
-        for every other project. A per-project fault is already handled by that
-        project's own `app.issue_sync_state` backoff.
+        bad URL, a revoked token -- looked exactly like a provider outage and
+        halted scheduling for every other project.
+
+        The whole-fleet requirement is what keeps that from coming back through
+        the backoff. A chronically broken project drops out of later passes, and
+        without the requirement the remaining projects would be the only
+        evidence: one more of them failing would read as "every attempted
+        project failed" and open the circuit while the provider was healthy.
+        The cost is the opposite error -- a project stuck in a long backoff
+        suppresses the verdict, so a genuine outage may not open the circuit --
+        and that is the safer of the two. Failing to open wastes agent
+        executions that the per-run circuit breakers still bound; opening
+        wrongly stops every project on the provider indefinitely, which is the
+        wedge class this issue exists to remove.
         """
         projects = await _await(self._control_plane.list_enabled_projects())
         results: dict[str, int | str] = {}
-        attempted = False
         answered = False
-        provider_error: str | None = None
+        failures: list[str] = []
         for project in projects:
             retry_after = self._retry_after.get(project.id)
             if retry_after is not None and retry_after > now:
                 results[project.id] = "issue sync is backing off"
                 continue
-            attempted = True
             try:
                 count = await self.sync_project(project, now)
+                # The tracker answered the read every other project depends on.
                 answered = True
                 await self.reconcile_project_labels(project)
                 self._failure_counts.pop(project.id, None)
@@ -167,24 +180,23 @@ class IssueSync:
                     await _await(clear_failure(project.id, now))
                 results[project.id] = count
             except LabelReconciliationError as error:
-                # The tracker answered the read this pass depends on, so the
-                # provider counts as reachable; only this project backs off.
-                answered = True
+                # `answered` is already set: the read succeeded and only the
+                # label write failed, so this backs the project off and is not
+                # counted against the provider.
                 await self._record_sync_failure(project.id, error, now)
                 results[project.id] = str(error)
             except IssueSyncError as error:
-                if provider_error is None:
-                    provider_error = str(error)
+                failures.append(str(error))
                 await self._record_sync_failure(project.id, error, now)
                 results[project.id] = str(error)
         if answered:
             clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
             if clear_provider is not None:
                 await _await(clear_provider("github", now))
-        elif attempted and provider_error is not None:
+        elif projects and len(failures) == len(projects):
             record_provider = getattr(self._control_plane, "record_provider_failure", None)
             if record_provider is not None:
-                await _await(record_provider("github", provider_error, now))
+                await _await(record_provider("github", failures[0], now))
         return results
 
     async def _record_sync_failure(self, project_id: str, error: Exception, now: datetime) -> None:
