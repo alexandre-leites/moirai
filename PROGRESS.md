@@ -2055,9 +2055,18 @@ An adversarial review of the first draft was run before committing. It found ten
   - Reason: `RecordWorkInProgress` writes private anchors under `refs/moirai-wip/<executionId>` in the shared cache. Under mirror semantics a refspec-less push would have published those to the code host and pruned remote branches the cache had not fetched. Verified: `git -C wt push origin` from a mirror worktree succeeds and mirror-pushes everything.
   - Consequences: the new tests assert the *exact* set of references present in origin after each push, not merely that the expected branch arrived — an assertion that only looked for the expected branch would pass against a mirror push.
 
+## Post-review corrections
+
+The new tests were mutation-tested against four deliberate defects injected into a throwaway copy of the tree, before committing. Two of them initially survived, and both were fixed:
+
+- **A regression to a refspec-less mirror push was not caught** (major). Replacing `push --set-upstream origin <branch>` with a bare `push origin` *succeeds* under `remote.origin.mirror=true` — it mirror-pushes everything — so the delivery branch still arrived in origin and `TestPushFromManagedCloneWorkspacePublishesTheDeliveryBranch` passed. That is the exact "reintroduce the bug and call it fixed" shape. The test now writes a `refs/moirai-wip/execution-earlier` anchor before pushing, as a prior failed execution would, and asserts the *exact* set of references origin holds. The mutation now fails with `origin references = [… refs/moirai-wip/execution-earlier], want exactly [refs/heads/agent/issue-147/run-1 refs/heads/main]`.
+- **Dropping `--force` from `PushWorkInProgress` was not caught** (minor). The redelivery step added a commit on top of the one already published, so the second push was a fast-forward and succeeded without the flag — the test's own comment claimed it proved the opposite. The retry is now built on the base revision (`reset --hard HEAD~1`), making it a genuine non-fast-forward, and the test asserts that shape rather than assuming it. The mutation now fails on the rejected push.
+
+Two further mutations were already caught and needed no change: removing `-c remote.origin.mirror=false` (the original bug — fails with the issue's exact `fatal:`), and making `Push` report `Pushed: true` without running git at all (caught by reading origin rather than trusting the return value).
+
 ## Validation Status
 
-- Targeted tests: Passed — the four tests in `runner/internal/repository/delivery_mirror_test.go`. The three push tests were each confirmed failing with the `-c remote.origin.mirror=false` removed from `pushCommand`, with the exact `fatal: --mirror can't be combined with refspecs` from the issue.
+- Targeted tests: Passed — the four tests in `runner/internal/repository/delivery_mirror_test.go`. The three push tests were each confirmed failing with the `-c remote.origin.mirror=false` removed from `pushCommand`, with the exact `fatal: --mirror can't be combined with refspecs` from the issue. See Post-review corrections above for the full mutation matrix.
 - Service tests: Passed — `make test-runner` (`cd runner && go test -race ./...`), all packages `ok`.
 - Full repository tests: Not run — the change is confined to `runner/internal/repository`. No proto, orchestrator, API, or web change.
 - Build: Covered by `go test -race ./...`.

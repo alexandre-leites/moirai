@@ -113,12 +113,25 @@ func TestPushWorkInProgressFromManagedCloneWorkspacePublishesTheWipBranch(t *tes
 
 	// An execution redelivered after a crash replaces its own earlier remains
 	// (#100): --force plus a refspec is the exact combination Git rejected.
-	if err := os.WriteFile(filepath.Join(workspace.Repository, "more.go"), []byte("package more\n"), 0o600); err != nil {
+	//
+	// The retry is deliberately built on the base revision rather than on the
+	// commit already published, so the second push is a genuine
+	// non-fast-forward — which is the only shape that actually needs --force.
+	// A retry that simply added another commit would succeed without it, and
+	// would prove nothing about the flag.
+	runRealGit(t, workspace.Repository, "reset", "--quiet", "--hard", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(workspace.Repository, "different.go"), []byte("package different\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	second, err := manager.Commit(context.Background(), workspace, "wip(failed): developer: A task (147)")
 	if err != nil || !second.Committed {
 		t.Fatalf("Commit() = %#v, %v", second, err)
+	}
+	if second.Revision == commit.Revision {
+		t.Fatal("the retry produced the same revision; this no longer tests a non-fast-forward push")
+	}
+	if isAncestor(t, workspace.Repository, commit.Revision, second.Revision) {
+		t.Fatal("the retry commit descends from the published one; this no longer tests a non-fast-forward push")
 	}
 	if _, err := manager.PushWorkInProgress(context.Background(), workspace, workInProgressBranch, nil); err != nil {
 		t.Fatalf("PushWorkInProgress() retry error = %v", err)
@@ -126,6 +139,7 @@ func TestPushWorkInProgressFromManagedCloneWorkspacePublishesTheWipBranch(t *tes
 	if published := readRemoteRevision(t, origin, "refs/heads/"+workInProgressBranch); published != second.Revision {
 		t.Fatalf("origin refs/heads/%s = %q, want the redelivered commit %q", workInProgressBranch, published, second.Revision)
 	}
+	assertRemoteReferences(t, origin, "refs/heads/main", "refs/heads/"+workInProgressBranch)
 }
 
 // TestCleanupRemoteBranchFromManagedCloneWorkspaceDeletesTheBranch covers the
@@ -242,6 +256,14 @@ func readGitConfiguration(t *testing.T, directory, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// isAncestor reports whether one revision is reachable from another, which is
+// what decides whether a push is a fast-forward.
+func isAncestor(t *testing.T, repository, ancestor, descendant string) bool {
+	t.Helper()
+	command := exec.Command("git", "-C", repository, "merge-base", "--is-ancestor", ancestor, descendant)
+	return command.Run() == nil
 }
 
 // readRemoteFile reads a file from a reference in a bare repository.
