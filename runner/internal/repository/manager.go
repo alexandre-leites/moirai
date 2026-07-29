@@ -203,6 +203,27 @@ func (manager Manager) prepareSource(ctx context.Context, root string, request P
 	return cache, nil
 }
 
+// ReleaseBranch detaches a workspace's HEAD, leaving its commits and files in
+// place. A retained workspace keeps its worktree registered with the source
+// repository, and Git refuses to re-create a branch another worktree has
+// checked out ("fatal: '<branch>' is already used by worktree at ..."). Since
+// the orchestrator reuses one branch name for every execution of a workflow,
+// retaining a failed workspace without detaching it would make the next attempt
+// of that same workflow fail to prepare.
+func (manager Manager) ReleaseBranch(ctx context.Context, workspace Workspace) error {
+	root, err := manager.dataDirectory()
+	if err != nil {
+		return err
+	}
+	if err := ensureContained(root, workspace.Root, workspace.Repository); err != nil {
+		return err
+	}
+	if err := manager.git(ctx, "-C", workspace.Repository, "checkout", "--detach"); err != nil {
+		return fmt.Errorf("detach retained workspace branch: %w", err)
+	}
+	return nil
+}
+
 func (manager Manager) Cleanup(ctx context.Context, projectID, jobID string) error {
 	if !safeSegment(projectID) {
 		return errors.New("project ID must contain only letters, digits, dots, underscores, or hyphens")

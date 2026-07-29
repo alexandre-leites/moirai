@@ -25,6 +25,9 @@ type WorkspaceManager interface {
 	Prepare(context.Context, repository.PrepareRequest) (repository.Workspace, error)
 	Cleanup(context.Context, string, string) error
 	CleanupExisting(context.Context, string, string) error
+	// ReleaseBranch frees the execution branch a retained workspace still has
+	// checked out, without discarding the workspace.
+	ReleaseBranch(context.Context, repository.Workspace) error
 }
 
 type EnvironmentResolver interface {
@@ -38,6 +41,10 @@ type RevisionInspector interface {
 type DeliveryManager interface {
 	Commit(context.Context, repository.Workspace, string) (repository.CommitResult, error)
 	Push(context.Context, repository.Workspace, string, map[string]string) (repository.PushResult, error)
+	// RecordWorkInProgress anchors a revision in the local repository so it
+	// survives the branch reset the next preparation performs.
+	RecordWorkInProgress(context.Context, repository.Workspace, string) error
+	PushWorkInProgress(context.Context, repository.Workspace, string, map[string]string) (repository.PushResult, error)
 }
 
 type ProjectConcurrencyGuard struct {
@@ -66,12 +73,6 @@ func (guard *ProjectConcurrencyGuard) Acquire(projectID string) (func(), error) 
 	}, nil
 }
 
-type RetentionPolicy struct {
-	KeepSucceeded bool
-	KeepFailed    bool
-	KeepAbandoned bool
-}
-
 type Dispatcher struct {
 	Workspaces         WorkspaceManager
 	Backend            agents.Backend
@@ -84,7 +85,16 @@ type Dispatcher struct {
 	Pipeline           pipeline.Runner
 	Retention          RetentionPolicy
 	Projects           *ProjectConcurrencyGuard
-	Delivery           DeliveryManager
+	// Active guards the workspaces of running executions against the retention
+	// sweep. A nil tracker is safe only where no execution can be running
+	// concurrently with a sweep.
+	Active   *ActiveWorkspaces
+	Delivery DeliveryManager
+	// PushWorkInProgress publishes the work a failed run produced to a
+	// per-execution `wip/<executionId>` branch when the packet allows pushing.
+	// Operators who do not want work-in-progress refs on the code host can turn
+	// it off; the commit is then kept only in the retained workspace.
+	PushWorkInProgress bool
 	// EmitLog, when set, is called with each chunk of agent stdout/stderr
 	// as it is produced, so it can be streamed to the orchestrator as log
 	// events (see control.EventReporter.EmitLog).
@@ -106,6 +116,16 @@ type Result struct {
 	Pushed          bool              `json:"pushed"`
 	PipelineResults []pipeline.Result `json:"pipelineResults"`
 	Raw             map[string]any    `json:"raw,omitempty"`
+	// WorkInProgressCommit is the revision holding the work a failed or blocked
+	// run produced, and WorkInProgressBranch the branch it was published to when
+	// pushing was possible. They are never the delivery branch: a failed run must
+	// not be mistakable for a delivered one.
+	WorkInProgressCommit string `json:"workInProgressCommit,omitempty"`
+	WorkInProgressBranch string `json:"workInProgressBranch,omitempty"`
+	WorkInProgressPushed bool   `json:"workInProgressPushed,omitempty"`
+	// LogTail is a bounded excerpt of the failing pipeline command's output, or
+	// of the agent's log, recorded so a retry has more than a status to work from.
+	LogTail string `json:"logTail,omitempty"`
 }
 
 func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (result Result, err error) {
@@ -122,6 +142,17 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 			return Result{}, err
 		}
 		defer release()
+	}
+	// Claiming the job before the sweep is what makes the sweep safe: this
+	// execution's workspace is off limits to every concurrent sweep from the
+	// moment it could be prepared, even though a retained record for the same
+	// job ID may still exist (one job ID serves every execution of a workflow).
+	defer dispatcher.Active.Claim(packet.JobID)()
+	// Retained workspaces are released before free space is measured, so the
+	// forensics kept for earlier failures cost the next execution capacity
+	// rather than blocking it.
+	if sweepErr := dispatcher.SweepRetainedWorkspaces(ctx); sweepErr != nil {
+		slog.Warn("could not fully sweep retained workspaces", "job_id", lease.JobID, "error", sweepErr)
 	}
 	if dispatcher.MinimumFreeBytes > 0 {
 		if dispatcher.AvailableBytes == nil {
@@ -147,12 +178,17 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	if err != nil {
 		return Result{}, err
 	}
+	// This execution supersedes anything retained under the same job ID, so the
+	// old record goes rather than describing a directory that is about to be
+	// replaced. Safety against a concurrent sweep comes from the claim above;
+	// this keeps the registry truthful and its count bound honest.
+	dispatcher.forgetRetainedWorkspace(packet.JobID)
 	workspace, err := dispatcher.Workspaces.Prepare(ctx, request)
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare workspace: %w", err)
 	}
 	defer func() {
-		if dispatcher.shouldRetain(ctx, result, err) {
+		if dispatcher.retain(ctx, packet, workspace, result, err) {
 			return
 		}
 		cleanupErr := dispatcher.cleanup(context.Background(), packet)
@@ -180,6 +216,9 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 			return Result{}, snapshotErr
 		}
 		result.FinalRevision = final.Revision
+		if pipelineErr != nil {
+			result.LogTail = logTail(workspace, result.PipelineResults)
+		}
 		if artifactErr := writeTerminalResult(workspace, result); artifactErr != nil {
 			return Result{}, artifactErr
 		}
@@ -231,9 +270,17 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	}
 	result.FinalRevision = final.Revision
 	result.ChangedFiles = mergeChangedFiles(result.ChangedFiles, final.ChangedFiles)
-	if executeErr == nil && packet.Constraints.MayModifyFiles {
-		if deliverErr := dispatcher.deliver(ctx, workspace, packet, request.Branch, environment, &result); deliverErr != nil {
-			executeErr = deliverErr
+	if packet.Constraints.MayModifyFiles {
+		// Only a completed run delivers to the agent branch. A blocked run
+		// reports no completed work, so publishing it there would present a
+		// non-delivery as a delivery.
+		if executeErr == nil && result.Status == "completed" {
+			if deliverErr := dispatcher.deliver(ctx, workspace, packet, request.Branch, environment, &result); deliverErr != nil {
+				executeErr = deliverErr
+			}
+		}
+		if executeErr != nil || result.Status != "completed" {
+			dispatcher.retainWorkInProgress(ctx, workspace, packet, environment, &result)
 		}
 	}
 	if executeErr != nil {
@@ -241,6 +288,9 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		if result.Summary == "" {
 			result.Summary = executeErr.Error()
 		}
+	}
+	if executeErr != nil || result.Status != "completed" {
+		result.LogTail = logTail(workspace, result.PipelineResults)
 	}
 	if err := writeTerminalResult(workspace, result); err != nil {
 		return Result{}, err
@@ -332,6 +382,79 @@ func (dispatcher Dispatcher) deliver(ctx context.Context, workspace repository.W
 	return nil
 }
 
+// retainWorkInProgress commits whatever a failed or blocked run produced so a
+// retry can build on it instead of starting from the base branch, and — when
+// the packet allows pushing — publishes it to a dedicated `wip/<executionId>`
+// branch.
+//
+// It never writes to the delivery branch. That branch means "this run produced
+// deliverable work", and the next attempt re-creates it from the base revision,
+// so a work-in-progress commit there would both misrepresent the outcome and be
+// rejected as a non-fast-forward push on the following attempt.
+//
+// Every failure here is reported and swallowed: the execution has already
+// failed for another reason, and preserving its remains must not replace the
+// cause the orchestrator needs to see.
+func (dispatcher Dispatcher) retainWorkInProgress(ctx context.Context, workspace repository.Workspace, packet taskpacket.Packet, environment map[string]string, result *Result) {
+	if dispatcher.Delivery == nil || ctx.Err() != nil {
+		return
+	}
+	logFields := []any{"job_id", packet.JobID, "execution_id", packet.ExecutionID}
+	commitResult, err := dispatcher.Delivery.Commit(ctx, workspace, workInProgressCommitMessage(packet, result.Status))
+	if err != nil {
+		slog.Warn("could not commit work in progress for a failed execution", append(logFields, "error", err)...)
+		return
+	}
+	if !commitResult.Committed && (commitResult.Revision == "" || commitResult.Revision == result.InitialRevision) {
+		return
+	}
+	result.WorkInProgressCommit = commitResult.Revision
+	if commitResult.Committed {
+		result.Committed = true
+		result.FinalRevision = commitResult.Revision
+	}
+	// The commit sits on the execution branch, which the next preparation of
+	// this job re-creates from the base revision — so without an anchor of its
+	// own the work would be unreachable by the time anything came looking. The
+	// local ref is written for every role; only a role granted mayPush can also
+	// publish it, and today the orchestrator grants that to the developer alone.
+	if err := dispatcher.Delivery.RecordWorkInProgress(ctx, workspace, workInProgressReference(packet.ExecutionID)); err != nil {
+		slog.Warn("could not anchor work in progress in the local repository", append(logFields, "error", err)...)
+	}
+	if !packet.Constraints.MayPush || !dispatcher.PushWorkInProgress {
+		return
+	}
+	pushResult, err := dispatcher.Delivery.PushWorkInProgress(ctx, workspace, workInProgressBranch(packet.ExecutionID), environment)
+	if err != nil {
+		slog.Warn("could not push work in progress for a failed execution", append(logFields, "error", err)...)
+		return
+	}
+	result.WorkInProgressBranch = pushResult.Branch
+	result.WorkInProgressPushed = pushResult.Pushed
+}
+
+func workInProgressBranch(executionID string) string {
+	return "wip/" + executionID
+}
+
+// workInProgressReference names the local anchor. It is outside refs/heads so
+// it can never be checked out by a preparation or mistaken for a branch.
+func workInProgressReference(executionID string) string {
+	return "refs/moirai-wip/" + executionID
+}
+
+// workInProgressCommitMessage marks the commit as work in progress and records
+// which non-delivering outcome produced it. The status is mapped to a fixed
+// vocabulary rather than interpolated, since it originates in the agent's own
+// result document.
+func workInProgressCommitMessage(packet taskpacket.Packet, status string) string {
+	outcome := "failed"
+	if status == "blocked" {
+		outcome = "blocked"
+	}
+	return fmt.Sprintf("wip(%s): %s", outcome, commitMessageFor(packet))
+}
+
 func commitMessageFor(packet taskpacket.Packet) string {
 	title := packet.Issue.Title
 	if title == "" {
@@ -404,21 +527,58 @@ func mergeChangedFiles(primary, additional []string) []string {
 	return merged
 }
 
-func (dispatcher Dispatcher) shouldRetain(ctx context.Context, result Result, executeErr error) bool {
-	if ctx.Err() != nil {
-		return dispatcher.Retention.KeepAbandoned
+// retain reports whether the finished workspace is kept for later inspection.
+// Keeping it also registers it, so the retention sweep can release it again
+// once it is too old, too numerous, or the disk runs short; a workspace that
+// cannot be registered is not kept, because an unregistered one would never be
+// released.
+func (dispatcher Dispatcher) retain(ctx context.Context, packet taskpacket.Packet, workspace repository.Workspace, result Result, executeErr error) bool {
+	status := retentionStatus(ctx, result, executeErr)
+	if !dispatcher.shouldRetain(status) {
+		return false
 	}
-	if executeErr == nil && result.Status == "completed" {
+	// A retained workspace keeps its worktree registered with the source
+	// repository, and git refuses to re-create a branch another worktree holds.
+	// Today a preparation for the same job removes this directory before it gets
+	// that far, so the collision is not reachable — but that is preparation's
+	// accident, not retention's guarantee, and the failure it would cause lands
+	// on an unrelated later run. Detaching keeps retention self-contained.
+	// The failure is not fatal for the same reason: forensics are worth more
+	// than a guard against an unreachable collision. context.Background() is
+	// deliberate — an abandoned execution arrives with a cancelled context and
+	// still has to release its branch.
+	if err := dispatcher.Workspaces.ReleaseBranch(context.Background(), workspace); err != nil {
+		slog.Warn("retaining a workspace whose execution branch could not be released",
+			"job_id", packet.JobID, "execution_id", packet.ExecutionID, "status", status, "error", err)
+	}
+	if err := dispatcher.recordRetainedWorkspace(packet, workspace.Root, status); err != nil {
+		slog.Warn("cleaning up a workspace that could not be registered for retention",
+			"job_id", packet.JobID, "execution_id", packet.ExecutionID, "status", status, "error", err)
+		return false
+	}
+	return true
+}
+
+func (dispatcher Dispatcher) shouldRetain(status string) bool {
+	switch status {
+	case "succeeded":
 		return dispatcher.Retention.KeepSucceeded
+	case "abandoned":
+		return dispatcher.Retention.KeepAbandoned
+	default:
+		return dispatcher.Retention.KeepFailed
 	}
-	return dispatcher.Retention.KeepFailed
 }
 
 func (dispatcher Dispatcher) cleanup(ctx context.Context, packet taskpacket.Packet) error {
-	if packet.Repository.Mode == string(repository.RepositoryModeExistingPath) {
-		return dispatcher.Workspaces.CleanupExisting(ctx, packet.Repository.LocalPath, packet.JobID)
+	return dispatcher.cleanupWorkspace(ctx, packet.Repository.Mode, packet.Repository.ProjectID, packet.Repository.LocalPath, packet.JobID)
+}
+
+func (dispatcher Dispatcher) cleanupWorkspace(ctx context.Context, mode, projectID, localPath, jobID string) error {
+	if mode == string(repository.RepositoryModeExistingPath) {
+		return dispatcher.Workspaces.CleanupExisting(ctx, localPath, jobID)
 	}
-	return dispatcher.Workspaces.Cleanup(ctx, packet.Repository.ProjectID, packet.JobID)
+	return dispatcher.Workspaces.Cleanup(ctx, projectID, jobID)
 }
 
 func (dispatcher Dispatcher) resolveEnvironment(ctx context.Context, references []taskpacket.EnvironmentRef) (map[string]string, error) {

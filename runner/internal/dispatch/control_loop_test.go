@@ -17,6 +17,7 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/agents"
 	"github.com/loop-engineering/runner/internal/control"
+	"github.com/loop-engineering/runner/internal/pipeline"
 	"github.com/loop-engineering/runner/internal/repository"
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
@@ -868,6 +869,76 @@ func TestControlLoopRescuesTerminalEventWithOversizedErrorText(t *testing.T) {
 	}
 }
 
+// TestTerminalPayloadReportsRetainedWorkSeparatelyFromDelivery pins the
+// delivery-safety contract on the wire: a failed run names where its work
+// survived without ever populating the delivered-branch field.
+func TestTerminalPayloadReportsRetainedWorkSeparatelyFromDelivery(t *testing.T) {
+	failed := terminalPayload("failed", Result{
+		WorkInProgressCommit: "cafebabe",
+		WorkInProgressBranch: "wip/execution-1",
+		WorkInProgressPushed: true,
+		LogTail:              "--- FAIL: TestThing",
+	}, nil)
+	if failed["wipCommit"] != "cafebabe" || failed["wipBranch"] != "wip/execution-1" || failed["wipPushed"] != true {
+		t.Fatalf("failed terminal payload = %#v", failed)
+	}
+	if failed["logTail"] != "--- FAIL: TestThing" {
+		t.Fatalf("failed terminal payload lost its log tail: %#v", failed)
+	}
+	if _, delivered := failed["branch"]; delivered || failed["pushed"] != false {
+		t.Fatalf("failed terminal payload reported delivery: %#v", failed)
+	}
+
+	local := terminalPayload("failed", Result{WorkInProgressCommit: "cafebabe"}, nil)
+	if local["wipPushed"] != false {
+		t.Fatalf("locally retained work should report wipPushed=false: %#v", local)
+	}
+	if _, named := local["wipBranch"]; named {
+		t.Fatalf("locally retained work should not name a remote branch: %#v", local)
+	}
+
+	// The orchestrator rejects a payload with more than 32 fields
+	// (runner_events.MAX_PAYLOAD_FIELDS), so terminal payload growth is bounded
+	// on the receiving side as well as by the encoded byte limit.
+	full := terminalPayload("failed", Result{WorkInProgressCommit: "cafebabe", WorkInProgressBranch: "wip/execution-1", LogTail: "tail", Branch: "agent/issue-7/run-1"}, executionUsage(time.Now(), Result{}))
+	full["failureFingerprint"], full["error"] = "fingerprint", "boom"
+	if len(full) > 24 {
+		t.Fatalf("terminal payload carries %d fields, leaving too little headroom under the orchestrator's limit", len(full))
+	}
+
+	delivered := terminalPayload("completed", Result{Branch: "agent/issue-7/run-1", Pushed: true}, nil)
+	if delivered["branch"] != "agent/issue-7/run-1" || delivered["pushed"] != true {
+		t.Fatalf("completed terminal payload = %#v", delivered)
+	}
+	for _, key := range []string{"wipBranch", "wipCommit", "wipPushed", "logTail"} {
+		if _, present := delivered[key]; present {
+			t.Fatalf("completed terminal payload carried %q: %#v", key, delivered)
+		}
+	}
+}
+
+// TestMinimalTerminalPayloadKeepsRetainedWorkAndDropsTheLogTail keeps the
+// pointer to a failed run's work alive on the fallback path while shedding the
+// unbounded excerpt that fallback exists for.
+func TestMinimalTerminalPayloadKeepsRetainedWorkAndDropsTheLogTail(t *testing.T) {
+	reduced := minimalTerminalPayload(map[string]any{
+		"status":    "failed",
+		"wipBranch": "wip/execution-1",
+		"wipCommit": "cafebabe",
+		"wipPushed": true,
+		"logTail":   strings.Repeat("z", 4096),
+	})
+	if reduced == nil {
+		t.Fatal("minimalTerminalPayload() did not reduce a payload carrying a log tail")
+	}
+	if reduced["wipBranch"] != "wip/execution-1" || reduced["wipCommit"] != "cafebabe" || reduced["wipPushed"] != true {
+		t.Fatalf("reduced payload lost the pointer to the retained work: %#v", reduced)
+	}
+	if _, present := reduced["logTail"]; present {
+		t.Fatalf("reduced payload kept the unbounded log tail: %#v", reduced)
+	}
+}
+
 func TestMinimalTerminalPayloadReducesOnlyWhenSomethingChanges(t *testing.T) {
 	if reduced := minimalTerminalPayload(map[string]any{"status": "failed", "exitCode": 1}); reduced != nil {
 		t.Fatalf("minimalTerminalPayload() reduced an already-minimal payload: %#v", reduced)
@@ -973,5 +1044,89 @@ func TestControlLoopWithCapacityRunsExecutionsForDifferentProjectsConcurrently(t
 	}
 	if loop.Busy() {
 		t.Fatal("loop reports busy after both leases were consumed to capacity and completed")
+	}
+}
+
+// TestControlLoopReportsRecoverableWorkAfterAPipelineFailure is the end-to-end
+// check for this behaviour: a run whose pipeline fails still commits what the
+// agent produced, publishes it under a work-in-progress ref, and names that
+// branch and commit in the terminal event the orchestrator receives — while the
+// delivery branch stays untouched.
+func TestControlLoopReportsRecoverableWorkAfterAPipelineFailure(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	retention := t.TempDir()
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "cafebabe"}}
+	dispatcher := Dispatcher{
+		Workspaces:         manager,
+		Backend:            &backend{result: agents.Result{Status: "completed", Summary: "implemented"}},
+		Delivery:           delivery,
+		Environment:        environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}},
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+		Pipeline: pipelineRunner{
+			results: []pipeline.Result{{Command: "go test ./...", ExitCode: 1, Output: "--- FAIL: TestThing\n"}},
+			err:     errors.New("pipeline command failed with exit code 1: go test ./..."),
+		},
+		PushWorkInProgress: true,
+		Retention:          RetentionPolicy{KeepFailed: true, Directory: retention, MaxAge: time.Hour, MaxWorkspaces: 4},
+	}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoop() error = %v", err)
+	}
+
+	offer := credentialOffer(t)
+	packet := taskpacket.Packet{}
+	if err := json.Unmarshal([]byte(offer.GetTaskPacketJson()), &packet); err != nil {
+		t.Fatal(err)
+	}
+	packet.Pipeline = []taskpacket.PipelineCommand{{Command: "go test ./...", TimeoutSeconds: 30}}
+	contents, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer.TaskPacketJson = string(contents)
+
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	acknowledgement := &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}
+	if err := loop.Handle(context.Background(), acknowledgement); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	terminal := client.events[1]
+	if terminal.GetType() != "failed" {
+		t.Fatalf("terminal event = %#v, want failed", terminal)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(terminal.GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	if payload["wipBranch"] != "wip/execution-1" || payload["wipCommit"] != "cafebabe" || payload["wipPushed"] != true {
+		t.Fatalf("terminal payload does not name the recoverable work: %#v", payload)
+	}
+	if payload["logTail"] != "--- FAIL: TestThing" {
+		t.Fatalf("terminal payload log tail = %#v", payload["logTail"])
+	}
+	if _, delivered := payload["branch"]; delivered || payload["pushed"] != false {
+		t.Fatalf("a pipeline-failed run reported delivery: %#v", payload)
+	}
+	if len(delivery.pushes) != 0 || len(delivery.workInProgressPushes) != 1 {
+		t.Fatalf("delivery pushes = %#v, work-in-progress pushes = %#v", delivery.pushes, delivery.workInProgressPushes)
+	}
+	if delivery.workInProgressEnv["GITHUB_TOKEN"] != "token-value" {
+		t.Fatalf("work-in-progress push environment = %#v", delivery.workInProgressEnv)
+	}
+	if manager.cleaned {
+		t.Fatal("the failed workspace was cleaned up instead of retained")
+	}
+	records, err := filepath.Glob(filepath.Join(retention, "retained", "*.json"))
+	if err != nil || len(records) != 1 {
+		t.Fatalf("retention records = %#v, %v", records, err)
 	}
 }
