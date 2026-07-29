@@ -323,21 +323,33 @@ class _WorkflowStore:
             if key in updates:
                 self.durable[key] = updates[key]
 
-    async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
-        del workflow_run_id
-        for request in self.requests:
-            if request["status"] == "queued":
-                return {"id": request["id"], "role": request["role"], "attempt": 1}
+    def _open_request(self) -> dict[str, str] | None:
+        for request in reversed(self.requests):
+            if request["status"] in ("queued", "dispatched"):
+                return request
         return None
 
-    async def dispatch(self, workflow_run_id: str, role: str) -> str:
+    async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
+        del workflow_run_id
+        request = self._open_request()
+        if request is None:
+            return None
+        return {"id": request["id"], "role": request["role"], "attempt": 1, "created": False}
+
+    async def dispatch(self, workflow_run_id: str, role: str) -> dict[str, Any]:
+        open_request = self._open_request()
+        if open_request is not None:
+            return {
+                "id": open_request["id"], "role": open_request["role"],
+                "attempt": 1, "created": False,
+            }
         request = {
             "id": f"{workflow_run_id}-{role}-{len(self.requests) + 1}",
             "role": role,
             "status": "queued",
         }
         self.requests.append(request)
-        return request["id"]
+        return {"id": request["id"], "role": role, "attempt": 1, "created": True}
 
     async def load_state(self, workflow_run_id: str) -> dict[str, object]:
         del workflow_run_id
@@ -368,6 +380,14 @@ class _WorkflowStore:
             if request["status"] == "queued":
                 request["status"] = "dispatched"
 
+    def close_open(self, event_type: str) -> None:
+        """Simulates accept_event stamping a terminal runner event on the
+        request it belongs to, in the same transaction as the outcome, so the
+        row stops counting as work in flight (issue #94)."""
+        request = self._open_request()
+        if request is not None:
+            request["status"] = event_type
+
 
 class _EventDrivenWorkflow:
     """Drives the real issue graph the way production does: one runner terminal
@@ -389,6 +409,7 @@ class _EventDrivenWorkflow:
         self.store = _WorkflowStore(human_approval_required=human_approval_required)
         self.code_host = code_host
         self.issue_tracker = issue_tracker
+        self.last_transition: dict[str, object] | None = None
         nodes = PersistedWorkflowNodes(
             self.store,
             self.store,
@@ -429,10 +450,24 @@ class _EventDrivenWorkflow:
         transition = workflow_transition_for_terminal_event(summary, self.store.status, role=role)
         if transition is None:
             raise AssertionError(f"terminal {role} event produced no workflow transition")
-        return await self.runtime.run(
-            self.store.workflow_run_id,
-            {"status": transition.new_status, **transition.state_updates},
-        )
+        self.store.close_open(event_type)
+        self.last_transition = {"status": transition.new_status, **transition.state_updates}
+        return await self.runtime.run(self.store.workflow_run_id, dict(self.last_transition))
+
+    async def replay_last(self, claimed: bool = False) -> dict[str, object]:
+        """Re-delivers the transition `deliver` last handed to the graph.
+
+        The workflow_transition_outbox is at-least-once: a crash between
+        invoking the graph and marking the row processed replays exactly this
+        call. `claimed` additionally moves the request the first delivery
+        queued to `dispatched`, which is what the scheduler does as soon as it
+        offers the work.
+        """
+        if self.last_transition is None:
+            raise AssertionError("nothing has been delivered yet")
+        if claimed:
+            self.store.claim_queued()
+        return await self.runtime.run(self.store.workflow_run_id, dict(self.last_transition))
 
     async def pending_nodes(self) -> tuple[str, ...]:
         snapshot = await self.graph.aget_state(
@@ -501,7 +536,9 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["status"], "implementing")
         self.assertTrue(state["awaiting_execution"])
         self.assertEqual(workflow.store.roles, ["planner", "developer"])
-        self.assertEqual([request["status"] for request in workflow.store.requests], ["dispatched", "queued"])
+        # The planner's request was closed by its own terminal event; only the
+        # developer request the graph just queued is still open.
+        self.assertEqual([request["status"] for request in workflow.store.requests], ["completed", "queued"])
         self.assertEqual(await workflow.pending_nodes(), ())
         # Phases that never ran must not have consumed any budget.
         self.assertEqual(workflow.store.durable["planning_attempts"], 1)
@@ -509,6 +546,60 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 0)
         self.assertEqual(workflow.store.durable["review_cycles"], 0)
         self.assertEqual(workflow.store.durable["total_agent_executions"], 2)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_replaying_a_transition_is_identical_to_delivering_it_once(self) -> None:
+        """Issue #96: the transition outbox is at-least-once, so every delivery
+        may happen twice. The second one must change nothing an observer can
+        see -- counters, execution requests, workflow status, transitions
+        written -- and must enter no node.
+
+        The last part needs the log: a node the replay walks onto finds another
+        phase's request open and suspends without writing anything, so the
+        counters and request rows alone cannot tell that it ran. `_reuse` logs
+        that as the invariant violation it is, which is what makes this test
+        fail if the runtime's replay gate is removed."""
+        for claimed in (False, True):
+            with self.subTest(request_claimed_by_the_scheduler=claimed):
+                workflow = _EventDrivenWorkflow()
+                await workflow.start()
+                state = await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+                counters = dict(workflow.store.durable)
+                roles = list(workflow.store.roles)
+                requests = [dict(request) for request in workflow.store.requests]
+                transitions = len(workflow.store.transitions)
+                pending = await workflow.pending_nodes()
+
+                with self.assertNoLogs("moirai.workflows.nodes", "ERROR"):
+                    replayed = await workflow.replay_last(claimed=claimed)
+
+                self.assertEqual(workflow.store.roles, roles)
+                self.assertEqual(workflow.store.durable, counters)
+                self.assertEqual(len(workflow.store.transitions), transitions)
+                self.assertEqual(await workflow.pending_nodes(), pending)
+                self.assertEqual(replayed["status"], state["status"])
+                self.assertIs(replayed["awaiting_execution"], True)
+                self.assertEqual(
+                    [request["role"] for request in workflow.store.requests],
+                    [request["role"] for request in requests],
+                )
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_a_replayed_transition_never_skips_the_pipeline_gate(self) -> None:
+        """A replay must not walk the graph past the execution it is still
+        waiting on. Advancing one node on a duplicate delivery would leave the
+        run suspended on the `pipeline` edge, and the developer's own terminal
+        event would then route straight out of it -- delivering the workflow
+        without the deterministic pipeline ever running."""
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+
+        await workflow.replay_last(claimed=True)
+        state = await workflow.deliver("developer", "implement")
+
+        self.assertEqual(state["status"], "local_pipeline")
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "pipeline"])
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_a_clean_developer_exit_cannot_reach_review_without_the_pipeline(self) -> None:
@@ -790,6 +881,10 @@ class _EntryPointControlPlane:
         self.events.append(event)
         summary = validate_runner_event(event.event_type, event.execution_id, event.payload)
         transition = workflow_transition_for_terminal_event(summary, self._store.status, role="developer")
+        # accept_event closes the request this execution belongs to in the same
+        # transaction that records the outcome (issue #94), which is what stops
+        # the resumed graph from mistaking it for work still in flight.
+        self._store.close_open(summary.event_type)
         if on_transition is not None and transition is not None:
             await on_transition(
                 self._store.workflow_run_id, transition.new_status, transition.state_updates

@@ -83,6 +83,22 @@ _ORPHANED_REQUEST_STATUS = "orphaned"
 # environment could buy.
 _LOST_EXECUTION_REQUEUE_LIMIT = 5
 
+# How long a drainer may hold a workflow_transition_outbox row in `processing`
+# before another drainer takes it back. `processing` is committed before the
+# delivery starts, so a crashed drainer cannot release its own row and the
+# transition would otherwise be dropped forever (issue #96). Comfortably longer
+# than a real delivery, which invokes the graph and can reach GitHub.
+#
+# It is deliberately shorter than the 2-minute window after which a run counts
+# as stalled (main._WORKFLOW_STALL_AFTER), so that on a maintenance loop ticking
+# at its normal 30s the drain usually reclaims a stranded row before the
+# stalled-run arm reaches the same run -- which matters because that arm
+# recovers a run *without* the state updates the outbox row carries. It is a
+# tendency, not a guarantee: a tick is unbounded (arm 3 can invoke the graph for
+# up to _WORKFLOW_STALL_BATCH runs), and nothing orders the two arms against
+# each other. Both outcomes are correct; the drain's is merely cheaper.
+_OUTBOX_PROCESSING_LEASE = timedelta(seconds=90)
+
 # Result-document keys that identify a single attempt rather than its content.
 # Both are required or emitted per execution, so they must never take part in
 # an outcome identity.
@@ -2195,26 +2211,71 @@ class AsyncpgControlPlane:
         on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
         now: datetime,
     ) -> None:
+        """Delivers the row accept_event just committed, inline.
+
+        The claim is what keeps this from racing the background drain: both
+        take the same lease, so a maintenance tick that lands in the window
+        between accept_event's commit and this call delivers the transition
+        once, not twice. Losing the claim is not a failure -- whoever holds it
+        is delivering the same transition.
+        """
+        claim = await self._claim_outbox_entry(outbox_id, now)
+        if claim is None:
+            return
         try:
             await on_transition(workflow_run_id, new_status, state_updates)
-        except Exception as error:  # noqa: BLE001 - leaves the outbox row pending for the background drain to retry
-            await self._pool.execute(
-                """
-                UPDATE app.workflow_transition_outbox
-                SET attempts = attempts + 1, last_error = $2
-                WHERE id = $1 AND status = 'pending'
-                """,
-                outbox_id,
-                str(error)[:1024],
-            )
+        except Exception as error:  # noqa: BLE001 - releases the outbox row for the background drain to retry
+            await self._release_outbox_entry(outbox_id, claim, error)
             return
+        await self._complete_outbox_entry(outbox_id, claim, now)
+
+    async def _claim_outbox_entry(self, outbox_id: UUID, now: datetime) -> datetime | None:
+        """Takes the processing lease on one row, returning the claim stamp.
+
+        The stamp is the fence. A delivery that outlives its own lease has
+        already had the row reclaimed by another drainer, and must not then
+        release or complete work that is no longer its own: doing so would
+        knock the current holder's claim out from under it and hand the same
+        transition to a third drainer.
+        """
+        claimed = await self._pool.fetchrow(
+            """
+            UPDATE app.workflow_transition_outbox
+            SET status = 'processing', processing_started_at = $2
+            WHERE id = $1 AND status = 'pending'
+            RETURNING processing_started_at
+            """,
+            outbox_id,
+            now,
+        )
+        return None if claimed is None else now
+
+    async def _release_outbox_entry(
+        self, outbox_id: UUID, claim: datetime, error: Exception
+    ) -> None:
         await self._pool.execute(
             """
             UPDATE app.workflow_transition_outbox
-            SET status = 'processed', processed_at = $2
-            WHERE id = $1
+            SET status = 'pending', processing_started_at = NULL,
+                attempts = attempts + 1, last_error = $3
+            WHERE id = $1 AND status = 'processing' AND processing_started_at = $2
             """,
             outbox_id,
+            claim,
+            str(error)[:1024],
+        )
+
+    async def _complete_outbox_entry(
+        self, outbox_id: UUID, claim: datetime, now: datetime
+    ) -> None:
+        await self._pool.execute(
+            """
+            UPDATE app.workflow_transition_outbox
+            SET status = 'processed', processed_at = $3
+            WHERE id = $1 AND status = 'processing' AND processing_started_at = $2
+            """,
+            outbox_id,
+            claim,
             now,
         )
 
@@ -2223,18 +2284,39 @@ class AsyncpgControlPlane:
         on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
         now: datetime,
         limit: int = 50,
+        processing_lease: timedelta = _OUTBOX_PROCESSING_LEASE,
     ) -> int:
         """At-least-once delivery for transitions an earlier accept_event call
         committed but never finished invoking (process crash, DB blip, etc).
-        Intended to be polled periodically by a background worker."""
+        Intended to be polled periodically by a background worker.
+
+        `processing` is a lease, not a terminal state. A drainer marks the row,
+        commits, and only then calls out to the graph runtime -- so a process
+        that dies mid-delivery leaves the row claimed with nobody to release
+        it, and selecting `pending` alone dropped that transition forever
+        (issue #96). Rows whose claim is older than `processing_lease` are
+        therefore taken back. The lease has to outlast a real delivery, which
+        reaches GitHub through the graph, or a slow-but-live drain would be
+        raced by the next tick; delivering twice is safe (nodes reuse the
+        execution request they already have) but pointless.
+
+        `now` is also the claim stamp, and every row in one pass shares it.
+        Completing or releasing a row requires that stamp to still be on it, so
+        a drainer whose delivery outlived its lease finds the row already
+        reclaimed and leaves it to whoever holds it now.
+        """
         async with self._pool.acquire() as connection:
             rows = await connection.fetch(
                 """
                 UPDATE app.workflow_transition_outbox
-                SET status = 'processing'
+                SET status = 'processing', processing_started_at = $2
                 WHERE id IN (
                     SELECT id FROM app.workflow_transition_outbox
                     WHERE status = 'pending'
+                       OR (
+                           status = 'processing'
+                           AND (processing_started_at IS NULL OR processing_started_at <= $3)
+                       )
                     ORDER BY created_at
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
@@ -2242,6 +2324,8 @@ class AsyncpgControlPlane:
                 RETURNING id, workflow_run_id, new_status, state_updates
                 """,
                 limit,
+                now,
+                now - processing_lease,
             )
         processed = 0
         for row in rows:
@@ -2250,26 +2334,10 @@ class AsyncpgControlPlane:
                 state_updates = json.loads(state_updates)
             try:
                 await on_transition(str(row["workflow_run_id"]), str(row["new_status"]), state_updates)
-            except Exception as error:  # noqa: BLE001 - leaves the outbox row pending for the next drain pass
-                await self._pool.execute(
-                    """
-                    UPDATE app.workflow_transition_outbox
-                    SET status = 'pending', attempts = attempts + 1, last_error = $2
-                    WHERE id = $1
-                    """,
-                    row["id"],
-                    str(error)[:1024],
-                )
+            except Exception as error:  # noqa: BLE001 - releases the outbox row for the next drain pass
+                await self._release_outbox_entry(row["id"], now, error)
                 continue
-            await self._pool.execute(
-                """
-                UPDATE app.workflow_transition_outbox
-                SET status = 'processed', processed_at = $2
-                WHERE id = $1
-                """,
-                row["id"],
-                now,
-            )
+            await self._complete_outbox_entry(row["id"], now, now)
             processed += 1
         return processed
 

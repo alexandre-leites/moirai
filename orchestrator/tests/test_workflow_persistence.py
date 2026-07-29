@@ -25,6 +25,7 @@ class _Connection:
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.attempt = 1
         self.status = "waiting_github_checks"
+        self.open_request: dict[str, object] | None = None
 
     def transaction(self) -> _Transaction:
         return _Transaction()
@@ -47,6 +48,8 @@ class _Connection:
             }
         if "UPDATE app.workflow_runs" in query and self.known:
             return {"id": args[0], "project_id": "00000000-0000-0000-0000-000000000002"}
+        if "FROM app.workflow_execution_requests" in query:
+            return self.open_request
         return {"id": args[0]} if self.known else None
 
     async def fetchval(self, query: str, *args: object) -> int:
@@ -73,12 +76,17 @@ class _Pool:
     def __init__(self) -> None:
         self.connection = _Connection()
         self.checkpoint: dict[str, object] | None = None
+        self.open_request: dict[str, object] | None = None
+        self.queries: list[str] = []
 
     def acquire(self) -> _Lease:
         return _Lease(self.connection)
 
     async def fetchrow(self, query: str, *args: object) -> dict[str, object] | None:
-        del query, args
+        del args
+        self.queries.append(query)
+        if "FROM app.workflow_execution_requests" in query:
+            return self.open_request
         return self.checkpoint
 
 
@@ -280,10 +288,62 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.latest_checkpoint(WORKFLOW_ID))
 
     async def test_dispatch_creates_a_queued_request_with_role_attempt(self) -> None:
-        execution_id = await self.store.dispatch(WORKFLOW_ID, "planner")
-        self.assertRegex(execution_id, r"^[0-9a-f-]{36}$")
+        request = await self.store.dispatch(WORKFLOW_ID, "planner")
+        self.assertRegex(str(request["id"]), r"^[0-9a-f-]{36}$")
+        self.assertEqual(request["role"], "planner")
+        self.assertIs(request["created"], True)
         self.assertTrue(any("FOR UPDATE" in query for query in self.pool.connection.queries))
-        self.assertTrue(any("workflow_execution_requests" in query for query in self.pool.connection.queries))
+        self.assertTrue(any(
+            "INSERT INTO app.workflow_execution_requests" in query
+            for query in self.pool.connection.queries
+        ))
+
+    async def test_dispatch_reuses_an_open_request_instead_of_queueing_a_second(self) -> None:
+        """Issue #96: the outbox delivers a transition at least once, so a node
+        can be entered again with the execution it queued still in flight. The
+        decision is made inside the transaction holding the run's row lock, so
+        two concurrent deliveries cannot both insert."""
+        for status in ("queued", "dispatched"):
+            with self.subTest(open_request_status=status):
+                self.pool.connection = _Connection()
+                self.pool.connection.open_request = {
+                    "id": "00000000-0000-0000-0000-0000000000aa", "role": "developer", "attempt": 2,
+                }
+                store = AsyncpgWorkflowPersistence(self.pool, now=lambda: NOW)
+
+                request = await store.dispatch(WORKFLOW_ID, "developer")
+
+                self.assertEqual(request["id"], "00000000-0000-0000-0000-0000000000aa")
+                self.assertEqual(request["attempt"], 2)
+                self.assertIs(request["created"], False)
+                self.assertFalse(any(
+                    "INSERT INTO app.workflow_execution_requests" in query
+                    for query in self.pool.connection.queries
+                ))
+
+    async def test_the_open_request_lookup_reads_only_live_rows(self) -> None:
+        """A request closed by its own terminal event, or by the maintenance
+        loop, is finished work: treating it as live would stop the phase it
+        belonged to from ever running again. Newest first, because a re-queued
+        phase leaves older closed rows for the same role behind."""
+        self.pool.open_request = {
+            "id": "00000000-0000-0000-0000-0000000000aa", "role": "reviewer", "attempt": 3,
+        }
+
+        request = await self.store.get_open_execution_request(WORKFLOW_ID)
+
+        self.assertEqual(request, {
+            "id": "00000000-0000-0000-0000-0000000000aa", "role": "reviewer",
+            "attempt": 3, "created": False,
+        })
+        query = next(
+            query for query in self.pool.queries if "FROM app.workflow_execution_requests" in query
+        )
+        self.assertIn("status IN ('queued', 'dispatched')", query)
+        self.assertIn("ORDER BY created_at DESC", query)
+
+    async def test_the_open_request_lookup_returns_none_when_nothing_is_in_flight(self) -> None:
+        self.assertIsNone(await self.store.get_open_execution_request(WORKFLOW_ID))
 
     async def test_dispatch_rejects_invalid_role_and_unknown_workflow(self) -> None:
         with self.assertRaisesRegex(ValueError, "role"):
