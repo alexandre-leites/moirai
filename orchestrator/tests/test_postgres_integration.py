@@ -416,6 +416,56 @@ class OfferExpiryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         assert reoffered is not None
         self.assertEqual(reoffered.offer.job_id, job_id)
 
+    async def test_an_accepted_run_that_reported_nothing_is_never_treated_as_bootstrap(self) -> None:
+        """A runner that accepts an offer and then dies silently -- a bad
+        image, a crash-looping agent, broken workspace prep -- must keep the
+        bounded outcome it had before issue #141: re-offered by `recover_one`
+        and eventually blocked by the unanswered-offer limit.
+
+        The bootstrap arm cancels the run, releases the project lock and leaves
+        the issue eligible, so `schedule()` immediately builds a *new* run with
+        a *new* job -- and the unanswered-offer streak is counted per job, so
+        the budget that is supposed to stop this resets on every cycle. Once
+        `accept_offer` stopped overwriting `current_phase`, the phase alone no
+        longer distinguished the two cases; the predicate tests `app.job_offers`
+        for an acceptance instead.
+        """
+        project_id, issue_id, runner_id = await self._seed()
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert scheduled is not None
+        job_id = scheduled.offer.job_id
+        workflow_run_id = scheduled.workflow.id
+        # Accepted, then silence: no `started` event, so no execution row, no
+        # branch, no execution request. Every other bootstrap guard holds.
+        await self.control_plane.accept_offer(job_id, runner_id, _NOW)
+        self.assertEqual(await self.control_plane.expire_leases(_NOW + timedelta(minutes=10)), (job_id,))
+        await self.pool.execute(
+            "UPDATE app.runners SET status = 'online' WHERE id = $1", UUID(runner_id)
+        )
+        recovered = await self.control_plane.recover_one(
+            _NOW + timedelta(minutes=10), timedelta(seconds=30)
+        )
+        assert recovered is not None
+        self.assertEqual(recovered.offer.job_id, job_id)
+
+        self.assertIn(job_id, await self.control_plane.expire_offers(_NOW + timedelta(minutes=11)))
+
+        run = await self._workflow_run(workflow_run_id)
+        self.assertEqual(run["status"], "recovering")
+        self.assertIsNone(run["terminal_reason"])
+        self.assertTrue(await self._holds_project_lock(project_id, workflow_run_id))
+        # The issue is still owned by this run, so nothing re-enters the global
+        # queue behind its back and the per-job unanswered streak keeps counting.
+        self.assertIsNone(await self.control_plane.schedule(_NOW + timedelta(minutes=11), timedelta(minutes=5)))
+        self.assertEqual(
+            int(
+                await self.pool.fetchval(
+                    "SELECT COUNT(*) FROM app.workflow_runs WHERE issue_id = $1", UUID(issue_id)
+                )
+            ),
+            1,
+        )
+
     async def test_expired_bootstrap_offer_cancels_the_run_and_releases_the_lock(self) -> None:
         project_id, issue_id, _ = await self._seed()
         scheduled = await self.control_plane.schedule(_NOW, timedelta(seconds=30))
@@ -557,6 +607,11 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     `find_stalled_workflow_runs`'s `NOT EXISTS (... 'queued', 'dispatched')`
     predicate could never hold for a run that had dispatched anything, and the
     maintenance loop's recovery arm was dead code.
+
+    The fixtures here are also the only ones that drive the real loop end to
+    end -- graph, scheduler, `accept_offer` and `accept_event` against real
+    PostgreSQL, with nothing about `app.workflow_runs` patched by hand -- so
+    the core-loop tests for issue #141 live here too.
     """
 
     async def asyncSetUp(self) -> None:
@@ -761,6 +816,66 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "SELECT status FROM app.workflow_runs WHERE id = $1", UUID(workflow_run_id)
         )
         return str(status)
+
+    async def _run_phase(self, workflow_run_id: str) -> str:
+        phase = await self.pool.fetchval(
+            "SELECT current_phase FROM app.workflow_runs WHERE id = $1", UUID(workflow_run_id)
+        )
+        return str(phase)
+
+    async def _job_status(self, job_id: str) -> str:
+        status = await self.pool.fetchval(
+            "SELECT status FROM app.jobs WHERE id = $1", UUID(job_id)
+        )
+        return str(status)
+
+    async def _dispatched_request_id(self, workflow_run_id: str) -> str:
+        """The request the run is currently waiting on, exactly as
+        `build_task_packet` picks it."""
+        value = await self.pool.fetchval(
+            """
+            SELECT id FROM app.workflow_execution_requests
+            WHERE workflow_run_id = $1 AND status = 'dispatched'
+            ORDER BY dispatched_at DESC, id DESC LIMIT 1
+            """,
+            UUID(workflow_run_id),
+        )
+        assert value is not None
+        return str(value)
+
+    async def _deliver_developer_result(
+        self, job_id: str, runner_id: str, request_id: str, on_transition: Any = None
+    ) -> None:
+        """A successful developer execution, reported the way the runner does:
+        `started`, then `completed` with the files it changed."""
+        from moirai.domain.models import ExecutionEvent
+
+        generation = int(
+            await self.pool.fetchval(
+                "SELECT lease_generation FROM app.jobs WHERE id = $1", UUID(job_id)
+            )
+        )
+        for sequence, event_type, payload in (
+            (1, "started", {}),
+            (
+                2,
+                "completed",
+                {"exitCode": 0, "changedFiles": ["src/main.py"], "commandsRun": ["make test"]},
+            ),
+        ):
+            await self.control_plane.accept_event(
+                ExecutionEvent(
+                    job_id=job_id,
+                    runner_id=runner_id,
+                    lease_generation=generation,
+                    event_sequence=sequence,
+                    event_type=event_type,
+                    execution_id=f"{request_id}-implement",
+                    payload=payload,
+                ),
+                _NOW,
+                on_transition=on_transition,
+            )
 
     async def _counters(self, workflow_run_id: str) -> dict[str, int]:
         row = await self.pool.fetchrow(
@@ -1117,6 +1232,99 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await self.control_plane.schedule_execution(
                 _NOW + timedelta(hours=1), timedelta(minutes=5)
             )
+        )
+
+    async def test_successful_developer_execution_advances_to_the_local_pipeline(self) -> None:
+        """Issue #141, acceptance criterion: a successful developer terminal
+        event delivered through `accept_event`, while the run holds the status
+        `accept_offer` actually leaves behind, produces a workflow transition
+        and resumes the graph.
+
+        Nothing about `app.workflow_runs` is patched here: the run reaches
+        `implement` through the real graph, `schedule_execution` offers the
+        developer request and `accept_offer` accepts it, exactly as production
+        does. Before the fix this committed nothing at all -- no transition, so
+        the graph stayed suspended on the edge out of `implement`, the job
+        stayed `running` until its lease expired, and `recover_one` re-offered
+        the same work forever.
+        """
+        workflow_run_id, job_id, runner_id = await self._implementing_run()
+        request_id = await self._dispatched_request_id(workflow_run_id)
+        # What `accept_offer` leaves behind: the job's lifecycle status on the
+        # run, with the phase the `implement` node committed intact underneath.
+        self.assertEqual(await self._run_status(workflow_run_id), "preparing")
+        self.assertEqual(await self._run_phase(workflow_run_id), "implementing")
+        nodes_before = await self._nodes_that_ran(workflow_run_id)
+        runtime = await self._runtime()
+
+        await self._deliver_developer_result(
+            job_id, runner_id, request_id, on_transition=self._advance(runtime)
+        )
+
+        self.assertEqual(await self._run_status(workflow_run_id), "local_pipeline")
+        self.assertEqual(await self._run_phase(workflow_run_id), "local_pipeline")
+        # The graph really resumed: `pipeline` ran and queued the deterministic
+        # gate's own execution. `pipeline_passed` is deliberately not set by the
+        # developer's exit code, so the pipeline execution is what decides it.
+        self.assertEqual(await self._nodes_that_ran(workflow_run_id) - nodes_before, 1)
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id),
+            [
+                ("developer", 1, "completed"),
+                ("pipeline", 1, "queued"),
+                ("planner", 1, "completed"),
+            ],
+        )
+        # The job finished with its execution rather than being left `running`
+        # for `expire_leases` to sweep into the re-offer loop.
+        self.assertEqual(await self._job_status(job_id), "completed")
+        self.assertEqual(await self._outbox_statuses(workflow_run_id), ["processed", "processed"])
+
+    async def test_developer_execution_recovered_from_a_lease_expiry_still_transitions(self) -> None:
+        """The same criterion one failure deeper. `expire_leases` fences the job
+        and `recover_one` re-offers it, and the re-offer carries the *same*
+        dispatched developer request -- so the terminal event it eventually
+        produces still has to be able to transition. Stamping `current_phase`
+        on either sweep is what turned this into the unbounded re-offer loop
+        issue #141 describes."""
+        workflow_run_id, job_id, runner_id = await self._implementing_run()
+
+        expired = await self.control_plane.expire_leases(_NOW + timedelta(hours=1))
+        self.assertIn(job_id, expired)
+        self.assertEqual(await self._run_status(workflow_run_id), "recovering")
+        self.assertEqual(await self._run_phase(workflow_run_id), "implementing")
+        # `expire_leases` marks the runner offline; it reconnects and is the
+        # only runner this project's labels allow.
+        await self.pool.execute(
+            "UPDATE app.runners SET status = 'online' WHERE id = $1", UUID(runner_id)
+        )
+
+        recovered = await self.control_plane.recover_one(
+            _NOW + timedelta(hours=1), timedelta(minutes=5)
+        )
+        assert recovered is not None
+        self.assertEqual(recovered.offer.job_id, job_id)
+        packet = await self.control_plane.build_task_packet(recovered)
+        self.assertEqual(packet["role"], "developer")
+        await self.control_plane.accept_offer(job_id, runner_id, _NOW + timedelta(hours=1))
+        self.assertEqual(await self._run_phase(workflow_run_id), "implementing")
+
+        runtime = await self._runtime()
+        await self._deliver_developer_result(
+            job_id,
+            runner_id,
+            await self._dispatched_request_id(workflow_run_id),
+            on_transition=self._advance(runtime),
+        )
+
+        self.assertEqual(await self._run_status(workflow_run_id), "local_pipeline")
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id),
+            [
+                ("developer", 1, "completed"),
+                ("pipeline", 1, "queued"),
+                ("planner", 1, "completed"),
+            ],
         )
 
     async def test_lost_execution_never_advances_the_graph_past_its_phase(self) -> None:

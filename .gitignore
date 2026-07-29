@@ -35,3 +35,12 @@ Thumbs.db
 
 # Project-specific
 runner/runner
+
+# Agent tooling
+# Ignore all local Claude Code runtime state (live git worktrees, locks, loop leases)
+# but keep the committed skill. Note `.claude/*` and NOT `.claude/**`: the single star
+# lets git descend into the re-included subdirectory, the double star would not.
+.claude/*
+!.claude/skills/
+.opencode/*
+!.opencode/command/
