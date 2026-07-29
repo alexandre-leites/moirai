@@ -78,6 +78,24 @@ Logs are JSON and retain structured fields passed with Python logging `extra`. M
 
 The gRPC listener stays insecure by default for local development. Set `LOOP_GRPC_TLS_CERT_FILE` and `LOOP_GRPC_TLS_KEY_FILE` to enable TLS. Set `LOOP_GRPC_TLS_CLIENT_CA_FILE` too to require runner mTLS certificates.
 
+## Circuit breakers
+
+`app.project_circuit_state` and `app.provider_circuit_state` hold one row per project and per issue provider. `open` keeps the project (or every project on that provider) out of `schedule()` for the probe cooldown, five minutes by default (`AsyncpgControlPlane(circuit_probe_cooldown=...)`); once it elapses, the next scheduling pass claims a single `half_open` probe by writing the workflow run it just created into `probe_workflow_run_id`. `half_open` keeps everything else out until that probe resolves.
+
+Both circuits are claimed in one savepoint, so a claim that cannot complete leaves neither row changed. Every way a probe can end resolves it:
+
+| Probe outcome | Circuit |
+| --- | --- |
+| delivered (`completed`) | closed, pointer cleared |
+| `blocked` through the workflow transition path | reopened with a fresh cooldown, counted as a failure |
+| `cancelled`, `failed`, an offer nobody answered, or a terminal status written straight to `app.workflow_runs` | reopened with a fresh cooldown, not counted — the probe reported nothing |
+
+Closing or reopening a circuit always clears `probe_workflow_run_id`, so a workflow that outlived its claim cannot decide a circuit twice. As a backstop, each leader-gated scheduler pass reopens any `half_open` row whose probe workflow is missing or already terminal and which has been claimed for longer than the cooldown, and logs `reopened orphaned circuit probes` when it does.
+
+The provider circuit is shared by every project on that provider, so an issue-sync pass decides it once, from the pass as a whole, and only on evidence about the provider: any project that syncs clears it, and a failure is recorded — once — only when every enabled project was attempted and all of them failed. Any other pass, including one that skipped a project because it was backing off, writes nothing. One project failing beside a healthy one is a project fault (a deleted repository, a bad URL, a revoked token) and is handled by that project's own `app.issue_sync_state` backoff rather than by halting scheduling everywhere. A failed `agent:*` label write does not count against the provider at all: the read the pass depends on succeeded, and the labels mirror status onto issues rather than feeding any workflow.
+
+The whole-fleet requirement is deliberate, and it is the reason a project stuck in a long backoff can stop a genuine outage from opening the circuit. Without it, a chronically broken project drops out of later passes and the projects still being attempted become the only evidence, so one of *them* failing reads as a provider outage and halts every project on GitHub. Between those two errors, failing to open only wastes agent executions — which the per-project and per-run breakers still bound — while opening wrongly stops all delivery until someone intervenes. During a real outage every project fails together, so their backoffs stay in step and the first delays (5s, 10s, 20s) are all shorter than the one-minute sync interval: no project is skipped, and the circuit opens on the third pass.
+
 ## Issue label ownership
 
 Issue sync owns exactly one label namespace: `agent:*` (`agent:ready`, `agent:running`, `agent:blocked`, `agent:delivered`, `agent:human-approval`). A reconciliation pass only ever adds or removes labels inside that namespace.
