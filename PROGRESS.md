@@ -1151,12 +1151,14 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 ## Known Issues
 
 - Issue: `runner/internal/dispatch`'s disconnected-delivery tests are flaky on GitHub-hosted runners.
-  - Severity: P2 — it failed two consecutive CI runs of PR #138, on a different test each time, so it will keep costing re-runs on unrelated PRs.
+  - Severity: P2 — it failed all three CI runs of PR #138 and one re-run (4 failures in 6 job executions), so it will keep costing re-runs on unrelated PRs.
   - Impact: the `runner` job failed on both CI runs of this branch and passed on a re-run of the same commit each time. Unrelated to this change: the branch modifies zero Go files (`git diff origin/main...HEAD --name-only` lists only Python, tests and Markdown).
     - Run 30426255735: `--- FAIL: TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected (0.62s)` → `control_loop_test.go:656: delivered events = []*runnerv1.ExecutionEvent(nil), want the terminal event`. Re-run: `runner pass 23s`.
     - Run 30426469159: `--- FAIL: TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected (0.01s)` → `control_loop_test.go:718: delivered events = […two events…], want the terminal event last`. Re-run: `runner pass`.
-  - Evidence: both pass locally under load — `cd runner && go test -race -count=20 -run 'TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected|TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected' ./internal/dispatch/` → `ok`. Both assert on what the fake transport has received at the moment of the check, while delivery is driven by a reconnecting background loop, so they depend on the scheduler catching up rather than on an observable condition. Both were added by issue #93 (`8956d84`); `main` has not flaked yet, but its runs are far fewer.
-  - Suggested resolution: belongs to whoever owns `runner/internal/dispatch` — poll the delivered-event slice until it satisfies the condition (with a deadline) instead of reading it once.
+    - Run 30426694743: `TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected` again; the first re-run failed identically and the second passed. Final state of PR #138: all ten checks pass, `mergeStateStatus: CLEAN`.
+  - Evidence: not reproducible locally — `cd runner && go test -race -count=20`, `GOMAXPROCS=2 -count=60`, and `GOMAXPROCS=1 -count=40` against six busy-loop processes all report `ok` for both tests. In the failures `client.events` is empty immediately after a synchronous `loop.FlushEvents()`, while the preceding assertion confirms the terminal event *was* in the crash-safe outbox — so the flush is not picking up an outbox entry it should, rather than the assertion racing ahead of a background sender. Both tests were added by issue #93 (`8956d84`); `main` was green on the same runner code at `30d8483`.
+    Not investigated further here because `runner/` is outside this session's ownership and was being worked on concurrently.
+  - Suggested resolution: belongs to whoever owns `runner/internal/dispatch`. Worth filing as its own issue: start from why `FlushEvents` can return without delivering an outbox entry that is present on disk, since that would be a durability defect rather than only a test defect.
 
 - Issue: `make test-postgres-integration` is not repeatable against the same database.
   - Severity: P3
