@@ -1494,5 +1494,131 @@ class CircuitBreakerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(str((await self._project_circuit(project_id))["probe_workflow_run_id"]), live_run)
 
 
+class RunnerDrainIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """A runner's self-reported drain must reach the real placement queries.
+
+    See GitHub issue #111. `test_runner_grpc.py` covers the gRPC handler
+    against the in-memory control plane; what actually stops placement in
+    production is `r.draining = false` in `schedule()`, `schedule_execution()`
+    and `recover_one()`, and only a real database exercises that.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._disable_seeded_projects)
+        await MigrationRunner(self.pool).run()
+        self.control_plane = AsyncpgControlPlane(self.pool)
+
+    async def _disable_seeded_projects(self) -> None:
+        """Leaves the shared database schedulable-neutral for other tests."""
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+
+    async def _seed(self) -> tuple[str, str]:
+        """Creates an isolated project, eligible issue, and one online runner.
+
+        Scheduling queries are global, so every project seeded by an earlier
+        test is disabled first and the runner's label is unique per test: the
+        only candidate `schedule()` can pick is the one this test created.
+        """
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        suffix = uuid4().hex[:12]
+        label = f"drain-{suffix}"
+        project = await self.control_plane.create_project(
+            f"runner-drain-{suffix}",
+            "managed_clone",
+            "https://example.test/runner-drain.git",
+            None,
+            "main",
+            {label},
+            _NOW,
+        )
+        await self.control_plane.upsert_issue(
+            project_id=str(project["id"]),
+            external_id=f"issue-{suffix}",
+            title="A draining runner must not be offered work",
+            body="",
+            state="open",
+            labels=["agent:ready"],
+            priority=100,
+            eligible=True,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+        token = await self.control_plane.create_registration_token(
+            {label}, _NOW + timedelta(minutes=30), now=_NOW
+        )
+        runner, credential = await self.control_plane.register_runner(
+            token, f"runner-{suffix}", {label}, _NOW
+        )
+        await self.control_plane.heartbeat(runner.id, credential, _NOW)
+        return runner.id, credential
+
+    async def _runner_row(self, runner_id: str) -> dict[str, Any]:
+        record = await self.pool.fetchrow(
+            "SELECT enabled, draining, status, revoked_at FROM app.runners WHERE id = $1",
+            UUID(runner_id),
+        )
+        assert record is not None
+        return dict(record)
+
+    async def test_a_drained_runner_is_not_selected_and_a_cleared_one_is(self) -> None:
+        runner_id, _ = await self._seed()
+
+        await self.control_plane.set_runner_draining(runner_id, True)
+        self.assertIsNone(await self.control_plane.schedule(_NOW, timedelta(minutes=5)))
+
+        await self.control_plane.set_runner_draining(runner_id, False)
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert scheduled is not None
+        self.assertEqual(scheduled.assignment.runner.id, runner_id)
+        # Hand the run back so this test leaves no lock or live offer behind.
+        await self.control_plane.reject_offer(scheduled.offer.job_id, runner_id, _NOW)
+
+    async def test_a_drain_report_writes_only_the_draining_column(self) -> None:
+        """The discriminator against `set_runner_state("drain")`/`("enable")`.
+
+        Those states also write `enabled`, so a runner reporting its own drain
+        state through them would silently re-enable a runner an operator had
+        deliberately disabled -- in both directions.
+        """
+        runner_id, credential = await self._seed()
+
+        # Heartbeating while draining must not silently undo the drain.
+        await self.control_plane.set_runner_draining(runner_id, True)
+        self.assertTrue((await self.control_plane.heartbeat(runner_id, credential, _NOW)).draining)
+
+        await self.control_plane.set_runner_state(runner_id, "disable", None, _NOW)
+        self.assertFalse((await self._runner_row(runner_id))["draining"])
+
+        await self.control_plane.set_runner_draining(runner_id, True)
+        drained = await self._runner_row(runner_id)
+        self.assertTrue(drained["draining"])
+        self.assertFalse(drained["enabled"])
+        self.assertEqual(drained["status"], "online")
+
+        await self.control_plane.set_runner_draining(runner_id, False)
+        cleared = await self._runner_row(runner_id)
+        self.assertFalse(cleared["draining"])
+        self.assertFalse(cleared["enabled"])
+
+    async def test_a_drain_report_is_rejected_for_an_unknown_or_revoked_runner(self) -> None:
+        runner_id, _ = await self._seed()
+
+        await self.control_plane.set_runner_state(runner_id, "revoke", None, _NOW)
+        with self.assertRaises(ValueError):
+            await self.control_plane.set_runner_draining(runner_id, False)
+        # Rejected means untouched: `revoke` left the row draining.
+        self.assertTrue((await self._runner_row(runner_id))["draining"])
+
+        with self.assertRaises(ValueError):
+            await self.control_plane.set_runner_draining(str(uuid4()), True)
+
+
 if __name__ == "__main__":
     unittest.main()
