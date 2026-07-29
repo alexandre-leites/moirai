@@ -158,7 +158,35 @@ class _DurableConnection:
             if self.pool.offer_status != "offered" or self.pool.offer_expires_at > arguments[0]:
                 return None
             self.pool.offer_status = "expired"
+            self.pool.record_unanswered_offer(arguments[0])
             return {"job_id": self.pool.job_id}
+        if "AS bootstrap" in query:
+            if self.pool.job_status != "offered":
+                return None
+            if arguments[1] is not None and str(arguments[1]) != str(self.pool.runner_id):
+                return None
+            return {
+                "workflow_run_id": self.pool.workflow_id,
+                "project_id": self.pool.project_id,
+                "terminal": self.pool.workflow_status
+                in {"completed", "blocked", "failed", "cancelled"},
+                "request_id": (
+                    self.pool.execution_request_id
+                    if self.pool.execution_request_status == "dispatched"
+                    else None
+                ),
+                "bootstrap": (
+                    self.pool.workflow_status == "offered"
+                    and self.pool.workflow_phase == "offered"
+                    and self.pool.branch_name is None
+                    and self.pool.execution_request_status == "none"
+                ),
+            }
+        if "AS unanswered" in query:
+            return {
+                "unanswered": self.pool.unanswered_offers,
+                "started_at": self.pool.unanswered_since,
+            }
         if "SET status = 'recovering'" in query:
             if self.pool.job_status not in {"preparing", "running"} or self.pool.lease_expires_at > arguments[0]:
                 return None
@@ -169,11 +197,6 @@ class _DurableConnection:
                 "runner_id": self.pool.runner_id,
                 "lease_generation": 2,
             }
-        if "SET status = 'cancelled'" in query:
-            if self.pool.job_status != "offered":
-                return None
-            self.pool.job_status = "cancelled"
-            return {"workflow_run_id": self.pool.workflow_id, "project_id": self.pool.project_id}
         if "SELECT state, opened_at FROM app.project_circuit_state" in query:
             return self.pool.project_circuit
         if "SELECT state, opened_at FROM app.provider_circuit_state" in query:
@@ -183,13 +206,14 @@ class _DurableConnection:
         if "UPDATE app.job_offers" in query:
             if self.pool.offer_status != "offered" or self.pool.offer_expires_at <= arguments[2]:
                 return None
-            self.pool.offer_status = "rejected" if "SET status = 'rejected'" in query else "accepted"
+            if "SET status = 'rejected'" in query:
+                self.pool.offer_status = "rejected"
+                self.pool.record_unanswered_offer(arguments[2])
+            else:
+                self.pool.offer_status = "accepted"
+                self.pool.unanswered_offers = 0
+                self.pool.unanswered_since = None
             return {"job_id": self.pool.job_id}
-        if "SET status = 'cancelled'" in query:
-            if self.pool.job_status != "offered":
-                return None
-            self.pool.job_status = "cancelled"
-            return {"workflow_run_id": self.pool.workflow_id, "project_id": self.pool.project_id}
         if "SET status = 'preparing'" in query:
             if self.pool.job_status != "offered":
                 return None
@@ -242,10 +266,31 @@ class _DurableConnection:
                 self.pool.provider_circuit["state"] = "half_open"
             return "UPDATE 1"
         if "UPDATE app.workflow_execution_requests" in query:
+            if "SET status = 'queued'" in query:
+                if self.pool.execution_request_status != "dispatched":
+                    return "UPDATE 0"
+                self.pool.execution_request_status = "queued"
+                return "UPDATE 1"
+            if "SET status = 'expired'" in query:
+                self.pool.execution_request_status = "expired"
+                return "UPDATE 1"
             if self.pool.execution_request_status != "queued":
                 return "UPDATE 0"
             self.pool.execution_request_status = "dispatched"
             return "UPDATE 1"
+        if "UPDATE app.jobs" in query and "recovery_reason" in query:
+            self.pool.job_status = "recovering" if "SET status = 'recovering'" in query else "cancelled"
+            if self.pool.job_status == "recovering":
+                self.pool.lease_generation += 1
+            return "UPDATE 1"
+        if "UPDATE app.workflow_runs" in query and "SET status = " in query:
+            self.pool.workflow_status = str(query.split("SET status = '")[1].split("'")[0])
+            if "current_phase" in query:
+                self.pool.workflow_phase = self.pool.workflow_status
+            return "UPDATE 1"
+        if "DELETE FROM app.project_locks" in query:
+            self.pool.project_locked = False
+            return "DELETE 1"
         if "app.jobs" in query and "last_event_sequence" in query:
             if self.pool.last_event_sequence >= int(arguments[1]):
                 return "UPDATE 0"
@@ -271,6 +316,12 @@ class _DurablePool:
         self.offer_status = "offered"
         self.job_status = "offered"
         self.workflow_status = "planning"
+        self.workflow_phase = "planning"
+        self.branch_name: str | None = "moirai/issue-91"
+        self.project_locked = True
+        self.lease_generation = 1
+        self.unanswered_offers = 0
+        self.unanswered_since: datetime | None = None
         self.last_event_sequence = 0
         self.execution_request_id = "00000000-0000-0000-0000-000000000007"
         self.execution_request_status = "none"
@@ -293,6 +344,19 @@ class _DurablePool:
             "status": "online",
             "labels": ["docker"],
         }
+
+    def record_unanswered_offer(self, now: object) -> None:
+        self.unanswered_offers += 1
+        if self.unanswered_since is None and isinstance(now, datetime):
+            self.unanswered_since = now
+
+    def bootstrap_run(self) -> None:
+        """Shapes the pool like a run schedule() just created: no branch, no
+        execution request, nothing accepted yet."""
+        self.workflow_status = "offered"
+        self.workflow_phase = "offered"
+        self.branch_name = None
+        self.execution_request_status = "none"
 
     def acquire(self) -> _DurableConnection:
         return _DurableConnection(self)
@@ -606,14 +670,82 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
                 NOW,
             )
 
-    async def test_expire_offers_cancels_job_and_releases_project_lock(self) -> None:
+    async def test_expire_offers_cancels_a_bootstrap_job_and_releases_project_lock(self) -> None:
         pool = _DurablePool()
+        pool.bootstrap_run()
         pool.offer_expires_at = NOW
         expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
         self.assertEqual(expired, (pool.job_id,))
         self.assertEqual(pool.offer_status, "expired")
         self.assertEqual(pool.job_status, "cancelled")
-        self.assertTrue(any("DELETE FROM app.project_locks" in query for query in pool.queries))
+        self.assertEqual(pool.workflow_status, "cancelled")
+        self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_requeues_an_in_flight_run(self) -> None:
+        """An unanswered re-offer must not cancel a run that already has work
+        (issue #91): the execution request goes back to the queue and the
+        project lock stays with the run."""
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
+        self.assertEqual(expired, (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "planning")
+        self.assertEqual(pool.execution_request_status, "queued")
+        self.assertEqual(pool.job_status, "cancelled")
+        self.assertTrue(pool.project_locked)
+        self.assertTrue(any("offer_unanswered" in query for query in pool.queries))
+
+    async def test_expire_offers_returns_a_recovery_offer_to_recovering(self) -> None:
+        pool = _DurablePool()
+        pool.workflow_status = "offered"
+        pool.workflow_phase = "recovering"
+        pool.offer_expires_at = NOW
+        expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
+        self.assertEqual(expired, (pool.job_id,))
+        self.assertEqual(pool.job_status, "recovering")
+        self.assertEqual(pool.lease_generation, 2)
+        self.assertEqual(pool.workflow_status, "recovering")
+        self.assertTrue(pool.project_locked)
+
+    async def test_expire_offers_does_not_resurrect_a_terminal_run(self) -> None:
+        pool = _DurablePool()
+        pool.workflow_status = "completed"
+        pool.workflow_phase = "completed"
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        expired = await AsyncpgControlPlane(pool).expire_offers(NOW)
+        self.assertEqual(expired, (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "completed")
+        self.assertEqual(pool.job_status, "cancelled")
+        self.assertEqual(pool.execution_request_status, "dispatched")
+        self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_blocks_a_run_that_never_answers(self) -> None:
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        pool.unanswered_offers = 4
+        pool.unanswered_since = NOW - timedelta(hours=1)
+        control_plane = AsyncpgControlPlane(pool, unanswered_offer_limit=5)
+        self.assertEqual(await control_plane.expire_offers(NOW), (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "blocked")
+        self.assertEqual(pool.execution_request_status, "expired")
+        self.assertFalse(pool.project_locked)
+
+    async def test_expire_offers_keeps_retrying_inside_the_grace_window(self) -> None:
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        pool.offer_expires_at = NOW
+        pool.unanswered_offers = 9
+        pool.unanswered_since = NOW - timedelta(minutes=1)
+        control_plane = AsyncpgControlPlane(
+            pool, unanswered_offer_limit=5, unanswered_offer_grace=timedelta(minutes=15)
+        )
+        self.assertEqual(await control_plane.expire_offers(NOW), (pool.job_id,))
+        self.assertEqual(pool.workflow_status, "planning")
+        self.assertEqual(pool.execution_request_status, "queued")
+        self.assertTrue(pool.project_locked)
 
     async def test_accept_offer_rejects_an_expired_durable_offer(self) -> None:
         pool = _DurablePool()
@@ -621,12 +753,29 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OfferError):
             await AsyncpgControlPlane(pool).accept_offer(pool.job_id, pool.runner_id, NOW)
 
-    async def test_reject_offer_cancels_the_durable_job_and_releases_the_lock(self) -> None:
+    async def test_reject_offer_cancels_a_bootstrap_job_and_releases_the_lock(self) -> None:
         pool = _DurablePool()
+        pool.bootstrap_run()
         await AsyncpgControlPlane(pool).reject_offer(pool.job_id, pool.runner_id, NOW)
         self.assertEqual(pool.offer_status, "rejected")
         self.assertEqual(pool.job_status, "cancelled")
-        self.assertTrue(any("DELETE FROM app.project_locks" in query for query in pool.queries))
+        self.assertEqual(pool.workflow_status, "cancelled")
+        self.assertFalse(pool.project_locked)
+
+    async def test_reject_offer_requeues_an_in_flight_run(self) -> None:
+        pool = _DurablePool()
+        pool.execution_request_status = "dispatched"
+        await AsyncpgControlPlane(pool).reject_offer(pool.job_id, pool.runner_id, NOW)
+        self.assertEqual(pool.offer_status, "rejected")
+        self.assertEqual(pool.workflow_status, "planning")
+        self.assertEqual(pool.execution_request_status, "queued")
+        self.assertTrue(pool.project_locked)
+
+    async def test_reject_offer_rejects_a_runner_that_does_not_own_the_job(self) -> None:
+        pool = _DurablePool()
+        pool.job_status = "preparing"
+        with self.assertRaises(OfferError):
+            await AsyncpgControlPlane(pool).reject_offer(pool.job_id, pool.runner_id, NOW)
 
     async def test_project_creation_listing_and_disable_are_durable(self) -> None:
         pool = _ProjectPool()

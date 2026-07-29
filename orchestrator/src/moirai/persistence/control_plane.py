@@ -86,12 +86,24 @@ _FINGERPRINT_MESSAGE_LINES = 5
 
 
 class AsyncpgControlPlane:
-    def __init__(self, pool: Any, circuit_probe_cooldown: timedelta = timedelta(minutes=5)) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        circuit_probe_cooldown: timedelta = timedelta(minutes=5),
+        unanswered_offer_limit: int = 5,
+        unanswered_offer_grace: timedelta = timedelta(minutes=15),
+    ) -> None:
         if circuit_probe_cooldown <= timedelta():
             raise ValueError("circuit probe cooldown must be positive")
+        if unanswered_offer_limit < 1:
+            raise ValueError("unanswered offer limit must be positive")
+        if unanswered_offer_grace < timedelta():
+            raise ValueError("unanswered offer grace must not be negative")
         self._pool = pool
         self._authentication = AsyncpgAuthentication(pool)
         self._circuit_probe_cooldown = circuit_probe_cooldown
+        self._unanswered_offer_limit = unanswered_offer_limit
+        self._unanswered_offer_grace = unanswered_offer_grace
 
     @property
     def pool(self) -> Any:
@@ -1219,35 +1231,234 @@ class AsyncpgControlPlane:
                     )
                     if offer is None:
                         break
-                    job = await connection.fetchrow(
-                        """
-                        UPDATE app.jobs
-                        SET status = 'cancelled', finished_at = $2, recovery_reason = 'offer_expired'
-                        WHERE id = $1 AND status = 'offered'
-                        RETURNING workflow_run_id, project_id
-                        """,
-                        offer["job_id"],
-                        now,
-                    )
-                    if job is None:
-                        continue
-                    await connection.execute(
-                        """
-                        UPDATE app.workflow_runs
-                        SET status = 'cancelled', current_phase = 'cancelled', terminal_reason = 'offer_expired',
-                            completed_at = $2, updated_at = $2
-                        WHERE id = $1
-                        """,
-                        job["workflow_run_id"],
-                        now,
-                    )
-                    await connection.execute(
-                        "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
-                        job["project_id"],
-                        job["workflow_run_id"],
-                    )
-                    expired.append(str(offer["job_id"]))
+                    if await self._release_unanswered_offer(
+                        connection, offer["job_id"], None, "offer_expired", now
+                    ):
+                        expired.append(str(offer["job_id"]))
         return tuple(expired)
+
+    async def _release_unanswered_offer(
+        self, connection: Any, job_id: Any, runner_id: Any, reason: str, now: datetime
+    ) -> bool:
+        """Releases a job whose offer was never answered, without destroying
+        work the run already completed (issue #91).
+
+        A bootstrap offer -- a run `schedule()` just created that has never
+        accepted a job -- is cancelled: it owns no branch, no pull request and
+        no execution history, and cancelling it hands the issue straight back
+        to the global queue.
+
+        Every other offer belongs to a run with progress, so it is returned to
+        a schedulable state instead: the workflow keeps its phase and its
+        project lock, a leaked `dispatched` execution request goes back to
+        `queued` for `schedule_execution`, and a recovery offer goes back to
+        `recovering` for `recover_one`. Runs cannot ping-pong forever: once the
+        unanswered offers for a job reach `unanswered_offer_limit` and have been
+        failing for longer than `unanswered_offer_grace`, the run is blocked
+        with a specific reason and stops holding the project lock.
+
+        Returns False when the job is no longer offered (it was accepted or
+        released concurrently), leaving the caller to decide what that means.
+        """
+        context = await connection.fetchrow(
+            """
+            SELECT j.workflow_run_id, j.project_id, request.id AS request_id,
+                   w.status IN ('completed', 'blocked', 'failed', 'cancelled') AS terminal,
+                   (
+                       w.status = 'offered' AND w.current_phase = 'offered'
+                       AND w.branch_name IS NULL AND w.pull_request_external_id IS NULL
+                       AND w.total_agent_executions = 0
+                       AND NOT EXISTS (SELECT 1 FROM app.executions AS e WHERE e.job_id = j.id)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM app.workflow_execution_requests AS r
+                           WHERE r.workflow_run_id = w.id
+                       )
+                   ) AS bootstrap
+            FROM app.jobs AS j
+            JOIN app.workflow_runs AS w ON w.id = j.workflow_run_id
+            LEFT JOIN LATERAL (
+                SELECT id FROM app.workflow_execution_requests
+                WHERE workflow_run_id = w.id AND status = 'dispatched'
+                ORDER BY dispatched_at DESC, id DESC
+                LIMIT 1
+            ) AS request ON true
+            WHERE j.id = $1 AND j.status = 'offered'
+              AND ($2::uuid IS NULL OR j.runner_id = $2)
+            FOR UPDATE OF j, w
+            """,
+            job_id,
+            runner_id,
+        )
+        if context is None:
+            return False
+        workflow_run_id = context["workflow_run_id"]
+        if bool(context["terminal"]):
+            # The run reached a terminal status while this offer was
+            # outstanding: release the job without resurrecting the run.
+            await self._cancel_offered_job(connection, job_id, context, reason, now, cancel_run=False)
+            return True
+        if bool(context["bootstrap"]):
+            await self._cancel_offered_job(connection, job_id, context, reason, now)
+            return True
+        streak = await connection.fetchrow(
+            """
+            SELECT COUNT(*) AS unanswered, MIN(created_at) AS started_at
+            FROM app.job_offers
+            WHERE job_id = $1 AND status IN ('expired', 'rejected')
+              AND created_at > COALESCE(
+                  (SELECT MAX(created_at) FROM app.job_offers WHERE job_id = $1 AND status = 'accepted'),
+                  '-infinity'::timestamptz
+              )
+            """,
+            job_id,
+        )
+        unanswered = int(streak["unanswered"]) if streak is not None else 1
+        started_at = streak["started_at"] if streak is not None else now
+        exhausted = unanswered >= self._unanswered_offer_limit and (
+            started_at is None or started_at <= now - self._unanswered_offer_grace
+        )
+        if exhausted:
+            await self._block_unanswered_run(connection, job_id, context, reason, now)
+        elif context["request_id"] is not None:
+            # Hand the execution request back to schedule_execution, which
+            # re-offers this same job on a later tick.
+            await connection.execute(
+                """
+                UPDATE app.workflow_execution_requests
+                SET status = 'queued', dispatched_at = NULL
+                WHERE id = $1 AND status = 'dispatched'
+                """,
+                context["request_id"],
+            )
+            await connection.execute(
+                """
+                UPDATE app.jobs
+                SET status = 'cancelled', finished_at = $2, recovery_reason = $3
+                WHERE id = $1
+                """,
+                job_id,
+                now,
+                reason,
+            )
+            await connection.execute(
+                "UPDATE app.workflow_runs SET updated_at = $2 WHERE id = $1",
+                workflow_run_id,
+                now,
+            )
+        else:
+            # No execution request to requeue (a recovery offer, or a run whose
+            # progress predates one): fence the lease and hand it to recover_one.
+            await connection.execute(
+                """
+                UPDATE app.jobs
+                SET status = 'recovering', lease_generation = lease_generation + 1,
+                    finished_at = NULL, recovery_reason = $2
+                WHERE id = $1
+                """,
+                job_id,
+                reason,
+            )
+            await connection.execute(
+                "UPDATE app.workflow_runs SET status = 'recovering', updated_at = $2 WHERE id = $1",
+                workflow_run_id,
+                now,
+            )
+        await connection.execute(
+            """
+            INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
+            VALUES ($1, 'offer_unanswered', $2, $3::jsonb, $4)
+            """,
+            workflow_run_id,
+            "error" if exhausted else "warning",
+            json.dumps(
+                {
+                    "job_id": str(job_id),
+                    "reason": reason,
+                    "unanswered_offers": unanswered,
+                    "outcome": "blocked" if exhausted else "requeued",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            now,
+        )
+        return True
+
+    async def _cancel_offered_job(
+        self,
+        connection: Any,
+        job_id: Any,
+        context: Any,
+        reason: str,
+        now: datetime,
+        *,
+        cancel_run: bool = True,
+    ) -> None:
+        await connection.execute(
+            """
+            UPDATE app.jobs
+            SET status = 'cancelled', finished_at = $2, recovery_reason = $3
+            WHERE id = $1
+            """,
+            job_id,
+            now,
+            reason,
+        )
+        if cancel_run:
+            await connection.execute(
+                """
+                UPDATE app.workflow_runs
+                SET status = 'cancelled', current_phase = 'cancelled', terminal_reason = $3,
+                    completed_at = $2, updated_at = $2
+                WHERE id = $1
+                """,
+                context["workflow_run_id"],
+                now,
+                reason,
+            )
+        await connection.execute(
+            "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+            context["project_id"],
+            context["workflow_run_id"],
+        )
+
+    async def _block_unanswered_run(
+        self, connection: Any, job_id: Any, context: Any, reason: str, now: datetime
+    ) -> None:
+        await connection.execute(
+            """
+            UPDATE app.jobs
+            SET status = 'cancelled', finished_at = $2, recovery_reason = $3
+            WHERE id = $1
+            """,
+            job_id,
+            now,
+            reason,
+        )
+        await connection.execute(
+            """
+            UPDATE app.workflow_runs
+            SET status = 'blocked', current_phase = 'blocked', blocking_reason = $3,
+                terminal_reason = $3, completed_at = COALESCE(completed_at, $2), updated_at = $2
+            WHERE id = $1
+            """,
+            context["workflow_run_id"],
+            now,
+            "unanswered_offer_limit",
+        )
+        await connection.execute(
+            """
+            UPDATE app.workflow_execution_requests
+            SET status = 'expired'
+            WHERE workflow_run_id = $1 AND status IN ('queued', 'dispatched')
+            """,
+            context["workflow_run_id"],
+        )
+        await connection.execute(
+            "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+            context["project_id"],
+            context["workflow_run_id"],
+        )
 
     async def expire_leases(self, now: datetime) -> tuple[str, ...]:
         expired: list[str] = []
@@ -1439,6 +1650,10 @@ class AsyncpgControlPlane:
         return JobLease(str(job_id), runner_id, int(job["lease_generation"]), job["lease_expires_at"])
 
     async def reject_offer(self, job_id: str, runner_id: str, now: datetime) -> None:
+        """Releases an offer the assigned runner refused (or the scheduler
+        could not deliver). A refusal says nothing about the work the run has
+        already done, so it takes the same non-destructive release path as an
+        expired offer."""
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 offer = await connection.fetchrow(
@@ -1454,33 +1669,11 @@ class AsyncpgControlPlane:
                 )
                 if offer is None:
                     raise OfferError("job offer is no longer active")
-                job = await connection.fetchrow(
-                    """
-                    UPDATE app.jobs
-                    SET status = 'cancelled', finished_at = $3, recovery_reason = 'runner_rejected_offer'
-                    WHERE id = $1 AND runner_id = $2 AND status = 'offered'
-                    RETURNING workflow_run_id, project_id
-                    """,
-                    _uuid(job_id),
-                    _uuid(runner_id),
-                    now,
+                released = await self._release_unanswered_offer(
+                    connection, _uuid(job_id), _uuid(runner_id), "runner_rejected_offer", now
                 )
-                if job is None:
+                if not released:
                     raise OfferError("job offer is no longer active")
-                await connection.execute(
-                    """
-                    UPDATE app.workflow_runs
-                    SET status = 'cancelled', current_phase = 'cancelled', updated_at = $2
-                    WHERE id = $1
-                    """,
-                    job["workflow_run_id"],
-                    now,
-                )
-                await connection.execute(
-                    "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
-                    job["project_id"],
-                    job["workflow_run_id"],
-                )
 
     async def renew_lease(
         self, job_id: str, runner_id: str, generation: int, expires_at: datetime, now: datetime

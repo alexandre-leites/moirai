@@ -73,22 +73,40 @@ class Scheduler:
         task_packet: Callable[[ScheduledJob], Awaitable[dict[str, Any]] | dict[str, Any]],
         offer_ttl: timedelta,
         max_offers_per_tick: int = 50,
+        max_consecutive_failures: int = 3,
     ) -> None:
         if offer_ttl <= timedelta():
             raise ValueError("offer TTL must be positive")
         if max_offers_per_tick < 1:
             raise ValueError("max offers per tick must be positive")
+        if max_consecutive_failures < 1:
+            raise ValueError("max consecutive failures must be positive")
         self._control_plane = control_plane
         self._deliver_offer = deliver_offer
         self._task_packet = task_packet
         self._offer_ttl = offer_ttl
         self._max_offers_per_tick = max_offers_per_tick
+        self._max_consecutive_failures = max_consecutive_failures
 
     async def tick(self, now: datetime) -> list[ScheduledJob]:
         """Place offers until no candidate remains or the per-tick budget is hit.
 
         A single fixed-interval pass previously placed at most one offer, so N
         queued jobs and N idle runners took N intervals to fully dispatch.
+
+        A candidate that cannot be served is never fatal to the pass (issue
+        #91): one unreachable runner must not stall every other ready job for a
+        full interval, and neither failure mode may terminate a workflow.
+
+        - A packet build error is an orchestrator-side fault. The offer is left
+          alone so nothing about the run is decided here; the control plane
+          releases it when the offer TTL elapses.
+        - An undelivered offer (returned false or raised) is released back to
+          the control plane, which requeues an in-flight run and only cancels a
+          bootstrap run that holds no work.
+
+        Consecutive failures are capped so a fleet-wide outage cannot churn a
+        whole per-tick budget of offers every interval.
         """
         expire_offers = getattr(self._control_plane, "expire_offers", None)
         if expire_offers is not None:
@@ -98,21 +116,38 @@ class Scheduler:
             await _await(expire_leases(now))
 
         placed: list[ScheduledJob] = []
+        consecutive_failures = 0
         for _ in range(self._max_offers_per_tick):
             scheduled = await self._schedule_one(now)
             if scheduled is None:
                 break
-            try:
-                task_packet = await _await(self._task_packet(scheduled))
-                delivered = await self._deliver_offer(scheduled.offer, task_packet)
-            except Exception as error:
-                await self._reject_offer(scheduled, now, error)
-                raise OfferDeliveryError("scheduled offer delivery failed") from error
-            if not delivered:
-                await self._reject_offer(scheduled, now)
-                break
+            if not await self._place(scheduled, now):
+                consecutive_failures += 1
+                if consecutive_failures >= self._max_consecutive_failures:
+                    break
+                continue
+            consecutive_failures = 0
             placed.append(scheduled)
         return placed
+
+    async def _place(self, scheduled: ScheduledJob, now: datetime) -> bool:
+        context = {"job_id": scheduled.offer.job_id, "runner_id": scheduled.offer.runner_id}
+        try:
+            task_packet = await _await(self._task_packet(scheduled))
+        except Exception:
+            _LOGGER.exception("task packet build failed; leaving the offer to expire", extra=context)
+            return False
+        delivery_error: Exception | None = None
+        try:
+            delivered = await self._deliver_offer(scheduled.offer, task_packet)
+        except Exception as error:
+            _LOGGER.exception("offer delivery failed; releasing the offer", extra=context)
+            delivery_error = error
+            delivered = False
+        if delivered:
+            return True
+        await self._reject_offer(scheduled, now, delivery_error)
+        return False
 
     async def _schedule_one(self, now: datetime) -> ScheduledJob | None:
         schedule_execution = getattr(self._control_plane, "schedule_execution", None)
