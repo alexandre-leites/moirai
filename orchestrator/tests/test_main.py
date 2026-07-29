@@ -14,6 +14,7 @@ from moirai.main import (
     CheckpointerUnavailableError,
     _build_checkpointer,
     _log_unexpected_completion,
+    _run_workflow_maintenance_loop,
     register_services,
 )
 
@@ -123,6 +124,91 @@ class LogUnexpectedCompletionTests(unittest.IsolatedAsyncioTestCase):
             await task
         _log_unexpected_completion("scheduler", health, shutdown, task)
         self.assertIn("scheduler", health.dead_loops)
+
+
+class _RecordingControlPlane:
+    def __init__(self, stalled: tuple[str, ...] = ()) -> None:
+        self.stalled = stalled
+        self.recovered: list[str] = []
+        self.calls: list[str] = []
+
+    async def drain_pending_transitions(self, on_transition: object, now: object) -> int:
+        self.calls.append("drain")
+        return 0
+
+    async def close_orphaned_execution_requests(self, now: object, stale_after: object) -> int:
+        self.calls.append("sweep")
+        return 0
+
+    async def find_stalled_workflow_runs(self, now: object, stale_after: object, limit: int) -> tuple[str, ...]:
+        self.calls.append("detect")
+        return self.stalled
+
+    async def recover_stalled_workflow_run(
+        self, workflow_run_id: str, on_transition: object, now: object
+    ) -> bool:
+        self.recovered.append(workflow_run_id)
+        if workflow_run_id == "explodes":
+            raise RuntimeError("recovery failed")
+        return True
+
+
+class _Leader:
+    def __init__(self, stop_event: asyncio.Event, error: Exception | None = None) -> None:
+        self._stop_event = stop_event
+        self._error = error
+        self.iterations = 0
+        self.closed = False
+
+    async def is_leader(self) -> bool:
+        self.iterations += 1
+        self._stop_event.set()
+        if self._error is not None:
+            raise self._error
+        return True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class WorkflowMaintenanceLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_once(self, control_plane: object, leader_error: Exception | None = None) -> _Leader:
+        from datetime import UTC, datetime, timedelta
+
+        stop_event = asyncio.Event()
+        leader = _Leader(stop_event, leader_error)
+
+        async def on_transition(*_args: object) -> None:
+            return None
+
+        await asyncio.wait_for(
+            _run_workflow_maintenance_loop(
+                control_plane, on_transition, stop_event,
+                lambda: datetime.now(UTC), timedelta(milliseconds=1), leader,
+            ),
+            timeout=10,
+        )
+        return leader
+
+    async def test_leadership_probe_failure_does_not_kill_the_loop(self) -> None:
+        """AsyncpgLeader re-raises whatever the database did. The loop's
+        done-callback now shuts the whole orchestrator down, so an unhandled
+        exception here would turn a failover blip into a process exit."""
+        control_plane = _RecordingControlPlane()
+
+        leader = await self._run_once(control_plane, leader_error=RuntimeError("connection lost"))
+
+        self.assertEqual(leader.iterations, 1)
+        self.assertTrue(leader.closed)
+        self.assertEqual(control_plane.calls, [])
+
+    async def test_sweep_runs_before_detection_and_one_failure_does_not_stop_the_batch(self) -> None:
+        control_plane = _RecordingControlPlane(stalled=("explodes", "recovers"))
+
+        await self._run_once(control_plane)
+
+        self.assertEqual(control_plane.calls, ["drain", "sweep", "detect"])
+        self.assertEqual(control_plane.recovered, ["explodes", "recovers"])
 
 
 if __name__ == "__main__":
