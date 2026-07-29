@@ -20,3 +20,13 @@ updates:
     directory: /web
     schedule:
       interval: weekly
+  # Every Dockerfile base image is pinned to a digest for reproducibility, which
+  # only stays safe while something keeps moving the pins forward.
+  - package-ecosystem: docker
+    directories:
+      - /api
+      - /orchestrator
+      - /runner
+      - /web
+    schedule:
+      interval: weekly

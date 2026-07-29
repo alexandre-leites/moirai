@@ -2,13 +2,13 @@ BUF_IMAGE ?= bufbuild/buf:1.50.0
 VENV ?= .venv
 MYPY_CACHE ?= /tmp/moirai-mypy-cache
 
-.PHONY: help test lint typecheck validate compose dev-install \
-        proto-lint proto-generate proto-check \
+.PHONY: help test lint typecheck validate compose compose-ghcr dev-install \
+        proto-lint proto-generate proto-check test-release-tags \
         test-orchestrator test-postgres-integration test-runner test-api test-web \
         build-runner build-api build-web
 
 help:
-	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run orchestrator tests.' '  make test-runner       Run runner tests with the race detector.' '  make test-api          Run API tests.' '  make test-web          Install web dependencies and run typecheck, lint, and unit tests.' '  make lint              Run orchestrator lint.' '  make typecheck         Run orchestrator type checks.' '  make validate          Run test, lint, typecheck, Compose, and proto checks.' '  make compose           Validate the Compose configuration.' '  make proto-check       Lint, generate, and verify protobuf outputs.'
+	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run orchestrator tests.' '  make test-runner       Run runner tests with the race detector.' '  make test-api          Run API tests.' '  make test-web          Install web dependencies and run typecheck, lint, and unit tests.' '  make lint              Run orchestrator lint.' '  make typecheck         Run orchestrator type checks.' '  make validate          Run test, lint, typecheck, Compose, and proto checks.' '  make compose           Validate the Compose configuration.' '  make compose-ghcr      Validate the published-image Compose overlay.' '  make test-release-tags Check the release trigger to image tag mapping.' '  make proto-check       Lint, generate, and verify protobuf outputs.'
 
 test: test-orchestrator test-runner test-api test-web
 
@@ -55,6 +55,17 @@ build-web:
 compose:
 	docker compose config
 
+# Renders compose.yaml with the published-image overlay. Fails if the overlay
+# stops replacing a build section, which would let `up` silently build from
+# source instead of running the released image.
+compose-ghcr:
+	docker compose -f compose.yaml -f compose.ghcr.yaml config --quiet
+	! docker compose -f compose.yaml -f compose.ghcr.yaml config | grep -q '^ *build:'
+
+# Executable specification of the release trigger -> image tag mapping.
+test-release-tags:
+	sh scripts/release-version_test.sh
+
 proto-lint:
 	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) lint
 
@@ -64,4 +75,4 @@ proto-generate:
 proto-check: proto-lint proto-generate
 	git diff --exit-code -- gen/go orchestrator/src/moirai/protocols
 
-validate: test-orchestrator lint typecheck compose proto-check
+validate: test-orchestrator lint typecheck compose compose-ghcr test-release-tags proto-check

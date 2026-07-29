@@ -2304,3 +2304,266 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 - #102 (runner lifecycle hardening) is now unblocked on its shutdown-ordering item: delivering the SIGTERM drain report can no longer strand a runner, because the next connect clears it.
 - #119 (operator drain/revoke API) should decide the `draining` column ownership before it ships. See Known Issues above for the constraint this change adds.
+
+---
+
+# Session: Docker runnability audit and GHCR release pipeline (agent/docker-ghcr-release, 2026-07-29)
+
+- Overall status: complete; branch `feat/docker-ghcr-release` pushed and PR opened.
+- Current phase: packaging and delivery. No product behaviour changed; no service source file was edited.
+- Active implementation: None.
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/docker-ghcr-release
+- Files deliberately not touched: `.github/workflows/ci.yml` and `compose.yaml`, both owned by
+  `fix/ci-self-hosted-python` (PR #160, still open at the time of writing). The published-image
+  path is a separate overlay, `compose.ghcr.yaml`, precisely so `compose.yaml` did not have to move.
+
+## Audit result: what was already correct
+
+Established by building and running, not by reading. Baseline `docker build` of all four
+services from `c67a881` succeeded, and `docker compose up --build --wait` brought
+postgres + orchestrator + api + web + runner to `healthy` in ~22 s. A real end-to-end request
+closed the loop: `POST /api/v1/auth/login` through the web container's nginx proxy returned
+`200` with a user id, which means web -> api -> orchestrator gRPC -> PostgreSQL all worked, the
+migrations applied, and the bootstrap admin was seeded. The runner registered and opened its
+control stream. So the honest headline is that Docker already worked; nothing here was a repair
+of a broken build.
+
+Already correct before this session, and left alone: three-network isolation, secrets delivered
+as files under `/run/secrets/` rather than environment variables, per-service healthchecks,
+`no-new-privileges`, `cap_drop: [ALL]` with narrow re-grants, `read_only` plus tmpfs on the
+runner, non-root runtime users (65532 for api/orchestrator/runner, `nginx` for web), the
+root-then-`gosu`/`su-exec` entrypoints that exist so secrets can be re-owned before dropping
+privileges, multi-stage builds for api/runner/web, `GOTOOLCHAIN=local`, `npm ci` against a
+committed lockfile, and the `compose-smoke` CI job that already boots the stack on every PR.
+
+## Done
+
+- [x] Make the container images reproducible, cache-friendly, multi-architecture, and smaller
+  - Completed: 2026-07-29
+  - Relevant files: `api/Dockerfile`, `runner/Dockerfile`, `web/Dockerfile`,
+    `orchestrator/Dockerfile`, `orchestrator/.dockerignore`, `.dockerignore`
+  - Behavior delivered:
+    - Every base image is pinned to its manifest-list digest (`golang:1.25-alpine`,
+      `alpine:3.22`, `node:22-alpine`, `nginx:1.27-alpine`, `python:3.12-slim`,
+      `ghcr.io/astral-sh/uv:0.11.26`). `.github/dependabot.yml` gained a `docker` ecosystem for
+      all four directories so the pins are moved forward weekly instead of rotting.
+    - `alpine:3.20` -> `alpine:3.22` for the api runtime. 3.20 is past its supported window, so
+      it no longer receives Alpine security updates.
+    - The orchestrator installs its dependency closure from the committed `uv.lock`
+      (`uv export --frozen --no-dev` -> `pip install --require-hashes`) instead of resolving the
+      `>=` ranges in `pyproject.toml` at build time. Two consequences: rebuilding an old commit
+      reproduces its dependency set, and the closure CI audits with `pip-audit` (which reads
+      `uv.lock`) is now the closure that actually ships. `uv.lock` had to be un-ignored in
+      `orchestrator/.dockerignore`.
+    - Go builders and the web bundle build run on `$BUILDPLATFORM` and cross-compile
+      (`GOOS/GOARCH=$TARGETOS/$TARGETARCH`, `CGO_ENABLED=0`, `-trimpath -ldflags='-s -w'`), so a
+      linux/arm64 image pays QEMU emulation only for the runtime stages that run `apk`,
+      `apt-get`, `pip`, and `npm`.
+    - Dependency installs are their own layers: `go mod download` before the service source,
+      `npm ci` before the web source, `pip install -r requirements` before `src/`. Editing a
+      source file no longer reinstalls dependencies.
+    - `HEALTHCHECK` in each image, mirroring what `compose.yaml` already declares, so a plain
+      `docker run` of a published image reports health without the caller restating the probe.
+      Compose still overrides them; nothing about the existing probes changed.
+    - The runner image dropped from **1.99 GB to 525 MB**. `npm install --global opencode-ai`
+      keeps all four x64 platform packages (~520 MB) plus a ~425 MB npm cache, even though its
+      postinstall has already hardlinked the one binary it needs into `bin/opencode.exe`.
+      Both are now removed, and `opencode --version` runs *after* the deletion so a future
+      opencode layout that stops hardlinking fails the build instead of shipping a runner with
+      no agent binary. api dropped 40.6 MB -> 30.8 MB.
+    - Root `.dockerignore` now excludes `.env`, `.env.*`, `.claude/`, `docs/`, `scripts/`,
+      `proto/`, `schemas/`, and the tool caches. Nothing copied them, but `.claude/` in
+      particular can contain entire git worktrees, and a build context is not the place to find
+      out that a credential file is in scope.
+  - Validation performed: see Validation Status.
+
+- [x] Publish the four images to GitHub Container Registry from a dedicated release workflow
+  - Completed: 2026-07-29
+  - Relevant files: `.github/workflows/release.yml`, `scripts/release-version.sh`,
+    `scripts/release-version_test.sh`, `compose.ghcr.yaml`, `docs/release.md`, `README.md`,
+    `.env.example`, `Makefile`, `.github/dependabot.yml`
+  - Behavior delivered:
+    - Images are `ghcr.io/<owner>/<repo>/<service>`, derived from `github.repository`, so a fork
+      publishes under its own owner with no edit.
+    - Authentication is the built-in `GITHUB_TOKEN` with job-scoped `packages: write`. No new
+      secret was invented, and the token never reaches a build argument, a build context, or an
+      image layer.
+    - Every tag is a `linux/amd64` + `linux/arm64` manifest list, built with buildx + QEMU,
+      `mode=max` provenance, an SBOM, and OCI labels and index annotations for title,
+      description, source, url, revision, version and created.
+    - Layer cache is GitHub Actions cache scoped per service (`type=gha,scope=release-<service>`).
+    - A `verify` job re-reads every published tag from the registry and fails the run if either
+      architecture is missing. A multi-arch build that silently degrades to one architecture
+      still pushes successfully, so the manifest lists are checked rather than trusted.
+    - `compose.ghcr.yaml` runs the stack from published images. It uses `build: !reset null`
+      rather than only setting `image:`, because an overlay that only sets `image:` still lets
+      `up` build from local source whenever the tag is not already in the image store.
+  - Validation performed: see Validation Status.
+
+## Decisions
+
+- Decision: image names are `ghcr.io/<owner>/<repo>/<service>`, not `ghcr.io/<owner>/moirai-<service>`.
+  - Context: both forms work with `GITHUB_TOKEN` and `packages: write`.
+  - Alternatives considered: the flat `moirai-<service>` prefix.
+  - Reason: this is a monorepo of co-released services. Nesting under the repository path groups
+    all four packages under the repository they come from and leaves the owner's top-level
+    package namespace free for unrelated projects.
+  - Consequences: package names read as `moirai/api` in the GitHub UI. Pull references are one
+    path segment longer.
+
+- Decision: publishing requires a *published GitHub Release*; pushing a git tag publishes nothing.
+  - Context: the workflow could have triggered on `push: tags: v*`, on `release: published`, or both.
+  - Alternatives considered: triggering on both, which double-fires whenever a release is created
+    from a new tag and needs a de-duplication rule to stay unambiguous.
+  - Reason: one trigger per outcome keeps the mapping from trigger to tags a function rather than
+    a race. It also makes releasing an intentional act: a tag can be created, inspected, and
+    deleted without touching the registry.
+  - Consequences: `git push --tags` alone does nothing. `docs/release.md` and `README.md` both
+    state this outright because it is the surprising half of the contract.
+
+- Decision: the trigger -> tag derivation lives in `scripts/release-version.sh`, not in workflow YAML.
+  - Context: the mapping is the part of a release pipeline that cannot be proven without cutting a
+    real release.
+  - Alternatives considered: `docker/metadata-action` with `type=semver` rules, which is less code
+    but encodes the contract in action inputs that cannot be executed locally.
+  - Reason: a shell script with a table-driven test is executable specification. The `plan` job
+    runs `scripts/release-version_test.sh` before it derives anything, so a change that breaks the
+    mapping fails the release instead of publishing images under the wrong tags.
+  - Consequences: 20 mapping cases are verified on every release run and by `make test-release-tags`.
+
+- Decision: `latest` is only claimed when GitHub reports this release as the newest one.
+  - Context: publishing a patch for an older line (`v1.3.5` after `v1.4.0`) would otherwise drag
+    `latest` backwards.
+  - Alternatives considered: always tagging `latest` on any non-prerelease release.
+  - Reason: `latest` moving backwards silently downgrades every deployment that tracks it.
+  - Consequences: the `plan` job makes one authenticated call to `repos/:owner/:repo/releases/latest`.
+    A non-200/404 response fails the job rather than guessing, because both guesses are wrong in a
+    way nobody would notice.
+
+- Decision: the release workflow runs on the existing `[self-hosted, linux]` pool.
+  - Context: multi-arch needs QEMU, which self-hosted runners may not have registered.
+  - Alternatives considered: GitHub-hosted `ubuntu-latest` with `docker/setup-qemu-action`, or a
+    native `ubuntu-24.04-arm` matrix with a digest-merge job.
+  - Reason: the repository is **private**, so GitHub-hosted minutes are billable and hosted arm64
+    runners are not free either. CI already builds and boots the entire Compose stack on the
+    self-hosted box, so Docker is known to work there. The workflow also uses no `actions/setup-*`
+    step at all, which keeps it clear of the `setup-python`-on-Debian-13 failure PR #160 is fixing.
+  - Consequences: the runner must be able to run privileged containers, because
+    `docker/setup-qemu-action` registers the aarch64 emulator by running `tonistiigi/binfmt` with
+    `--privileged`. If it cannot, the workflow fails at that step rather than publishing an
+    amd64-only image. `docker/setup-buildx-action` downloads buildx itself, so the buildx plugin
+    does not need to be preinstalled. This prerequisite is stated in `docs/release.md`; it is the
+    one thing this session could not verify or install.
+
+- Decision: the release matrix uses `fail-fast: false`.
+  - Context: four services publish independently, so a failure can leave a partial release.
+  - Alternatives considered: `fail-fast: true`, and a two-phase build-by-digest then
+    `imagetools create` merge, which is the only genuinely atomic option.
+  - Reason: `fail-fast: true` cancels siblings that may be mid-push, which is worse than a partial
+    publish. The tag set is a pure function of the trigger, so re-running the workflow republishes
+    the same tags and converges. The `verify` job is what makes an incomplete release visible.
+  - Consequences: a failed release must be re-run, not patched by hand.
+
+## Validation Status
+
+Every command below was run in the worktree at
+`.claude/worktrees/docker-release` on 2026-07-29. Host ports were bound to 39301/39302 and the
+local registry to 39399 to avoid colliding with concurrent agents; all of it was torn down.
+
+- Targeted tests: Passed — `make test-release-tags` (20/20 trigger -> tag mapping cases, covering
+  stable releases, `MAKE_LATEST=false`, prereleases by flag and by tag identifier, release
+  branches with and without a leading `v`, dispatch dry runs, and 10 rejected inputs). Also run
+  under `dash` to confirm the script is POSIX, not bash.
+- Service tests: Not run — no service source file was changed. `make test` was deliberately not
+  invoked.
+- Full repository tests: Not run, same reason.
+- Build: Passed — baseline `docker build` of all four services from `c67a881`, then again after
+  the changes:
+  `docker build -t moirai-audit-web:new ./web`;
+  `docker build -f api/Dockerfile -t moirai-audit-api:new .`;
+  `docker build -t moirai-audit-orchestrator:new ./orchestrator`;
+  `docker build -f runner/Dockerfile -t moirai-audit-runner:new .`
+  Sizes: runner 1.99 GB -> 525 MB, api 40.6 MB -> 30.8 MB, orchestrator 565 MB (unchanged), web
+  73.9 MB (unchanged).
+- Multi-architecture build: Passed — arm64 emulation installed with
+  `docker run --privileged --rm tonistiigi/binfmt --install arm64`, a `docker-container` builder
+  created, and all four images built for `linux/amd64,linux/arm64` with `--provenance=mode=max
+  --sbom=true` and pushed to a throwaway registry on `127.0.0.1:39399`. Inspected with the exact
+  template the `verify` job uses:
+  `docker buildx imagetools inspect <ref> --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}'`
+  -> `linux/amd64 linux/arm64 unknown/unknown unknown/unknown` for all four (the two
+  `unknown/unknown` entries are the provenance and SBOM attestation manifests).
+  The arm64 images were then run under emulation: api reports `aarch64` and starts, runner reports
+  `aarch64` with `opencode 1.18.7` and `/runner live` -> `{"status":"live"}`, orchestrator reports
+  `aarch64` with `gh 2.63.2` and imports `moirai`/`asyncpg`/`grpc`, web reports `aarch64` with
+  nginx 1.27.5 and the built assets present.
+  The `workflow_dispatch` dry-run shape (multi-arch, no output, no attestations) was also run and
+  exits 0.
+- Lint: Passed — `actionlint v1.7.12` on `.github/workflows/release.yml`, exit 0.
+- Type checks: Not applicable — no Python or Go source changed.
+- Database migrations: Not applicable.
+- Docker Compose: Passed — `docker compose config --quiet` on the unmodified `compose.yaml`;
+  `make compose-ghcr`, which renders `compose.yaml` + `compose.ghcr.yaml` and asserts no `build:`
+  section survives.
+  `docker compose up --build --detach --wait --wait-timeout 300` reached `healthy` on all five
+  services with the new Dockerfiles.
+- End-to-end workflow: Passed, twice.
+  1. From local builds: `curl http://127.0.0.1:39301/` -> 200, `/ready` -> 200, and
+     `POST /api/v1/auth/login` through the web nginx proxy -> 200 with a user id.
+  2. **From published images**: the same stack started with
+     `docker compose -f compose.yaml -f compose.ghcr.yaml pull && ... up --detach --wait`, with
+     `MOIRAI_IMAGE_PREFIX=127.0.0.1:39399/moirai` and `MOIRAI_IMAGE_TAG=multiarch-test` pointing at
+     the registry-pushed multi-arch images. All five services reached `healthy` and the same login
+     returned 200. This is the `compose.ghcr.yaml` path exercised for real, differing from a GHCR
+     release only in registry hostname and authentication.
+- Orchestrator dependency closure: Passed — `pip freeze` inside the built image is byte-identical
+  to `uv export --frozen --no-dev --no-emit-project --no-hashes` from `orchestrator/uv.lock`, with
+  the single expected difference of `tzdata`, whose marker is `sys_platform == 'win32'`.
+- Teardown: `docker compose down --volumes --remove-orphans` for both projects, registry container
+  and buildx builder removed, all test images deleted, and
+  `docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-aarch64` run to restore the
+  host's binfmt registrations to their prior state. No moirai container, image, volume, or network
+  remained.
+
+## Known Issues
+
+- Issue: the release workflow itself has never fired.
+  - Severity: P2 — everything downstream of the trigger is verified; the trigger is not.
+  - Impact: `on: push: branches: ['release/**']` and `on: release: types: [published]` firing,
+    `GITHUB_TOKEN` being accepted by `ghcr.io` for this owner, the GHA layer cache working from a
+    self-hosted runner, and `docker/setup-qemu-action` succeeding on the Debian 13 box are all
+    unproven. They cannot be proven without cutting a real release, and `workflow_dispatch` only
+    becomes dispatchable once the workflow is on `main`.
+  - Evidence: no tags and no releases exist in this repository yet (`git tag` and
+    `gh release list` are both empty), so nothing has ever exercised the path.
+  - Suggested resolution: after merge, run the workflow once from the Actions tab. That is the
+    dry-run path: it builds all four images for both architectures and publishes nothing. Then cut
+    `release/0.1.0` and check that `0.1.0-rc.<n>` and `0.1.0-rc` appear in the package list.
+
+- Issue: CI does not run on release branches.
+  - Severity: P2.
+  - Impact: `.github/workflows/ci.yml` triggers on `push` to `main` and on `pull_request` only, so
+    a push to `release/1.4.0` publishes release-candidate images without the test suite having run
+    on that commit.
+  - Evidence: `on: push: branches: [main]` in `.github/workflows/ci.yml`.
+  - Suggested resolution: add `release/**` to that workflow's push branches. Deliberately not done
+    here: `ci.yml` is owned by PR #160 for the duration of that fix, and a one-line trigger change
+    is not worth a conflict in a file another agent is actively repairing.
+
+- Issue: `compose.yaml` binds the web service on all interfaces while the API is loopback-only.
+  - Severity: P3.
+  - Impact: `ports: ["3000:8080"]` publishes the dashboard on every host interface, whereas the
+    API uses `127.0.0.1:8080:8080`. On a machine with a public interface the dev dashboard is
+    reachable from the network.
+  - Evidence: `compose.yaml`, `web.ports`.
+  - Suggested resolution: `127.0.0.1:3000:8080`, which keeps `curl localhost:3000` working in the
+    `compose-smoke` job. Deliberately not done here: `compose.yaml` is contested by PR #160.
+
+## Next Recommended Implementation
+
+- Run the release workflow once via `workflow_dispatch` after merge (dry run, publishes nothing),
+  then cut `release/0.1.0` to exercise the release-candidate path end to end. Only after those two
+  runs is the pipeline genuinely proven.
+- Whoever lands PR #160 should add `release/**` to `ci.yml`'s push branches, so release-candidate
+  images are only built from commits the test suite has passed.
