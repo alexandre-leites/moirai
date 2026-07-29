@@ -35,6 +35,7 @@ If another agent's changes conflict with yours:
 
 - `PROGRESS.md` is the coordination point. Keep it current.
 - GitHub issues are the backlog. An agent may assign an issue to itself by commenting.
+- Whenever you open a GitHub issue, add the `ai-doable` label to it. That label is what marks an issue as eligible for autonomous implementation, so an issue you file without it never re-enters the backlog you and other agents select from.
 - Source code changes by different agents should touch different modules. The monorepo layout (`api/`, `orchestrator/`, `runner/`, `web/`) naturally separates concerns.
 - Service-level boundaries (gRPC, REST, shared protos) are shared contracts. Coordinate changes to `.proto` files or public API types with care.
 
