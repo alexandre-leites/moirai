@@ -59,9 +59,10 @@ jobs:
       - name: Verify the trigger to tag mapping
         run: sh scripts/release-version_test.sh
 
-      # `latest` must only ever move forward. Publishing a patch for an older
-      # line (v1.3.5 after v1.4.0) must not drag `latest` backwards, so the tag
-      # is only claimed when GitHub itself reports this release as the newest.
+      # The tags that span release lines -- `latest` and the bare major `X` --
+      # must only ever move forward. Publishing a patch for an older line
+      # (v1.3.5 after v1.4.0) must not drag them backwards, so they are only
+      # claimed when GitHub itself reports this release as the newest.
       - name: Resolve whether this release is the newest one
         id: newest
         if: github.event_name == 'release'
