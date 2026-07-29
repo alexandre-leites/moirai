@@ -135,7 +135,15 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 			return Result{}, fmt.Errorf("insufficient runner disk space: %d available, %d required", available, dispatcher.MinimumFreeBytes)
 		}
 	}
-	request, err := prepareRequest(packet)
+	// The task environment is resolved before the workspace exists: a clone or
+	// fetch of a private repository needs the same credential the later push
+	// does, and an unresolvable reference must fail the execution rather than
+	// silently degrade to an unauthenticated Git operation.
+	environment, err := dispatcher.resolveEnvironment(ctx, packet.EnvironmentRefs)
+	if err != nil {
+		return Result{}, err
+	}
+	request, err := prepareRequest(packet, environment)
 	if err != nil {
 		return Result{}, err
 	}
@@ -158,10 +166,6 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return Result{}, err
 	}
 	if err := writeArtifacts(workspace, packet); err != nil {
-		return Result{}, err
-	}
-	environment, err := dispatcher.resolveEnvironment(ctx, packet.EnvironmentRefs)
-	if err != nil {
 		return Result{}, err
 	}
 	if packet.Role == taskpacket.RolePipeline {
@@ -257,7 +261,7 @@ func (dispatcher Dispatcher) Cancel(_ context.Context, lease control.Lease) erro
 	return dispatcher.Backend.Cancel(lease.Packet.ExecutionID)
 }
 
-func prepareRequest(packet taskpacket.Packet) (repository.PrepareRequest, error) {
+func prepareRequest(packet taskpacket.Packet, environment map[string]string) (repository.PrepareRequest, error) {
 	branch := packet.Repository.Branch
 	if branch == "" {
 		generated, err := repository.BranchName(packet.Issue.ExternalID, packet.ExecutionID)
@@ -274,6 +278,7 @@ func prepareRequest(packet taskpacket.Packet) (repository.PrepareRequest, error)
 		LocalRepositoryPath: packet.Repository.LocalPath,
 		DefaultBranch:       packet.Repository.DefaultBranch,
 		Branch:              branch,
+		Environment:         environment,
 	}, nil
 }
 

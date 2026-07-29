@@ -31,6 +31,10 @@ type PrepareRequest struct {
 	LocalRepositoryPath string
 	DefaultBranch       string
 	Branch              string
+	// Environment carries the task packet's resolved environment references.
+	// Any code-host credential it holds authenticates the clone and fetch that
+	// populate the workspace; it is never written to disk or to a Git config.
+	Environment map[string]string
 }
 
 type Workspace struct {
@@ -150,6 +154,10 @@ func (manager Manager) excludeLoopArtifacts(ctx context.Context, repository stri
 }
 
 func (manager Manager) prepareSource(ctx context.Context, root string, request PrepareRequest) (string, error) {
+	credentials, err := credentialEnvironment(request.Environment)
+	if err != nil {
+		return "", err
+	}
 	if request.RepositoryMode == RepositoryModeExistingPath {
 		source, err := filepath.EvalSymlinks(request.LocalRepositoryPath)
 		if err != nil {
@@ -162,7 +170,7 @@ func (manager Manager) prepareSource(ctx context.Context, root string, request P
 		if !info.IsDir() {
 			return "", errors.New("local repository path must be a directory")
 		}
-		if err := manager.git(ctx, "-C", source, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
+		if err := manager.gitWithEnv(ctx, credentials, "-C", source, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
 			return "", fmt.Errorf("fetch local repository default branch: %w", err)
 		}
 		return source, nil
@@ -176,7 +184,7 @@ func (manager Manager) prepareSource(ctx context.Context, root string, request P
 		return "", fmt.Errorf("create repository cache parent: %w", err)
 	}
 	if _, err := os.Stat(cache); errors.Is(err, os.ErrNotExist) {
-		if err := manager.git(ctx, "clone", "--mirror", "--", request.RepositoryURL, cache); err != nil {
+		if err := manager.gitWithEnv(ctx, credentials, "clone", "--mirror", "--", request.RepositoryURL, cache); err != nil {
 			return "", fmt.Errorf("clone repository cache: %w", err)
 		}
 	} else if err != nil {
@@ -185,11 +193,11 @@ func (manager Manager) prepareSource(ctx context.Context, root string, request P
 		if err := os.RemoveAll(cache); err != nil {
 			return "", fmt.Errorf("discard corrupt repository cache: %w", err)
 		}
-		if err := manager.git(ctx, "clone", "--mirror", "--", request.RepositoryURL, cache); err != nil {
+		if err := manager.gitWithEnv(ctx, credentials, "clone", "--mirror", "--", request.RepositoryURL, cache); err != nil {
 			return "", fmt.Errorf("reclone corrupt repository cache: %w", err)
 		}
 	}
-	if err := manager.git(ctx, "-C", cache, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
+	if err := manager.gitWithEnv(ctx, credentials, "-C", cache, "fetch", "--prune", "origin", request.DefaultBranch); err != nil {
 		return "", fmt.Errorf("fetch default branch: %w", err)
 	}
 	return cache, nil

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,6 +39,62 @@ func TestCommitStagesChangesAndPushesValidatedBranch(t *testing.T) {
 	}
 }
 
+func TestPushAuthenticatesGitHubHTTPSRemoteFromResolvedEnvironment(t *testing.T) {
+	binary, recorded := fakeGit(t)
+	workspace := Workspace{Repository: filepath.Join(t.TempDir(), "repository")}
+	if err := os.MkdirAll(workspace.Repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manager := Manager{GitBinary: binary}
+
+	push, err := manager.Push(context.Background(), workspace, "agent/issue-7/run-1", map[string]string{"GITHUB_TOKEN": "token-value"})
+	if err != nil || !push.Pushed {
+		t.Fatalf("Push() = %#v, %v", push, err)
+	}
+
+	commands := readGitCommands(t, recorded)
+	environments := readGitEnvironments(t, recorded)
+	if len(commands) != 1 || len(environments) != 1 {
+		t.Fatalf("recorded commands = %#v", commands)
+	}
+	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:token-value"))
+	for _, entry := range []string{
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
+		"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic " + credential,
+		"GITHUB_TOKEN=token-value",
+	} {
+		if !gitEnvironmentContains(environments[0], entry) {
+			t.Fatalf("push environment is missing %q: %#v", entry, environments[0])
+		}
+	}
+	if strings.Contains(strings.Join(commands[0], " "), "token-value") {
+		t.Fatalf("push arguments leaked the credential: %#v", commands[0])
+	}
+}
+
+// TestCredentialEnvironmentConfiguresRealGit proves the injected GIT_CONFIG_*
+// variables are actually honoured by git, so an authenticated clone, fetch, or
+// push really does send the Authorization header rather than merely carrying
+// an unused environment variable.
+func TestCredentialEnvironmentConfiguresRealGit(t *testing.T) {
+	extra, err := credentialEnvironment(map[string]string{"GITHUB_TOKEN": "token-value"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "config", "--get", "http.https://github.com/.extraheader")
+	command.Dir = t.TempDir()
+	command.Env = append(os.Environ(), extra...)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("git config --get: %v", err)
+	}
+	credential := base64.StdEncoding.EncodeToString([]byte("x-access-token:token-value"))
+	if strings.TrimSpace(string(output)) != "AUTHORIZATION: basic "+credential {
+		t.Fatalf("git resolved extraheader = %q", output)
+	}
+}
+
 func TestCommitAndPushUseRunnerIdentityWithoutAmbientGitConfiguration(t *testing.T) {
 	root := t.TempDir()
 	working := filepath.Join(root, "working")
@@ -60,7 +117,7 @@ func TestCommitAndPushUseRunnerIdentityWithoutAmbientGitConfiguration(t *testing
 	if err != nil || !result.Committed {
 		t.Fatalf("Commit() = %#v, %v", result, err)
 	}
-	pushed, err := manager.Push(context.Background(), workspace, "main", nil)
+	pushed, err := manager.Push(context.Background(), workspace, "main", map[string]string{"GITHUB_TOKEN": "token-value"})
 	if err != nil || !pushed.Pushed {
 		t.Fatalf("Push() = %#v, %v", pushed, err)
 	}

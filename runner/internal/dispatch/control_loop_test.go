@@ -12,7 +12,9 @@ import (
 	"time"
 
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/runner/internal/agents"
 	"github.com/loop-engineering/runner/internal/control"
+	"github.com/loop-engineering/runner/internal/repository"
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
 
@@ -151,6 +153,70 @@ func TestControlLoopReportsFailureWithoutStartingRenewalAcknowledgementTwice(t *
 	if len(client.events) != 2 || client.events[1].GetType() != "failed" || contains(client.events[1].GetPayloadJson(), "unsafe") {
 		t.Fatalf("failure events = %#v", client.events)
 	}
+}
+
+func TestControlLoopReportsFailedTerminalEventNamingUnresolvableEnvironment(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
+	dispatcher := Dispatcher{
+		Workspaces:         manager,
+		Backend:            &backend{result: agents.Result{Status: "completed"}},
+		Delivery:           delivery,
+		Environment:        environmentResolver{err: errors.New(`environment reference "GITHUB_TOKEN" is not configured on this runner`)},
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+	}
+	loop, err := NewControlLoopWithOutbox(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoop() error = %v", err)
+	}
+
+	offer := credentialOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	acknowledgement := &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}
+	if err := loop.Handle(context.Background(), acknowledgement); err != nil {
+		t.Fatalf("Handle(acknowledgement) error = %v", err)
+	}
+	waitForEvents(t, client, 2)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.events) != 2 || client.events[1].GetType() != "failed" {
+		t.Fatalf("terminal events = %#v", client.events)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(client.events[1].GetPayloadJson()), &payload); err != nil {
+		t.Fatalf("parse terminal payload: %v", err)
+	}
+	message, _ := payload["error"].(string)
+	if !strings.Contains(message, "GITHUB_TOKEN") || !strings.Contains(message, "not configured") {
+		t.Fatalf("failed terminal payload = %#v", payload)
+	}
+	if len(delivery.commits) != 0 || len(delivery.pushes) != 0 {
+		t.Fatalf("runner attempted unauthenticated delivery: %#v", delivery)
+	}
+}
+
+func credentialOffer(t *testing.T) *runnerv1.JobOffer {
+	t.Helper()
+	contents, err := json.Marshal(taskpacket.Packet{
+		ProtocolVersion: taskpacket.ProtocolVersion,
+		JobID:           "job-1", ExecutionID: "execution-1", Role: taskpacket.RoleDeveloper,
+		Objective: "Implement task", Issue: taskpacket.Issue{ExternalID: "7", Title: "Task", Body: "Body"},
+		Repository:      taskpacket.Repository{ProjectID: "project-1", Mode: "managed_clone", URL: "https://github.com/owner/repo.git", DefaultBranch: "main", Branch: "agent/issue-7/run-1"},
+		PromptPath:      ".loop/prompt.md",
+		ExpectedOutput:  ".loop/result.json",
+		TimeoutSeconds:  60,
+		EnvironmentRefs: []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}},
+		Constraints:     taskpacket.Constraints{MayModifyFiles: true, MayPush: true},
+	})
+	if err != nil {
+		t.Fatalf("encode packet: %v", err)
+	}
+	return &runnerv1.JobOffer{JobId: "job-1", LeaseGeneration: 1, TaskPacketJson: string(contents)}
 }
 
 func TestControlLoopLogsOfferCorrelationFields(t *testing.T) {

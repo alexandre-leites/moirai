@@ -256,10 +256,84 @@ func TestDispatcherPersistsFailedTerminalResult(t *testing.T) {
 
 type environmentResolver struct {
 	values map[string]string
+	err    error
 }
 
 func (resolver environmentResolver) Resolve(context.Context, []taskpacket.EnvironmentRef) (map[string]string, error) {
-	return resolver.values, nil
+	return resolver.values, resolver.err
+}
+
+func TestDispatcherResolvesTaskEnvironmentBeforePreparingTheWorkspace(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{
+		commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"},
+		pushResult:   repository.PushResult{Branch: "agent/issue-7/run-1", Pushed: true},
+	}
+	lease := deliverableLease()
+	lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}}
+	dispatcher := Dispatcher{
+		Workspaces:         manager,
+		Backend:            &backend{result: agents.Result{Status: "completed"}},
+		Delivery:           delivery,
+		Environment:        environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}},
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if manager.prepared.Environment["GITHUB_TOKEN"] != "token-value" {
+		t.Fatalf("prepare request environment = %#v", manager.prepared.Environment)
+	}
+	if delivery.pushEnv["GITHUB_TOKEN"] != "token-value" {
+		t.Fatalf("push environment = %#v", delivery.pushEnv)
+	}
+}
+
+func TestDispatcherFailsBeforePreparingWhenDeclaredEnvironmentIsUnresolvable(t *testing.T) {
+	tests := []struct {
+		name       string
+		allowed    []string
+		resolver   EnvironmentResolver
+		wantErrors []string
+	}{
+		{
+			name:       "not allowed on this runner",
+			resolver:   environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}},
+			wantErrors: []string{"GITHUB_TOKEN", "not allowed"},
+		},
+		{
+			name:       "not configured on this runner",
+			allowed:    []string{"GITHUB_TOKEN"},
+			resolver:   environmentResolver{err: errors.New(`environment reference "GITHUB_TOKEN" is not configured on this runner`)},
+			wantErrors: []string{"GITHUB_TOKEN", "not configured"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &workspaceManager{workspace: testWorkspace(t)}
+			delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
+			agent := &backend{result: agents.Result{Status: "completed"}}
+			lease := deliverableLease()
+			lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}}
+
+			_, err := (Dispatcher{Workspaces: manager, Backend: agent, Delivery: delivery, Environment: test.resolver, AllowedEnvironment: test.allowed}).Execute(context.Background(), lease)
+			if err == nil {
+				t.Fatal("Execute() accepted an unresolvable environment reference")
+			}
+			for _, want := range test.wantErrors {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("Execute() error = %v, want it to mention %q", err, want)
+				}
+			}
+			if manager.prepared.ProjectID != "" || manager.cleaned {
+				t.Fatalf("workspace was prepared despite an unresolvable reference: %#v", manager.prepared)
+			}
+			if agent.request.ExecutionID != "" || len(delivery.commits) != 0 || len(delivery.pushes) != 0 {
+				t.Fatalf("execution continued unauthenticated: agent = %#v, delivery = %#v", agent.request, delivery)
+			}
+		})
+	}
 }
 
 func TestDispatcherAllowsOnlyConfiguredTaskEnvironment(t *testing.T) {
@@ -290,9 +364,9 @@ func TestDispatcherFailsClosedWithoutEnvironmentResolver(t *testing.T) {
 	lease := validLease()
 	lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "TOKEN", SecretRef: "secret/token"}}
 
-	_, err := (Dispatcher{Workspaces: manager, Backend: agent}).Execute(context.Background(), lease)
-	if err == nil || !manager.cleaned || agent.request.ExecutionID != "" {
-		t.Fatalf("Execute() = %v, cleaned = %v, request = %#v", err, manager.cleaned, agent.request)
+	_, err := (Dispatcher{Workspaces: manager, Backend: agent, AllowedEnvironment: []string{"TOKEN"}}).Execute(context.Background(), lease)
+	if err == nil || manager.cleaned || manager.prepared.ProjectID != "" || agent.request.ExecutionID != "" {
+		t.Fatalf("Execute() = %v, cleaned = %v, prepared = %#v, request = %#v", err, manager.cleaned, manager.prepared, agent.request)
 	}
 }
 
