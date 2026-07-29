@@ -2560,6 +2560,29 @@ local registry to 39399 to avoid colliding with concurrent agents; all of it was
   - Suggested resolution: `127.0.0.1:3000:8080`, which keeps `curl localhost:3000` working in the
     `compose-smoke` job. Deliberately not done here: `compose.yaml` is contested by PR #160.
 
+## Re-validation after the review fixes
+
+Six of the seven fixes are workflow and script changes, re-verified directly: `actionlint` clean,
+`make test-release-tags` 21/21 under both `sh` and `dash` (two new cases pin the major-pointer
+gating and the `MAKE_LATEST` default), the tag-expansion step simulated to prove it now emits all
+five references per service instead of four, and the verify job simulated against a stub `docker`
+that reports amd64-only for one tag -- it checks 20 references (4 services x 5 tags), emits
+`::error::` for the degraded one, and exits 1.
+
+The seventh, `uv export --frozen` -> `--locked`, changes an image, so it was re-validated as an
+image: `docker build ./orchestrator` succeeds, and the resulting image was run standalone against
+`postgres:16-alpine` on a throwaway network -- it reached `healthy` **on the Dockerfile's own new
+HEALTHCHECK, with no Compose involved**, applied all seven migrations, created the initial admin
+and the seed project, and started the gRPC server on `0.0.0.0:50051`. Torn down afterwards.
+
+The full five-service `docker compose up --build --wait` was **not** re-run after that one-word
+change: this workstation hit Docker Hub's unauthenticated pull rate limit (HTTP 429 resolving
+`golang:1.25-alpine`) from the multi-architecture builds earlier in the session, and it had not
+cleared. That is an environmental limit, not a defect -- the identical stack, built from these
+Dockerfiles with the single difference of the `uv` flag, reached healthy and served a real login
+twice earlier in the session (once from local builds, once from registry-published images), and
+the flag change alters only whether `uv` asserts the lock is current, not the exported closure.
+
 ## Adversarial review of this diff
 
 A hostile review of the commit was run before the PR was opened. It found seven real defects,
