@@ -1170,8 +1170,9 @@ The issue's step 2 says offer expiry leaks `dispatched` rows. That is no longer 
 - Lint: Passed — `make lint` → `All checks passed!`.
 - Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-94` → `Success: no issues found in 47 source files` (private cache, so sibling worktrees are unaffected).
 - Database migrations: Not applicable — no schema change. `app.workflow_execution_requests.status` has no CHECK constraint, and `expired` was already written by `_block_unanswered_run`.
-- Docker Compose: Not run — no Compose or configuration-file change; the maintenance loop's interval, stall window, and batch size are module constants in `main.py`.
+- Docker Compose: Passed — `make compose` (`docker compose config`) is valid. No Compose or configuration-file change was needed; the maintenance loop's interval, stall window, and batch size are module constants in `main.py`.
 - End-to-end workflow: Not run.
+- CI (PR [#142](https://github.com/alexandre-leites/moirai/pull/142), commit `668654f`): all ten checks green. The first attempt failed one job — `runner` / `TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected` — on a diff that contains no Go code at all. Re-running that job on the same commit passed with no change, and the test passes 20/20 locally under `-race`, as does the whole runner suite at `-count=5`. Recorded as a flake in [#143](https://github.com/alexandre-leites/moirai/issues/143) rather than papered over; `runner/` belongs to another issue's ownership, so it was not touched here.
 
 ## Known Issues
 
