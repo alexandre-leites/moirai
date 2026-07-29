@@ -46,8 +46,17 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 		}
 		return CommitResult{Revision: strings.TrimSpace(revision)}, nil
 	}
-	if err := manager.git(ctx, "-C", workspace.Repository, "add", "-A", "--", ".", ":!.loop", ":!.loop/**"); err != nil {
+	// Runner artifacts are kept out of the commit by the worktree's git exclude
+	// file (see Manager.excludeLoopArtifacts), and unstaged again afterwards in
+	// case that exclude is ever missing. They are deliberately not named as
+	// negative pathspecs: a pathspec that explicitly matches an ignored path
+	// makes "git add" report it and exit non-zero, which failed every commit in
+	// a prepared workspace — exactly where .loop always exists.
+	if err := manager.git(ctx, "-C", workspace.Repository, "add", "-A", "--", "."); err != nil {
 		return CommitResult{}, fmt.Errorf("stage repository changes: %w", err)
+	}
+	if err := manager.git(ctx, "-C", workspace.Repository, "reset", "--quiet", "--", ".loop"); err != nil {
+		return CommitResult{}, fmt.Errorf("unstage runner artifacts: %w", err)
 	}
 	if err := manager.git(ctx, "-C", workspace.Repository, "-c", "user.name="+manager.committerName(), "-c", "user.email="+manager.committerEmail(), "commit", "-m", message); err != nil {
 		return CommitResult{}, fmt.Errorf("commit repository changes: %w", err)
@@ -74,6 +83,25 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 		return PushResult{}, fmt.Errorf("push branch: %w", err)
 	}
 	return PushResult{Branch: branch, Pushed: true}, nil
+}
+
+// RecordWorkInProgress points a local reference at the workspace's current HEAD.
+// The commit of a failed run lives on the execution branch, and the next
+// preparation of that job re-creates the branch from the base revision, so
+// without an anchor the work becomes unreachable in the runner's own repository.
+// The reference is written outside refs/heads so no preparation can check it out
+// and no push mistakes it for a branch.
+func (manager Manager) RecordWorkInProgress(ctx context.Context, workspace Workspace, reference string) error {
+	if err := validateWorkspace(workspace); err != nil {
+		return err
+	}
+	if !safeReference(reference) {
+		return errors.New("work-in-progress reference is invalid")
+	}
+	if err := manager.git(ctx, "-C", workspace.Repository, "update-ref", reference, "HEAD"); err != nil {
+		return fmt.Errorf("record work-in-progress reference: %w", err)
+	}
+	return nil
 }
 
 // PushWorkInProgress publishes the workspace's current HEAD to a dedicated
@@ -170,6 +198,12 @@ func validateWorkspace(workspace Workspace) error {
 		return fmt.Errorf("repository workspace is unavailable: %w", err)
 	}
 	return nil
+}
+
+// safeReference validates a fully qualified reference name: a refs/ prefix plus
+// path segments that satisfy the same rules as a branch name.
+func safeReference(reference string) bool {
+	return strings.HasPrefix(reference, "refs/") && safeRef(reference)
 }
 
 func safeCommitMessage(message string) bool {

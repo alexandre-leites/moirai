@@ -31,8 +31,11 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_MAX_LOG_BYTES` | `4194304` | Per-stream persisted agent-log limit. |
 | `LOOP_RUNNER_TERMINATION_GRACE` | `5s` | Local process termination grace configuration. |
 | `LOOP_RUNNER_REDACTION_PREFIXES` | | Comma-separated additional secret prefixes redacted from events. |
-| `LOOP_RUNNER_RETAIN_WORKSPACES` | | Comma-separated `succeeded`, `failed`, and `abandoned` retention policy. |
-| `LOOP_RUNNER_MINIMUM_FREE_BYTES` | `1073741824` | Minimum free workspace-disk bytes. |
+| `LOOP_RUNNER_RETAIN_WORKSPACES` | `failed` | Comma-separated terminal outcomes whose workspace is kept: `succeeded`, `failed`, `abandoned`. Use `none` to keep nothing. |
+| `LOOP_RUNNER_RETENTION_MAX_AGE` | `72h` | How long a retained workspace survives before the sweep releases it. |
+| `LOOP_RUNNER_RETENTION_MAX_WORKSPACES` | `10` | How many retained workspaces may coexist; the oldest are released first. |
+| `LOOP_RUNNER_PUSH_WORK_IN_PROGRESS` | `true` | Publish a failed run's commit to `wip/<executionId>` when the packet allows pushing. |
+| `LOOP_RUNNER_MINIMUM_FREE_BYTES` | `1073741824` | Minimum free workspace-disk bytes. Also the level below which the retention sweep releases retained workspaces. |
 | `LOOP_RUNNER_REPOSITORY_LOCK_POLL` | `25ms` | Repository worktree-lock retry interval. |
 | `LOOP_RUNNER_CLEANUP_ATTEMPTS` / `LOOP_RUNNER_CLEANUP_RETRY_DELAY` | `3` / `250ms` | Workspace cleanup retry policy. |
 | `LOOP_RUNNER_GIT_COMMITTER_NAME` / `LOOP_RUNNER_GIT_COMMITTER_EMAIL` | `moirai-runner` / `moirai-runner@localhost` | Git identity used for delivery commits. |
@@ -74,7 +77,7 @@ In Compose the runner receives it as `GITHUB_TOKEN_FILE=/run/secrets/github_toke
 | `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | empty | Comma-separated environment variable names a task packet may request. |
 | `GITHUB_TOKEN` / `GITHUB_TOKEN_FILE` | empty | Code-host credential resolved for task packets that declare `GITHUB_TOKEN`; the `_FILE` form reads a mounted secret. |
 | `LOOP_RUNNER_REDACTION_PREFIXES` | empty | Comma-separated sensitive-variable prefixes removed from logs. |
-| `LOOP_RUNNER_RETAIN_WORKSPACES` | empty | Comma-separated terminal states to retain: `succeeded`, `failed`, `abandoned`. |
+| `LOOP_RUNNER_RETAIN_WORKSPACES` | `failed` | Comma-separated terminal states to retain: `succeeded`, `failed`, `abandoned`, or `none`. |
 | `LOOP_RUNNER_DOCKER_ENABLED` | `false` | Allow Docker-backed execution. |
 | `LOOP_RUNNER_AGENT_BACKEND` | `opencode` | Agent backend: `opencode`, `cli`, or `docker`. |
 | `LOOP_RUNNER_AGENT_BINARY` | empty | Required executable name when `LOOP_RUNNER_AGENT_BACKEND=cli`. |
@@ -93,6 +96,38 @@ Registration credentials must be provided through `LOOP_RUNNER_REGISTRATION_TOKE
 Every agent execution must write the result document named by the task packet's `expectedOutput` (default `.loop/result.json`, validated against `schemas/agent-result.schema.json`). The runner treats it as the only evidence of what the agent did: it must be valid JSON with `protocolVersion` `1.0`, an `executionId` matching the execution, a non-empty `summary`, and a `status` of `completed`, `blocked`, or `failed`.
 
 Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `docker` — reports a `failed` terminal event when the document is missing or invalid, naming the missing evidence (for example `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`). A process that fails outright reports the process failure instead, so the orchestrator receives distinct failure fingerprints for "the agent crashed" and "the agent claimed nothing".
+
+## Failed Work and Workspace Retention
+
+Iterative repair needs the previous attempt's work, so a run that does not complete is not discarded.
+
+**Push semantics.** What a run may write to the repository depends on its outcome, and the two are never confused:
+
+| Outcome | Commit | Anchored locally | Pushed | Terminal payload |
+| --- | --- | --- | --- | --- |
+| `completed` | delivery message, on the packet's branch | — | `origin/<branch>`, upstream set, when `mayPush` | `branch`, `pushed: true` |
+| `failed` | `wip(failed): …` | `refs/moirai-wip/<executionId>` | `wip/<executionId>` when `mayPush` and `LOOP_RUNNER_PUSH_WORK_IN_PROGRESS` | `wipBranch`, `wipCommit`, `wipPushed`, `logTail` |
+| `blocked` | `wip(blocked): …` | as `failed` | as `failed` | as `failed` |
+| cancelled / abandoned | none — the context is already cancelled | — | — | `status: cancelled` |
+
+Only a completed run writes to the packet's branch, so a non-delivery can never be mistaken for a delivery. A failed or blocked run publishes to a per-execution `wip/<executionId>` ref instead, which cannot collide with the branch the next attempt re-creates from the base revision. That ref is force-pushed: it belongs to exactly one execution, which must be able to replace its own earlier remains after a redelivery.
+
+The local `refs/moirai-wip/<executionId>` anchor is what makes the commit durable, and it is written for every non-delivering run. The commit itself sits on the execution branch, and the next preparation of that job re-creates the branch from the base revision ([#136](https://github.com/alexandre-leites/moirai/issues/136)) — without the anchor the work would be unreachable in the runner's own repository. This matters most for roles the orchestrator does not grant `mayPush`: today that is every file-modifying role except `developer`, so a **repairer**'s work is preserved only locally, on the runner that produced it, until #106 or a `mayPush` grant lets it be published.
+
+`logTail` is a sanitised excerpt of the failing pipeline command's output, or of the agent's log, bounded to 2 KiB *as JSON encodes it* rather than raw, since `<`, `>`, and `&` cost six bytes each in the encoded payload.
+
+Note that pipeline commands currently reach the runner only on `role=pipeline` packets, which may not modify files and so have nothing to retain; in practice the paths above are exercised by a failing or blocked `developer`/`repairer` execution. A developer packet carrying pipeline commands is valid and handled (the pipeline failure then retains the agent's diff), but the orchestrator does not build that shape today.
+
+**Retention.** `LOOP_RUNNER_RETAIN_WORKSPACES` defaults to `failed`, keeping the worktree, `terminal-result.json`, and the agent's `*.stdout.log` / `*.stderr.log`. Retention is bounded, because keeping everything would eventually fill the disk:
+
+- Every retained workspace is registered in `<LOOP_RUNNER_DATA_DIR>/retained`. A workspace that cannot be registered is cleaned up instead, so nothing is kept that the sweep could not later release.
+- The sweep runs at startup and before every execution — the moments at which new workspace disk is about to be consumed — and releases workspaces older than `LOOP_RUNNER_RETENTION_MAX_AGE`, then the oldest beyond `LOOP_RUNNER_RETENTION_MAX_WORKSPACES`, then the oldest remaining while free disk is under `LOOP_RUNNER_MINIMUM_FREE_BYTES`. An idle runner therefore holds up to `LOOP_RUNNER_RETENTION_MAX_WORKSPACES` workspaces past their age bound until it next starts an execution.
+- A job whose execution is running is never swept, even when a retained record still names its ID — one job ID serves every execution of a workflow run, so the record of an earlier execution names the path the next one prepares.
+- A retained workspace's HEAD is detached, so it can never be the reason a later `git worktree add -B` fails.
+
+How long the forensics last: a retained workspace lives at `workspaces/job-<jobId>`, and the *next execution of the same job* removes that directory when it prepares. Retention therefore covers inspection after a failure and up to the workflow's next attempt — the durable artefact across attempts is the work-in-progress commit, not the workspace.
+
+Consuming any of this is still the orchestrator's to do: the runner reports `wipBranch`/`wipCommit`, but nothing yet turns them into a retry packet's `currentCommit`/`diffSummary` (see [#106](https://github.com/alexandre-leites/moirai/issues/106)). Nothing prunes `wip/*` on the code host or `refs/moirai-wip/*` in the runner's repositories either; both grow with the number of non-delivering executions.
 
 ## Execution Events
 

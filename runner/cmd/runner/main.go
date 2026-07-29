@@ -222,6 +222,7 @@ func run(ctx context.Context) error {
 		Retention:          retentionPolicy(settings),
 		PushWorkInProgress: settings.PushWorkInProgress,
 		Projects:           projects,
+		Active:             dispatch.NewActiveWorkspaces(),
 	}
 	// Retained workspaces age while the runner is idle, so the age bound is also
 	// applied once at startup rather than only before the next execution.

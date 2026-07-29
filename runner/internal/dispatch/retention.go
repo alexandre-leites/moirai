@@ -10,17 +10,18 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
 
 // RetentionPolicy decides which finished workspaces survive cleanup and bounds
-// the disk the surviving ones may hold. Retaining a failed workspace is what
-// lets a retry inspect the previous attempt's worktree, terminal result, and
-// agent logs, so the default keeps failed runs — but "keep everything" would
-// eventually fill the runner's disk, so every retained workspace is registered
-// and released again by an age, count, and free-space bounded sweep.
+// the disk the surviving ones may hold. Retaining a failed workspace preserves
+// the previous attempt's worktree, terminal result, and agent logs, so the
+// default keeps failed runs — but "keep everything" would eventually fill the
+// runner's disk, so every retained workspace is registered and released again by
+// an age, count, and free-space bounded sweep.
 type RetentionPolicy struct {
 	KeepSucceeded bool
 	KeepFailed    bool
@@ -50,6 +51,57 @@ type retainedWorkspace struct {
 	Root       string    `json:"root"`
 	Status     string    `json:"status"`
 	RetainedAt time.Time `json:"retainedAt"`
+}
+
+// ActiveWorkspaces records the jobs whose workspaces are in use right now, so
+// the retention sweep can never release one out from under a running execution.
+//
+// A registry record alone is not enough to make that safe. One job ID is reused
+// by every execution of a workflow run, so a record written by an earlier
+// execution names the very path the next one prepares; between a sweep reading
+// that record and acting on it, another goroutine (LOOP_RUNNER_CAPACITY > 1)
+// can have re-prepared the workspace. Execute claims its job before it sweeps,
+// which closes that window: any workspace a concurrent execution owns is
+// claimed before any sweep can observe it.
+type ActiveWorkspaces struct {
+	mu   sync.Mutex
+	jobs map[string]int
+}
+
+func NewActiveWorkspaces() *ActiveWorkspaces {
+	return &ActiveWorkspaces{jobs: map[string]int{}}
+}
+
+// Claim marks a job's workspace as in use and returns the release function.
+func (active *ActiveWorkspaces) Claim(jobID string) func() {
+	if active == nil || jobID == "" {
+		return func() {}
+	}
+	active.mu.Lock()
+	if active.jobs == nil {
+		active.jobs = map[string]int{}
+	}
+	active.jobs[jobID]++
+	active.mu.Unlock()
+	return func() {
+		active.mu.Lock()
+		defer active.mu.Unlock()
+		if active.jobs[jobID] <= 1 {
+			delete(active.jobs, jobID)
+			return
+		}
+		active.jobs[jobID]--
+	}
+}
+
+func (active *ActiveWorkspaces) claimed(jobID string) bool {
+	if active == nil {
+		return false
+	}
+	active.mu.Lock()
+	defer active.mu.Unlock()
+	_, held := active.jobs[jobID]
+	return held
 }
 
 func (dispatcher Dispatcher) retentionDirectory() string {
@@ -109,9 +161,9 @@ func (dispatcher Dispatcher) forgetRetainedWorkspace(jobID string) {
 
 // SweepRetainedWorkspaces releases retained workspaces that exceed the policy's
 // age or count bound, and keeps releasing the oldest while free disk is below
-// the runner's minimum. It only ever considers registered records, which are
-// written after an execution finishes, so a running execution's workspace is
-// never a candidate.
+// the runner's minimum. Records are written only when an execution finishes,
+// and any job claimed in ActiveWorkspaces is skipped, so a running execution's
+// workspace is never a candidate even when it reuses a retained job's ID.
 func (dispatcher Dispatcher) SweepRetainedWorkspaces(ctx context.Context) error {
 	if dispatcher.retentionDirectory() == "" || dispatcher.Workspaces == nil {
 		return nil
@@ -134,6 +186,12 @@ func (dispatcher Dispatcher) SweepRetainedWorkspaces(ctx context.Context) error 
 	now := time.Now().UTC()
 	kept := make([]retainedWorkspace, 0, len(records))
 	for _, record := range records {
+		// A claimed job has re-prepared this path, or is about to: the record
+		// describes a live workspace and must not be acted on. It is left in
+		// place; that execution's own preparation drops it.
+		if dispatcher.Active.claimed(record.JobID) {
+			continue
+		}
 		if _, err := os.Stat(record.Root); errors.Is(err, os.ErrNotExist) {
 			dispatcher.forgetRetainedWorkspace(record.JobID)
 			continue
@@ -153,15 +211,19 @@ func (dispatcher Dispatcher) SweepRetainedWorkspaces(ctx context.Context) error 
 		}
 		kept = remaining
 	}
+	// Under disk pressure the oldest go first, and a workspace that cannot be
+	// released is stepped over rather than allowed to halt the reclaim: one
+	// permanently stuck worktree must not pin the disk at its low-water mark.
 	for dispatcher.MinimumFreeBytes > 0 && dispatcher.AvailableBytes != nil && len(kept) > 0 {
 		available, err := dispatcher.AvailableBytes(dispatcher.DiskPath)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("inspect workspace disk space: %w", err))
 			break
 		}
-		if available >= dispatcher.MinimumFreeBytes || !release(kept[0]) {
+		if available >= dispatcher.MinimumFreeBytes {
 			break
 		}
+		release(kept[0])
 		kept = kept[1:]
 	}
 	return errors.Join(failures...)

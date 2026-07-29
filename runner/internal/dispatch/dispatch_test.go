@@ -21,9 +21,19 @@ import (
 type workspaceManager struct {
 	workspace  repository.Workspace
 	prepareErr error
+	releaseErr error
 	prepared   repository.PrepareRequest
 	cleaned    bool
+	released   bool
 	artifacts  map[string]string
+}
+
+func (manager *workspaceManager) ReleaseBranch(context.Context, repository.Workspace) error {
+	if manager.releaseErr != nil {
+		return manager.releaseErr
+	}
+	manager.released = true
+	return nil
 }
 
 func (manager *workspaceManager) Prepare(_ context.Context, request repository.PrepareRequest) (repository.Workspace, error) {
@@ -243,7 +253,8 @@ func TestDispatcherRetainsWorkspacesByTerminalOutcome(t *testing.T) {
 }
 
 // TestDispatcherCleansUpWorkspacesItCannotRegisterForRetention proves retention
-// stays bounded: a workspace the sweep would never find again is not kept.
+// stays bounded: a workspace the sweep could never find again is not kept,
+// because nothing would ever release it.
 func TestDispatcherCleansUpWorkspacesItCannotRegisterForRetention(t *testing.T) {
 	manager := &workspaceManager{workspace: testWorkspace(t)}
 	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{err: errors.New("agent exited")}, Retention: RetentionPolicy{KeepFailed: true}}
@@ -253,6 +264,45 @@ func TestDispatcherCleansUpWorkspacesItCannotRegisterForRetention(t *testing.T) 
 	}
 	if !manager.cleaned {
 		t.Fatal("an unregisterable workspace was retained without a bound")
+	}
+}
+
+// TestDispatcherKeepsForensicsWhenTheBranchCannotBeReleased pins the trade-off:
+// detaching is a guard against a collision that preparation already avoids, so
+// failing to detach must not cost the run its forensics.
+func TestDispatcherKeepsForensicsWhenTheBranchCannotBeReleased(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t), releaseErr: errors.New("worktree is locked")}
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend:    &backend{err: errors.New("agent exited")},
+		Retention:  RetentionPolicy{KeepFailed: true, Directory: t.TempDir(), MaxAge: time.Hour, MaxWorkspaces: 4},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), validLease()); err == nil {
+		t.Fatal("Execute() succeeded despite backend failure")
+	}
+	if manager.cleaned || manager.released {
+		t.Fatalf("cleaned = %v, released = %v", manager.cleaned, manager.released)
+	}
+}
+
+// TestDispatcherReleasesTheExecutionBranchOfRetainedWorkspaces guards the
+// interaction between retention and workspace preparation: git refuses to
+// re-create a branch that another worktree holds, and the orchestrator reuses
+// one branch name for every execution of a workflow.
+func TestDispatcherReleasesTheExecutionBranchOfRetainedWorkspaces(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend:    &backend{err: errors.New("agent exited")},
+		Retention:  RetentionPolicy{KeepFailed: true, Directory: t.TempDir(), MaxAge: time.Hour, MaxWorkspaces: 4},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), validLease()); err == nil {
+		t.Fatal("Execute() succeeded despite backend failure")
+	}
+	if manager.cleaned || !manager.released {
+		t.Fatalf("cleaned = %v, released = %v", manager.cleaned, manager.released)
 	}
 }
 
@@ -430,9 +480,11 @@ type deliveryManager struct {
 	pushResult            repository.PushResult
 	pushErr               error
 	workInProgressPushErr error
+	recordErr             error
 	commits               []string
 	pushes                []string
 	workInProgressPushes  []string
+	recordedReferences    []string
 	pushEnv               map[string]string
 	workInProgressEnv     map[string]string
 }
@@ -450,6 +502,13 @@ func (manager *deliveryManager) Push(_ context.Context, _ repository.Workspace, 
 	manager.pushes = append(manager.pushes, branch)
 	manager.pushEnv = environment
 	return manager.pushResult, manager.pushErr
+}
+
+func (manager *deliveryManager) RecordWorkInProgress(_ context.Context, _ repository.Workspace, reference string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.recordedReferences = append(manager.recordedReferences, reference)
+	return manager.recordErr
 }
 
 func (manager *deliveryManager) PushWorkInProgress(_ context.Context, _ repository.Workspace, branch string, environment map[string]string) (repository.PushResult, error) {
@@ -616,6 +675,11 @@ func TestDispatcherKeepsWorkInProgressLocalWhenPushingIsNotPermitted(t *testing.
 			if len(delivery.workInProgressPushes) != 0 {
 				t.Fatalf("work in progress pushes = %#v", delivery.workInProgressPushes)
 			}
+			// Unpublished work still has to survive the branch reset the next
+			// preparation of this job performs, or committing it achieved nothing.
+			if len(delivery.recordedReferences) != 1 || delivery.recordedReferences[0] != "refs/moirai-wip/execution-1" {
+				t.Fatalf("recorded references = %#v", delivery.recordedReferences)
+			}
 		})
 	}
 }
@@ -711,4 +775,18 @@ func testWorkspace(t *testing.T) repository.Workspace {
 	t.Helper()
 	root := t.TempDir()
 	return repository.Workspace{Root: root, Repository: filepath.Join(root, "repository"), Loop: filepath.Join(root, "repository", ".loop")}
+}
+
+type callbackBackend struct {
+	onExecute func()
+}
+
+func (callbackBackend) Name() string                      { return "callback" }
+func (callbackBackend) HealthCheck(context.Context) error { return nil }
+func (callbackBackend) Cancel(string) error               { return nil }
+func (agent *callbackBackend) Execute(context.Context, agents.Request) (agents.Result, error) {
+	if agent.onExecute != nil {
+		agent.onExecute()
+	}
+	return agents.Result{Status: "completed"}, nil
 }

@@ -13,16 +13,19 @@ import (
 	"github.com/loop-engineering/runner/internal/repository"
 )
 
-// maxLogTailBytes bounds the failure excerpt carried by a terminal event. The
-// encoded event payload is capped at 16 KiB, and an agent log is unbounded, so
-// the tail is sanitised (which removes the escape sequences that would other-
-// wise inflate several-fold as JSON) and then cut to this many bytes.
+// maxLogTailBytes bounds the failure excerpt carried by a terminal event,
+// measured as the JSON-encoded size rather than the raw one. Raw length is the
+// wrong budget: the whole event payload is capped at 16 KiB encoded, and Go's
+// encoder escapes `<`, `>`, and `&` to six bytes each — all three are common in
+// real failure output (`<module>`, generics, XML fixtures), so a 2 KiB raw tail
+// of them would consume 12 KiB of the payload and push the run onto the reduced
+// payload path.
 const maxLogTailBytes = 2048
 
 // logTailWindowBytes is how much of a log file is read before sanitising. It is
-// larger than the tail itself so that stripping control characters still leaves
-// enough material to fill it.
-const logTailWindowBytes = 8 * maxLogTailBytes
+// larger than the tail itself so that stripping control characters, and the
+// escaping budget above, still leave enough material to fill it.
+const logTailWindowBytes = 16 * maxLogTailBytes
 
 // logTail returns a bounded excerpt explaining a failed run: the output of the
 // pipeline command that failed when there is one, otherwise the end of the
@@ -93,17 +96,44 @@ func fileTail(path string) string {
 
 // boundedLogTail renders arbitrary process output as a payload-safe string: it
 // drops terminal escape sequences and other control characters, replaces
-// invalid UTF-8, and keeps only the final maxLogTailBytes bytes.
+// invalid UTF-8, and keeps the longest suffix whose JSON encoding fits in
+// maxLogTailBytes.
 func boundedLogTail(value string) string {
 	sanitized := strings.TrimSpace(strings.ToValidUTF8(sanitizeLogText(value), ""))
-	if len(sanitized) <= maxLogTailBytes {
-		return sanitized
+	budget := maxLogTailBytes - jsonEncodedSize(truncationMarker)
+	start := len(sanitized)
+	for start > 0 {
+		next := start - 1
+		for next > 0 && !utf8.RuneStart(sanitized[next]) {
+			next--
+		}
+		cost := jsonEncodedSize(sanitized[next:start])
+		if budget < cost {
+			return truncationMarker + sanitized[start:]
+		}
+		budget -= cost
+		start = next
 	}
-	start := len(sanitized) - (maxLogTailBytes - len(truncationMarker))
-	for start < len(sanitized) && !utf8.RuneStart(sanitized[start]) {
-		start++
+	return sanitized
+}
+
+// jsonEncodedSize reports how many bytes value occupies inside a JSON string,
+// mirroring encoding/json: quote and backslash are escaped to two bytes, the
+// HTML-significant bytes and anything below 0x20 to six, and everything else —
+// including the continuation bytes of a multi-byte rune — is copied verbatim.
+func jsonEncodedSize(value string) int {
+	size := 0
+	for index := 0; index < len(value); index++ {
+		switch character := value[index]; {
+		case character == '"' || character == '\\' || character == '\n' || character == '\r' || character == '\t':
+			size += 2
+		case character < 0x20 || character == '<' || character == '>' || character == '&':
+			size += 6
+		default:
+			size++
+		}
 	}
-	return truncationMarker + sanitized[start:]
+	return size
 }
 
 // sanitizeLogText removes ANSI escape sequences and control characters, keeping

@@ -400,9 +400,9 @@ func parseAgentArguments(value string) ([]string, error) {
 }
 
 // parseWorkspaceRetention selects which terminal outcomes keep their workspace.
-// The default keeps failed runs: the previous attempt's worktree, terminal
-// result, and agent logs are the substrate a retry repairs, and deleting them
-// makes every retry repeat the first attempt's mistakes. Retention is bounded by
+// The default keeps failed runs, so the worktree, terminal result, and agent
+// logs of a failure survive it — for inspection, and for a retry that lands on
+// the same runner before the job prepares again. Retention is bounded by
 // LOOP_RUNNER_RETENTION_MAX_AGE and LOOP_RUNNER_RETENTION_MAX_WORKSPACES, and
 // "none" opts out of retention altogether.
 func parseWorkspaceRetention(value string) ([]string, error) {
