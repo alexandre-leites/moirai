@@ -427,26 +427,31 @@ def _optional_value(value: object) -> str | None:
 def _merged_at(updates: dict[str, object], now: datetime) -> datetime | None:
     """When the pull request merged, as a timestamp the column can hold.
 
+    Non-NULL only for an update that reports a merge, so no timestamp can ever
+    be written for a pull request nobody said had merged -- the reported
+    timestamp is read *after* that test, never as a substitute for it.
+
     The code host reports an ISO-8601 string, so it is parsed here rather than
     handed to asyncpg as text. A merge the code host confirmed but timestamped
-    unusably still gets a timestamp -- `now` -- because the alternative is a
-    merged pull request whose `merged_at` stays NULL, which is precisely the
-    state this column exists to rule out. A pull request that is not merged
-    gets NULL, and the COALESCE in the upsert keeps that from erasing an
-    earlier merge.
+    unusably or not at all still gets a timestamp -- `now` -- because the
+    alternative is a merged pull request whose `merged_at` stays NULL, which is
+    precisely the state this column exists to rule out. A pull request that is
+    not merged gets NULL, and the COALESCE in the upsert keeps that from
+    erasing an earlier merge.
     """
-    reported = _optional_value(updates.get("pull_request_merged_at"))
-    if reported is not None:
-        try:
-            parsed = datetime.fromisoformat(reported)
-        except ValueError:
-            parsed = None
-        if parsed is not None:
-            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
-    merged = updates.get("pull_request_merged") is True
-    if not merged and str(updates.get("pull_request_state") or "") != "merged":
+    if (
+        updates.get("pull_request_merged") is not True
+        and str(updates.get("pull_request_state") or "") != "merged"
+    ):
         return None
-    return now
+    reported = _optional_value(updates.get("pull_request_merged_at"))
+    if reported is None:
+        return now
+    try:
+        parsed = datetime.fromisoformat(reported)
+    except ValueError:
+        return now
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _execution_request(record: Any, created: bool) -> dict[str, Any]:

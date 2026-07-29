@@ -214,6 +214,26 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(arguments[5])
         self.assertIsNone(arguments[6])
 
+    async def test_a_timestamp_alone_never_makes_a_pull_request_look_merged(self) -> None:
+        """`merged_at` is written only for an update that reports a merge, so a
+        stray timestamp cannot manufacture one."""
+        await self.store.transition(
+            WORKFLOW_ID,
+            "merging",
+            {
+                "status": "merging",
+                "pull_request_id": "42",
+                "pull_request_state": "open",
+                "pull_request_merged": False,
+                "pull_request_merged_at": "2026-01-02T03:04:05+00:00",
+                "pull_request_merge_commit": "def456",
+            },
+        )
+        _, arguments = next(
+            call for call in self.pool.connection.calls if "INSERT INTO app.pull_requests" in call[0]
+        )
+        self.assertIsNone(arguments[5])
+
     async def test_a_merge_the_code_host_did_not_timestamp_still_gets_one(self) -> None:
         """A merged pull request with a NULL `merged_at` is exactly the hole
         this column exists to close, so the writer stamps its own clock rather
