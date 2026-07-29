@@ -101,11 +101,14 @@ Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `
 
 Every execution gets a fresh workspace at `workspaces/job-<jobId>`: the previous one is removed when its execution ends, and the next execution of the same job may be leased by another runner. The directory is therefore not what carries a job's work from one execution to the next — the execution branch is. Every execution of a job shares one branch name (`agent/<issueExternalId>/<first 8 characters of jobId>`, built by the orchestrator's task-packet builder for every role), and preparation re-creates the workspace from that branch's tip, looked for in this order:
 
-1. the branch as published on the remote, found with `git ls-remote` and fetched — the one state of the job every runner can see, so it decides the tip;
-2. otherwise the branch in this runner's own repository, which is where an execution that could not push leaves its work;
-3. otherwise the default branch — the start point of a job's first execution, stated rather than implied, because `git worktree add -B` would just as happily rewind an existing branch onto it ([#136](https://github.com/alexandre-leites/moirai/issues/136)).
+1. When `git ls-remote` finds the branch on the remote, its tip is fetched into `refs/moirai-remote/<branch>` — a reference of the runner's own, with `--refmap=` so the fetch cannot also write `refs/heads/<branch>`. A managed cache is a mirror, and its configured `+refs/*:refs/*` would otherwise force-update the branch whatever destination the refspec names, discarding an unpushed commit.
+2. This runner's own copy of the branch is what the workspace starts from when that copy already contains the published tip. That copy is the *only* record of the work of an execution whose role was not granted `mayPush` — today every file-modifying role except `developer` — because such an execution can also *complete*, and only a failed or blocked one is anchored at `refs/moirai-wip/<executionId>`.
+3. Otherwise the published tip decides: the branch has diverged, or this runner is behind, and the published tip is the state every runner resolves identically. A local commit left behind that way came from a run that did not complete, which is anchored.
+4. A job whose branch exists neither on the remote nor here starts from the default branch — its first execution. That start point is stated rather than implied, because `git worktree add -B` would just as happily rewind an existing branch onto it ([#136](https://github.com/alexandre-leites/moirai/issues/136)).
 
 This is what makes the mandatory local pipeline ([#90](https://github.com/alexandre-leites/moirai/issues/90)) mean anything: the pipeline execution runs the project's commands against the tree the developer execution produced, and a reviewer execution reads that tree rather than base-branch code.
+
+Two limits are worth knowing. Until [#147](https://github.com/alexandre-leites/moirai/issues/147) is fixed, no push from a `managed_clone` workspace succeeds, so in that mode nothing is ever published: step 1 does not fire, this runner's own copy of the branch is the only carrier, and a job resumed on a *different* runner still starts from the default branch. And nothing prunes `refs/moirai-remote/*`, which grows with the number of job branches a repository has seen, alongside the `refs/moirai-wip/*` anchors already noted below.
 
 ## Failed Work and Workspace Retention
 

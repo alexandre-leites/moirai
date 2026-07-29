@@ -86,11 +86,14 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 }
 
 // RecordWorkInProgress points a local reference at the workspace's current HEAD.
-// The commit of a failed run lives on the execution branch, and the next
-// preparation of that job re-creates the branch from the base revision, so
-// without an anchor the work becomes unreachable in the runner's own repository.
-// The reference is written outside refs/heads so no preparation can check it out
-// and no push mistakes it for a branch.
+//
+// The commit of a failed run lives on the execution branch, which the next
+// preparation of that job now continues from where it can (#136). The anchor
+// covers the case it cannot: when the branch has been published elsewhere and
+// this runner's copy does not contain that published tip, the preparation
+// re-creates the branch there, and only a reference outside refs/heads still
+// reaches the failed run's commit. Being outside refs/heads is also what keeps
+// it from being checked out by a preparation or mistaken for a branch by a push.
 func (manager Manager) RecordWorkInProgress(ctx context.Context, workspace Workspace, reference string) error {
 	if err := validateWorkspace(workspace); err != nil {
 		return err
