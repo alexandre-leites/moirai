@@ -258,74 +258,312 @@ class EndToEndExecutionFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet["constraints"]["mayMerge"], False)
 
 
-class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
-    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
-    async def test_full_workflow_from_plan_to_complete_with_fake_adapters(self) -> None:
-        """Validates the complete phase transition sequence end to end."""
-        from moirai.workflows.issue_graph import IssueWorkflowState, build_issue_graph
-        from moirai.workflows.nodes import PersistedWorkflowNodes
+# Counters that app.workflow_runs stores as columns; _WorkflowStore mirrors the
+# subset the graph reads back through load_state().
+_DURABLE_COUNTERS = (
+    "planning_attempts",
+    "implementation_attempts",
+    "pipeline_repair_attempts",
+    "review_cycles",
+    "ci_repair_attempts",
+    "total_agent_executions",
+    "blocking_reason",
+    "branch_name",
+    "pull_request_id",
+    "pull_request_url",
+)
 
-        persistence = _FakePersistence()
-        dispatcher = _FakeDispatcher()
-        code_host = _FakeCodeHost()
-        issue_tracker = _FakeIssueTracker()
-        nodes = PersistedWorkflowNodes(
-            persistence, dispatcher,
-            code_host_factory=lambda project_id: code_host,
-            issue_tracker_factory=lambda project_id: issue_tracker,
-        )
-        graph = build_issue_graph(nodes.build())
+_PLANNER_READY: dict[str, Any] = {
+    "status": "ready",
+    "summary": "plan ready",
+    "assumptions": [],
+    "questions": [],
+    "risk": "low",
+    "acceptanceCriteria": [],
+    "steps": [],
+}
+_REVIEW_APPROVED: dict[str, Any] = {"verdict": "approved", "acceptanceCriteria": [], "findings": []}
 
-        state: IssueWorkflowState = {
-            "workflow_run_id": "wf-1",
+
+class _WorkflowStore:
+    """In-memory stand-in for the tables the persisted runtime writes through:
+    app.workflow_runs, app.workflow_execution_requests, app.workflow_checkpoints."""
+
+    def __init__(self, human_approval_required: bool = False) -> None:
+        self.workflow_run_id = "wf-1"
+        self.transitions: list[tuple[str, dict[str, object]]] = []
+        self.requests: list[dict[str, str]] = []
+        self.checkpoints: list[dict[str, object]] = []
+        self.durable: dict[str, object] = {
+            "workflow_run_id": self.workflow_run_id,
+            "project_id": "project-1",
             "issue_id": "42",
+            "status": "preparing",
             "branch_name": "agent/42/run-1",
             "base_branch": "main",
             "merge_method": "squash",
-            "plan_valid": True,
-            "pipeline_passed": True,
-            "review_approved": True,
-            "checks_passed": True,
+            "human_approval_required": human_approval_required,
+            "planning_attempts": 0,
+            "implementation_attempts": 0,
+            "pipeline_repair_attempts": 0,
+            "review_cycles": 0,
+            "ci_repair_attempts": 0,
+            "total_agent_executions": 0,
         }
 
-        result = await graph.ainvoke(state, {"configurable": {"thread_id": "wf-1"}})
-        self.assertEqual(result.get("status"), "completed")
+    async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
+        del workflow_run_id
+        self.transitions.append((status, dict(updates)))
+        self.durable["status"] = status
+        for key in _DURABLE_COUNTERS:
+            if key in updates:
+                self.durable[key] = updates[key]
 
-        self.assertGreaterEqual(len(dispatcher.dispatches), 2)
-        dispatched_roles = [r for _, r in dispatcher.dispatches]
-        self.assertNotIn("planner", dispatched_roles)
-        self.assertIn("developer", dispatched_roles)
-        self.assertIn("reviewer", dispatched_roles)
+    async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
+        del workflow_run_id
+        for request in self.requests:
+            if request["status"] == "queued":
+                return {"id": request["id"], "role": request["role"], "attempt": 1}
+        return None
 
-        self.assertGreaterEqual(len(code_host.created_prs), 1)
-        self.assertGreaterEqual(len(code_host.merged_prs), 1)
-        self.assertIn("42", issue_tracker.closed_issues)
+    async def dispatch(self, workflow_run_id: str, role: str) -> str:
+        request = {
+            "id": f"{workflow_run_id}-{role}-{len(self.requests) + 1}",
+            "role": role,
+            "status": "queued",
+        }
+        self.requests.append(request)
+        return request["id"]
 
-    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
-    async def test_runner_event_entry_point_seeds_runtime_and_completes_external_delivery(self) -> None:
-        from moirai.grpc.runner_control import RunnerControlService
+    async def load_state(self, workflow_run_id: str) -> dict[str, object]:
+        del workflow_run_id
+        return dict(self.durable)
+
+    async def latest_checkpoint(self, workflow_run_id: str) -> tuple[int, dict[str, object]] | None:
+        del workflow_run_id
+        if not self.checkpoints:
+            return None
+        return len(self.checkpoints), dict(self.checkpoints[-1])
+
+    async def checkpoint(self, workflow_run_id: str, state: dict[str, object]) -> int:
+        del workflow_run_id
+        self.checkpoints.append(dict(state))
+        return len(self.checkpoints)
+
+    @property
+    def status(self) -> str:
+        return str(self.durable["status"])
+
+    @property
+    def roles(self) -> list[str]:
+        return [request["role"] for request in self.requests]
+
+    def claim_queued(self) -> None:
+        """Simulates the scheduler claiming every queued execution request."""
+        for request in self.requests:
+            if request["status"] == "queued":
+                request["status"] = "dispatched"
+
+
+class _EventDrivenWorkflow:
+    """Drives the real issue graph the way production does: one runner terminal
+    event at a time, through the same translation and resume path as
+    AsyncpgControlPlane.accept_event -> RunnerControlService._advance_workflow."""
+
+    def __init__(
+        self,
+        human_approval_required: bool = False,
+        code_host: Any = None,
+        issue_tracker: Any = None,
+    ) -> None:
+        from langgraph.checkpoint.memory import InMemorySaver
+
         from moirai.workflows.issue_graph import build_issue_graph
         from moirai.workflows.nodes import PersistedWorkflowNodes
         from moirai.workflows.runtime import PersistedWorkflowRuntime
+
+        self.store = _WorkflowStore(human_approval_required=human_approval_required)
+        self.code_host = code_host
+        self.issue_tracker = issue_tracker
+        nodes = PersistedWorkflowNodes(
+            self.store,
+            self.store,
+            code_host_factory=None if code_host is None else (lambda project_id: code_host),
+            issue_tracker_factory=None if issue_tracker is None else (lambda project_id: issue_tracker),
+        )
+        self.graph = build_issue_graph(
+            nodes.build(), checkpointer=InMemorySaver(), interrupt_before=("wait_for_human",)
+        )
+        self.runtime = PersistedWorkflowRuntime(self.graph, self.store, has_checkpointer=True)
+
+    async def start(self) -> dict[str, object]:
+        return await self.runtime.run(self.store.workflow_run_id, {"status": "preparing"})
+
+    async def deliver(
+        self,
+        role: str,
+        execution_suffix: str,
+        result: dict[str, Any] | None = None,
+        event_type: str = "completed",
+        exit_code: int = 0,
+    ) -> dict[str, object]:
+        from moirai.workflows.runner_events import (
+            RunnerEventSummary,
+            workflow_transition_for_terminal_event,
+        )
+
+        self.store.claim_queued()
+        summary = RunnerEventSummary(
+            event_type=event_type,
+            execution_id=f"job-1-{execution_suffix}",
+            exit_code=exit_code,
+            changed_files=[],
+            commands_run=[],
+            terminal=True,
+            result=result,
+        )
+        transition = workflow_transition_for_terminal_event(summary, self.store.status, role=role)
+        if transition is None:
+            raise AssertionError(f"terminal {role} event produced no workflow transition")
+        return await self.runtime.run(
+            self.store.workflow_run_id,
+            {"status": transition.new_status, **transition.state_updates},
+        )
+
+    async def pending_nodes(self) -> tuple[str, ...]:
+        snapshot = await self.graph.aget_state(
+            {"configurable": {"thread_id": self.store.workflow_run_id}}
+        )
+        return tuple(snapshot.next)
+
+
+class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_sequential_runner_events_drive_the_workflow_to_completed(self) -> None:
+        """The full phase sequence, driven only by simulated runner events: no
+        gate boolean is ever pre-seeded, so every transition is earned by an
+        execution that actually reported back."""
+        workflow = _EventDrivenWorkflow(code_host=_FakeCodeHost(), issue_tracker=_FakeIssueTracker())
+
+        state = await workflow.start()
+        self.assertEqual(state["status"], "planning")
+        self.assertEqual(workflow.store.roles, ["planner"])
+
+        state = await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        self.assertEqual(state["status"], "implementing")
+        self.assertEqual(workflow.store.roles, ["planner", "developer"])
+
+        state = await workflow.deliver("developer", "implement")
+        self.assertEqual(state["status"], "ai_review")
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "reviewer"])
+
+        state = await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        self.assertEqual(state["status"], "pushing")
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "reviewer", "developer"])
+
+        state = await workflow.deliver("developer", "implement")
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "reviewer", "developer"])
+        self.assertEqual(len(workflow.code_host.created_prs), 1)
+        self.assertEqual(workflow.code_host.merged_prs, [("42", "squash")])
+        self.assertEqual(workflow.issue_tracker.closed_issues, ["42"])
+        self.assertEqual(workflow.store.durable["total_agent_executions"], 4)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_one_terminal_event_dispatches_one_execution_and_ends_the_invocation(self) -> None:
+        """Regression for the run-to-completion graph: a planner success must
+        queue exactly one developer execution and stop, instead of walking
+        pipeline/repair against gates the developer has not produced yet."""
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+
+        state = await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+
+        self.assertEqual(state["status"], "implementing")
+        self.assertTrue(state["awaiting_execution"])
+        self.assertEqual(workflow.store.roles, ["planner", "developer"])
+        self.assertEqual([request["status"] for request in workflow.store.requests], ["dispatched", "queued"])
+        self.assertEqual(await workflow.pending_nodes(), ())
+        # Phases that never ran must not have consumed any budget.
+        self.assertEqual(workflow.store.durable["planning_attempts"], 1)
+        self.assertEqual(workflow.store.durable["implementation_attempts"], 1)
+        self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 0)
+        self.assertEqual(workflow.store.durable["review_cycles"], 0)
+        self.assertEqual(workflow.store.durable["total_agent_executions"], 2)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_repair_cycle_blocks_only_after_every_counted_attempt_really_ran(self) -> None:
+        """Each counted repair attempt is preceded by a real repairer execution,
+        and each pipeline verdict comes from a pipeline execution that reported
+        back -- the budget can no longer be spent by phantom traversals."""
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+
+        state = await workflow.deliver("developer", "implement", exit_code=1)
+        self.assertEqual(state["status"], "local_pipeline")
+        self.assertEqual(workflow.store.roles[-1], "pipeline")
+
+        for expected_attempts in (1, 2, 3):
+            state = await workflow.deliver("pipeline", "pipeline", event_type="failed", exit_code=1)
+            self.assertEqual(state["status"], "repairing")
+            self.assertEqual(workflow.store.roles[-1], "repairer")
+            self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], expected_attempts)
+            state = await workflow.deliver("repairer", "repair")
+            self.assertEqual(state["status"], "local_pipeline")
+            self.assertEqual(workflow.store.roles[-1], "pipeline")
+
+        state = await workflow.deliver("pipeline", "pipeline", event_type="failed", exit_code=1)
+        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["blocking_reason"], "workflow retry budget exhausted")
+        self.assertEqual(workflow.store.roles.count("repairer"), 3)
+        self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 3)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_human_approval_interrupt_pauses_before_merge(self) -> None:
+        """With human approval required the graph stops before wait_for_human
+        and merges only once the decision resumes it."""
+        workflow = _EventDrivenWorkflow(
+            human_approval_required=True,
+            code_host=_FakeCodeHost(),
+            issue_tracker=_FakeIssueTracker(),
+        )
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+
+        state = await workflow.deliver("developer", "implement")
+        self.assertEqual(state["status"], "waiting_github_checks")
+        self.assertEqual(await workflow.pending_nodes(), ("wait_for_human",))
+        self.assertEqual(workflow.code_host.merged_prs, [])
+
+        state = await workflow.runtime.run(
+            workflow.store.workflow_run_id,
+            {"human_approved": True, "human_changes_requested": False},
+        )
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(workflow.code_host.merged_prs, [("42", "squash")])
+        self.assertEqual(workflow.issue_tracker.closed_issues, ["42"])
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_runner_event_entry_point_resumes_the_graph_and_completes_delivery(self) -> None:
+        """The gRPC entry point is wired end to end: a runner terminal event
+        arriving on the stream resumes the suspended graph and finishes the
+        external delivery (pull request, merge, issue closure)."""
+        from moirai.grpc.runner_control import RunnerControlService
         from proto import runner_control_pb2
 
-        persistence = _EntryPointPersistence()
-        dispatcher = _FakeDispatcher()
-        code_host = _FakeCodeHost()
-        issue_tracker = _FakeIssueTracker()
-        runtime = PersistedWorkflowRuntime(
-            build_issue_graph(
-                PersistedWorkflowNodes(
-                    persistence,
-                    dispatcher,
-                    code_host_factory=lambda project_id: code_host,
-                    issue_tracker_factory=lambda project_id: issue_tracker,
-                ).build()
-            ),
-            persistence,
-        )
-        control_plane = _EntryPointControlPlane()
-        service = RunnerControlService(control_plane, now=lambda: NOW, workflow_runtime=runtime)
+        workflow = _EventDrivenWorkflow(code_host=_FakeCodeHost(), issue_tracker=_FakeIssueTracker())
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        state = await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        self.assertEqual(state["status"], "pushing")
+        workflow.store.claim_queued()
+
+        control_plane = _EntryPointControlPlane(workflow.store)
+        service = RunnerControlService(control_plane, now=lambda: NOW, workflow_runtime=workflow.runtime)
         message = runner_control_pb2.RunnerToOrchestrator(
             event=runner_control_pb2.ExecutionEvent(
                 job_id="job-entry",
@@ -340,111 +578,35 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         await service._handle_message(message, "runner-entry")
 
         self.assertEqual(control_plane.events[0].job_id, "job-entry")
-        self.assertGreaterEqual(len(code_host.created_prs), 1)
-        self.assertGreaterEqual(len(code_host.merged_prs), 1)
-        self.assertEqual(issue_tracker.closed_issues, ["42"])
-        self.assertTrue(persistence.checkpoints)
-
-    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
-    async def test_repair_loop_routes_through_pipeline_after_developer_completes(self) -> None:
-        """After developer completes with failed pipeline, the graph routes to repair."""
-
-    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
-    async def test_human_approval_interrupt_pauses_before_merge(self) -> None:
-        """When human_approval is required, graph pauses at wait_for_human."""
-        from moirai.workflows.issue_graph import IssueWorkflowState, build_issue_graph
-        from moirai.workflows.nodes import PersistedWorkflowNodes
-
-        persistence = _FakePersistence()
-        dispatcher = _FakeDispatcher()
-        nodes = PersistedWorkflowNodes(persistence, dispatcher)
-        graph = build_issue_graph(nodes.build(), interrupt_after=("wait_for_human",))
-
-        state: IssueWorkflowState = {
-            "workflow_run_id": "wf-human",
-            "status": "waiting_github_checks",
-            "checks_passed": True,
-            "human_approved": False,
-            "plan_valid": True,
-            "pipeline_passed": True,
-            "review_approved": True,
-            "human_approval_required": True,
-        }
-
-        if hasattr(graph, "update_state"):
-            result = await graph.ainvoke(state, {"configurable": {"thread_id": "wf-human"}})
-            self.assertEqual(result.get("status"), "waiting_human")
-
-
-class _FakePersistence:
-    def __init__(self) -> None:
-        self.transitions: list[tuple[str, str, dict[str, object]]] = []
-
-    async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
-        self.transitions.append((workflow_run_id, status, updates))
-
-    async def dispatch(self, workflow_run_id: str, role: str, status_key: str, attempt_field: str | None) -> str:
-        self.dispatches: list[tuple[str, str]] = getattr(self, "dispatches", [])
-        attempt = 1
-        if attempt_field:
-            attempt = 2
-        self.dispatches.append((workflow_run_id, role))
-        return f"{workflow_run_id}-{role}-{attempt}"
-
-    async def latest_checkpoint(self, workflow_run_id: str) -> tuple[int, dict[str, object]] | None:
-        return None
-
-    async def checkpoint(self, workflow_run_id: str, state: dict[str, object]) -> int:
-        return 1
-
-    async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
-        return None
-
-
-class _EntryPointPersistence(_FakePersistence):
-    def __init__(self) -> None:
-        super().__init__()
-        self.checkpoints: list[dict[str, object]] = []
-
-    async def load_state(self, workflow_run_id: str) -> dict[str, object]:
-        return {
-            "workflow_run_id": workflow_run_id,
-            "project_id": "project-entry",
-            "issue_id": "42",
-            "status": "pushing",
-            "branch_name": "agent/42/entry",
-            "base_branch": "main",
-            "merge_method": "squash",
-            "plan_valid": True,
-            "pipeline_passed": True,
-            "review_approved": True,
-            "checks_passed": True,
-            "human_approval_required": False,
-        }
-
-    async def checkpoint(self, workflow_run_id: str, state: dict[str, object]) -> int:
-        self.checkpoints.append({"workflow_run_id": workflow_run_id, **state})
-        return len(self.checkpoints)
+        self.assertEqual(workflow.store.status, "completed")
+        self.assertEqual(len(workflow.code_host.created_prs), 1)
+        self.assertEqual(workflow.code_host.merged_prs, [("42", "squash")])
+        self.assertEqual(workflow.issue_tracker.closed_issues, ["42"])
+        self.assertTrue(workflow.store.checkpoints)
 
 
 class _EntryPointControlPlane:
-    def __init__(self) -> None:
-        self.events: list[object] = []
+    """Mirrors AsyncpgControlPlane.accept_event: record the event, translate it
+    with the shared runner-event policy, hand the transition to on_transition."""
 
-    async def accept_event(self, event: object, now: datetime, on_transition: Any = None) -> None:
+    def __init__(self, store: _WorkflowStore) -> None:
+        self._store = store
+        self.events: list[Any] = []
+
+    async def accept_event(self, event: Any, now: datetime, on_transition: Any = None) -> None:
         del now
+        from moirai.workflows.runner_events import (
+            validate_runner_event,
+            workflow_transition_for_terminal_event,
+        )
+
         self.events.append(event)
-        if on_transition is not None:
-            await on_transition("wf-entry", "pr_created", {"status": "pr_created"})
-
-
-class _FakeDispatcher:
-    def __init__(self) -> None:
-        self.dispatches: list[tuple[str, str]] = []
-
-    async def dispatch(self, workflow_run_id: str, role: str) -> str:
-        self.dispatches.append((workflow_run_id, role))
-        return f"{workflow_run_id}-{role}"
+        summary = validate_runner_event(event.event_type, event.execution_id, event.payload)
+        transition = workflow_transition_for_terminal_event(summary, self._store.status, role="developer")
+        if on_transition is not None and transition is not None:
+            await on_transition(
+                self._store.workflow_run_id, transition.new_status, transition.state_updates
+            )
 
 
 class _FakeCodeHost:

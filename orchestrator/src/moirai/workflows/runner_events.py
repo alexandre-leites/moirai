@@ -178,6 +178,24 @@ def workflow_transition_for_terminal_event(
     current_status: str,
     role: str | None = None,
 ) -> WorkflowTransition | None:
+    transition = _terminal_event_transition(summary, current_status, role)
+    if transition is None:
+        return None
+    # A terminal execution event is precisely the signal the suspended graph is
+    # waiting for (see issue_graph.suspend_after_dispatch). Clearing the gate is
+    # what lets the dispatching node's outgoing edge advance on resume instead
+    # of routing straight back to END; without it the run would never progress.
+    return WorkflowTransition(
+        new_status=transition.new_status,
+        state_updates={**transition.state_updates, "awaiting_execution": False},
+    )
+
+
+def _terminal_event_transition(
+    summary: RunnerEventSummary,
+    current_status: str,
+    role: str | None,
+) -> WorkflowTransition | None:
     if not summary.terminal:
         return None
 

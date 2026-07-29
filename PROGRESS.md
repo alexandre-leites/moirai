@@ -471,81 +471,37 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
 
 ---
 
-# Session: GitHub issue #91 — offer expiry must not cancel in-flight workflows
+## Issue #88 — Event-driven issue workflow (platform review finding F1)
 
-## Current Status
+### Done
 
-- Overall status: Complete; branch `issue-91` pushed with a PR open against `main`
-- Current phase: Platform review remediation (finding F4)
-- Active implementation: None (issue #91 finished 2026-07-29)
-- Last updated: 2026-07-29
-- Agent/session identifier: agent/issue-91
+- [x] Suspend the LangGraph issue workflow after every execution dispatch
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/runner_events.py`, `orchestrator/src/moirai/workflows/runtime.py`, `orchestrator/tests/test_end_to_end.py`, `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_runtime.py`, `orchestrator/tests/test_runner_events.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `README.md`, `PROJECT.md`, `orchestrator/README.md`
+  - Behavior delivered:
+    - `_dispatch` sets `awaiting_execution` on the graph state; `suspend_after_dispatch` wraps the outgoing edge of every dispatching node (`plan`, `implement`, `pipeline`, `review`, `repair`, `push`) so the invocation ends at `END` while an execution is pending.
+    - `workflow_transition_for_terminal_event` clears `awaiting_execution` on every terminal transition, so `PersistedWorkflowRuntime.run` resumes the graph from that same edge.
+    - `_dispatch` replay guard: a node re-entered while its own request is still `queued` reuses that request.
+    - Checkpointer decision: production requires one. Without a checkpointer the runtime leaves a suspended run untouched and logs a warning.
+  - Validation: `make test-orchestrator` (298 tests, OK), `make lint`, `make typecheck`, `make compose`.
+  - Commands: `make dev-install`; `make test-orchestrator`; `make lint`; `make typecheck`; `make compose`.
 
-## Done
+### Decisions
 
-- [x] Offer expiry and rejection no longer cancel in-flight workflow runs (GitHub issue #91, review finding F4)
+- Decision: Suspend with a conditional edge to `END` rather than langgraph's static `interrupt_after`.
+- Decision: Clear `awaiting_execution` in `workflow_transition_for_terminal_event`, not in `PersistedWorkflowRuntime.run`.
+
+## Issue #91 — Offer expiry must not cancel in-flight workflows (finding F4)
+
+### Done
+
+- [x] Offer expiry and rejection no longer cancel in-flight workflow runs
   - Completed: 2026-07-29
   - Relevant files: `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/scheduler.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_scheduler_service.py`, `orchestrator/tests/test_postgres_integration.py`, `docs/architecture.md`
   - Behavior delivered:
-    - `expire_offers` and `reject_offer` share one release path that distinguishes a bootstrap offer (run with no branch, pull request, execution, or execution request) from a re-offer of a run with progress. Bootstrap offers still cancel and hand the issue back to the queue; every other unanswered offer requeues the run.
-    - An unanswered execution re-offer returns its leaked `dispatched` execution request to `queued` in the same transaction, keeps the workflow status/phase and the project lock, and is re-offered by `schedule_execution` on a later tick.
-    - An unanswered recovery re-offer returns the job to `recovering` with a fenced lease generation and the run to `recovering`, so `recover_one` re-offers it.
-    - Repeated failure is bounded: `unanswered_offer_limit` (default 5) consecutive unanswered offers that have been failing longer than `unanswered_offer_grace` (default 15 minutes) block the run with `blocking_reason = 'unanswered_offer_limit'`, expire its outstanding execution requests, and release the project lock. Accepting an offer resets the streak. Each release also writes an `offer_unanswered` workflow event.
-    - `Scheduler.tick` no longer routes a task-packet build error into `reject_offer`: it logs, skips the candidate, and leaves the offer to expire. An undelivered offer (returned `False` or raised) is released and the loop continues instead of breaking, bounded by `max_consecutive_failures` (default 3).
-  - Validation performed: failing tests were written first and reproduced both defects (`'cancelled' != 'ai_review'` for a mid-workflow expiry/rejection, `'cancelled' != 'recovering'` for a recovery offer, `OfferDeliveryError` from a packet-build failure, `0 != 1` placements after one undelivered offer), then all suites were rerun green.
-  - Commands executed:
-    - `make test-orchestrator` — `Ran 303 tests ... OK (skipped=8)`
-    - `LOOP_TEST_DATABASE_URL=postgresql://loop:loop@127.0.0.1:55491/loop make test-postgres-integration` — `Ran 8 tests ... OK` (throwaway `postgres:16-alpine` container)
-    - `make lint` — `All checks passed!`
-    - `make typecheck` — `Success: no issues found in 47 source files`
-    - `make test-runner` — `ok` for all runner packages
-    - `make test-api` — `ok` for all API packages
-    - `make compose` — Compose configuration rendered
-  - Notes: No migration was required. The unanswered-offer streak is derived from `app.job_offers` rows (offers created after the last `accepted` offer for that job), so no schema change or new counter column was needed.
-
-## Decisions
-
-- Decision: Bound repeated offer expiry by both a consecutive-offer count and a grace period, and block the run rather than cancel it.
-  - Context: Issue #91 step 2 requires a bounded policy so a run cannot ping-pong between expiry and re-offer forever. The scheduler ticks every second while the offer TTL is 600 seconds, so a count-only bound is consumed in seconds by a runner restart.
-  - Alternatives considered: (a) count only (`N` consecutive expiries → blocked), which would block a healthy run with an open pull request within seconds of a brief runner outage; (b) time only, which never bounds a fast expiry loop; (c) a new `consecutive_offer_expiries` column plus a migration, which duplicates state `app.job_offers` already records.
-  - Reason: The pair (`unanswered_offer_limit = 5`, `unanswered_offer_grace = 15 minutes`) blocks only runs that have both failed repeatedly and been failing for a long time. `blocked` is the correct terminal state because it carries a `blocking_reason` and releases the project lock, whereas `cancelled` reads as "nothing happened".
-  - Consequences: A total-fleet outage shorter than the grace period never terminates a run; a genuinely unschedulable run stops holding its project lock after the grace period. Both bounds are `AsyncpgControlPlane` constructor arguments, so `main.py` needs no change and operators can tune them in one place.
-
-- Decision: Keep cancelling the bootstrap offer instead of requeuing it.
-  - Context: Issue #91 step 5 allows either behavior for a bootstrap expiry.
-  - Alternatives considered: Return the bootstrap run to `recovering` so `recover_one` re-offers it.
-  - Reason: A bootstrap run holds no branch, pull request, execution, or execution request, and cancelling it is how the project lock is released so the issue re-enters global priority ordering — possibly behind a higher-priority issue that appeared meanwhile. Requeuing would pin the project to one issue and delay fairness for no durable gain.
-  - Consequences: A bootstrap run still ends `cancelled` with `terminal_reason = 'offer_expired'` (or `'runner_rejected_offer'`), but no work is lost and the issue is rescheduled on the next tick. Repeated bootstrap churn on a dead fleet remains bounded only by the project circuit breaker (GitHub issue #92, deliberately out of scope here).
-
-- Decision: A task-packet build failure leaves the offer alone instead of rejecting it.
-  - Context: The scheduler's exception arm previously routed any failure, including `build_task_packet` errors, into the terminal reject path.
-  - Alternatives considered: Reject the offer immediately so the runner capacity is freed sooner.
-  - Reason: A build error says nothing about the runner, and rejecting it would count against the unanswered-offer streak for a fault the runner never saw. Letting the offer expire on its TTL keeps the failure entirely orchestrator-side, and the tick simply moves to the next candidate.
-  - Consequences: A failed packet build holds one runner slot until the offer TTL elapses. Repeated build failures are bounded per tick by `max_consecutive_failures`.
-
-## Validation Status
-
-- Targeted tests: Passed — `test_scheduler_service.py` (24 tests), `test_asyncpg_control_plane.py` (39 tests).
-- Service tests: Passed — `make test-orchestrator`: 303 tests, 8 skipped (PostgreSQL integration skips without a database URL).
-- Full repository tests: Passed — `make test-orchestrator`, `make test-runner`, `make test-api`. `make test-web` not run (no web change; requires npm install).
-- Build: Not run (no build-affecting change).
-- Lint: Passed — `make lint`.
-- Type checks: Passed — `make typecheck`.
-- Database migrations: No migration added; migrations applied by `make test-postgres-integration` against a real PostgreSQL 16 container.
-- Docker Compose: Passed — `make compose`.
-- End-to-end workflow: Not run.
-
-## Known Issues
-
-- Issue: An unanswered offer that blocks a run writes `blocked` directly through the control plane, so it does not resolve a `half_open` project or provider circuit probe.
-  - Severity: P2
-  - Impact: A run that was serving as a circuit probe and is blocked by the unanswered-offer bound leaves the circuit in `half_open`.
-  - Evidence: `workflows/persistence.py` resolves probes only inside `transition()`; `expire_offers` has never used that path.
-  - Suggested resolution: GitHub issue #92 (circuit-breaker wedge states), which owns circuit resolution routing and was deliberately excluded from this change to avoid overlapping edits to `expire_offers`.
-
-## Next Recommended Implementation
-
-GitHub issue #92 (circuit-breaker wedge states): route every terminal outcome that `expire_offers` and `reject_offer` can produce — `cancelled` for a bootstrap release and `blocked` for the unanswered-offer bound — through the circuit-probe resolution used by `workflows/persistence.transition`, and add an orphan-probe reaper. Relevant files: `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/workflows/persistence.py`. Targeted validation: `make test-orchestrator` plus new PostgreSQL integration coverage in `orchestrator/tests/test_postgres_integration.py`.
+    - `expire_offers` and `reject_offer` share one release path distinguishing bootstrap (cancel) from re-offer (requeue). Consecutive failures bounded by `unanswered_offer_limit` + `unanswered_offer_grace`. Accepting an offer resets the streak.
+    - `Scheduler.tick` no longer routes packet-build errors into `reject_offer`: logs and skips.
+  - Validation: `make test-orchestrator` (303 tests, OK), `make test-postgres-integration` (8 tests, OK), `make test-runner`, `make test-api`, `make lint`, `make typecheck`, `make compose`.
 ---
 
 # Issue #89 — Runner: a missing or invalid result document must not be reported as success

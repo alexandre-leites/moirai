@@ -69,29 +69,35 @@ class PersistedWorkflowNodes:
 
     async def plan(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if state.get("plan_valid"):
-            return await self._transition(state, "planning", {"status": "planning", "plan_valid": True})
+            return await self._transition(
+                state, "planning", {"status": "planning", "plan_valid": True, "awaiting_execution": False}
+            )
         if int(state.get("planning_attempts", 0)) >= _BUDGET.planning_attempts:
-            return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
+            return await self._budget_exhausted(state)
         return await self._dispatch(state, "planner", "planning", "planning_attempts")
 
     async def implement(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if int(state.get("implementation_attempts", 0)) >= _BUDGET.implementation_attempts:
-            return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
+            return await self._budget_exhausted(state)
         return await self._dispatch(state, "developer", "implementing", "implementation_attempts")
 
     async def pipeline(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if state.get("pipeline_passed") is True:
-            return await self._transition(state, "local_pipeline", {"status": "local_pipeline", "pipeline_passed": True})
+            return await self._transition(
+                state,
+                "local_pipeline",
+                {"status": "local_pipeline", "pipeline_passed": True, "awaiting_execution": False},
+            )
         return await self._dispatch(state, "pipeline", "local_pipeline", None)
 
     async def review(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if int(state.get("review_cycles", 0)) >= _BUDGET.review_cycles:
-            return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
+            return await self._budget_exhausted(state)
         return await self._dispatch(state, "reviewer", "ai_review", "review_cycles")
 
     async def repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
         if int(state.get("pipeline_repair_attempts", 0)) >= _BUDGET.pipeline_repair_attempts:
-            return await self._transition(state, "blocked", {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"})
+            return await self._budget_exhausted(state)
         return await self._dispatch(state, "repairer", "repairing", "pipeline_repair_attempts")
 
     async def push(self, state: IssueWorkflowState) -> WorkflowUpdate:
@@ -181,6 +187,13 @@ class PersistedWorkflowNodes:
             return None
         return await _await(self.issue_tracker_factory(state.get("project_id", "")))
 
+    async def _budget_exhausted(self, state: IssueWorkflowState) -> WorkflowUpdate:
+        return await self._transition(state, "blocked", {
+            "status": "blocked",
+            "blocking_reason": "workflow retry budget exhausted",
+            "awaiting_execution": False,
+        })
+
     async def _dispatch(
         self,
         state: IssueWorkflowState,
@@ -190,15 +203,31 @@ class PersistedWorkflowNodes:
     ) -> WorkflowUpdate:
         workflow_run_id = _workflow_run_id(state)
         if int(state.get("total_agent_executions", 0)) >= _BUDGET.total_agent_executions:
-            blocked_updates: WorkflowUpdate = {"status": "blocked", "blocking_reason": "workflow retry budget exhausted"}
-            await _await(self.persistence.transition(workflow_run_id, "blocked", blocked_updates))
-            return blocked_updates
+            return await self._budget_exhausted(state)
         existing = await _await(self.persistence.get_queued_execution_request(workflow_run_id))
         if existing is not None and existing["role"] == role:
-            execution_id = existing["id"]
-        else:
-            execution_id = await _await(self.dispatcher.dispatch(workflow_run_id, role))
-        updates: WorkflowUpdate = {"status": status, "execution_id": execution_id}
+            # This node already queued its request and the scheduler has not
+            # claimed it yet, so the node is being replayed (at-least-once
+            # transition delivery, or a resume that re-entered the node).
+            # Queueing a second request would duplicate the agent run, and
+            # re-counting the attempt would spend two units of retry budget on
+            # one execution.
+            reused: WorkflowUpdate = {
+                "status": status,
+                "execution_id": existing["id"],
+                "awaiting_execution": True,
+            }
+            await _await(self.persistence.transition(workflow_run_id, status, reused))
+            return reused
+        execution_id = await _await(self.dispatcher.dispatch(workflow_run_id, role))
+        # `awaiting_execution` suspends the graph on the outgoing edge: the
+        # gates the downstream nodes read only exist once this execution
+        # reports a terminal event.
+        updates: WorkflowUpdate = {
+            "status": status,
+            "execution_id": execution_id,
+            "awaiting_execution": True,
+        }
         if attempt_counter is not None:
             current_attempts = state.get(attempt_counter, 0)
             updates[attempt_counter] = (current_attempts if isinstance(current_attempts, int) else 0) + 1
