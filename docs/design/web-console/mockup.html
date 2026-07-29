@@ -1,0 +1,1292 @@
+<title>Moirai Console — UI proposal</title>
+<style>
+  :root {
+    --ground: #f3f2f5;
+    --surface: #fbfbfa;
+    --raised: #ffffff;
+    --border: #dddbe2;
+    --border-soft: #e8e6ec;
+    --ink: #23222b;
+    --ink-2: #5c5a68;
+    --ink-3: #8c8998;
+    --thread: #9a7420;
+    --thread-mark: #b98a2e;
+    --thread-soft: #f0e6cf;
+    --ok: #34965c;
+    --ok-soft: #e2f0e7;
+    --crit: #93294a;
+    --crit-soft: #f4e2e8;
+    --warn: #a8641c;
+    --warn-soft: #f4e9dc;
+    --wait: #4a6fb5;
+    --wait-soft: #e3e9f5;
+    --idle: #8c8998;
+    --idle-soft: #ebeaef;
+    --chart-ok: #34965c;
+    --chart-crit: #93294a;
+    --chart-warn: #a8641c;
+    --focus: #4a6fb5;
+    --shadow: 0 1px 3px rgba(30, 28, 45, 0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #14161f;
+      --surface: #1b1e2b;
+      --raised: #222635;
+      --border: #313548;
+      --border-soft: #272b3c;
+      --ink: #e6e4dc;
+      --ink-2: #a5a2b2;
+      --ink-3: #767386;
+      --thread: #d4a752;
+      --thread-mark: #d4a752;
+      --thread-soft: #322c1d;
+      --ok: #57a06b;
+      --ok-soft: #1e2b23;
+      --crit: #c25c7c;
+      --crit-soft: #33202a;
+      --warn: #c48229;
+      --warn-soft: #322818;
+      --wait: #6b8fd4;
+      --wait-soft: #1f2536;
+      --idle: #767386;
+      --idle-soft: #262a39;
+      --chart-ok: #57a06b;
+      --chart-crit: #b04565;
+      --chart-warn: #c48229;
+      --focus: #6b8fd4;
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    }
+  }
+  :root[data-theme="light"] {
+    --ground: #f3f2f5;
+    --surface: #fbfbfa;
+    --raised: #ffffff;
+    --border: #dddbe2;
+    --border-soft: #e8e6ec;
+    --ink: #23222b;
+    --ink-2: #5c5a68;
+    --ink-3: #8c8998;
+    --thread: #9a7420;
+    --thread-mark: #b98a2e;
+    --thread-soft: #f0e6cf;
+    --ok: #34965c;
+    --ok-soft: #e2f0e7;
+    --crit: #93294a;
+    --crit-soft: #f4e2e8;
+    --warn: #a8641c;
+    --warn-soft: #f4e9dc;
+    --wait: #4a6fb5;
+    --wait-soft: #e3e9f5;
+    --idle: #8c8998;
+    --idle-soft: #ebeaef;
+    --chart-ok: #34965c;
+    --chart-crit: #93294a;
+    --chart-warn: #a8641c;
+    --focus: #4a6fb5;
+    --shadow: 0 1px 3px rgba(30, 28, 45, 0.08);
+  }
+  :root[data-theme="dark"] {
+    --ground: #14161f;
+    --surface: #1b1e2b;
+    --raised: #222635;
+    --border: #313548;
+    --border-soft: #272b3c;
+    --ink: #e6e4dc;
+    --ink-2: #a5a2b2;
+    --ink-3: #767386;
+    --thread: #d4a752;
+    --thread-mark: #d4a752;
+    --thread-soft: #322c1d;
+    --ok: #57a06b;
+    --ok-soft: #1e2b23;
+    --crit: #c25c7c;
+    --crit-soft: #33202a;
+    --warn: #c48229;
+    --warn-soft: #322818;
+    --wait: #6b8fd4;
+    --wait-soft: #1f2536;
+    --idle: #767386;
+    --idle-soft: #262a39;
+    --chart-ok: #57a06b;
+    --chart-crit: #b04565;
+    --chart-warn: #c48229;
+    --focus: #6b8fd4;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font: 14px/1.55 system-ui, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .serif { font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; }
+  .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  a { color: var(--wait); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  button { font: inherit; color: inherit; }
+  :is(button, a, [tabindex]):focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* ---------- Sidebar ---------- */
+  .side {
+    width: 208px; flex: none;
+    border-right: 1px solid var(--border-soft);
+    background: var(--surface);
+    padding: 20px 12px;
+    display: flex; flex-direction: column; gap: 4px;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .wordmark {
+    display: flex; align-items: center; gap: 10px;
+    padding: 2px 10px 18px;
+  }
+  .wordmark svg { flex: none; }
+  .wordmark .name {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-size: 21px; letter-spacing: 0.02em;
+  }
+  .wordmark .sub { font-size: 10.5px; color: var(--ink-3); letter-spacing: 0.14em; text-transform: uppercase; }
+  .navlab {
+    font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-3); padding: 14px 10px 4px;
+  }
+  .nav-item {
+    display: flex; align-items: center; gap: 9px;
+    width: 100%; text-align: left;
+    background: none; border: 0; border-radius: 7px;
+    padding: 7px 10px; cursor: pointer;
+    color: var(--ink-2); font-size: 13.5px;
+  }
+  .nav-item:hover { background: var(--idle-soft); color: var(--ink); }
+  .nav-item[aria-current="page"] { background: var(--thread-soft); color: var(--ink); font-weight: 600; }
+  .nav-item[aria-current="page"] .nav-dot { background: var(--thread); }
+  .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex: none; }
+  .nav-item .count {
+    margin-left: auto; font-size: 11.5px; color: var(--ink-3);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .nav-item .count.hot { color: var(--crit); font-weight: 700; }
+  .side .foot { margin-top: auto; padding: 10px; font-size: 12px; color: var(--ink-3); }
+  .side .foot .who { color: var(--ink-2); }
+
+  /* ---------- Main ---------- */
+  .main { flex: 1; min-width: 0; padding: 26px 32px 64px; max-width: 1240px; }
+  .view-head { margin: 0 0 4px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .view-head h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-weight: 600; font-size: 26px; margin: 0; letter-spacing: 0.01em;
+    text-wrap: balance;
+  }
+  .view-head .crumb { color: var(--ink-3); font-size: 13px; }
+  .view-sub { color: var(--ink-2); margin: 0 0 22px; max-width: 62ch; }
+
+  .grid { display: grid; gap: 14px; }
+  .cards-4 { grid-template-columns: repeat(4, 1fr); }
+  .cols-2 { grid-template-columns: 3fr 2fr; align-items: start; }
+  @media (max-width: 1000px) { .cards-4 { grid-template-columns: repeat(2, 1fr); } .cols-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 820px) {
+    .side { display: none; }
+    .main { padding: 18px 14px 48px; }
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .card .card-h {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 13px 16px 0;
+  }
+  .card .card-h h2 { font-size: 13px; margin: 0; font-weight: 650; letter-spacing: 0.01em; }
+  .card .card-h .hint { font-size: 12px; color: var(--ink-3); margin-left: auto; }
+  .card .card-b { padding: 12px 16px 14px; }
+
+  /* stat tiles */
+  .tile { padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .tile .lab { font-size: 11.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); }
+  .tile .val { font-size: 27px; font-weight: 650; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .tile .val small { font-size: 14px; color: var(--ink-3); font-weight: 500; }
+  .tile .note { font-size: 12px; color: var(--ink-2); }
+  .tile .note.bad { color: var(--crit); font-weight: 600; }
+  .tile svg { margin-top: 6px; }
+
+  /* pills */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
+    border-radius: 999px; padding: 2.5px 9px;
+    white-space: nowrap;
+  }
+  .pill i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; font-style: normal; }
+  .p-run  { background: var(--thread-soft); color: var(--thread); }
+  .p-ok   { background: var(--ok-soft); color: var(--ok); }
+  .p-bad  { background: var(--crit-soft); color: var(--crit); }
+  .p-warn { background: var(--warn-soft); color: var(--warn); }
+  .p-wait { background: var(--wait-soft); color: var(--wait); }
+  .p-idle { background: var(--idle-soft); color: var(--idle); }
+  .pulse i { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse i, .spindle-core { animation: none !important; }
+  }
+
+  /* tables */
+  .tbl-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th {
+    text-align: left; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; padding: 8px 12px;
+    border-bottom: 1px solid var(--border-soft); white-space: nowrap;
+  }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  tr.rowlink { cursor: pointer; }
+  tr.rowlink:hover td { background: var(--idle-soft); }
+  tr.rowlink:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+  td .t2 { color: var(--ink-3); font-size: 12px; }
+  .num { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums; }
+  .right { text-align: right; }
+
+  /* buttons */
+  .btn {
+    border: 1px solid var(--border); background: var(--raised);
+    border-radius: 7px; padding: 5.5px 12px; cursor: pointer;
+    font-size: 12.5px; font-weight: 600; color: var(--ink);
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn.primary { background: var(--thread); border-color: var(--thread); color: var(--ground); }
+  .btn.primary:hover { filter: brightness(1.07); }
+  .btn.danger { color: var(--crit); border-color: var(--crit); background: transparent; }
+  .btn.danger:hover { background: var(--crit-soft); }
+  .btn.sm { padding: 3.5px 9px; font-size: 12px; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* attention list */
+  .attn { display: flex; flex-direction: column; }
+  .attn-item {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 11px 16px; border-bottom: 1px solid var(--border-soft);
+  }
+  .attn-item:last-child { border-bottom: 0; }
+  .attn-item .stripe { width: 3px; align-self: stretch; border-radius: 2px; flex: none; }
+  .attn-item .tx { min-width: 0; flex: 1; }
+  .attn-item .tx .t { font-weight: 600; font-size: 13.5px; }
+  .attn-item .tx .d { color: var(--ink-2); font-size: 12.5px; }
+  .attn-item .act { flex: none; display: flex; gap: 6px; align-items: center; padding-top: 2px; }
+
+  /* feed */
+  .feed { display: flex; flex-direction: column; }
+  .feed-item { display: flex; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--border-soft); font-size: 12.5px; }
+  .feed-item:last-child { border-bottom: 0; }
+  .feed-item .tm { color: var(--ink-3); flex: none; width: 52px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px; padding-top: 1px; }
+  .feed-item .ic { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .feed-item .tx { color: var(--ink-2); }
+  .feed-item .tx b { color: var(--ink); font-weight: 600; }
+
+  /* health strip */
+  .health-strip {
+    display: flex; gap: 18px; flex-wrap: wrap;
+    padding: 10px 16px; align-items: center;
+  }
+  .hp { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+  .hp i { width: 8px; height: 8px; border-radius: 50%; font-style: normal; flex: none; }
+  .hp .v { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); font-size: 12px; }
+
+  /* thread (signature) */
+  .threadline { width: 100%; }
+  .phase-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); padding-top: 8px; }
+  .phase-legend .k { display: inline-flex; align-items: center; gap: 6px; }
+  .phase-legend .sw { width: 16px; height: 3px; border-radius: 2px; }
+
+  .minithread { display: block; }
+
+  /* meters */
+  .meter { display: inline-flex; align-items: center; gap: 7px; }
+  .meter .bar { width: 54px; height: 5px; border-radius: 3px; background: var(--idle-soft); overflow: hidden; }
+  .meter .bar span { display: block; height: 100%; border-radius: 3px; background: var(--thread); }
+  .meter .bar span.full { background: var(--crit); }
+  .meter .n { font-size: 11.5px; color: var(--ink-3); font-family: ui-monospace, Menlo, monospace; }
+
+  /* filter row */
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; align-items: center; }
+  .chip {
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 999px; padding: 4px 12px; font-size: 12.5px; cursor: pointer; color: var(--ink-2);
+  }
+  .chip[aria-pressed="true"] { background: var(--thread-soft); border-color: var(--thread); color: var(--ink); font-weight: 600; }
+  .filters .gap { flex: 1; }
+  .search {
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+    border-radius: 7px; padding: 5px 11px; font: inherit; font-size: 13px; width: 200px;
+  }
+  .search:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+  /* detail layout */
+  .detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 14px; align-items: start; }
+  @media (max-width: 1000px) { .detail-grid { grid-template-columns: 1fr; } }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; padding: 4px 0; }
+  .kv dt { color: var(--ink-3); }
+  .kv dd { margin: 0; }
+  .budget-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+  .budget-row:last-child { border-bottom: 0; }
+
+  /* event log */
+  .evt { display: flex; gap: 10px; padding: 7px 16px; border-bottom: 1px solid var(--border-soft); font-size: 12.5px; }
+  .evt:last-child { border-bottom: 0; }
+  .evt .tm { color: var(--ink-3); flex: none; width: 60px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  .evt .ph { flex: none; width: 86px; color: var(--ink-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 1px; }
+  .evt .tx { color: var(--ink-2); min-width: 0; }
+  .evt .tx b { color: var(--ink); font-weight: 600; }
+  .evt.warn .tx { color: var(--warn); }
+  .logline {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
+    background: var(--ground); border: 1px solid var(--border-soft); border-radius: 7px;
+    padding: 10px 12px; overflow-x: auto; color: var(--ink-2); white-space: pre; line-height: 1.7;
+  }
+
+  /* decision panel */
+  .decision {
+    border: 1px solid var(--wait); background: var(--wait-soft);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .decision h3 { margin: 0 0 4px; font-size: 14px; }
+  .decision p { margin: 0 0 10px; font-size: 13px; color: var(--ink-2); }
+  .decision textarea {
+    width: 100%; min-height: 56px; resize: vertical;
+    border: 1px solid var(--border); border-radius: 7px; background: var(--surface);
+    color: var(--ink); font: inherit; font-size: 13px; padding: 8px 10px; margin-bottom: 10px;
+  }
+
+  /* circuit banner */
+  .banner {
+    display: flex; gap: 12px; align-items: center;
+    border: 1px solid var(--crit); background: var(--crit-soft);
+    border-radius: 10px; padding: 11px 16px; margin-bottom: 16px; font-size: 13px;
+  }
+  .banner .tx b { color: var(--crit); }
+  .banner .act { margin-left: auto; flex: none; }
+
+  /* toast */
+  #toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: var(--ground);
+    border-radius: 8px; padding: 9px 18px; font-size: 13px; font-weight: 600;
+    opacity: 0; pointer-events: none; transition: opacity 0.25s;
+    z-index: 50; box-shadow: 0 4px 18px rgba(0,0,0,0.3);
+  }
+  #toast.show { opacity: 1; }
+
+  /* chart */
+  .chart-tip {
+    position: fixed; z-index: 40; pointer-events: none;
+    background: var(--raised); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 11px; font-size: 12px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.18); display: none; min-width: 130px;
+  }
+  .chart-tip .d { font-weight: 700; margin-bottom: 4px; }
+  .chart-tip .r { display: flex; align-items: center; gap: 6px; color: var(--ink-2); }
+  .chart-tip .r .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .chart-tip .r .v { margin-left: auto; font-family: ui-monospace, Menlo, monospace; color: var(--ink); }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--ink-2); padding: 8px 0 0; flex-wrap: wrap; }
+  .legend .k { display: inline-flex; align-items: center; gap: 6px; }
+  .legend .sw { width: 9px; height: 9px; border-radius: 2px; }
+
+  .empty { padding: 26px 16px; text-align: center; color: var(--ink-3); font-size: 13px; }
+  .section-gap { margin-top: 16px; }
+  .proposal-note {
+    margin-top: 40px; padding: 14px 18px; border-radius: 10px;
+    border: 1px dashed var(--border); color: var(--ink-3); font-size: 12.5px; max-width: 72ch;
+  }
+</style>
+
+<div class="app">
+  <nav class="side" aria-label="Console navigation">
+    <div class="wordmark">
+      <svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true">
+        <path d="M6 4 C 10 12, 8 20, 5 26" fill="none" stroke="var(--thread)" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M15 3 C 14 12, 16 20, 15 27" fill="none" stroke="var(--thread)" stroke-width="1.8" stroke-linecap="round" opacity="0.75"/>
+        <path d="M24 4 C 21 11, 23 17, 25 22" fill="none" stroke="var(--thread)" stroke-width="1.8" stroke-linecap="round" opacity="0.5"/>
+        <circle cx="25" cy="22" r="2.4" fill="var(--crit)"/>
+      </svg>
+      <div>
+        <div class="name">Moirai</div>
+        <div class="sub">Console</div>
+      </div>
+    </div>
+    <div id="nav"></div>
+    <div class="foot">
+      <div class="who">william · admin</div>
+      <div>orchestrator: reachable</div>
+    </div>
+  </nav>
+
+  <main class="main" id="main"></main>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div class="chart-tip" id="chart-tip"></div>
+
+<script>
+"use strict";
+
+/* ---------------- sample data (mirrors the real schema) ---------------- */
+
+const PHASES = ["prepare","plan","implement","pipeline","review","push","pr","checks","human","merge","done"];
+const PHASE_LABEL = { prepare:"Prepare", plan:"Plan", implement:"Implement", pipeline:"Pipeline", review:"AI review", push:"Push", pr:"Open PR", checks:"GitHub checks", human:"Human gate", merge:"Merge", done:"Complete" };
+
+const STATUS_META = {
+  planning:          { label:"Planning",        cls:"p-run pulse",  phase:"plan" },
+  implementing:      { label:"Implementing",    cls:"p-run pulse",  phase:"implement" },
+  local_pipeline:    { label:"Pipeline",        cls:"p-run pulse",  phase:"pipeline" },
+  repairing:         { label:"Repairing",       cls:"p-warn pulse", phase:"pipeline" },
+  ai_review:         { label:"AI review",       cls:"p-run pulse",  phase:"review" },
+  pushing:           { label:"Pushing",         cls:"p-run pulse",  phase:"push" },
+  pr_created:        { label:"PR open",         cls:"p-wait",       phase:"pr" },
+  waiting_github_checks: { label:"Waiting on checks", cls:"p-wait", phase:"checks" },
+  waiting_human:     { label:"Needs decision",  cls:"p-wait",       phase:"human" },
+  merging:           { label:"Merging",         cls:"p-run pulse",  phase:"merge" },
+  recovering:        { label:"Recovering",      cls:"p-warn pulse", phase:"implement" },
+  completed:         { label:"Delivered",       cls:"p-ok",         phase:"done" },
+  blocked:           { label:"Blocked",         cls:"p-bad",        phase:null },
+  failed:            { label:"Failed",          cls:"p-bad",        phase:null },
+  cancelled:         { label:"Cancelled",       cls:"p-idle",       phase:null },
+  offered:           { label:"Offered",         cls:"p-idle",       phase:"prepare" },
+  preparing:         { label:"Preparing",       cls:"p-run pulse",  phase:"prepare" },
+};
+const TERMINAL = new Set(["completed","blocked","failed","cancelled"]);
+
+const projects = [
+  { id:"moirai",     name:"moirai",      enabled:true,  mode:"managed_clone", repo:"github.com/williamokano/moirai",     branch:"main", merge:"squash", labels:["python","go","docker"], circuit:"closed", lock:"wf-9f21" },
+  { id:"helios",     name:"helios-api",  enabled:true,  mode:"managed_clone", repo:"github.com/williamokano/helios-api", branch:"main", merge:"squash", labels:["go"],                   circuit:"open",   lock:null,
+    circuitInfo:{ failures:3, reason:"pipeline: go test ./... exit 2 (TestTokenRefresh)", openedAt:"09:12", cooldown:"probe allowed in 2m 40s" } },
+  { id:"atlas",      name:"atlas-web",   enabled:true,  mode:"managed_clone", repo:"github.com/williamokano/atlas-web",  branch:"main", merge:"merge",  labels:["node"],                 circuit:"closed", lock:"wf-c4d8" },
+  { id:"chronos",    name:"chronos-jobs",enabled:false, mode:"existing_path", repo:"/srv/repos/chronos-jobs",            branch:"trunk", merge:"rebase", labels:["python"],              circuit:"closed", lock:null },
+];
+
+const workflows = [
+  { id:"wf-9f21", project:"moirai", issue:103, title:"Close execution requests on terminal transitions",
+    status:"implementing", runner:"loom-01", started:"10:41", updated:"12s ago",
+    attempts:{ planning:[1,2], implementation:[2,3], pipeline_repair:[0,3], review_cycles:[0,3], ci_repair:[0,3], total:[4,10] },
+    branch:"agent/103-close-execution-requests", pr:null,
+    gates:{ plan_valid:true, pipeline_passed:null, review_approved:null, checks_passed:null, human:null },
+    events:[
+      { t:"12:04:11", ph:"implement", warn:false, tx:"<b>Developer attempt 2 started</b> on loom-01 (execution exec-88a1, timeout 1800s)" },
+      { t:"12:01:47", ph:"implement", warn:true,  tx:"Attempt 1 failed: pipeline step <b>pytest</b> exit 1 — 2 tests failed. Failure fingerprint recorded, task packet updated with prior failure." },
+      { t:"11:44:02", ph:"pipeline",  warn:false, tx:"Local pipeline started for commit <b>7c19e4a</b>" },
+      { t:"11:12:30", ph:"plan",      warn:false, tx:"<b>Plan accepted</b> — 6 acceptance criteria extracted from issue #103" },
+      { t:"10:41:08", ph:"prepare",   warn:false, tx:"Job accepted by <b>loom-01</b> · branch <span class='num'>agent/103-close-execution-requests</span> from <span class='num'>main@e4f2c91</span>" },
+    ],
+    log:`12:04:18  [developer] applying plan step 3/6: mark execution requests completed in _apply_transition
+12:04:16  [developer] reading orchestrator/src/moirai/workflows/persistence.py
+12:04:12  [runner]    agent process started (opencode, attempt 2)
+12:01:47  [runner]    attempt 1 terminal: exit 0, pipeline verdict FAILED (pytest: 2 failed)`,
+  },
+  { id:"wf-b7d3", project:"helios", issue:58, title:"Fix flaky auth token refresh under concurrent requests",
+    status:"waiting_human", runner:"loom-02", started:"08:15", updated:"1h 12m ago",
+    attempts:{ planning:[1,2], implementation:[1,3], pipeline_repair:[1,3], review_cycles:[2,3], ci_repair:[0,3], total:[6,10] },
+    branch:"agent/58-flaky-token-refresh", pr:{ n:112, url:"#", checks:"passed" },
+    gates:{ plan_valid:true, pipeline_passed:true, review_approved:true, checks_passed:true, human:"pending" },
+    needsHuman:true,
+    events:[
+      { t:"10:52:19", ph:"human",  warn:false, tx:"<b>Waiting for human decision</b> — issue carries agent:human-approval" },
+      { t:"10:52:15", ph:"checks", warn:false, tx:"All 4 required checks <b>passed</b> on PR #112" },
+      { t:"10:38:44", ph:"pr",     warn:false, tx:"Pull request <b>#112</b> opened against main" },
+      { t:"10:31:02", ph:"review", warn:false, tx:"AI review verdict: <b>approve</b> (cycle 2) — concurrency guard verified against acceptance criteria" },
+    ],
+    log:`10:52:15  [checks]  build ✓  lint ✓  test ✓  integration ✓
+10:31:02  [reviewer] verdict=approve cycle=2 commit=91d0b3f`,
+  },
+  { id:"wf-c4d8", project:"atlas", issue:211, title:"Add retry with backoff to image upload client",
+    status:"waiting_github_checks", runner:"loom-01", started:"11:02", updated:"3m ago",
+    attempts:{ planning:[1,2], implementation:[1,3], pipeline_repair:[0,3], review_cycles:[1,3], ci_repair:[0,3], total:[3,10] },
+    branch:"agent/211-upload-retry", pr:{ n:340, url:"#", checks:"pending" },
+    gates:{ plan_valid:true, pipeline_passed:true, review_approved:true, checks_passed:"pending", human:null },
+    events:[
+      { t:"11:58:31", ph:"checks", warn:false, tx:"Polling required checks on PR #340 — 2 of 3 passed, <b>e2e pending</b>" },
+      { t:"11:49:12", ph:"pr",     warn:false, tx:"Pull request <b>#340</b> opened against main" },
+    ],
+    log:`11:58:31  [checks]  unit ✓  lint ✓  e2e … running (4m)`,
+  },
+  { id:"wf-77aa", project:"moirai", issue:96, title:"Deduplicate label reconciliation writes",
+    status:"blocked", runner:"loom-01", started:"yesterday 22:10", updated:"9h ago",
+    attempts:{ planning:[1,2], implementation:[3,3], pipeline_repair:[3,3], review_cycles:[0,3], ci_repair:[0,3], total:[8,10] },
+    branch:"agent/96-label-reconciliation", pr:null,
+    blocking_reason:"Non-progress: 4 consecutive identical terminal outcomes (same diff hash d41f…, same failure fingerprint: ruff E501 in issue_sync.py). Blocked instead of retrying.",
+    gates:{ plan_valid:true, pipeline_passed:false, review_approved:null, checks_passed:null, human:null },
+    events:[
+      { t:"03:12:44", ph:"blocked",  warn:true, tx:"<b>Workflow blocked</b> — non-progress guard tripped after 4 identical outcomes. Issue relabeled agent:blocked." },
+      { t:"03:12:40", ph:"pipeline", warn:true, tx:"Pipeline repair attempt 3 failed with an identical failure fingerprint" },
+    ],
+    log:`03:12:40  [pipeline] ruff: issue_sync.py:214:89 E501 line too long (4th identical outcome)`,
+  },
+  { id:"wf-e001", project:"helios", issue:61, title:"Return RFC-7807 errors from rate limiter",
+    status:"ai_review", runner:"loom-02", started:"11:20", updated:"40s ago",
+    attempts:{ planning:[1,2], implementation:[1,3], pipeline_repair:[0,3], review_cycles:[1,3], ci_repair:[0,3], total:[3,10] },
+    branch:"agent/61-problem-json", pr:null,
+    gates:{ plan_valid:true, pipeline_passed:true, review_approved:"pending", checks_passed:null, human:null },
+    events:[ { t:"12:03:55", ph:"review", warn:false, tx:"Reviewer prompt generated independently (no developer plan included) — cycle 1" } ],
+    log:`12:03:55  [reviewer] reviewing diff of 4 files against 5 acceptance criteria`,
+  },
+  { id:"wf-52f0", project:"atlas", issue:198, title:"Migrate session storage to httpOnly cookies",
+    status:"completed", runner:"loom-01", started:"07:30", updated:"3h ago", terminal_reason:"merged",
+    attempts:{ planning:[1,2], implementation:[1,3], pipeline_repair:[1,3], review_cycles:[1,3], ci_repair:[0,3], total:[4,10] },
+    branch:"agent/198-cookie-sessions", pr:{ n:338, url:"#", checks:"passed" },
+    gates:{ plan_valid:true, pipeline_passed:true, review_approved:true, checks_passed:true, human:true },
+    events:[ { t:"09:14:02", ph:"done", warn:false, tx:"PR #338 <b>merged</b> (squash) · issue #198 closed · labels converged to agent:delivered" } ],
+    log:`09:14:02  [merge] auto-merge completed, base main@f01ac22`,
+  },
+  { id:"wf-1c9b", project:"helios", issue:44, title:"Add pagination to audit log endpoint",
+    status:"failed", runner:"loom-03", started:"yesterday 18:04", updated:"18h ago",
+    terminal_reason:"Offer expired: runner loom-03 disconnected mid-run and the lease lapsed before reconnect. Recovery re-offer found no compatible runner within TTL.",
+    attempts:{ planning:[1,2], implementation:[1,3], pipeline_repair:[0,3], review_cycles:[0,3], ci_repair:[0,3], total:[2,10] },
+    branch:"agent/44-audit-pagination", pr:{ n:109, url:"#", checks:"pending" },
+    gates:{ plan_valid:true, pipeline_passed:true, review_approved:null, checks_passed:null, human:null },
+    events:[ { t:"18:52:10", ph:"failed", warn:true, tx:"<b>Cancelled by lease expiry</b> — jobs.recovery_reason=lease_expired. A live PR #109 was left open." } ],
+    log:`18:52:10  [lease] generation 3 expired; runner loom-03 last heartbeat 18:49:41`,
+  },
+];
+
+const queue = [
+  { pri:8, project:"helios", issue:62,  title:"Token refresh circuit opens under load spike",   labels:["agent:ready","agent-priority:8","bug"], waiting:"41m", held:"Project circuit open — probe in 2m 40s" },
+  { pri:5, project:"moirai", issue:104, title:"Expose workflow events over the management API", labels:["agent:ready","agent-priority:5"],        waiting:"2h 10m", held:"Project busy — one workflow per project (wf-9f21 active)" },
+  { pri:3, project:"atlas",  issue:215, title:"Bundle size regression guard in CI",             labels:["agent:ready","agent-priority:3"],        waiting:"3h 02m", held:"Project busy — wf-c4d8 active" },
+  { pri:1, project:"moirai", issue:105, title:"Runner disk pressure alert threshold",           labels:["agent:ready","agent-priority:1"],        waiting:"5h 44m", held:"Behind #104 in project queue" },
+  { pri:1, project:"helios", issue:63,  title:"Document mTLS setup for runners",                labels:["agent:ready","agent-priority:1","docs"], waiting:"1d 2h",  held:"Project circuit open" },
+];
+
+const syncState = [
+  { project:"moirai", failures:0, last:"12s ago",  err:null },
+  { project:"helios", failures:0, last:"31s ago",  err:null },
+  { project:"atlas",  failures:3, last:"4m ago",   err:"gh: HTTP 502 from api.github.com — retrying with backoff", next:"in 40s" },
+  { project:"chronos",failures:0, last:"paused",   err:null, disabled:true },
+];
+
+const runners = [
+  { id:"loom-01", status:"online", enabled:true, draining:false, version:"0.9.2", labels:["python","go","docker"], capacity:2, active:2, reserved:0,
+    heartbeat:"4s ago", registered:"2026-07-12", backend:"opencode / docker", jobs:["wf-9f21","wf-c4d8"] },
+  { id:"loom-02", status:"online", enabled:true, draining:true, version:"0.9.2", labels:["go"], capacity:1, active:1, reserved:0,
+    heartbeat:"7s ago", registered:"2026-07-12", backend:"opencode / local", jobs:["wf-e001"], note:"Draining — finishes wf-e001, then accepts no offers" },
+  { id:"loom-03", status:"offline", enabled:true, draining:false, version:"0.9.0", labels:["python"], capacity:1, active:0, reserved:0,
+    heartbeat:"18h ago", registered:"2026-06-28", backend:"cli / local", jobs:[], note:"Disconnected mid-run yesterday; caused wf-1c9b lease expiry" },
+];
+
+const tokens = [
+  { id:"tok-31ac", labels:["go","docker"], expires:"in 9m",  used:null, revoked:false },
+  { id:"tok-2f01", labels:["python"],      expires:"—",      used:"2026-07-12 by loom-01", revoked:false },
+  { id:"tok-9d77", labels:[],              expires:"expired",used:null, revoked:true },
+];
+
+const outcomes14d = [
+  { d:"Jul 16", ok:3, blocked:0, failed:0 }, { d:"Jul 17", ok:2, blocked:1, failed:0 },
+  { d:"Jul 18", ok:4, blocked:0, failed:0 }, { d:"Jul 19", ok:1, blocked:0, failed:1 },
+  { d:"Jul 20", ok:0, blocked:0, failed:0 }, { d:"Jul 21", ok:3, blocked:1, failed:0 },
+  { d:"Jul 22", ok:5, blocked:0, failed:0 }, { d:"Jul 23", ok:2, blocked:2, failed:0 },
+  { d:"Jul 24", ok:4, blocked:0, failed:1 }, { d:"Jul 25", ok:3, blocked:0, failed:0 },
+  { d:"Jul 26", ok:1, blocked:1, failed:0 }, { d:"Jul 27", ok:4, blocked:0, failed:0 },
+  { d:"Jul 28", ok:2, blocked:1, failed:1 }, { d:"Jul 29", ok:1, blocked:1, failed:0 },
+];
+const queueSpark = [4,4,5,3,6,7,6,8,7,7,6,5,7,5];
+
+const auditRows = [
+  { t:"12:01", actor:"william", action:"human_decision.approved", target:"wf-52f0 (atlas-web #198)" },
+  { t:"09:40", actor:"william", action:"runner.drain",            target:"loom-02" },
+  { t:"09:12", actor:"system",  action:"circuit.opened",          target:"project helios-api (3 consecutive blocked)" },
+  { t:"08:55", actor:"william", action:"token.created",           target:"tok-31ac (labels: go, docker)" },
+  { t:"yesterday", actor:"william", action:"project.updated",     target:"atlas-web (merge_method: merge)" },
+];
+
+/* ---------------- helpers ---------------- */
+
+const $ = (sel, el=document) => el.querySelector(sel);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const projName = id => (projects.find(p => p.id===id)||{}).name || id;
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toast._h);
+  toast._h = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+function pill(status) {
+  const m = STATUS_META[status] || { label:status, cls:"p-idle" };
+  return `<span class="pill ${m.cls}"><i></i>${m.label}</span>`;
+}
+
+function meterHtml(used, budget) {
+  const pct = Math.min(100, (used/budget)*100);
+  return `<span class="meter"><span class="bar"><span class="${used>=budget?'full':''}" style="width:${pct}%"></span></span><span class="n">${used}/${budget}</span></span>`;
+}
+
+/* signature: the phase thread ------------------------------------------ */
+function threadSvg(wf, opts={}) {
+  const W = opts.w || 720, H = opts.h || 74, mini = !!opts.mini;
+  const m = STATUS_META[wf.status];
+  const isTerminalBad = wf.status==="blocked" || wf.status==="failed" || wf.status==="cancelled";
+  // current index along the happy path
+  let cur = m && m.phase ? PHASES.indexOf(m.phase) : null;
+  if (wf.status==="completed") cur = PHASES.length - 1;
+  // where the thread got cut (last reached phase) for terminal-bad
+  let cutAt = null;
+  if (isTerminalBad) {
+    cutAt = wf.gates.pipeline_passed===false ? PHASES.indexOf("pipeline")
+          : wf.pr ? PHASES.indexOf("checks") : PHASES.indexOf("implement");
+  }
+  const x0 = mini ? 2 : 16, x1 = W - (mini ? 2 : 16);
+  const step = (x1-x0)/(PHASES.length-1);
+  const y = mini ? H/2 : 34;
+  const xs = PHASES.map((_,i)=> x0 + step*i);
+  const reach = isTerminalBad ? cutAt : (cur ?? 0);
+
+  let p = `<svg class="${mini?'minithread':'threadline'}" viewBox="0 0 ${W} ${H}" width="${mini?W:'100%'}" height="${mini?H:'auto'}" role="img" aria-label="Workflow phase progress: ${esc(m?m.label:wf.status)}">`;
+
+  // spun (done) thread: slight weave wobble makes it a thread, not a progress bar
+  const wobble = mini ? 1.2 : 2.2;
+  const seg = (xa, xb, i) =>
+    `M ${xa} ${y} C ${xa+step*0.35} ${y-wobble*((i%2)?1:-1)}, ${xb-step*0.35} ${y+wobble*((i%2)?1:-1)}, ${xb} ${y}`;
+  let done = "", todo = "";
+  for (let i=0;i<PHASES.length-1;i++) {
+    const isDone = i < reach;
+    const isCutGap = isTerminalBad && i === reach; // gap after the cut
+    if (isDone) done += seg(xs[i], xs[i+1], i) + " ";
+    else if (!isCutGap) todo += `M ${xs[i]} ${y} L ${xs[i+1]} ${y} `;
+  }
+  p += `<path d="${todo}" fill="none" stroke="var(--border)" stroke-width="${mini?1.5:2}" stroke-dasharray="2 5" stroke-linecap="round"/>`;
+  p += `<path d="${done}" fill="none" stroke="var(--thread-mark)" stroke-width="${mini?2:2.5}" stroke-linecap="round"/>`;
+
+  // cut: frayed end
+  if (isTerminalBad && cutAt!=null) {
+    const cx = xs[cutAt];
+    p += `<path d="M ${cx} ${y} l ${step*0.22} ${-4} M ${cx} ${y} l ${step*0.26} ${1.5} M ${cx} ${y} l ${step*0.18} ${5}" stroke="var(--crit)" stroke-width="${mini?1.5:2}" fill="none" stroke-linecap="round"/>`;
+  }
+
+  // nodes
+  PHASES.forEach((ph,i)=>{
+    const x = xs[i];
+    const donePh = i < reach || wf.status==="completed";
+    const isCur = !isTerminalBad && cur===i && !TERMINAL.has(wf.status);
+    if (mini) {
+      if (isCur) p += `<circle cx="${x}" cy="${y}" r="3" fill="var(--thread-mark)"/>`;
+      return;
+    }
+    if (isCur) {
+      p += `<circle cx="${x}" cy="${y}" r="8" fill="none" stroke="var(--thread-mark)" stroke-width="1.5" opacity="0.5"/>
+            <circle class="spindle-core" cx="${x}" cy="${y}" r="4.5" fill="var(--thread-mark)"/>`;
+    } else if (isTerminalBad && i===cutAt) {
+      p += `<circle cx="${x}" cy="${y}" r="4.5" fill="var(--crit)"/>`;
+    } else if (donePh) {
+      p += `<circle cx="${x}" cy="${y}" r="3.5" fill="var(--thread-mark)"/>`;
+    } else {
+      p += `<circle cx="${x}" cy="${y}" r="3" fill="var(--ground)" stroke="var(--border)" stroke-width="1.5"/>`;
+    }
+    const lab = PHASE_LABEL[ph];
+    const anchor = i===0 ? "start" : (i===PHASES.length-1 ? "end" : "middle");
+    const emph = isCur || (isTerminalBad && i===cutAt);
+    p += `<text x="${x}" y="${y+24}" text-anchor="${anchor}" font-size="10.5" fill="${emph ? (isTerminalBad?'var(--crit)':'var(--thread)') : 'var(--ink-3)'}" font-weight="${emph?700:400}" font-family="system-ui,sans-serif">${lab}</text>`;
+  });
+  p += `</svg>`;
+  return p;
+}
+
+/* sparkline for stat tile */
+function sparkSvg(data, w=150, h=30) {
+  const max = Math.max(...data), min = Math.min(...data);
+  const sx = i => 2 + i*(w-8)/(data.length-1);
+  const sy = v => h-4 - (v-min)/((max-min)||1)*(h-10);
+  const pts = data.map((v,i)=>`${sx(i)},${sy(v)}`).join(" L ");
+  const lastX = sx(data.length-1), lastY = sy(data[data.length-1]);
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">
+    <path d="M ${pts} L ${lastX} ${h-2} L 2 ${h-2} Z" fill="var(--thread-soft)" opacity="0.8"/>
+    <path d="M ${pts}" fill="none" stroke="var(--thread-mark)" stroke-width="1.8" stroke-linejoin="round"/>
+    <circle cx="${lastX}" cy="${lastY}" r="3" fill="var(--thread-mark)"/>
+  </svg>`;
+}
+
+/* stacked outcome bars: thin marks, 2px gaps, rounded top end */
+function outcomesChart() {
+  const W = 660, H = 170, padL = 26, padB = 22, padT = 8;
+  const days = outcomes14d;
+  const maxT = Math.max(...days.map(d=>d.ok+d.blocked+d.failed));
+  const yMax = Math.ceil(maxT/2)*2 || 4;
+  const plotW = W-padL-8, plotH = H-padT-padB;
+  const bw = 18, slot = plotW/days.length;
+  const y = v => padT + plotH - (v/yMax)*plotH;
+  const series = [
+    { k:"ok",      name:"Delivered", c:"var(--chart-ok)" },
+    { k:"failed",  name:"Failed",    c:"var(--chart-crit)" },
+    { k:"blocked", name:"Blocked",   c:"var(--chart-warn)" },
+  ];
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Workflow outcomes per day, last 14 days" id="outcomes-svg">`;
+  for (let g=0; g<=yMax; g+=2) {
+    s += `<line x1="${padL}" y1="${y(g)}" x2="${W-8}" y2="${y(g)}" stroke="var(--border-soft)" stroke-width="1"/>
+          <text x="${padL-7}" y="${y(g)+3.5}" text-anchor="end" font-size="10" fill="var(--ink-3)" font-family="ui-monospace,Menlo,monospace">${g}</text>`;
+  }
+  days.forEach((d,i)=>{
+    const cx = padL + slot*i + slot/2;
+    let acc = 0, segs = [];
+    series.forEach(sr => { const v = d[sr.k]; if (v>0) { segs.push({...sr, v, from:acc, to:acc+v}); acc += v; } });
+    segs.forEach((sg, si) => {
+      const yTop = y(sg.to), yBot = y(sg.from);
+      const gap = si < segs.length-1 ? 1 : 0; // 2px visual gap via surface stroke below
+      const hgt = Math.max(2, yBot - yTop - (si>0 ? 2 : 0));
+      const isTop = si === segs.length-1;
+      const r = isTop ? 3 : 0;
+      const yy = yTop + (si>0 ? 2 : 0) - (si>0?2:0);
+      s += `<path d="M ${cx-bw/2} ${yBot} L ${cx-bw/2} ${yTop+r} Q ${cx-bw/2} ${yTop} ${cx-bw/2+r} ${yTop} L ${cx+bw/2-r} ${yTop} Q ${cx+bw/2} ${yTop} ${cx+bw/2} ${yTop+r} L ${cx+bw/2} ${yBot} Z" fill="${sg.c}" ${si>0?'stroke="var(--surface)" stroke-width="2"':''}/>`;
+    });
+    if (i%2===1 || days.length<=8) s += `<text x="${cx}" y="${H-6}" text-anchor="middle" font-size="9.5" fill="var(--ink-3)" font-family="system-ui,sans-serif">${d.d.replace("Jul ","")}</text>`;
+    s += `<rect class="hitcol" data-i="${i}" x="${padL + slot*i}" y="${padT}" width="${slot}" height="${plotH+padB}" fill="transparent"/>`;
+  });
+  s += `<text x="${padL}" y="${H-6}" font-size="9.5" fill="var(--ink-3)" font-family="system-ui,sans-serif">Jul</text>`;
+  s += `</svg>`;
+  s += `<div class="legend">${series.map(sr=>`<span class="k"><span class="sw" style="background:${sr.c}"></span>${sr.name}</span>`).join("")}</div>`;
+  return s;
+}
+
+function wireOutcomesTip() {
+  const svg = $("#outcomes-svg"); if (!svg) return;
+  const tip = $("#chart-tip");
+  svg.addEventListener("pointermove", e => {
+    const col = e.target.closest(".hitcol"); if (!col) { tip.style.display="none"; return; }
+    const d = outcomes14d[+col.dataset.i];
+    tip.innerHTML = `<div class="d">${esc(d.d)}</div>
+      <div class="r"><span class="sw" style="background:var(--chart-ok)"></span>Delivered<span class="v">${d.ok}</span></div>
+      <div class="r"><span class="sw" style="background:var(--chart-crit)"></span>Failed<span class="v">${d.failed}</span></div>
+      <div class="r"><span class="sw" style="background:var(--chart-warn)"></span>Blocked<span class="v">${d.blocked}</span></div>`;
+    tip.style.display = "block";
+    tip.style.left = Math.min(window.innerWidth-160, e.clientX+14) + "px";
+    tip.style.top = (e.clientY+14) + "px";
+  });
+  svg.addEventListener("pointerleave", () => { tip.style.display = "none"; });
+}
+
+/* ---------------- views ---------------- */
+
+const needsAttention = () => {
+  const items = [];
+  workflows.filter(w=>w.status==="waiting_human").forEach(w=>items.push({
+    kind:"decision", color:"var(--wait)",
+    t:`${projName(w.project)} #${w.issue} is ready to merge`,
+    d:`All gates passed — pipeline, AI review, GitHub checks. Waiting ${w.updated.replace(" ago","")} for your decision.`,
+    act:`<button class="btn sm primary" data-go="wf:${w.id}">Review &amp; decide</button>`,
+  }));
+  workflows.filter(w=>w.status==="blocked").forEach(w=>items.push({
+    kind:"blocked", color:"var(--crit)",
+    t:`${projName(w.project)} #${w.issue} is blocked`,
+    d:w.blocking_reason,
+    act:`<button class="btn sm" data-go="wf:${w.id}">Inspect</button>`,
+  }));
+  projects.filter(p=>p.circuit==="open").forEach(p=>items.push({
+    kind:"circuit", color:"var(--crit)",
+    t:`Circuit open on ${p.name}`,
+    d:`${p.circuitInfo.failures} consecutive blocked workflows — ${p.circuitInfo.reason}. ${p.circuitInfo.cooldown}.`,
+    act:`<button class="btn sm" data-act="reset-circuit" data-p="${p.id}">Reset circuit</button>`,
+  }));
+  workflows.filter(w=>w.status==="failed").forEach(w=>items.push({
+    kind:"failed", color:"var(--warn)",
+    t:`${projName(w.project)} #${w.issue} failed with an open PR`,
+    d:w.terminal_reason,
+    act:`<button class="btn sm" data-act="retry" data-w="${w.id}">Retry workflow</button> <button class="btn sm" data-go="wf:${w.id}">Inspect</button>`,
+  }));
+  return items;
+};
+
+function viewOverview() {
+  const active = workflows.filter(w=>!TERMINAL.has(w.status)).length;
+  const online = runners.filter(r=>r.status==="online").length;
+  const attn = needsAttention();
+  return `
+  <div class="view-head"><h1>Overview</h1><span class="crumb">Tue Jul 29 · 12:04</span></div>
+  <p class="view-sub">Everything the orchestrator is spinning right now, and the ${attn.length} thing${attn.length===1?"":"s"} that need a human hand.</p>
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="health-strip" role="status" aria-label="Orchestrator health">
+      <span class="hp"><i style="background:var(--ok)"></i>Database <span class="v">ok</span></span>
+      <span class="hp"><i style="background:var(--ok)"></i>Scheduler tick <span class="v">0.4s ago</span></span>
+      <span class="hp"><i style="background:var(--ok)"></i>Issue sync <span class="v">12s ago</span></span>
+      <span class="hp"><i style="background:var(--ok)"></i>Outbox <span class="v">0 pending</span></span>
+      <span class="hp"><i style="background:var(--crit)"></i>Circuits <span class="v">1 open (helios-api)</span></span>
+      <span class="hp" style="margin-left:auto"><span class="v" style="color:var(--ink-3)">durable checkpointing on</span></span>
+    </div>
+  </div>
+
+  <div class="grid cards-4" style="margin-bottom:14px">
+    <div class="card tile">
+      <span class="lab">Queue depth</span>
+      <span class="val">${queue.length}</span>
+      <span class="note">eligible issues · top priority P8</span>
+      ${sparkSvg(queueSpark)}
+    </div>
+    <div class="card tile">
+      <span class="lab">Active workflows</span>
+      <span class="val">${active}</span>
+      <span class="note">${workflows.filter(w=>w.status==="waiting_human").length} waiting on you · ${workflows.filter(w=>STATUS_META[w.status].cls.includes("p-run")).length} spinning</span>
+    </div>
+    <div class="card tile">
+      <span class="lab">Runners online</span>
+      <span class="val">${online}<small> / ${runners.length}</small></span>
+      <span class="note ${runners.some(r=>r.status==='offline')?'bad':''}">${runners.filter(r=>r.draining).length} draining · loom-03 offline 18h</span>
+    </div>
+    <div class="card tile">
+      <span class="lab">Delivered this week</span>
+      <span class="val">17</span>
+      <span class="note">3 blocked · 2 failed</span>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <div class="card">
+        <div class="card-h"><h2>Needs you</h2><span class="hint">${attn.length} item${attn.length===1?"":"s"}</span></div>
+        <div class="attn">
+          ${attn.map(a=>`
+            <div class="attn-item">
+              <span class="stripe" style="background:${a.color}"></span>
+              <div class="tx"><div class="t">${a.t}</div><div class="d">${esc(a.d||"")}</div></div>
+              <div class="act">${a.act}</div>
+            </div>`).join("") || `<div class="empty">Nothing needs a decision. The Fates are spinning on their own.</div>`}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Outcomes — last 14 days</h2><span class="hint">terminal workflows per day</span></div>
+        <div class="card-b">${outcomesChart()}</div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <div class="card">
+        <div class="card-h"><h2>In flight</h2><button class="btn sm" data-go="workflows" style="margin-left:auto">All workflows</button></div>
+        <div class="attn">
+          ${workflows.filter(w=>!TERMINAL.has(w.status)).map(w=>`
+            <div class="attn-item" style="align-items:center">
+              <div class="tx">
+                <div class="t" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                  <a href="#" data-go="wf:${w.id}">${projName(w.project)} #${w.issue}</a> ${pill(w.status)}
+                </div>
+                <div class="d">${esc(w.title)}</div>
+                ${threadSvg(w,{w:280,h:14,mini:true})}
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Recent events</h2><span class="hint">live · all projects</span></div>
+        <div class="feed">
+          <div class="feed-item"><span class="tm">12:04</span><span class="ic" style="background:var(--thread)"></span><span class="tx"><b>moirai #103</b> developer attempt 2 started on loom-01</span></div>
+          <div class="feed-item"><span class="tm">12:03</span><span class="ic" style="background:var(--thread)"></span><span class="tx"><b>helios-api #61</b> entered AI review (cycle 1)</span></div>
+          <div class="feed-item"><span class="tm">11:58</span><span class="ic" style="background:var(--wait)"></span><span class="tx"><b>atlas-web #211</b> waiting on e2e check (4m)</span></div>
+          <div class="feed-item"><span class="tm">11:49</span><span class="ic" style="background:var(--ok)"></span><span class="tx"><b>atlas-web #211</b> PR #340 opened</span></div>
+          <div class="feed-item"><span class="tm">10:52</span><span class="ic" style="background:var(--wait)"></span><span class="tx"><b>helios-api #58</b> all checks passed — awaiting your decision</span></div>
+          <div class="feed-item"><span class="tm">09:14</span><span class="ic" style="background:var(--ok)"></span><span class="tx"><b>atlas-web #198</b> merged and delivered</span></div>
+          <div class="feed-item"><span class="tm">09:12</span><span class="ic" style="background:var(--crit)"></span><span class="tx"><b>helios-api</b> circuit opened after 3 blocked workflows</span></div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function viewQueue() {
+  return `
+  <div class="view-head"><h1>Queue</h1></div>
+  <p class="view-sub">One global queue across all enabled projects. Highest <span class="num">agent-priority</span> wins; one workflow per project at a time.</p>
+  <div class="card">
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>#</th><th>Priority</th><th>Issue</th><th>Labels</th><th>Waiting</th><th>Why it hasn't started</th></tr></thead>
+      <tbody>
+        ${queue.map((q,i)=>`<tr>
+          <td class="num" style="color:var(--ink-3)">${i+1}</td>
+          <td><span class="pill ${q.pri>=6?'p-bad':q.pri>=3?'p-warn':'p-idle'}">P${q.pri}</span></td>
+          <td><b>${projName(q.project)} #${q.issue}</b><div class="t2">${esc(q.title)}</div></td>
+          <td class="t2">${q.labels.map(l=>`<span class="num">${esc(l)}</span>`).join(" · ")}</td>
+          <td class="num">${q.waiting}</td>
+          <td class="t2">${esc(q.held)}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="card section-gap">
+    <div class="card-h"><h2>Issue sync</h2><span class="hint">polls GitHub every 60s per enabled project</span></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Project</th><th>Last sync</th><th>Consecutive failures</th><th>Status</th></tr></thead>
+      <tbody>
+        ${syncState.map(s=>`<tr>
+          <td><b>${projName(s.project)}</b></td>
+          <td class="num">${s.last}</td>
+          <td class="num">${s.failures}</td>
+          <td>${s.disabled ? '<span class="pill p-idle">project disabled</span>'
+              : s.err ? `<span class="pill p-warn"><i></i>backing off</span> <span class="t2">${esc(s.err)} · next ${esc(s.next)}</span>`
+              : '<span class="pill p-ok"><i></i>healthy</span>'}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table></div>
+  </div>`;
+}
+
+let wfFilter = "active";
+function viewWorkflows() {
+  const filters = [["active","Active"],["needs_you","Needs you"],["terminal","Terminal"],["all","All"]];
+  const list = workflows.filter(w =>
+    wfFilter==="all" ? true :
+    wfFilter==="active" ? !TERMINAL.has(w.status) :
+    wfFilter==="needs_you" ? w.status==="waiting_human" || w.status==="blocked" :
+    TERMINAL.has(w.status));
+  return `
+  <div class="view-head"><h1>Workflows</h1></div>
+  <p class="view-sub">Every thread the orchestrator has spun — click one for phases, attempts, events, and controls.</p>
+  <div class="filters" role="group" aria-label="Filter workflows">
+    ${filters.map(([k,l])=>`<button class="chip" aria-pressed="${wfFilter===k}" data-wf-filter="${k}">${l}</button>`).join("")}
+    <span class="gap"></span>
+    <input class="search" type="search" placeholder="Search issue, branch, PR…" aria-label="Search workflows">
+  </div>
+  <div class="card">
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Issue</th><th>Status</th><th>Thread</th><th>Attempts</th><th>Runner</th><th>PR</th><th>Updated</th></tr></thead>
+      <tbody>
+        ${list.map(w=>`<tr class="rowlink" tabindex="0" data-go="wf:${w.id}" aria-label="Open workflow for ${projName(w.project)} issue ${w.issue}">
+          <td><b>${projName(w.project)} #${w.issue}</b><div class="t2" style="max-width:30ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(w.title)}</div></td>
+          <td>${pill(w.status)}</td>
+          <td>${threadSvg(w,{w:170,h:12,mini:true})}</td>
+          <td>${meterHtml(w.attempts.total[0], w.attempts.total[1])}</td>
+          <td class="num">${w.runner}</td>
+          <td>${w.pr ? `<a href="${w.pr.url}" class="num" onclick="event.stopPropagation()">#${w.pr.n}</a> ${w.pr.checks==="passed"?'<span class="pill p-ok">checks ✓</span>':w.pr.checks==="pending"?'<span class="pill p-wait">checks …</span>':''}` : '<span class="t2">—</span>'}</td>
+          <td class="t2" style="white-space:nowrap">${w.updated}</td>
+        </tr>`).join("") || `<tr><td colspan="7"><div class="empty">No workflows match this filter.</div></td></tr>`}
+      </tbody>
+    </table></div>
+  </div>`;
+}
+
+function gateRow(name, v, pendingLabel) {
+  const state = v===true ? ["✓ passed","var(--ok)"] : v===false ? ["✗ failed","var(--crit)"]
+    : v==="pending" ? [pendingLabel||"in progress","var(--wait)"] : ["not reached","var(--ink-3)"];
+  return `<div class="budget-row"><span>${name}</span><span style="color:${state[1]};font-weight:600">${state[0]}</span></div>`;
+}
+
+function viewWorkflowDetail(id) {
+  const w = workflows.find(x=>x.id===id);
+  if (!w) return `<div class="empty">Workflow not found.</div>`;
+  const m = STATUS_META[w.status];
+  const a = w.attempts;
+  return `
+  <div class="view-head">
+    <span class="crumb"><a href="#" data-go="workflows">Workflows</a> /</span>
+    <h1>${projName(w.project)} #${w.issue}</h1>
+    ${pill(w.status)}
+  </div>
+  <p class="view-sub">${esc(w.title)}</p>
+
+  ${w.status==="blocked" ? `<div class="banner"><span class="tx"><b>Blocked.</b> ${esc(w.blocking_reason)}</span>
+      <span class="act btnrow"><button class="btn sm" data-act="retry" data-w="${w.id}">Retry with fresh context</button><button class="btn sm danger" data-act="cancel" data-w="${w.id}">Cancel &amp; release issue</button></span></div>` : ""}
+  ${w.status==="failed" ? `<div class="banner"><span class="tx"><b>Failed.</b> ${esc(w.terminal_reason)}</span>
+      <span class="act btnrow"><button class="btn sm" data-act="retry" data-w="${w.id}">Retry workflow</button></span></div>` : ""}
+
+  <div class="card" style="margin-bottom:14px">
+    <div class="card-h"><h2>The thread</h2><span class="hint">phase ${m.phase ? PHASE_LABEL[m.phase] : "terminal"} · updated ${w.updated}</span></div>
+    <div class="card-b">
+      ${threadSvg(w,{w:980,h:70})}
+      <div class="phase-legend">
+        <span class="k"><span class="sw" style="background:var(--thread-mark)"></span>spun</span>
+        <span class="k"><span class="sw" style="background:var(--border)"></span>ahead</span>
+        ${(w.status==="blocked"||w.status==="failed") ? '<span class="k"><span class="sw" style="background:var(--crit)"></span>cut</span>' : ''}
+      </div>
+    </div>
+  </div>
+
+  ${w.status==="waiting_human" ? `
+  <div class="decision" style="margin-bottom:14px">
+    <h3>Your decision gates the merge</h3>
+    <p>Pipeline, AI review, and all 4 GitHub checks passed on <a href="${w.pr.url}" class="num">PR #${w.pr.n}</a>. Approving merges with <span class="num">squash</span> and closes issue #${w.issue}.</p>
+    <textarea placeholder="Optional comment — recorded in the audit log and posted to the PR" aria-label="Decision comment"></textarea>
+    <div class="btnrow">
+      <button class="btn primary" data-act="approve" data-w="${w.id}">Approve &amp; merge</button>
+      <button class="btn" data-act="changes" data-w="${w.id}">Request changes</button>
+    </div>
+  </div>` : ""}
+
+  <div class="detail-grid">
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <div class="card">
+        <div class="card-h"><h2>Events</h2><span class="hint">from workflow_events · live</span></div>
+        <div>
+          ${w.events.map(e=>`<div class="evt ${e.warn?'warn':''}"><span class="tm">${e.t}</span><span class="ph">${e.ph}</span><span class="tx">${e.tx}</span></div>`).join("")}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Agent log tail</h2><span class="hint">streamed from ${w.runner} · redacted</span></div>
+        <div class="card-b"><div class="logline">${esc(w.log)}</div></div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <div class="card">
+        <div class="card-h"><h2>Gates</h2></div>
+        <div class="card-b" style="padding-top:4px">
+          ${gateRow("Plan valid", w.gates.plan_valid)}
+          ${gateRow("Local pipeline", w.gates.pipeline_passed)}
+          ${gateRow("AI review", w.gates.review_approved, "reviewing")}
+          ${gateRow("GitHub checks", w.gates.checks_passed, "pending")}
+          ${gateRow("Human approval", w.gates.human, "waiting")}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Attempt budgets</h2><span class="hint">hard caps</span></div>
+        <div class="card-b" style="padding-top:4px">
+          <div class="budget-row"><span>Planning</span>${meterHtml(a.planning[0],a.planning[1])}</div>
+          <div class="budget-row"><span>Implementation</span>${meterHtml(a.implementation[0],a.implementation[1])}</div>
+          <div class="budget-row"><span>Pipeline repair</span>${meterHtml(a.pipeline_repair[0],a.pipeline_repair[1])}</div>
+          <div class="budget-row"><span>Review cycles</span>${meterHtml(a.review_cycles[0],a.review_cycles[1])}</div>
+          <div class="budget-row"><span>CI repair</span>${meterHtml(a.ci_repair[0],a.ci_repair[1])}</div>
+          <div class="budget-row"><span><b>Total executions</b></span>${meterHtml(a.total[0],a.total[1])}</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Details</h2></div>
+        <div class="card-b">
+          <dl class="kv">
+            <dt>Workflow</dt><dd class="num">${w.id}</dd>
+            <dt>Runner</dt><dd class="num">${w.runner}</dd>
+            <dt>Branch</dt><dd class="num" style="overflow-wrap:anywhere">${esc(w.branch)}</dd>
+            <dt>PR</dt><dd>${w.pr?`<a href="${w.pr.url}" class="num">#${w.pr.n}</a>`:"not yet"}</dd>
+            <dt>Started</dt><dd>${w.started}</dd>
+          </dl>
+        </div>
+      </div>
+      ${!TERMINAL.has(w.status) && w.status!=="waiting_human" ? `
+      <div class="card"><div class="card-b btnrow" style="padding-top:14px">
+        <button class="btn" data-act="cancel" data-w="${w.id}">Cancel workflow</button>
+        <button class="btn" data-act="block" data-w="${w.id}">Block &amp; hold issue</button>
+      </div></div>` : ""}
+    </div>
+  </div>`;
+}
+
+function viewRunners() {
+  return `
+  <div class="view-head"><h1>Runners</h1></div>
+  <p class="view-sub">The fleet that executes what the orchestrator schedules. Capacity shows real reservations — a slot held by a pending offer counts as busy.</p>
+  <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(320px,1fr));margin-bottom:16px">
+    ${runners.map(r=>`
+    <div class="card">
+      <div class="card-h">
+        <h2 class="num" style="font-size:14px">${r.id}</h2>
+        ${r.status==="online" ? (r.draining ? '<span class="pill p-warn"><i></i>Draining</span>' : '<span class="pill p-ok pulse"><i></i>Online</span>') : '<span class="pill p-bad"><i></i>Offline</span>'}
+        <span class="hint num">v${r.version}</span>
+      </div>
+      <div class="card-b">
+        <dl class="kv">
+          <dt>Heartbeat</dt><dd class="num">${r.heartbeat}</dd>
+          <dt>Capacity</dt><dd>${meterHtml(r.active + r.reserved, r.capacity)} <span class="t2">${r.active} running${r.reserved?`, ${r.reserved} reserved by offer`:""}</span></dd>
+          <dt>Labels</dt><dd>${r.labels.map(l=>`<span class="pill p-idle">${esc(l)}</span>`).join(" ")}</dd>
+          <dt>Backend</dt><dd class="num">${r.backend}</dd>
+          <dt>Working on</dt><dd>${r.jobs.length? r.jobs.map(j=>`<a href="#" data-go="wf:${j}" class="num">${j}</a>`).join(", ") : '<span class="t2">idle</span>'}</dd>
+        </dl>
+        ${r.note?`<p style="margin:8px 0 10px;font-size:12.5px;color:var(--warn)">${esc(r.note)}</p>`:""}
+        <div class="btnrow" style="margin-top:8px">
+          ${r.draining ? `<button class="btn sm" data-act="undrain" data-r="${r.id}">Stop draining</button>`
+                       : `<button class="btn sm" data-act="drain" data-r="${r.id}">Drain</button>`}
+          <button class="btn sm" data-act="disable" data-r="${r.id}">${r.enabled?"Disable":"Enable"}</button>
+          <button class="btn sm danger" data-act="revoke" data-r="${r.id}">Revoke</button>
+        </div>
+      </div>
+    </div>`).join("")}
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h2>Registration tokens</h2>
+      <span class="hint">one-time use · 15 min TTL</span>
+      <button class="btn sm primary" style="margin-left:8px" data-act="new-token">New token</button>
+    </div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Token</th><th>Allowed labels</th><th>Expires</th><th>Used</th><th class="right">Actions</th></tr></thead>
+      <tbody>
+        ${tokens.map(t=>`<tr>
+          <td class="num">${t.id}</td>
+          <td>${t.labels.length? t.labels.map(l=>`<span class="pill p-idle">${esc(l)}</span>`).join(" ") : '<span class="t2">any</span>'}</td>
+          <td class="num">${t.expires}</td>
+          <td class="t2">${t.used || "—"}</td>
+          <td class="right">${t.revoked ? '<span class="pill p-idle">revoked</span>' : t.used ? '<span class="pill p-ok">consumed</span>' : `<button class="btn sm danger" data-act="revoke-token" data-t="${t.id}">Revoke</button>`}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table></div>
+  </div>`;
+}
+
+function viewProjects() {
+  return `
+  <div class="view-head"><h1>Projects</h1><button class="btn primary" style="margin-left:auto" data-act="new-project">Add project</button></div>
+  <p class="view-sub">Each project is one repository the Fates may work on — its issues, labels, pipeline, and merge policy.</p>
+  <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(340px,1fr))">
+    ${projects.map(p=>`
+    <div class="card">
+      <div class="card-h">
+        <h2 style="font-size:14.5px">${p.name}</h2>
+        ${p.enabled ? '<span class="pill p-ok"><i></i>Scheduling</span>' : '<span class="pill p-idle"><i></i>Paused</span>'}
+        ${p.circuit==="open" ? '<span class="pill p-bad pulse"><i></i>Circuit open</span>' : ''}
+      </div>
+      <div class="card-b">
+        <dl class="kv">
+          <dt>Source</dt><dd class="num" style="overflow-wrap:anywhere">${esc(p.repo)}</dd>
+          <dt>Mode</dt><dd>${p.mode==="managed_clone"?"Managed clone":"Existing path"} · base <span class="num">${p.branch}</span> · <span class="num">${p.merge}</span> merge</dd>
+          <dt>Runner labels</dt><dd>${p.labels.map(l=>`<span class="pill p-idle">${esc(l)}</span>`).join(" ")}</dd>
+          <dt>Active thread</dt><dd>${p.lock?`<a href="#" data-go="wf:${p.lock}" class="num">${p.lock}</a>`:'<span class="t2">none</span>'}</dd>
+        </dl>
+        ${p.circuit==="open" ? `<p style="margin:8px 0 10px;font-size:12.5px;color:var(--crit)">${p.circuitInfo.failures} consecutive blocked — ${esc(p.circuitInfo.reason)}. ${esc(p.circuitInfo.cooldown)}.</p>`:""}
+        <div class="btnrow" style="margin-top:8px">
+          <button class="btn sm" data-act="edit-project" data-p="${p.id}">Configure</button>
+          <button class="btn sm" data-act="toggle-project" data-p="${p.id}">${p.enabled?"Pause scheduling":"Resume scheduling"}</button>
+          ${p.circuit==="open"?`<button class="btn sm danger" data-act="reset-circuit" data-p="${p.id}">Reset circuit</button>`:""}
+        </div>
+      </div>
+    </div>`).join("")}
+  </div>`;
+}
+
+function viewSystem() {
+  return `
+  <div class="view-head"><h1>System</h1></div>
+  <p class="view-sub">The orchestrator's own vitals — what today only exists in a health file on disk and in Postgres tables.</p>
+
+  <div class="grid cards-4" style="margin-bottom:14px">
+    <div class="card tile"><span class="lab">Scheduler</span><span class="val" style="font-size:20px">0.4s</span><span class="note">since last tick · leader lock held</span></div>
+    <div class="card tile"><span class="lab">Issue sync</span><span class="val" style="font-size:20px">12s</span><span class="note">since last full pass</span></div>
+    <div class="card tile"><span class="lab">Outbox</span><span class="val" style="font-size:20px">0<small> pending</small></span><span class="note">1 processed in last minute</span></div>
+    <div class="card tile"><span class="lab">Execution requests</span><span class="val" style="font-size:20px">2<small> open</small></span><span class="note bad">1 dispatched &gt; 30 min — investigate</span></div>
+  </div>
+
+  <div class="grid cols-2">
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <div class="card">
+        <div class="card-h"><h2>Circuit breakers</h2><span class="hint">3 blocked opens · 5 min cooldown · 1 half-open probe</span></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Scope</th><th>State</th><th>Failures</th><th>Last reason</th><th class="right"></th></tr></thead>
+          <tbody>
+            <tr><td><b>helios-api</b> <span class="t2">project</span></td><td><span class="pill p-bad pulse"><i></i>Open</span></td><td class="num">3</td><td class="t2">pipeline: go test exit 2 (TestTokenRefresh)</td><td class="right"><button class="btn sm" data-act="reset-circuit" data-p="helios">Reset</button></td></tr>
+            <tr><td><b>moirai</b> <span class="t2">project</span></td><td><span class="pill p-ok"><i></i>Closed</span></td><td class="num">0</td><td class="t2">—</td><td></td></tr>
+            <tr><td><b>atlas-web</b> <span class="t2">project</span></td><td><span class="pill p-ok"><i></i>Closed</span></td><td class="num">0</td><td class="t2">—</td><td></td></tr>
+            <tr><td><b>github</b> <span class="t2">provider</span></td><td><span class="pill p-warn"><i></i>Half-open</span></td><td class="num">2</td><td class="t2">gh: HTTP 502 · probe wf-c4d8 in flight</td><td class="right"><button class="btn sm" data-act="reset-circuit" data-p="github">Reset</button></td></tr>
+          </tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Audit log</h2><span class="hint">90-day retention</span></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th></tr></thead>
+          <tbody>
+            ${auditRows.map(r=>`<tr><td class="num" style="white-space:nowrap">${r.t}</td><td>${r.actor}</td><td class="num">${r.action}</td><td class="t2">${esc(r.target)}</td></tr>`).join("")}
+          </tbody>
+        </table></div>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+      <div class="card">
+        <div class="card-h"><h2>Loops</h2><span class="hint">from the orchestrator health snapshot</span></div>
+        <div class="card-b" style="padding-top:4px">
+          <div class="budget-row"><span>Scheduler (1s tick, ≤50 offers)</span><span style="color:var(--ok);font-weight:600">running</span></div>
+          <div class="budget-row"><span>Issue sync (60s)</span><span style="color:var(--ok);font-weight:600">running</span></div>
+          <div class="budget-row"><span>Outbox maintenance (30s)</span><span style="color:var(--ok);font-weight:600">running</span></div>
+          <div class="budget-row"><span>Metrics refresh (15s)</span><span style="color:var(--ok);font-weight:600">running</span></div>
+          <div class="budget-row"><span>Retention reaper (hourly)</span><span style="color:var(--ok);font-weight:600">last 12:00</span></div>
+          <div class="budget-row"><span>Dead loops</span><span style="color:var(--ink-3)">none</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Retention</h2></div>
+        <div class="card-b" style="padding-top:4px">
+          <div class="budget-row"><span>Sessions</span><span class="t2">TTL + 1 day grace</span></div>
+          <div class="budget-row"><span>Workflow events</span><span class="t2">30 days</span></div>
+          <div class="budget-row"><span>Audit events</span><span class="t2">90 days</span></div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------------- router / wiring ---------------- */
+
+const NAV = [
+  { key:"overview",  label:"Overview" },
+  { key:"queue",     label:"Queue",     count:()=>queue.length },
+  { key:"workflows", label:"Workflows", count:()=>workflows.filter(w=>!TERMINAL.has(w.status)).length,
+    hot:()=>workflows.some(w=>w.status==="waiting_human"||w.status==="blocked") },
+  { key:"runners",   label:"Runners",   count:()=>`${runners.filter(r=>r.status==="online").length}/${runners.length}` },
+  { key:"projects",  label:"Projects" },
+  { key:"system",    label:"System",    hot:()=>projects.some(p=>p.circuit==="open") },
+];
+let route = "overview";
+
+function renderNav() {
+  $("#nav").innerHTML = `<div class="navlab">Operate</div>` + NAV.map(n=>`
+    <button class="nav-item" data-go="${n.key}" ${route===n.key || (route.startsWith("wf:")&&n.key==="workflows") ? 'aria-current="page"':''}>
+      <span class="nav-dot"></span>${n.label}
+      ${n.count!==undefined?`<span class="count ${n.hot&&n.hot()?'hot':''}">${typeof n.count==="function"?n.count():n.count}</span>`
+        : n.hot&&n.hot() ? `<span class="count hot">!</span>` : ""}
+    </button>`).join("");
+}
+
+function render() {
+  renderNav();
+  const main = $("#main");
+  if (route==="overview") main.innerHTML = viewOverview();
+  else if (route==="queue") main.innerHTML = viewQueue();
+  else if (route==="workflows") main.innerHTML = viewWorkflows();
+  else if (route==="runners") main.innerHTML = viewRunners();
+  else if (route==="projects") main.innerHTML = viewProjects();
+  else if (route==="system") main.innerHTML = viewSystem();
+  else if (route.startsWith("wf:")) main.innerHTML = viewWorkflowDetail(route.slice(3));
+  if (route==="overview") wireOutcomesTip();
+  main.insertAdjacentHTML("beforeend",
+    `<div class="proposal-note"><b>Design proposal.</b> This is a static mockup with sample data — every field shown maps to an existing column in the orchestrator's Postgres schema or to a control the platform review calls for (circuit reset, runner drain, retry, workflow events). Actions show a toast instead of calling the API.</div>`);
+  window.scrollTo(0,0);
+}
+
+const ACT_MSG = {
+  "approve":       "Approved — merging PR and closing the issue",
+  "changes":       "Changes requested — task packet updated, developer re-engaged",
+  "retry":         "Workflow requeued with prior-failure context",
+  "cancel":        "Workflow cancelled — issue label reset to agent:ready",
+  "block":         "Workflow blocked — issue held with agent:blocked",
+  "drain":         "Draining — finishes current work, then accepts no offers",
+  "undrain":       "Drain cancelled — runner accepting offers again",
+  "disable":       "Runner disabled — no new offers",
+  "revoke":        "Runner revoked — credential invalidated",
+  "reset-circuit": "Circuit closed — project schedulable again",
+  "new-token":     "Token created — copy it now, it is shown only once",
+  "revoke-token":  "Token revoked",
+  "new-project":   "Would open the project form (name, source, branch, labels, merge policy)",
+  "edit-project":  "Would open project configuration",
+  "toggle-project":"Scheduling toggled for this project",
+};
+
+document.addEventListener("click", e => {
+  const go = e.target.closest("[data-go]");
+  if (go) { e.preventDefault(); route = go.dataset.go; render(); return; }
+  const f = e.target.closest("[data-wf-filter]");
+  if (f) { wfFilter = f.dataset.wfFilter; render(); return; }
+  const act = e.target.closest("[data-act]");
+  if (act) { toast(ACT_MSG[act.dataset.act] || "Done"); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key==="Enter") {
+    const row = e.target.closest("tr[data-go]");
+    if (row) { route = row.dataset.go; render(); }
+  }
+});
+
+render();
+</script>
