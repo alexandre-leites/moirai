@@ -221,6 +221,7 @@ func run(ctx context.Context) error {
 		AvailableBytes:     health.AvailableBytes,
 		Retention:          retentionPolicy(settings),
 		PushWorkInProgress: settings.PushWorkInProgress,
+		MaxContinuations:   settings.MaxContinuations,
 		Projects:           projects,
 		Active:             dispatch.NewActiveWorkspaces(),
 	}

@@ -244,6 +244,33 @@ func lookup(values map[string]string) func(string) (string, bool) {
 	}
 }
 
+// The continuation budget is the one integer setting whose valid range includes
+// zero: zero switches the runner's goal loop off. It is still bounded above,
+// since every continuation is another agent run inside the same packet timeout.
+func TestLoadReadsTheContinuationBudget(t *testing.T) {
+	hostname := func() (string, error) { return "runner", nil }
+	settings, err := Load(lookup(map[string]string{}), hostname)
+	if err != nil || settings.MaxContinuations != 3 {
+		t.Fatalf("default MaxContinuations = %d, err = %v", settings.MaxContinuations, err)
+	}
+	settings, err = Load(lookup(map[string]string{"LOOP_RUNNER_MAX_CONTINUATIONS": "0"}), hostname)
+	if err != nil || settings.MaxContinuations != 0 {
+		t.Fatalf("disabled MaxContinuations = %d, err = %v", settings.MaxContinuations, err)
+	}
+	settings, err = Load(lookup(map[string]string{"LOOP_RUNNER_MAX_CONTINUATIONS": "5"}), hostname)
+	if err != nil || settings.MaxContinuations != 5 {
+		t.Fatalf("MaxContinuations = %d, err = %v", settings.MaxContinuations, err)
+	}
+	for name, value := range map[string]string{"negative": "-1", "above the cap": "11", "unparsable": "many"} {
+		if _, err := Load(lookup(map[string]string{"LOOP_RUNNER_MAX_CONTINUATIONS": value}), hostname); err == nil {
+			t.Fatalf("Load() accepted a %s continuation budget", name)
+		}
+	}
+	if err := (Config{MaxContinuations: -1}).Validate(); err == nil {
+		t.Fatal("Validate() accepted a negative continuation budget")
+	}
+}
+
 func TestLoadRejectsInvalidRetentionBounds(t *testing.T) {
 	for name, environment := range map[string]map[string]string{
 		"zero age":          {"LOOP_RUNNER_RETENTION_MAX_AGE": "0s"},

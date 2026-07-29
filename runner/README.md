@@ -35,6 +35,7 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_RETENTION_MAX_AGE` | `72h` | How long a retained workspace survives before the sweep releases it. |
 | `LOOP_RUNNER_RETENTION_MAX_WORKSPACES` | `10` | How many retained workspaces may coexist; the oldest are released first. |
 | `LOOP_RUNNER_PUSH_WORK_IN_PROGRESS` | `true` | Publish a failed run's commit to `wip/<executionId>` when the packet allows pushing. |
+| `LOOP_RUNNER_MAX_CONTINUATIONS` | `3` | How many times one execution may re-engage its agent after the goal gate finds the objective unmet. `0` switches the goal loop off; the maximum is `10`. Continuations run inside the same lease and inside the packet's own `timeoutSeconds`, so this changes neither the orchestrator's budgets nor an execution's wall-clock *bound* — though a continuing execution does occupy its runner and project slot for longer within that bound. |
 | `LOOP_RUNNER_MINIMUM_FREE_BYTES` | `1073741824` | Minimum free workspace-disk bytes. Also the level below which the retention sweep releases retained workspaces. |
 | `LOOP_RUNNER_REPOSITORY_LOCK_POLL` | `25ms` | Repository worktree-lock retry interval. |
 | `LOOP_RUNNER_CLEANUP_ATTEMPTS` / `LOOP_RUNNER_CLEANUP_RETRY_DELAY` | `3` / `250ms` | Workspace cleanup retry policy. |
@@ -106,6 +107,31 @@ Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `
 - An agent result that is not `completed` skips the packet's pipeline commands, since a pipeline verdict would replace the agent's status, reason, and remaining work with a generic failure.
 
 The orchestrator routes the block to the terminal `blocked` status with `blocking_reason` composed from the agent's summary and remaining work, clearing the gate the reporting role owns (`workflows/runner_events.py`).
+
+## Goal Gate and Continuations
+
+A process exit is not evidence that the objective was met. The most common autonomy failure is an agent ending its own reasoning loop early — half the work done, "I will now do X" followed by an exit, or a clean refusal — and reporting each of those as a terminal outcome after one shot throws away a run the runner could still finish. So after the agent exits, the runner asks a deterministic question of its own and, while the answer is "no" and budget remains, continues the agent in the same session ([#104](https://github.com/alexandre-leites/moirai/issues/104)).
+
+**The gate.** A run counts as *delivered* only when all of these hold:
+
+1. the result document is valid — an absent or invalid one is already a failure rather than a clean exit (see above);
+2. its `status` is `completed`;
+3. its `remainingWork` is empty;
+4. for a role that may modify files, the workspace shows a change — either uncommitted changes or a moved `HEAD`.
+
+Check 4 does not apply to a role that may not modify files, so planners and reviewers never enter the loop; it is also skipped, rather than failed, when the diff cannot be measured, since an unmeasurable workspace is not evidence of an idle agent.
+
+**The continuation.** A failed gate with budget left re-invokes the agent through the backend's `Continue`, resuming the `sessionId` the result document reported, so the agent keeps its own reasoning context instead of re-deriving it. The prompt states the missing evidence ("No result document was written at `.loop/result.json`", "You listed work as still remaining: …", "No file in the repository was changed"), asks the agent to continue rather than start over, and then repeats the role's whole original prompt unchanged — that matters because the fallback path starts a *fresh* agent, and it must be held to the same role, plan, prior failures, and review findings the first run was. Each prompt is kept in the workspace as `.loop/continuation-<n>.md`. Backends without sessions — `cli` and `docker` — and an execution whose agent never reported a session ID take that fallback.
+
+Each attempt is judged on evidence it produced itself: the finished attempt's result document is moved to `.loop/result-attempt-<n>.json` before the next one starts. Without that, a continuation that exits without writing anything would be assessed against its predecessor's document — the "a clean exit is not a result" hole, re-opened inside one execution. A document that cannot be moved aside stops the loop rather than being continued around.
+
+**The loop guard.** Continuing is only worthwhile while something changes. The gate's verdict is fingerprinted from its reason codes, the agent's remaining-work list, and the repository's revision plus changed-path set; two consecutive identical fingerprints mean the agent is wedged, and the run is reported terminal with what it has. A declared block therefore usually costs a single continuation — the blocker is sometimes clearable once asked, and re-declaring the same block over an unchanged workspace trips the guard on the next pass.
+
+**A continuation can never make a run worse.** An attempt that ended in an executor error — a signal, a timeout, or a clean exit with no result document — never overrides an attempt that did not, so a crashed or timed-out continuation cannot replace a completed run's delivery, or an agent-declared block's stated reason, with an anonymous failure. Outcomes the agent itself reached are not ranked against each other: an agent that completes and then, asked to continue, declares itself blocked has retracted its own claim with a stated reason, and the retraction stands. `continuations` is what says another attempt was made.
+
+**Bounds.** The loop terminates on five independent limits: the continuation budget, the loop guard, the execution context (a cancelled or expired lease is never answered with another agent process), a result document that cannot be set aside, and the packet's `timeoutSeconds`, which bounds the *total* agent wall clock rather than each invocation — the first run receives the whole packet timeout and every continuation only what is left, and a remainder too small to fund a real run ends the loop instead. Because the total is unchanged, lease renewal needs nothing new: `StreamSupervisor`'s heartbeat drives `ControlLoop.Reconcile` → `OfferState.RenewDue` on its own ticker while executions run in their own goroutines, so renewal never depended on how long an execution takes, and an execution still cannot outlive the bound it always had.
+
+**Reporting.** Terminal payloads carry `continuations` (omitted when zero) and `gateVerdict`, so the orchestrator can tell "delivered after 2 continuations" from "gave up after 3" — a distinction the terminal status alone does not make. Both are runner-derived and drawn from a closed vocabulary (`delivered`, `not delivered (continuation budget exhausted): …`, `identical verdict repeated`, `execution time budget exhausted`, `execution cancelled`, `previous evidence could not be set aside`), so they are bounded, stable across executions, and safe for the failure fingerprints. They survive the reduced-payload retry an oversized event falls back to. All of this happens inside one lease and one execution, so no orchestrator budget, protocol message, or workflow state changes. The gate never rewrites an outcome into a different one either: it decides whether to continue, which attempt is reported, and what travels alongside it — the terminal status is still whatever that attempt reached.
 
 ## Workspace Preparation
 

@@ -41,18 +41,16 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o750); err != nil {
 		return Result{}, fmt.Errorf("create result directory: %w", err)
 	}
-	stdout, err := os.Create(filepath.Join(filepath.Dir(resultPath), "docker-cli.stdout.log"))
+	stdout, stdoutLog, err := openAgentLog(filepath.Dir(resultPath), "docker-cli.stdout.log")
 	if err != nil {
-		return Result{}, fmt.Errorf("create Docker CLI stdout log: %w", err)
+		return Result{}, err
 	}
 	defer stdout.Close()
-	stderr, err := os.Create(filepath.Join(filepath.Dir(resultPath), "docker-cli.stderr.log"))
+	stderr, stderrLog, err := openAgentLog(filepath.Dir(resultPath), "docker-cli.stderr.log")
 	if err != nil {
-		return Result{}, fmt.Errorf("create Docker CLI stderr log: %w", err)
+		return Result{}, err
 	}
 	defer stderr.Close()
-	stdoutLog := newBoundedLogWriter(stdout)
-	stderrLog := newBoundedLogWriter(stderr)
 	defer writeLogMetadata(filepath.Dir(resultPath), "docker-cli", stdoutLog, stderrLog)
 	command := append(append([]string(nil), backend.Arguments...), request.Prompt)
 	executor := backend.Executor
@@ -68,6 +66,14 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 		return Result{ExitCode: executionResult.ExitCode}, err
 	}
 	return Result{Status: document.Status, ExitCode: executionResult.ExitCode, Summary: document.Summary, ChangedFiles: document.ChangedFiles, CommandsRun: document.CommandsRun, RemainingWork: document.RemainingWork, SessionID: document.SessionID}, nil
+}
+
+// Continue re-engages the agent with the continuation prompt. Each Docker
+// invocation is a fresh container with no session to resume, so this is the
+// fresh-run fallback the Backend contract allows; the continuation prompt still
+// names the objective and the missing evidence.
+func (backend DockerCLIBackend) Continue(ctx context.Context, request Request) (Result, error) {
+	return backend.Execute(ctx, request)
 }
 
 func (backend DockerCLIBackend) Cancel(executionID string) error {
