@@ -513,5 +513,332 @@ class OfferExpiryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         run = await self._workflow_run(workflow_run_id)
         self.assertEqual(run["status"], "ai_review")
 
+
+_PLANNER_READY: dict[str, Any] = {
+    "status": "ready",
+    "summary": "plan ready",
+    "assumptions": [],
+    "questions": [],
+    "risk": "low",
+    "acceptanceCriteria": [],
+    "steps": [],
+}
+
+
+class _AlwaysLeader:
+    """Stands in for AsyncpgLeader: the maintenance loop's recovery arm only
+    runs on the elected instance, and this test *is* that instance."""
+
+    def __init__(self) -> None:
+        self.iterations = 0
+        self.closed = False
+
+    async def is_leader(self) -> bool:
+        self.iterations += 1
+        return True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Execution requests must be closed so stalled-run recovery can fire.
+
+    See GitHub issue #94 (platform review finding F7): `workflow_execution_requests`
+    rows were only ever written as `queued` and then `dispatched`, so
+    `find_stalled_workflow_runs`'s `NOT EXISTS (... 'queued', 'dispatched')`
+    predicate could never hold for a run that had dispatched anything, and the
+    maintenance loop's recovery arm was dead code.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._disable_seeded_projects)
+        await MigrationRunner(self.pool).run()
+        self.control_plane = AsyncpgControlPlane(self.pool)
+
+    async def _disable_seeded_projects(self) -> None:
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+
+    async def _delete_fixture(self, project_id: str, runner_id: str) -> None:
+        """Removes everything this test seeded.
+
+        These tests deliberately leave jobs holding live leases, and the
+        control plane's sweeps (`expire_leases`, `recover_one`,
+        `find_stalled_workflow_runs`) are global queries against a database
+        shared with every other integration test, so the fixture cannot be
+        left behind.
+        """
+        project = UUID(project_id)
+        await self.pool.execute("DELETE FROM app.project_locks WHERE project_id = $1", project)
+        await self.pool.execute("DELETE FROM app.jobs WHERE project_id = $1", project)
+        await self.pool.execute("DELETE FROM app.workflow_runs WHERE project_id = $1", project)
+        await self.pool.execute("DELETE FROM app.issues WHERE project_id = $1", project)
+        await self.pool.execute("DELETE FROM app.projects WHERE id = $1", project)
+        await self.pool.execute("DELETE FROM app.runners WHERE id = $1", UUID(runner_id))
+
+    async def _runtime(self) -> Any:
+        """The production workflow runtime, on a checkpointer that survives the
+        simulated crash exactly as the durable Postgres one would."""
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from moirai.workflows.runtime import build_persisted_runtime
+
+        return build_persisted_runtime(self.pool, checkpointer=InMemorySaver())
+
+    @staticmethod
+    def _advance(runtime: Any) -> Any:
+        """The same adapter production uses (RunnerControlService._advance_workflow):
+        a transition callback that re-enters the graph runtime."""
+
+        async def advance(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
+            await runtime.run(workflow_run_id, {"status": new_status, **updates})
+
+        return advance
+
+    async def _planning_run(self) -> tuple[str, str, str, str]:
+        """Drives a seeded project to a run whose planner execution has been
+        dispatched to a runner and accepted: the state a terminal planner event
+        arrives in.
+
+        Returns (workflow_run_id, job_id, runner_id, planner_request_id).
+        """
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        suffix = uuid4().hex[:12]
+        label = f"stall-{suffix}"
+        project = await self.control_plane.create_project(
+            f"stalled-run-{suffix}",
+            "managed_clone",
+            "https://example.test/stalled-run.git",
+            None,
+            "main",
+            {label},
+            _NOW,
+        )
+        project_id = str(project["id"])
+        await self.control_plane.upsert_issue(
+            project_id=project_id,
+            external_id=f"issue-{suffix}",
+            title="Close execution requests on terminal events",
+            body="",
+            state="open",
+            labels=["agent:ready"],
+            priority=100,
+            eligible=True,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+        token = await self.control_plane.create_registration_token(
+            {label}, _NOW + timedelta(minutes=30), now=_NOW
+        )
+        runner, credential = await self.control_plane.register_runner(
+            token, f"runner-{suffix}", {label}, _NOW
+        )
+        self.addAsyncCleanup(self._delete_fixture, project_id, runner.id)
+        await self.control_plane.heartbeat(runner.id, credential, _NOW)
+
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert scheduled is not None
+        job_id = scheduled.offer.job_id
+        workflow_run_id = scheduled.workflow.id
+        await self.control_plane.accept_offer(job_id, runner.id, _NOW)
+
+        # The graph's own first pass: prepare -> plan queues a planner request
+        # and suspends on the edge out of `plan`.
+        runtime = await self._runtime()
+        state = await runtime.run(workflow_run_id, {"status": "preparing"})
+        self.assertEqual(state["status"], "planning")
+        self.assertTrue(state["awaiting_execution"])
+        request_id = await self.pool.fetchval(
+            "SELECT id FROM app.workflow_execution_requests WHERE workflow_run_id = $1",
+            UUID(workflow_run_id),
+        )
+        assert request_id is not None
+
+        # The bootstrap job finished its offer, so schedule_execution() can
+        # place the planner request on the same runner.
+        await self.pool.execute(
+            "UPDATE app.jobs SET status = 'completed', finished_at = $2 WHERE id = $1",
+            UUID(job_id),
+            _NOW,
+        )
+        offered = await self.control_plane.schedule_execution(_NOW, timedelta(minutes=5))
+        assert offered is not None
+        self.assertEqual(offered.offer.job_id, job_id)
+        await self.control_plane.accept_offer(job_id, runner.id, _NOW)
+        return workflow_run_id, job_id, runner.id, str(request_id)
+
+    async def _deliver_planner_result(
+        self, job_id: str, runner_id: str, request_id: str, on_transition: Any = None
+    ) -> None:
+        from moirai.domain.models import ExecutionEvent
+
+        lease = await self.pool.fetchrow(
+            "SELECT lease_generation FROM app.jobs WHERE id = $1", UUID(job_id)
+        )
+        assert lease is not None
+        generation = int(lease["lease_generation"])
+        for sequence, event_type, payload in (
+            (1, "started", {}),
+            (2, "completed", {"exitCode": 0, "result": _PLANNER_READY}),
+        ):
+            await self.control_plane.accept_event(
+                ExecutionEvent(
+                    job_id=job_id,
+                    runner_id=runner_id,
+                    lease_generation=generation,
+                    event_sequence=sequence,
+                    event_type=event_type,
+                    execution_id=f"{request_id}-plan",
+                    payload=payload,
+                ),
+                _NOW,
+                on_transition=on_transition,
+            )
+
+    async def _request_statuses(self, workflow_run_id: str) -> list[tuple[str, str]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT role, status FROM app.workflow_execution_requests
+            WHERE workflow_run_id = $1 ORDER BY created_at, id
+            """,
+            UUID(workflow_run_id),
+        )
+        return [(str(row["role"]), str(row["status"])) for row in rows]
+
+    async def _run_maintenance_once(
+        self, on_transition: Any, now: datetime, timeout: float = 10.0
+    ) -> tuple[list[tuple[str, str, dict[str, object]]], _AlwaysLeader]:
+        """Runs the real maintenance loop until it recovers something, then
+        stops it. The leader's iteration count proves recovery happened within
+        a single interval."""
+        import asyncio
+
+        from moirai.main import _run_workflow_maintenance_loop
+
+        stop_event = asyncio.Event()
+        finished = asyncio.Event()
+        leader = _AlwaysLeader()
+        recovered: list[tuple[str, str, dict[str, object]]] = []
+
+        async def recording(workflow_run_id: str, new_status: str, updates: dict[str, object]) -> None:
+            recovered.append((workflow_run_id, new_status, dict(updates)))
+            try:
+                if on_transition is not None:
+                    await on_transition(workflow_run_id, new_status, updates)
+            finally:
+                finished.set()
+
+        task = asyncio.create_task(
+            _run_workflow_maintenance_loop(
+                self.control_plane,
+                recording,
+                stop_event,
+                lambda: now,
+                timedelta(milliseconds=20),
+                leader,
+            )
+        )
+        try:
+            await asyncio.wait_for(finished.wait(), timeout)
+        except TimeoutError:
+            pass
+        finally:
+            stop_event.set()
+            await task
+        return recovered, leader
+
+    async def test_terminal_event_closes_the_dispatched_execution_request(self) -> None:
+        """Acceptance criterion 1: once a phase's execution reports terminal,
+        no queued/dispatched request row remains for that phase."""
+        workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+        self.assertEqual(await self._request_statuses(workflow_run_id), [("planner", "dispatched")])
+        runtime = await self._runtime()
+
+        await self._deliver_planner_result(job_id, runner_id, request_id, on_transition=self._advance(runtime))
+
+        statuses = await self._request_statuses(workflow_run_id)
+        self.assertEqual(statuses[0], ("planner", "completed"))
+        # The planner phase left nothing schedulable behind; the developer
+        # request the resumed graph queued is the only open row.
+        self.assertEqual(
+            [role for role, status in statuses if status in ("queued", "dispatched")],
+            ["developer"],
+        )
+        self.assertEqual(
+            await self.control_plane.find_stalled_workflow_runs(
+                _NOW + timedelta(hours=1), timedelta(seconds=30)
+            ),
+            (),
+        )
+
+    async def test_committed_transition_without_a_graph_invocation_is_recovered(self) -> None:
+        """Acceptance criterion 2: a crash between committing a terminal
+        transition and invoking the graph runtime is repaired by the
+        maintenance loop within one interval."""
+        workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+
+        # The crash: accept_event commits the transition and the outbox row,
+        # then the process dies. The outbox row is left mid-drain
+        # ('processing'), which the drain arm never retries, so recovery can
+        # only come from the stalled-run arm.
+        await self._deliver_planner_result(job_id, runner_id, request_id, on_transition=None)
+        await self.pool.execute(
+            "UPDATE app.workflow_transition_outbox SET status = 'processing' WHERE workflow_run_id = $1",
+            UUID(workflow_run_id),
+        )
+        run = await self.pool.fetchrow(
+            "SELECT status FROM app.workflow_runs WHERE id = $1", UUID(workflow_run_id)
+        )
+        assert run is not None
+        self.assertEqual(str(run["status"]), "implementing")
+
+        runtime = await self._runtime()
+        recovered, leader = await self._run_maintenance_once(
+            self._advance(runtime), _NOW + timedelta(hours=1)
+        )
+
+        self.assertEqual([entry[0] for entry in recovered], [workflow_run_id])
+        self.assertEqual(leader.iterations, 1)
+        # Recovery re-entered the graph, which queued fresh work: the run is no
+        # longer stalled.
+        self.assertIn(
+            "queued", [status for _, status in await self._request_statuses(workflow_run_id)]
+        )
+        self.assertEqual(
+            await self.control_plane.find_stalled_workflow_runs(
+                _NOW + timedelta(hours=2), timedelta(seconds=30)
+            ),
+            (),
+        )
+
+    async def test_maintenance_loop_closes_an_execution_request_whose_job_is_gone(self) -> None:
+        """A dispatched request whose job was released without requeueing it
+        would pin the run out of the stall detector forever."""
+        workflow_run_id, job_id, _, _ = await self._planning_run()
+        await self.pool.execute(
+            "UPDATE app.jobs SET status = 'cancelled', finished_at = $2 WHERE id = $1",
+            UUID(job_id),
+            _NOW,
+        )
+        self.assertEqual(await self._request_statuses(workflow_run_id), [("planner", "dispatched")])
+
+        runtime = await self._runtime()
+        recovered, _ = await self._run_maintenance_once(
+            self._advance(runtime), _NOW + timedelta(hours=1)
+        )
+
+        self.assertEqual([entry[0] for entry in recovered], [workflow_run_id])
+        statuses = await self._request_statuses(workflow_run_id)
+        self.assertEqual(statuses[0], ("planner", "orphaned"))
+        self.assertIn("queued", [status for _, status in statuses])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,31 @@ The runner's terminal event clears `awaiting_execution` (`workflows/runner_event
 
 Resuming from that edge is a checkpointer capability. Without a checkpointer the only way forward is replaying the graph from its start node, which would re-enter nodes whose executions already ran, so a suspended run is left untouched and a warning is logged instead. Deployments that must make progress require a checkpointer; Compose never sets `LOOP_ALLOW_NO_CHECKPOINTER`.
 
+### Execution request lifecycle
+
+`app.workflow_execution_requests` is the queue between a dispatching node and the scheduler. A row is `queued` when the node creates it, `dispatched` when `schedule_execution` places it on a runner, and closed when the execution is over:
+
+| Terminal status | Written by | Meaning |
+| --- | --- | --- |
+| `completed` / `failed` / `cancelled` | `accept_event` | The runner reported this execution's terminal event; the status mirrors the event. |
+| `queued` (back from `dispatched`) | `_release_unanswered_offer` | The offer was never answered; the same request is re-offered on a later tick. |
+| `expired` | `_block_unanswered_run` | The run was blocked after too many unanswered offers. |
+| `orphaned` | `close_orphaned_execution_requests` | Nothing can execute or report on the row any more: its run is terminal, or its `dispatched` row has no job left that could deliver a terminal event. |
+
+Only `queued` and `dispatched` count as open. Leaving a finished request open is what previously made stalled-run recovery unreachable (issue #94), because the detector requires a run to have no open request.
+
+### Workflow maintenance loop
+
+One elected instance runs a 30-second maintenance loop (`main._run_workflow_maintenance_loop`) with three arms, in order:
+
+1. Drain `app.workflow_transition_outbox` — at-least-once delivery for transitions committed by `accept_event` but never invoked.
+2. Close orphaned execution requests, so runs holding a dead row stop looking busy.
+3. Re-enter the graph for stalled runs: a run whose status says an agent execution should be in flight, untouched for longer than the stall window (2 minutes), with no open execution request and no job in `offered`, `preparing`, `running`, or `recovering`.
+
+Arm 3 clears `awaiting_execution` when it re-enters the graph — the detector has already established that nothing is in flight, and the flag is what suspends the graph on the edge out of a dispatching node. Nothing else is invented: the gates the lost execution would have produced are left as they were, so the graph re-runs the phase (bounded by the same retry budgets) instead of advancing past it on a verdict nobody reported.
+
+Runs parked on an external event rather than an execution — `pr_created`, `waiting_github_checks`, `waiting_human`, `merging` — are deliberately not recovered this way: re-entering the graph for one would resolve a pending human-approval interrupt as "not approved". Unanswered offers (`offered`) and lease expiry (jobs in `recovering`) have their own owners, `expire_offers` and `recover_one`.
+
 ## Operations
 
 Logs are JSON and retain structured fields passed with Python logging `extra`. Metrics are served at `LOOP_METRICS_BIND` (default `0.0.0.0:9090`) on `/metrics`.

@@ -63,6 +63,10 @@ from moirai.workflows.task_packets import (
 # N identical outcomes have been observed.
 NON_PROGRESS_OUTCOME_LIMIT = 4
 
+# Workflow-run statuses that mean the run is over. A terminal run never has
+# work in flight, so nothing may resurrect it.
+_TERMINAL_WORKFLOW_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
+
 # Result-document keys that identify a single attempt rather than its content.
 # Both are required or emitted per execution, so they must never take part in
 # an outcome identity.
@@ -1737,7 +1741,26 @@ class AsyncpgControlPlane:
                     # orchestrator actually dispatched for this job: never let it drive
                     # a workflow transition (that is the gate #8 closes).
                     raise StaleLeaseError("runner execution event was rejected")
-                resolved_role, resolved_attempt = resolved if resolved is not None else (None, None)
+                resolved_request_id, resolved_role, resolved_attempt = (
+                    resolved if resolved is not None else (None, None, None)
+                )
+
+                if summary.terminal and resolved_request_id is not None:
+                    # The request this execution belongs to is finished: close it in
+                    # the same transaction that records the outcome. Leaving it
+                    # `dispatched` would keep the run permanently outside
+                    # find_stalled_workflow_runs' predicate and would let
+                    # schedule_execution re-offer work that already reported back
+                    # (issue #94). The status mirrors the runner's terminal event.
+                    await connection.execute(
+                        """
+                        UPDATE app.workflow_execution_requests
+                        SET status = $2
+                        WHERE id = $1 AND status = 'dispatched'
+                        """,
+                        resolved_request_id,
+                        summary.event_type,
+                    )
 
                 current_workflow_status = str(job["workflow_status"])
                 transition = workflow_transition_for_terminal_event(
@@ -1972,11 +1995,13 @@ class AsyncpgControlPlane:
 
     async def _resolve_dispatched_execution(
         self, connection: Any, workflow_run_id: str, job_id: str, execution_id: str
-    ) -> tuple[str, int] | None:
-        """Resolves (role, attempt) for an execution ID by joining the
-        dispatched request it claims to be -- never by trusting the string
+    ) -> tuple[UUID | None, str, int] | None:
+        """Resolves (request id, role, attempt) for an execution ID by joining
+        the dispatched request it claims to be -- never by trusting the string
         itself. Returns None when the execution ID does not correspond to
-        anything this orchestrator actually dispatched for this job.
+        anything this orchestrator actually dispatched for this job; the
+        request id is None for the bootstrap planner dispatch, which has no
+        request row to close.
         """
         if execution_id == f"{job_id}-plan":
             # The very first planning dispatch for a workflow predates any
@@ -1990,7 +2015,7 @@ class AsyncpgControlPlane:
                 _uuid(workflow_run_id),
             )
             if existing is None:
-                return "planner", 1
+                return None, "planner", 1
             return None
 
         candidate = execution_id[:36]
@@ -2002,15 +2027,16 @@ class AsyncpgControlPlane:
             return None
         row = await connection.fetchrow(
             """
-            SELECT role, attempt
+            SELECT id, role, attempt
             FROM app.workflow_execution_requests
             WHERE id = $1 AND workflow_run_id = $2 AND status = 'dispatched'
+            FOR UPDATE
             """,
             request_id,
             _uuid(workflow_run_id),
         )
         if row is not None:
-            return str(row["role"]), int(row["attempt"])
+            return UUID(str(row["id"])), str(row["role"]), int(row["attempt"])
         return None
 
     async def _record_ai_review(
@@ -2120,16 +2146,76 @@ class AsyncpgControlPlane:
             processed += 1
         return processed
 
+    async def close_orphaned_execution_requests(self, now: datetime, stale_after: timedelta) -> int:
+        """Closes execution requests that can never be executed or reported on.
+
+        Two kinds leak (issue #94). A request still open on a run that has
+        already reached a terminal status would let `schedule_execution` offer
+        work for a finished run. A `dispatched` request whose workflow run has
+        no job that could still produce its terminal event -- the runner's job
+        was cancelled or released without the request being requeued -- pins
+        the run outside `find_stalled_workflow_runs`' predicate forever.
+
+        The second rule is time-boxed by `stale_after` so it can never race a
+        `schedule_execution` transaction that is still in flight. Returns the
+        number of rows closed.
+        """
+        rows = await self._pool.fetch(
+            """
+            UPDATE app.workflow_execution_requests AS req
+            SET status = 'orphaned'
+            WHERE req.status IN ('queued', 'dispatched')
+              AND (
+                  EXISTS (
+                      SELECT 1 FROM app.workflow_runs AS wr
+                      WHERE wr.id = req.workflow_run_id
+                        AND wr.status IN ('completed', 'blocked', 'failed', 'cancelled')
+                  )
+                  OR (
+                      req.status = 'dispatched'
+                      AND COALESCE(req.dispatched_at, req.created_at) <= $1
+                      AND NOT EXISTS (
+                          SELECT 1 FROM app.jobs AS j
+                          WHERE j.workflow_run_id = req.workflow_run_id
+                            AND j.status IN ('offered', 'preparing', 'running', 'recovering')
+                      )
+                  )
+              )
+            RETURNING req.id
+            """,
+            now - stale_after,
+        )
+        return len(rows)
+
     async def find_stalled_workflow_runs(self, now: datetime, stale_after: timedelta) -> tuple[str, ...]:
-        """Workflow runs whose status implies in-flight work but which have
-        no queued/dispatched execution request and no active job -- the
-        symptom of a crash between committing a transition and invoking the
-        graph runtime (see accept_event / the outbox above)."""
+        """Workflow runs whose status says an agent execution should be in
+        flight but which have no queued/dispatched execution request and no
+        job that could still deliver one -- the symptom of a crash between
+        committing a transition and invoking the graph runtime (see
+        accept_event / the outbox above).
+
+        The statuses are an allow-list rather than "everything non-terminal"
+        on purpose. `pr_created`, `waiting_github_checks`, `waiting_human` and
+        `merging` are parked on an external event (a GitHub check, a human
+        decision), not on an execution, and re-entering the graph for those
+        would resolve a pending human-approval interrupt as "not approved".
+        `offered` is excluded because an unanswered offer already has an owner
+        (`expire_offers`), while `preparing` -- the status `accept_offer`
+        stamps for the whole life of an execution -- is included: once no job
+        can report that execution any more, nothing else will ever move the
+        run.
+
+        Jobs in `recovering` count as active work: `recover_one` already owns
+        them. A workflow run in `recovering` whose job is not, on the other
+        hand, is unreachable for `recover_one` (it requires both) and is
+        exactly the kind of stall this query exists to find.
+        """
         rows = await self._pool.fetch(
             """
             SELECT wr.id
             FROM app.workflow_runs AS wr
-            WHERE wr.status NOT IN ('completed', 'blocked', 'failed', 'cancelled', 'offered', 'preparing')
+            WHERE wr.status IN ('preparing', 'planning', 'implementing', 'local_pipeline',
+                                'repairing', 'ai_review', 'pushing', 'recovering')
               AND wr.updated_at <= $1
               AND NOT EXISTS (
                   SELECT 1 FROM app.workflow_execution_requests AS req
@@ -2137,8 +2223,10 @@ class AsyncpgControlPlane:
               )
               AND NOT EXISTS (
                   SELECT 1 FROM app.jobs AS j
-                  WHERE j.workflow_run_id = wr.id AND j.status IN ('offered', 'preparing', 'running')
+                  WHERE j.workflow_run_id = wr.id
+                    AND j.status IN ('offered', 'preparing', 'running', 'recovering')
               )
+            ORDER BY wr.updated_at, wr.id
             """,
             now - stale_after,
         )
@@ -2150,15 +2238,31 @@ class AsyncpgControlPlane:
         on_transition: Callable[[str, str, dict[str, object]], Awaitable[None]],
     ) -> bool:
         """Re-enters the graph runtime for a stalled run using its last
-        checkpoint, with no new state updates, so the current node's
-        dispatch logic re-evaluates and (idempotently) resumes progress."""
+        checkpoint, so the suspended node's outgoing edge re-evaluates and
+        dispatch logic (idempotently) resumes progress.
+
+        `awaiting_execution` is cleared because the detector's own predicate
+        established that nothing is in flight: the flag is what suspends the
+        graph on the edge out of a dispatching node (issue #88), so leaving it
+        set would make every recovery attempt route straight back to END and
+        the run would stay stalled forever. No other state is invented -- the
+        gates the lost execution would have produced stay as they were, so the
+        graph re-runs the phase rather than advancing past it on a verdict
+        nobody reported.
+
+        Returns False when the run disappeared or reached a terminal status
+        between detection and recovery.
+        """
         record = await self._pool.fetchrow(
             "SELECT status FROM app.workflow_runs WHERE id = $1",
             _uuid(workflow_run_id),
         )
         if record is None:
             return False
-        await on_transition(workflow_run_id, str(record["status"]), {})
+        status = str(record["status"])
+        if status in _TERMINAL_WORKFLOW_STATUSES:
+            return False
+        await on_transition(workflow_run_id, status, {"awaiting_execution": False})
         return True
 
     async def _load_runner_credential(self, runner_id: str, now: datetime) -> tuple[Runner, str]:

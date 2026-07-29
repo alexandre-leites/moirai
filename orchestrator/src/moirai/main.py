@@ -77,6 +77,14 @@ async def _build_checkpointer(database_url: str) -> Any | None:
     return checkpointer
 
 
+# How often the workflow maintenance loop runs, and how long a workflow run
+# must have been untouched before that loop treats it as stalled rather than
+# as a transition that is simply still in flight. The window is deliberately
+# several intervals wide: a normal accept_event -> graph invocation completes
+# in milliseconds, so anything older than this really has lost its driver.
+_WORKFLOW_MAINTENANCE_INTERVAL = timedelta(seconds=30)
+_WORKFLOW_STALL_AFTER = timedelta(minutes=2)
+
 _DEFAULT_SEED_PROJECT_NAME = "demo"
 _DEFAULT_SEED_REPOSITORY_URL = "https://github.com/example/demo.git"
 # Matches the 15-minute TTL the API mints for interactively-created runner
@@ -435,7 +443,7 @@ async def serve(
                     runner_service._advance_workflow,
                     shutdown,
                     lambda: datetime.now(UTC),
-                    timedelta(seconds=30),
+                    _WORKFLOW_MAINTENANCE_INTERVAL,
                     maintenance_leader,
                 )
             )
@@ -499,19 +507,46 @@ async def _run_workflow_maintenance_loop(
     interval: timedelta,
     leader: Any,
 ) -> None:
-    """Drains the workflow_transition_outbox (at-least-once delivery for
-    transitions committed but never invoked, e.g. after a crash) and
-    recovers workflow runs stalled with in-flight status but no queued or
-    active work (see persistence/control_plane.py's accept_event)."""
+    """Repairs workflow runs that lost their way between the database and the
+    graph runtime.
+
+    Three arms, in dependency order:
+
+    1. Drain the workflow_transition_outbox (at-least-once delivery for
+       transitions committed but never invoked, e.g. after a crash).
+    2. Close execution requests that can never be executed or reported on, so
+       the runs holding them stop looking busy.
+    3. Re-enter the graph for runs whose status says an execution should be in
+       flight while nothing is (see persistence/control_plane.py's
+       accept_event).
+
+    Arm 2 has to run before arm 3: a leaked `dispatched` request is exactly
+    what makes arm 3's detector unable to see the run (issue #94).
+    """
     try:
         while not stop_event.is_set():
             if await leader.is_leader():
                 current = now()
                 try:
                     await control_plane.drain_pending_transitions(on_transition, current)
-                    stalled = await control_plane.find_stalled_workflow_runs(current, timedelta(seconds=30))
+                    orphaned = await control_plane.close_orphaned_execution_requests(
+                        current, _WORKFLOW_STALL_AFTER
+                    )
+                    if orphaned:
+                        _LOGGER.info(
+                            "closed orphaned execution requests", extra={"requests": orphaned}
+                        )
+                    stalled = await control_plane.find_stalled_workflow_runs(
+                        current, _WORKFLOW_STALL_AFTER
+                    )
                     for workflow_run_id in stalled:
-                        await control_plane.recover_stalled_workflow_run(workflow_run_id, on_transition)
+                        if await control_plane.recover_stalled_workflow_run(
+                            workflow_run_id, on_transition
+                        ):
+                            _LOGGER.info(
+                                "recovered stalled workflow run",
+                                extra={"workflow_run_id": workflow_run_id},
+                            )
                 except Exception:
                     _LOGGER.exception("workflow maintenance loop iteration failed")
             try:
