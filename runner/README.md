@@ -85,6 +85,18 @@ Every agent execution must write the result document named by the task packet's 
 
 Exiting successfully is not a result. Every backend — `opencode`, `cli`, and `docker` — reports a `failed` terminal event when the document is missing or invalid, naming the missing evidence (for example `agent exited 0 without a valid result document (.loop/result.json): agent result was not written`). A process that fails outright reports the process failure instead, so the orchestrator receives distinct failure fingerprints for "the agent crashed" and "the agent claimed nothing".
 
+## Execution Events
+
+Execution events are queued in a bounded in-memory buffer (`LOOP_RUNNER_EVENT_BUFFER_SIZE`) that is mirrored to a crash-safe outbox in `LOOP_RUNNER_DATA_DIR`, and delivered in order on every reconnect. Terminal events (`completed`, `failed`, `cancelled`) carry the only record of a run's outcome, so they are never dropped silently:
+
+- When the buffer is full, a terminal event evicts the oldest queued lower-priority event (`log` and `progress` first, then `started`) instead of being rejected. Log and progress events are never allowed to evict anything.
+- Lease expiry discards a job's queued log and progress events but keeps its terminal events, still fenced by their lease generation, and keeps the expired lease just long enough for the still-running execution to report its outcome. Each expired generation is retained separately, so a job that is re-offered at the next generation does not displace the outcome still owed by the superseded execution.
+- The effective buffer size is raised to twice `LOOP_RUNNER_CAPACITY` when configured lower, covering each running execution plus one whose lease expired while it was still winding down. This is a floor, not a guarantee.
+- A terminal event that cannot be queued is retried once stripped to its classification fields (`status`, `exitCode`, `error`, `failureFingerprint`, `durationMs`, `branch`), each truncated to 2 KiB, so neither an oversized result document nor an agent that dumps its stderr into the returned error costs the run its outcome — only its detail.
+- A terminal event that still cannot be queued is logged at `ERROR` with `msg="terminal execution event lost"` plus the job, execution, lease generation, and reason. One that is queued but not yet delivered is logged at `WARN` and retried from the outbox.
+
+The orchestrator remains authoritative: it fences every event on the lease generation. Note that it currently *rejects* an event whose lease has expired — `expire_leases` bumps the generation, so a terminal event reported after expiry is discarded and the control stream is aborted. The runner still records and offers the outcome; accepting it as recovery evidence is tracked as the orchestrator half of #93.
+
 ## Health Probes
 
 `runner live` verifies the process can start. `runner ready` additionally validates its configuration, data directory capacity, and selected agent backend prerequisites.
