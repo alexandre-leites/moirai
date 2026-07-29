@@ -973,3 +973,98 @@ An adversarial review of the first commit confirmed the mechanism (no double-rel
 ## Next Recommended Implementation
 
 Unchanged from the previous session: the orchestrator half of issue #93 step 4.
+
+# Session: F5 / issue #92 — Circuit-breaker wedge states (branch `issue-92`)
+
+## Current Status
+
+- Overall status: Complete for finding F5.
+- Current phase: Bug fix from the 2026-07-29 platform review (`docs/reviews/2026-07-29-platform-review.md`, F5, P1, marked *(verify)*).
+- Active implementation: issue-92 agent session, 2026-07-29 — circuit-breaker wedge states.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-92.
+
+## Done
+
+- [x] A half-open circuit can no longer be left without a live probe
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/persistence/circuits.py` (new), `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/workflows/persistence.py`, `orchestrator/src/moirai/scheduler.py`, `orchestrator/src/moirai/services/issue_sync.py`, `orchestrator/tests/test_postgres_integration.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_workflow_persistence.py`, `orchestrator/tests/test_scheduler_service.py`, `orchestrator/tests/test_issue_sync.py`, `README.md`, `orchestrator/README.md`.
+  - Behavior delivered:
+    - **Wedge 1 — partial claim.** `_claim_circuit_probes` now runs both claims inside its own `connection.transaction()`, which asyncpg issues as a `SAVEPOINT` because `schedule()` already holds the outer transaction. A claim that cannot complete raises `_CircuitProbeUnavailable`, which unwinds the savepoint and returns `False`; the caller's `return None` then commits an unchanged pair of circuit rows instead of a project stuck at `half_open` pointing at a workflow run that was never inserted.
+    - The claim's `UPDATE` no longer requires `probe_workflow_run_id IS NULL`. The row is locked `FOR UPDATE` and `state = 'open'` means no probe is outstanding, so a pointer still on the row is stale by definition; requiring it to be NULL is what made the provider claim fail forever after a circuit had been closed and reopened (and is what triggered wedge 1 in production-shaped data).
+    - **Wedge 2 — unresolved probes.** `cancelled` and `failed` now resolve a probe: `AsyncpgWorkflowPersistence._update_project_circuit` reopens the circuits the run was holding with a fresh `opened_at` and a cleared pointer. The two raw-SQL paths that take a run terminal without a workflow transition do the same — `_cancel_offered_job` when it cancels the run (the bootstrap run offer expiry cancels is typically the probe `schedule()` just claimed) and `_block_unanswered_run`. `_cancel_offered_job(cancel_run=False)` deliberately does not, because that run already resolved its circuits through `transition`.
+    - Reopening is not counted as a new failure. A probe that was cancelled, failed, or never answered produced no evidence about the project or provider; it only restarts the cooldown so a later probe can run.
+    - `AsyncpgWorkflowPersistence.load_state` releases the probe of a run it finds already terminal (except `completed`), which is the same compensation it already performs for the project lock. This covers the third terminal writer: `accept_event` sets `blocked`/`cancelled` directly on `app.workflow_runs`, and `PersistedWorkflowRuntime.run` returns early for a run that is already terminal, so `transition` — and every circuit write inside it — is never reached for that run. `completed` is excluded because a delivered probe must *close* its circuit, which only `transition` does.
+    - **Reaper.** `AsyncpgControlPlane.reap_orphaned_circuit_probes(now)` reopens any `half_open` row claimed longer ago than the cooldown whose probe workflow is missing or already terminal, and returns per-table counts. `Scheduler.tick` calls it ahead of the candidate query, since a half-open circuit is precisely what excludes a project (or a whole provider) from scheduling; that pass is already leader-gated by `AsyncpgLeader` in `main.py`, so exactly one orchestrator reopens them. A probe workflow that is still running is never reaped.
+    - **Wedge 3 — stale pointers.** `clear_provider_failure` and `record_provider_failure` both clear `probe_workflow_run_id`, and every statement that resolves a probe is now guarded on `state = 'half_open'` as well as the pointer. A workflow that outlived its claim can no longer reopen — or close — a circuit that was decided on newer evidence. `record_provider_failure` against a `half_open` circuit now reopens it with a fresh cooldown instead of silently closing it.
+    - All three writers share `orchestrator/src/moirai/persistence/circuits.py`, so the transition and offer-release paths cannot drift apart again.
+    - **Provider-failure sources (step 5).** Label-reconciliation failures raise the new `LabelReconciliationError` and no longer open the provider circuit; see Decisions. The provider circuit is also decided once per sync pass instead of per project, so one project's success can no longer erase the failure another project recorded in the same pass.
+  - Validation performed: nine PostgreSQL integration tests written first and confirmed failing without the fix, then confirmed passing; fourteen unit tests; full orchestrator suite; lint; type check.
+  - Commands executed (throwaway PostgreSQL 16 container on port 55492, removed afterwards):
+    - Failing-test-first. Re-confirmed at the end against a pristine copy of `HEAD`'s sources (`git archive HEAD orchestrator/src orchestrator/migrations` into a scratch tree, then `PYTHONPATH=<scratch>/orchestrator/src … -k CircuitBreaker` against a fresh database):
+      → `Ran 9 tests … FAILED (failures=7, errors=2)` — every new integration test fails without the change. Per wedge:
+      - Wedge 1: `test_a_partial_probe_claim_is_never_committed` → `AssertionError: 'half_open' != 'open'` (the project claim survived a failed provider claim), and `test_a_stale_provider_probe_pointer_does_not_wedge_the_project` → `AssertionError` on `scheduled is not None` (`schedule()` returned None and left the project half-open).
+      - Wedge 2: `test_a_cancelled_probe_reopens_the_circuits_and_allows_a_later_probe` and `test_a_failed_probe_workflow_reopens_the_circuits` → `AssertionError: 'half_open' != 'open'`. `test_orphaned_half_open_probes_are_reaped_after_the_cooldown` and `test_a_live_or_recent_probe_is_never_reaped` → `AttributeError: 'AsyncpgControlPlane' object has no attribute 'reap_orphaned_circuit_probes'`.
+      - Wedge 3: `test_a_closed_provider_circuit_is_not_reopened_by_a_stale_probe` and `test_recording_a_provider_failure_drops_the_probe_pointer` → `AssertionError: UUID('…') is not None` (the pointer survived closing the circuit).
+      - The `load_state` compensation: `test_a_terminal_status_written_outside_the_transition_path_releases_the_probe` → `AssertionError: 'half_open' != 'open'`. Also checked in isolation against a copy with only that one hunk removed, so it is not passing on the strength of the other fixes.
+    - After the fix: `LOOP_TEST_DATABASE_URL=… make test-postgres-integration` → `Ran 18 tests … OK`.
+    - `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests` → `Ran 374 tests … OK (skipped=18)`.
+    - `make lint` → `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-92` → `Success: no issues found in 48 source files`.
+  - Notes: no migration and no new configuration. The probe cooldown is still `AsyncpgControlPlane(circuit_probe_cooldown=…)`, five minutes by default, and the reaper reuses it as its grace period so it can never outrun a probe that has only just been claimed.
+
+## Decisions
+
+- Decision: label-reconciliation failures gate issue-sync backoff only, never the provider circuit.
+  - Context: step 5 of issue #92. `sync_all_projects` caught every `IssueSyncError` alike and called `record_provider_failure("github", …)`; three of those open the provider circuit, and `schedule()` then excludes every project on that provider. `reconcile_project_labels` runs inside the same `try`, so a refused `gh issue edit --add-label` halted scheduling platform-wide.
+  - Alternatives considered: (a) leave it, treating any tracker error as provider evidence; (b) drop the backoff for label failures too and retry labels every cycle; (c) give label failures their own circuit.
+  - Reason: the provider circuit exists to stop burning agent executions against a broken provider. A failed label write is the opposite evidence — the pass had just listed that project's issues successfully, so the read path scheduling depends on is working, and the `agent:*` labels are a status mirror that no workflow consumes. (b) removes a real safeguard against hammering a tracker that is rejecting writes; (c) adds a durable state machine for something that self-heals on the next pass.
+  - Consequences: `LabelReconciliationError` (a subclass, so `sync_project`'s existing contract is unchanged) backs that project's sync off with the existing exponential delay and is reported in the pass results, but the provider circuit is untouched. Scheduling is now only gated by failures to *read or persist* issues. A persistent label failure is visible in `app.issue_sync_state.last_error` and in the pass result rather than as an unexplained scheduling halt.
+
+- Decision: the shared provider circuit is decided once per sync pass, not per project.
+  - Context: the review's second half of wedge 3 — `clear_provider_failure` ran inside the per-project success arm, so with several projects the last one to sync decided the circuit and erased a failure recorded seconds earlier in the same pass.
+  - Alternatives considered: keep per-project clearing and rely on the next failing pass to reopen the circuit.
+  - Reason: the row is global; only a whole-pass verdict is meaningful. Clearing on one project's success while another project's `list_open_issues` is timing out is not a fact about the provider.
+  - Consequences: the circuit is cleared only when the pass had at least one success and no provider-attributable failure. A pass where every project is backing off touches nothing, which is correct — it made no request, so it learned nothing.
+
+- Decision: the orphan-probe reaper runs in `Scheduler.tick`, not in the workflow maintenance loop.
+  - Context: `main.py` has a separate `_run_workflow_maintenance_loop` that drains the transition outbox and recovers stalled runs. `main.py` is owned by a concurrent agent on issue #94.
+  - Alternatives considered: add it to the workflow maintenance loop.
+  - Reason: it belongs with scheduling on the merits, not only for file ownership. What an orphaned probe blocks is the candidate query in `schedule()`, and `Scheduler.tick` already runs the other two pre-scheduling sweeps (`expire_offers`, `expire_leases`) under the same leader lock. It is attached via `getattr`, matching those two, so control-plane fakes without the method are unaffected.
+  - Consequences: the reaper runs on the scheduler interval rather than the maintenance interval. Both are leader-gated in `main.py`, so there is no double execution.
+
+- Decision: a claim never inspects `probe_workflow_run_id`; `state = 'open'` is the whole predicate.
+  - Context: with the pointer cleared on every close and reopen, the only rows that can still carry a stale pointer are ones written before this change (or by an older orchestrator during a rolling restart).
+  - Alternatives considered: keep `AND probe_workflow_run_id IS NULL` and rely on the reaper to clean up. The reaper only visits `half_open` rows, so an `open` row with a stale pointer would have stayed unclaimable forever.
+  - Reason: `open` and `half_open` already encode "no probe outstanding" and "one probe outstanding". Making the pointer a second, weaker source of truth for the same fact is what produced wedge 1.
+  - Consequences: a stale pointer on an `open` row is overwritten by the next claim instead of vetoing it. It cannot steal a live probe, because a live probe means `state = 'half_open'`, which the pre-check under `FOR UPDATE` rejects before any write.
+
+## Validation Status
+
+- Targeted tests: Passed — 9 new PostgreSQL integration tests (`CircuitBreakerIntegrationTests`) and 14 new unit tests, listed above with their pre-fix failure messages.
+- Service tests: Passed — `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests` → `Ran 374 tests … OK (skipped=18)`; `make test-postgres-integration` → `Ran 18 tests … OK`.
+- Full repository tests: Not run — no Go, proto, or web change. `make test` was deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-92` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Not applicable — `probe_workflow_run_id` already exists (migration `006_circuit_half_open_probes.sql`). Migrations were run against the throwaway database by the integration suite.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run.
+
+## Known Issues
+
+- Issue: `make test-postgres-integration` is not repeatable against the same database.
+  - Severity: P3
+  - Impact: the second run of the file against one database fails `OfferExpiryIntegrationTests.test_expired_recovery_offer_returns_the_run_to_recovering` with two expired leases instead of one.
+  - Evidence: pre-existing, and reproduced on unmodified `main` in this worktree — with the whole change stashed, run 1 was `Ran 9 tests … OK` and run 2 `Ran 9 tests … FAILED (failures=1)`. `PostgreSQLPersistenceIntegrationTests.test_control_plane_persists_project_runner_issue_and_lease_lifecycle` leaves a job in `preparing` with `lease_expires_at = _NOW + 10min`, which the next run's global `expire_leases` picks up. CI creates a fresh Postgres service per job, so it is green there. This is the same class of leftover already recorded under the issue #99 session. `CircuitBreakerIntegrationTests` is repeat-safe: it deletes both circuit tables and disables seeded projects in `asyncSetUp` and again on cleanup.
+  - Suggested resolution: have that lifecycle test clean up its job and workflow run, or truncate the `app` schema in `asyncSetUp`.
+
+- Issue: a `blocked` probe reported through the control plane's runner-event path is not counted as a project-circuit failure.
+  - Severity: P3
+  - Impact: `accept_event` writes some terminal statuses straight to `app.workflow_runs` (`workflows/runner_events.py` returns `new_status` `blocked` or `cancelled`), and `PersistedWorkflowRuntime.run` returns early for a run that is already terminal, so `AsyncpgWorkflowPersistence.transition` never runs for it. This change makes such a run *release* its probe (via `load_state`) so nothing wedges, but the failure counter that opens the circuit in the first place is still only incremented on the transition path.
+  - Evidence: `orchestrator/src/moirai/persistence/control_plane.py` `accept_event`'s `UPDATE app.workflow_runs SET status = $2`; `orchestrator/src/moirai/workflows/runtime.py` `run()`'s `_TERMINAL_STATUSES` short-circuit before any `transition` call.
+  - Suggested resolution: belongs with issue #94, which owns `accept_event` and the execution-request lifecycle — either have that path enqueue a real transition or let the runtime run the terminal transition instead of returning early. Deliberately not attempted here: it means restructuring `accept_event`, which this session was scoped out of.
+
+## Next Recommended Implementation
+
+Issue #96 (finding F9) — make transition replay idempotent. It is the highest-priority platform-review issue with no `ai-working` label as of this session (#90, #92, #94 and #100 were all claimed). The transition outbox is at-least-once, but `_dispatch` in `workflows/nodes.py` increments attempt counters and `total_agent_executions` even when it reuses a queued request, and creates a duplicate request for the same role when the previous one already moved to `dispatched`; outbox rows set to `processing` are never retried after a crash. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice. Those budgets are what open a project circuit in the first place, so double-counting them is what makes the breaker above fire early.

@@ -10,6 +10,7 @@ import asyncpg
 
 from moirai.persistence.control_plane import AsyncpgControlPlane
 from moirai.persistence.migrations import MigrationRunner
+from moirai.workflows.persistence import AsyncpgWorkflowPersistence
 
 _DATABASE_URL_ENV = "LOOP_TEST_DATABASE_URL"
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
@@ -512,6 +513,416 @@ class OfferExpiryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         run = await self._workflow_run(workflow_run_id)
         self.assertEqual(run["status"], "ai_review")
+
+
+class CircuitBreakerIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """No terminal outcome may leave a circuit half-open without a live probe.
+
+    See GitHub issue #92 (review finding F5). Three wedges are reproduced here
+    against real PostgreSQL, because every one of them is a property of what a
+    transaction commits, which no query-string fake can observe:
+
+    1. A half-open claim that only half succeeded used to be committed, leaving
+       the project pointing at a workflow run that was never inserted. `schedule`
+       excludes half-open projects, so the project never scheduled again.
+    2. Probes were resolved only by `completed` and `blocked`. A cancelled or
+       failed probe left the circuit half-open forever, and nothing reaped it.
+    3. Closing a circuit left `probe_workflow_run_id` set, so a stale workflow
+       could later reopen a circuit that had been legitimately closed.
+    """
+
+    COOLDOWN = timedelta(minutes=5)
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._reset_shared_state)
+        await MigrationRunner(self.pool).run()
+        await self._reset_shared_state()
+        self.control_plane = AsyncpgControlPlane(self.pool, circuit_probe_cooldown=self.COOLDOWN)
+        self.provider = ""
+
+    async def _reset_shared_state(self) -> None:
+        """Circuit state and scheduling are global, so every seeded project is
+        disabled and every circuit row is dropped: the reaper's counts and the
+        candidate `schedule()` picks are then decided only by this test."""
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        await self.pool.execute("DELETE FROM app.project_circuit_state")
+        await self.pool.execute("DELETE FROM app.provider_circuit_state")
+
+    async def _seed(self) -> tuple[str, str, str]:
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        suffix = uuid4().hex[:12]
+        label = f"circuit-{suffix}"
+        self.provider = f"provider-{suffix}"
+        project = await self.control_plane.create_project(
+            f"circuit-{suffix}",
+            "managed_clone",
+            "https://example.test/circuit.git",
+            None,
+            "main",
+            {label},
+            _NOW,
+        )
+        project_id = str(project["id"])
+        await self.control_plane.upsert_issue(
+            project_id=project_id,
+            external_id=f"issue-{suffix}",
+            title="Circuit breaker wedges",
+            body="",
+            state="open",
+            labels=["agent:ready"],
+            priority=100,
+            eligible=True,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+        # A per-test provider keeps this test's provider circuit row its own.
+        issue = await self.pool.fetchrow(
+            "UPDATE app.issues SET provider = $2 WHERE project_id = $1 RETURNING id",
+            UUID(project_id),
+            self.provider,
+        )
+        assert issue is not None
+        token = await self.control_plane.create_registration_token(
+            {label}, _NOW + timedelta(minutes=30), now=_NOW
+        )
+        runner, credential = await self.control_plane.register_runner(
+            token, f"runner-{suffix}", {label}, _NOW
+        )
+        await self.control_plane.heartbeat(runner.id, credential, _NOW)
+        return project_id, str(issue["id"]), runner.id
+
+    async def _open_circuits(
+        self, project_id: str, opened_at: datetime, *, provider_probe: Any | None = None
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO app.project_circuit_state
+                (project_id, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
+            VALUES ($1, 'open', 3, 'base branch is broken', $2, $2)
+            """,
+            UUID(project_id),
+            opened_at,
+        )
+        await self.pool.execute(
+            """
+            INSERT INTO app.provider_circuit_state
+                (provider, state, consecutive_failures, last_failure_reason, opened_at,
+                 probe_workflow_run_id, updated_at)
+            VALUES ($1, 'open', 3, 'issue tracker is unavailable', $2, $3, $2)
+            """,
+            self.provider,
+            opened_at,
+            provider_probe,
+        )
+
+    async def _half_open_circuits(
+        self,
+        project_id: str,
+        *,
+        project_probe: Any | None,
+        provider_probe: Any | None,
+        claimed_at: datetime,
+    ) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO app.project_circuit_state
+                (project_id, state, consecutive_failures, last_failure_reason, opened_at,
+                 probe_workflow_run_id, updated_at)
+            VALUES ($1, 'half_open', 3, 'base branch is broken', $2, $3, $2)
+            """,
+            UUID(project_id),
+            claimed_at,
+            project_probe,
+        )
+        await self.pool.execute(
+            """
+            INSERT INTO app.provider_circuit_state
+                (provider, state, consecutive_failures, last_failure_reason, opened_at,
+                 probe_workflow_run_id, updated_at)
+            VALUES ($1, 'half_open', 3, 'issue tracker is unavailable', $2, $3, $2)
+            """,
+            self.provider,
+            claimed_at,
+            provider_probe,
+        )
+
+    async def _project_circuit(self, project_id: str) -> Any:
+        record = await self.pool.fetchrow(
+            """
+            SELECT state, opened_at, probe_workflow_run_id, updated_at
+            FROM app.project_circuit_state WHERE project_id = $1
+            """,
+            UUID(project_id),
+        )
+        assert record is not None
+        return record
+
+    async def _provider_circuit(self) -> Any:
+        record = await self.pool.fetchrow(
+            """
+            SELECT state, opened_at, probe_workflow_run_id, updated_at
+            FROM app.provider_circuit_state WHERE provider = $1
+            """,
+            self.provider,
+        )
+        assert record is not None
+        return record
+
+    async def _workflow_run_id(self, project_id: str, issue_id: str, status: str) -> str:
+        run_id = uuid4()
+        await self.pool.execute(
+            """
+            INSERT INTO app.workflow_runs
+                (id, project_id, issue_id, thread_id, status, current_phase, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $5, $6, $6)
+            """,
+            run_id,
+            UUID(project_id),
+            UUID(issue_id),
+            str(run_id),
+            status,
+            _NOW,
+        )
+        return str(run_id)
+
+    async def _suppress_provider_circuit_updates(self) -> None:
+        """Makes the provider half-open claim fail the way a lost race does:
+        the row is locked and open, but the claiming UPDATE matches no row."""
+        await self.pool.execute(
+            """
+            CREATE OR REPLACE FUNCTION app.moirai_test_suppress_update() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$
+            """
+        )
+        await self.pool.execute(
+            """
+            CREATE TRIGGER moirai_test_suppress_provider_circuit
+            BEFORE UPDATE ON app.provider_circuit_state
+            FOR EACH ROW EXECUTE FUNCTION app.moirai_test_suppress_update()
+            """
+        )
+        self.addAsyncCleanup(self._restore_provider_circuit_updates)
+
+    async def _restore_provider_circuit_updates(self) -> None:
+        await self.pool.execute(
+            "DROP TRIGGER IF EXISTS moirai_test_suppress_provider_circuit ON app.provider_circuit_state"
+        )
+        await self.pool.execute("DROP FUNCTION IF EXISTS app.moirai_test_suppress_update()")
+
+    async def test_a_partial_probe_claim_is_never_committed(self) -> None:
+        """Wedge 1: `return None` from inside `async with connection.transaction()`
+        commits. The project claim must not survive a failed provider claim."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(project_id, _NOW - self.COOLDOWN - timedelta(seconds=1))
+        await self._suppress_provider_circuit_updates()
+
+        self.assertIsNone(await self.control_plane.schedule(_NOW, timedelta(minutes=5)))
+
+        project = await self._project_circuit(project_id)
+        self.assertEqual(project["state"], "open")
+        self.assertIsNone(project["probe_workflow_run_id"])
+        self.assertEqual(
+            await self.pool.fetchval(
+                "SELECT COUNT(*) FROM app.workflow_runs WHERE project_id = $1", UUID(project_id)
+            ),
+            0,
+        )
+
+        await self._restore_provider_circuit_updates()
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        self.assertIsNotNone(scheduled)
+
+    async def test_a_stale_provider_probe_pointer_does_not_wedge_the_project(self) -> None:
+        """Wedges 1 and 3 together: a pointer left behind by a closed circuit
+        made every later provider claim fail, and the project claim that ran
+        first was committed anyway."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(
+            project_id, _NOW - self.COOLDOWN - timedelta(seconds=1), provider_probe=uuid4()
+        )
+
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+
+        assert scheduled is not None
+        project = await self._project_circuit(project_id)
+        provider = await self._provider_circuit()
+        self.assertEqual(project["state"], "half_open")
+        self.assertEqual(provider["state"], "half_open")
+        self.assertEqual(str(project["probe_workflow_run_id"]), scheduled.workflow.id)
+        self.assertEqual(str(provider["probe_workflow_run_id"]), scheduled.workflow.id)
+        self.assertIsNotNone(
+            await self.pool.fetchrow(
+                "SELECT id FROM app.workflow_runs WHERE id = $1", UUID(scheduled.workflow.id)
+            )
+        )
+
+    async def test_a_cancelled_probe_reopens_the_circuits_and_allows_a_later_probe(self) -> None:
+        """Wedge 2 and acceptance criterion 2: killing the probe workflow must
+        reopen the circuit and allow another probe once the cooldown elapses."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(project_id, _NOW - self.COOLDOWN - timedelta(seconds=1))
+        probe = await self.control_plane.schedule(_NOW, timedelta(seconds=30))
+        assert probe is not None
+        self.assertEqual((await self._project_circuit(project_id))["state"], "half_open")
+
+        expired_at = _NOW + timedelta(seconds=31)
+        self.assertIn(probe.offer.job_id, await self.control_plane.expire_offers(expired_at))
+
+        run = await self.pool.fetchrow(
+            "SELECT status FROM app.workflow_runs WHERE id = $1", UUID(probe.workflow.id)
+        )
+        assert run is not None
+        self.assertEqual(run["status"], "cancelled")
+        for circuit in (await self._project_circuit(project_id), await self._provider_circuit()):
+            self.assertEqual(circuit["state"], "open")
+            self.assertEqual(circuit["opened_at"], expired_at)
+            self.assertIsNone(circuit["probe_workflow_run_id"])
+        self.assertIsNone(await self.control_plane.schedule(expired_at, timedelta(seconds=30)))
+
+        retried = await self.control_plane.schedule(expired_at + self.COOLDOWN, timedelta(seconds=30))
+
+        assert retried is not None
+        self.assertEqual(
+            str((await self._project_circuit(project_id))["probe_workflow_run_id"]),
+            retried.workflow.id,
+        )
+
+    async def test_a_failed_probe_workflow_reopens_the_circuits(self) -> None:
+        """Wedge 2 for the other unhandled terminal status."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(project_id, _NOW - self.COOLDOWN - timedelta(seconds=1))
+        probe = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert probe is not None
+        failed_at = _NOW + timedelta(minutes=1)
+
+        await AsyncpgWorkflowPersistence(self.pool, now=lambda: failed_at).transition(
+            probe.workflow.id, "failed", {"status": "failed"}
+        )
+
+        for circuit in (await self._project_circuit(project_id), await self._provider_circuit()):
+            self.assertEqual(circuit["state"], "open")
+            self.assertEqual(circuit["opened_at"], failed_at)
+            self.assertIsNone(circuit["probe_workflow_run_id"])
+
+    async def test_a_terminal_status_written_outside_the_transition_path_releases_the_probe(self) -> None:
+        """`accept_event` writes some terminal statuses straight to
+        app.workflow_runs, and `PersistedWorkflowRuntime.run` returns early for
+        a run that is already terminal -- so `transition` never runs for it and
+        every circuit write in it is skipped. `load_state` compensates, exactly
+        as it already does for the project lock."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(project_id, _NOW - self.COOLDOWN - timedelta(seconds=1))
+        probe = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert probe is not None
+        await self.pool.execute(
+            """
+            UPDATE app.workflow_runs SET status = 'blocked', current_phase = 'blocked' WHERE id = $1
+            """,
+            UUID(probe.workflow.id),
+        )
+        resolved_at = _NOW + timedelta(minutes=1)
+
+        await AsyncpgWorkflowPersistence(self.pool, now=lambda: resolved_at).load_state(
+            probe.workflow.id
+        )
+
+        for circuit in (await self._project_circuit(project_id), await self._provider_circuit()):
+            self.assertEqual(circuit["state"], "open")
+            self.assertEqual(circuit["opened_at"], resolved_at)
+            self.assertIsNone(circuit["probe_workflow_run_id"])
+
+    async def test_a_closed_provider_circuit_is_not_reopened_by_a_stale_probe(self) -> None:
+        """Wedge 3: `clear_provider_failure` closed the circuit but kept the
+        pointer, so the probe's own terminal event reopened it later."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(project_id, _NOW - self.COOLDOWN - timedelta(seconds=1))
+        probe = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert probe is not None
+
+        await self.control_plane.clear_provider_failure(self.provider, _NOW + timedelta(minutes=1))
+
+        provider = await self._provider_circuit()
+        self.assertEqual(provider["state"], "closed")
+        self.assertIsNone(provider["probe_workflow_run_id"])
+
+        await AsyncpgWorkflowPersistence(
+            self.pool, now=lambda: _NOW + timedelta(minutes=2)
+        ).transition(probe.workflow.id, "blocked", {"status": "blocked", "blocking_reason": "probe failed"})
+
+        provider = await self._provider_circuit()
+        self.assertEqual(provider["state"], "closed")
+        self.assertIsNone(provider["opened_at"])
+
+    async def test_recording_a_provider_failure_drops_the_probe_pointer(self) -> None:
+        """A new failure invalidates any probe: leaving the pointer set made
+        the circuit unclaimable for the rest of its life."""
+        project_id, _, _ = await self._seed()
+        await self._open_circuits(project_id, _NOW - self.COOLDOWN - timedelta(seconds=1))
+        probe = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert probe is not None
+
+        failed_at = _NOW + timedelta(minutes=1)
+        await self.control_plane.record_provider_failure(self.provider, "gh api failed", failed_at)
+
+        provider = await self._provider_circuit()
+        self.assertEqual(provider["state"], "open")
+        self.assertEqual(provider["opened_at"], failed_at)
+        self.assertIsNone(provider["probe_workflow_run_id"])
+
+    async def test_orphaned_half_open_probes_are_reaped_after_the_cooldown(self) -> None:
+        """Step 4: nothing else resolves a probe whose workflow row never
+        existed, or died before any terminal transition reached the circuit."""
+        project_id, issue_id, _ = await self._seed()
+        terminal_run = await self._workflow_run_id(project_id, issue_id, "cancelled")
+        await self._half_open_circuits(
+            project_id,
+            project_probe=uuid4(),
+            provider_probe=UUID(terminal_run),
+            claimed_at=_NOW - self.COOLDOWN - timedelta(seconds=1),
+        )
+
+        reaped = await self.control_plane.reap_orphaned_circuit_probes(_NOW)
+
+        self.assertEqual(reaped, {"project_circuits": 1, "provider_circuits": 1})
+        for circuit in (await self._project_circuit(project_id), await self._provider_circuit()):
+            self.assertEqual(circuit["state"], "open")
+            self.assertEqual(circuit["opened_at"], _NOW)
+            self.assertIsNone(circuit["probe_workflow_run_id"])
+        scheduled = await self.control_plane.schedule(_NOW + self.COOLDOWN, timedelta(minutes=5))
+        self.assertIsNotNone(scheduled)
+
+    async def test_a_live_or_recent_probe_is_never_reaped(self) -> None:
+        project_id, issue_id, _ = await self._seed()
+        live_run = await self._workflow_run_id(project_id, issue_id, "implementing")
+        await self._half_open_circuits(
+            project_id,
+            project_probe=UUID(live_run),
+            provider_probe=uuid4(),
+            claimed_at=_NOW - timedelta(seconds=1),
+        )
+
+        self.assertEqual(
+            await self.control_plane.reap_orphaned_circuit_probes(_NOW),
+            {"project_circuits": 0, "provider_circuits": 0},
+        )
+
+        # The provider probe is a dangling pointer, so only the cooldown keeps
+        # it alive; the project probe is a running workflow and stays claimed.
+        reaped = await self.control_plane.reap_orphaned_circuit_probes(
+            _NOW + self.COOLDOWN + timedelta(seconds=1)
+        )
+
+        self.assertEqual(reaped, {"project_circuits": 0, "provider_circuits": 1})
+        self.assertEqual((await self._project_circuit(project_id))["state"], "half_open")
+        self.assertEqual(str((await self._project_circuit(project_id))["probe_workflow_run_id"]), live_run)
+
 
 if __name__ == "__main__":
     unittest.main()

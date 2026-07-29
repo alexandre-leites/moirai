@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from moirai.persistence.circuits import reopen_probe_circuits
+
 _VALID_ROLES = frozenset({"planner", "developer", "pipeline", "reviewer", "repairer"})
 
 # The durable subset of graph state that has a matching app.workflow_runs
@@ -132,13 +134,19 @@ class AsyncpgWorkflowPersistence:
                 UPDATE app.provider_circuit_state
                 SET state = 'closed', consecutive_failures = 0, last_failure_reason = NULL,
                     opened_at = NULL, probe_workflow_run_id = NULL, updated_at = $2
-                WHERE probe_workflow_run_id = $1
+                WHERE probe_workflow_run_id = $1 AND state = 'half_open'
                 """,
                 _uuid(workflow_run_id),
                 now,
             )
             return
         if status != "blocked":
+            # Issue #92: a cancelled or failed run delivers no verdict about the
+            # project, but if it was holding a probe the circuit stays half-open
+            # -- and unschedulable -- until something releases it. Nothing else
+            # in this path does, and a project circuit is never opened by these
+            # statuses, so releasing the probe is the whole obligation here.
+            await reopen_probe_circuits(connection, _uuid(workflow_run_id), now)
             return
         reason = str(updates.get("blocking_reason") or "workflow blocked")[:1024]
         await connection.execute(
@@ -172,7 +180,7 @@ class AsyncpgWorkflowPersistence:
             SET state = 'open', opened_at = $2, probe_workflow_run_id = NULL,
                 consecutive_failures = consecutive_failures + 1,
                 last_failure_reason = $3, updated_at = $2
-            WHERE probe_workflow_run_id = $1
+            WHERE probe_workflow_run_id = $1 AND state = 'half_open'
             """,
             _uuid(workflow_run_id),
             now,
@@ -207,6 +215,20 @@ class AsyncpgWorkflowPersistence:
                         record["project_id"],
                         _uuid(workflow_run_id),
                     )
+                    if str(record["status"]) != "completed":
+                        # The same compensation as the lock release above, for
+                        # the circuit (issue #92). A terminal status can also be
+                        # written straight to app.workflow_runs by the control
+                        # plane's runner-event path, and the runtime returns
+                        # early for a run that is already terminal, so
+                        # transition() -- and with it every circuit write -- is
+                        # never reached for that run. `completed` is excluded
+                        # because a delivered probe must *close* its circuit,
+                        # which only transition() knows how to do; a probe left
+                        # pointing at a completed run is the reaper's job.
+                        await reopen_probe_circuits(
+                            connection, _uuid(workflow_run_id), self._now()
+                        )
                 branch_name = _optional_text(record["branch_name"])
                 if branch_name is None:
                     job_id = record["job_id"]

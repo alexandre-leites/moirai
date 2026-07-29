@@ -32,6 +32,22 @@ Logs are JSON and retain structured fields passed with Python logging `extra`. M
 
 The gRPC listener stays insecure by default for local development. Set `LOOP_GRPC_TLS_CERT_FILE` and `LOOP_GRPC_TLS_KEY_FILE` to enable TLS. Set `LOOP_GRPC_TLS_CLIENT_CA_FILE` too to require runner mTLS certificates.
 
+## Circuit breakers
+
+`app.project_circuit_state` and `app.provider_circuit_state` hold one row per project and per issue provider. `open` keeps the project (or every project on that provider) out of `schedule()` for the probe cooldown, five minutes by default (`AsyncpgControlPlane(circuit_probe_cooldown=...)`); once it elapses, the next scheduling pass claims a single `half_open` probe by writing the workflow run it just created into `probe_workflow_run_id`. `half_open` keeps everything else out until that probe resolves.
+
+Both circuits are claimed in one savepoint, so a claim that cannot complete leaves neither row changed. Every way a probe can end resolves it:
+
+| Probe outcome | Circuit |
+| --- | --- |
+| delivered (`completed`) | closed, pointer cleared |
+| `blocked` through the workflow transition path | reopened with a fresh cooldown, counted as a failure |
+| `cancelled`, `failed`, an offer nobody answered, or a terminal status written straight to `app.workflow_runs` | reopened with a fresh cooldown, not counted — the probe reported nothing |
+
+Closing or reopening a circuit always clears `probe_workflow_run_id`, so a workflow that outlived its claim cannot decide a circuit twice. As a backstop, each leader-gated scheduler pass reopens any `half_open` row whose probe workflow is missing or already terminal and which has been claimed for longer than the cooldown, and logs `reopened orphaned circuit probes` when it does.
+
+The provider circuit is shared, so an issue-sync pass decides it once at the end rather than per project: it opens on a failure to read or persist issues, and is cleared only when the pass had at least one success and no failure. A failed `agent:*` label write backs that project's sync off but never opens it — the labels mirror status onto issues and are not an input to any workflow.
+
 ## Issue label ownership
 
 Issue sync owns exactly one label namespace: `agent:*` (`agent:ready`, `agent:running`, `agent:blocked`, `agent:delivered`, `agent:human-approval`). A reconciliation pass only ever adds or removes labels inside that namespace.

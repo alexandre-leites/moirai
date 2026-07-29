@@ -24,6 +24,17 @@ class IssueSyncError(RuntimeError):
     pass
 
 
+class LabelReconciliationError(IssueSyncError):
+    """A failure while writing `agent:*` labels back to the issue tracker.
+
+    Distinct from every other sync failure because of what it does *not* prove
+    (issue #92, step 5): the tracker was reachable enough to list issues, and
+    the labels it failed to write are a status mirror, not an input to any
+    workflow. It must therefore never open the provider circuit, which gates
+    scheduling for every project on that provider.
+    """
+
+
 def github_issue_tracker_for_project(
     project: Project, command_runner: CommandRunner | None = None
 ) -> GitHubCliIssueTracker:
@@ -117,8 +128,19 @@ class IssueSync:
         return len(seen_external_ids)
 
     async def sync_all_projects(self, now: datetime) -> dict[str, int | str]:
+        """Syncs every enabled project and updates the shared provider circuit once.
+
+        The provider circuit is global: it gates scheduling for every project on
+        that provider, so it is only decided after the whole pass (issue #92).
+        Clearing it per project let one project's success erase the failure
+        another project had just recorded, and a label-write failure used to
+        open it even though nothing about the provider's availability was in
+        doubt.
+        """
         projects = await _await(self._control_plane.list_enabled_projects())
         results: dict[str, int | str] = {}
+        provider_reachable = False
+        provider_failed = False
         for project in projects:
             retry_after = self._retry_after.get(project.id)
             if retry_after is not None and retry_after > now:
@@ -126,29 +148,40 @@ class IssueSync:
                 continue
             try:
                 count = await self.sync_project(project, now)
+                provider_reachable = True
                 await self.reconcile_project_labels(project)
                 self._failure_counts.pop(project.id, None)
                 self._retry_after.pop(project.id, None)
                 clear_failure = getattr(self._control_plane, "clear_issue_sync_failure", None)
                 if clear_failure is not None:
                     await _await(clear_failure(project.id, now))
-                clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
-                if clear_provider is not None:
-                    await _await(clear_provider("github", now))
                 results[project.id] = count
+            except LabelReconciliationError as error:
+                # Backs this project's sync off, but leaves the provider circuit
+                # (and therefore scheduling) alone.
+                await self._record_sync_failure(project.id, error, now)
+                results[project.id] = str(error)
             except IssueSyncError as error:
-                failures = self._failure_counts.get(project.id, 0) + 1
-                retry_at = now + _retry_delay(failures)
-                self._failure_counts[project.id] = failures
-                self._retry_after[project.id] = retry_at
-                record_failure = getattr(self._control_plane, "record_issue_sync_failure", None)
-                if record_failure is not None:
-                    await _await(record_failure(project.id, failures, retry_at, str(error), now))
+                provider_failed = True
+                await self._record_sync_failure(project.id, error, now)
                 record_provider = getattr(self._control_plane, "record_provider_failure", None)
                 if record_provider is not None:
                     await _await(record_provider("github", str(error), now))
                 results[project.id] = str(error)
+        if provider_reachable and not provider_failed:
+            clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
+            if clear_provider is not None:
+                await _await(clear_provider("github", now))
         return results
+
+    async def _record_sync_failure(self, project_id: str, error: Exception, now: datetime) -> None:
+        failures = self._failure_counts.get(project_id, 0) + 1
+        retry_at = now + _retry_delay(failures)
+        self._failure_counts[project_id] = failures
+        self._retry_after[project_id] = retry_at
+        record_failure = getattr(self._control_plane, "record_issue_sync_failure", None)
+        if record_failure is not None:
+            await _await(record_failure(project_id, failures, retry_at, str(error), now))
 
     async def reconcile_project_labels(self, project: Project) -> None:
         tracker = self._issue_tracker_factory(project)
@@ -175,9 +208,13 @@ class IssueSync:
                         timeout=self._sync_timeout_seconds,
                     )
             except TimeoutError as error:
-                raise IssueSyncError(f"label reconciliation timed out for project {project.id}") from error
+                raise LabelReconciliationError(
+                    f"label reconciliation timed out for project {project.id}"
+                ) from error
             except Exception as error:
-                raise IssueSyncError(f"label reconciliation failed for project {project.id}") from error
+                raise LabelReconciliationError(
+                    f"label reconciliation failed for project {project.id}"
+                ) from error
             set_labels = getattr(self._control_plane, "set_issue_labels", None)
             if set_labels is not None:
                 reconciled = (set(current_labels) - set(to_remove)) | set(to_add)
