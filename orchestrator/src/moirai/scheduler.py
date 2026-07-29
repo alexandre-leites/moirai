@@ -114,6 +114,16 @@ class Scheduler:
         expire_leases = getattr(self._control_plane, "expire_leases", None)
         if expire_leases is not None:
             await _await(expire_leases(now))
+        # Runs here rather than in the workflow maintenance loop because what an
+        # orphaned probe blocks is scheduling: a half-open circuit whose probe
+        # can never report excludes its project (or every project on that
+        # provider) from the candidate query below. This pass is leader-gated,
+        # so exactly one orchestrator reopens them.
+        reap_circuit_probes = getattr(self._control_plane, "reap_orphaned_circuit_probes", None)
+        if reap_circuit_probes is not None:
+            reopened = await _await(reap_circuit_probes(now))
+            if reopened and any(reopened.values()):
+                _LOGGER.info("reopened orphaned circuit probes", extra=dict(reopened))
 
         placed: list[ScheduledJob] = []
         consecutive_failures = 0

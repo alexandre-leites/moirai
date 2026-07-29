@@ -24,6 +24,7 @@ class _Connection:
         self.queries: list[str] = []
         self.calls: list[tuple[str, tuple[object, ...]]] = []
         self.attempt = 1
+        self.status = "waiting_github_checks"
 
     def transaction(self) -> _Transaction:
         return _Transaction()
@@ -34,7 +35,7 @@ class _Connection:
         if "JOIN app.issues AS i" in query:
             return {
                 "id": args[0], "project_id": "00000000-0000-0000-0000-000000000002",
-                "status": "waiting_github_checks", "branch_name": None,
+                "status": self.status, "branch_name": None,
                 "planning_attempts": 1, "implementation_attempts": 2,
                 "pipeline_repair_attempts": 0, "review_cycles": 1,
                 "ci_repair_attempts": 0, "total_agent_executions": 4,
@@ -185,6 +186,63 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         completed_queries = "\n".join(self.pool.connection.queries)
         self.assertIn("probe_workflow_run_id = NULL", completed_queries)
         self.assertIn("UPDATE app.provider_circuit_state", completed_queries)
+
+    async def test_cancelled_and_failed_probes_release_their_half_open_circuits(self) -> None:
+        """Issue #92, wedge 2: only `completed` and `blocked` resolved a probe,
+        so a cancelled or failed probe workflow left its circuit half-open --
+        and its project unschedulable -- with no reaper and no way back."""
+        for status in ("cancelled", "failed"):
+            with self.subTest(status=status):
+                self.pool.connection.queries.clear()
+                await self.store.transition(WORKFLOW_ID, status, {"status": status})
+                released = [
+                    query
+                    for query in self.pool.connection.queries
+                    if "WHERE probe_workflow_run_id = $1 AND state = 'half_open'" in query
+                ]
+                self.assertEqual(len(released), 2)
+                for query in released:
+                    self.assertIn("SET state = 'open', opened_at = $2, probe_workflow_run_id = NULL", query)
+                self.assertTrue(any("app.project_circuit_state" in query for query in released))
+                self.assertTrue(any("app.provider_circuit_state" in query for query in released))
+
+    async def test_probe_resolution_only_ever_touches_a_half_open_circuit(self) -> None:
+        """Issue #92, wedge 3: matching the probe pointer alone let a workflow
+        whose pointer was never cleared reopen -- or close -- a provider circuit
+        that had already been decided on real evidence."""
+        for status in ("completed", "blocked"):
+            with self.subTest(status=status):
+                self.pool.connection.queries.clear()
+                await self.store.transition(WORKFLOW_ID, status, {"status": status})
+                provider = next(
+                    query
+                    for query in self.pool.connection.queries
+                    if "UPDATE app.provider_circuit_state" in query
+                )
+                self.assertIn("WHERE probe_workflow_run_id = $1 AND state = 'half_open'", provider)
+
+    async def test_loading_a_terminal_run_releases_the_probe_it_still_holds(self) -> None:
+        """Issue #92: the control plane writes some terminal statuses straight
+        to app.workflow_runs from the runner-event path, and the runtime short
+        -circuits a run that is already terminal, so `transition` never runs for
+        it. This is the same compensation as the project-lock release."""
+        self.pool.connection.status = "blocked"
+        await self.store.load_state(WORKFLOW_ID)
+        released = [
+            query
+            for query in self.pool.connection.queries
+            if "WHERE probe_workflow_run_id = $1 AND state = 'half_open'" in query
+        ]
+        self.assertEqual(len(released), 2)
+
+    async def test_loading_a_completed_run_never_reopens_its_circuit(self) -> None:
+        """A delivered probe closes its circuit; only `transition` can do that,
+        so this path must not reopen what that success just closed."""
+        self.pool.connection.status = "completed"
+        await self.store.load_state(WORKFLOW_ID)
+        self.assertEqual(
+            [query for query in self.pool.connection.queries if "probe_workflow_run_id" in query], []
+        )
 
     async def test_transition_omits_columns_not_present_in_updates(self) -> None:
         await self.store.transition(WORKFLOW_ID, "planning", {"status": "planning"})
