@@ -1083,7 +1083,8 @@ Issues [#114](https://github.com/alexandre-leites/moirai/issues/114) (a write pa
     - New `close_orphaned_execution_requests(now, stale_after)` closes rows nothing can ever execute or report on: any open row on a terminal run, and any `dispatched` row older than the stall window whose workflow run has no job in `offered` / `preparing` / `running` / `recovering`. Status `orphaned`.
     - `find_stalled_workflow_runs` moved from a status blocklist to an allow-list of statuses that mean "an agent execution should be in flight" (`preparing`, `planning`, `implementing`, `local_pipeline`, `repairing`, `ai_review`, `pushing`, `recovering`), added `recovering` to the active-job exclusion, and takes a `limit`.
     - `recover_stalled_workflow_run(workflow_run_id, on_transition, now)` repairs a run in one of two ways, decided by how its most recent request was closed. `orphaned` → the execution was lost, so a fresh `queued` request is written for the **same role** and the graph is left suspended. `completed`/`failed`/`cancelled` → the execution reported and only the graph invocation was lost, so the graph is re-entered with `awaiting_execution` cleared. Terminal runs are skipped.
-    - `main._run_workflow_maintenance_loop` gained the sweep arm (ordered before detection, because a leaked `dispatched` row is exactly what hides the run from the detector), per-run failure isolation, a bounded batch, named interval/window constants, and a `_log_unexpected_completion` done-callback so the loop can no longer die silently.
+    - `main._run_workflow_maintenance_loop` gained the sweep arm (ordered before detection, because a leaked `dispatched` row is exactly what hides the run from the detector), per-run failure isolation, a bounded batch, named interval/window constants, and a `_log_unexpected_completion` done-callback so the loop can no longer die silently. The whole iteration — including the leadership probe — is inside the failure guard, so a database blip costs one tick rather than the process.
+    - `build_task_packet` refuses to build a packet for a job whose run has execution history but no `dispatched` request, instead of silently emitting the bootstrap planner packet.
   - Validation performed: failing-test-first (below), then unit + Postgres integration + lint + typecheck, all green.
   - Commands executed:
     - `make test-orchestrator` → `Ran 370 tests ... OK (skipped=13)`
@@ -1107,10 +1108,15 @@ The issue is marked *(verify)*. Three integration tests were written against the
 
 ## Post-review corrections
 
-An adversarial review of the diff found two defects, both fixed before this was proposed:
+Two adversarial reviews of the diff. Round 1 found two defects, round 2 found a third plus several gaps; all are fixed.
 
 - **Blocker.** The first implementation recovered every stalled run by clearing `awaiting_execution` and resuming the graph. `implement`, `repair` and `push` have *unconditional* outgoing edges, so for a run whose execution was **lost** that does not re-run the phase — it skips it. The reviewer demonstrated the `push` case end to end on the real graph: the branch is never pushed, yet `create_pull_request` → `wait_for_checks` → `merge` → `complete` runs, the pull request is merged and the issue closed. Fixed by splitting recovery on how the last request was closed (`orphaned` → re-queue the same role; terminal → advance), with `test_lost_execution_never_advances_the_graph_past_its_phase` as the regression test: after losing a developer execution the request set is `[('developer', 1, 'orphaned'), ('developer', 2, 'queued'), ('planner', 1, 'completed')]` and no `pipeline` row exists.
-- **Tests were not exercising the resume path.** The integration fixture built a new `InMemorySaver` per `_runtime()` call, so the recovering runtime had an empty LangGraph thread and `ainvoke(None, config)` replayed from `START` instead of resuming the suspended edge. The reviewer mutation-tested it: reverting the production change left all three tests green. The checkpointer is now memoised per test, and reverting the change fails them.
+- **Tests were not exercising the resume path.** The integration fixture built a new `InMemorySaver` per `_runtime()` call, so the recovering runtime had an empty LangGraph thread and `ainvoke(None, config)` replayed from `START` instead of resuming the suspended edge. The reviewer mutation-tested it: reverting the production change left all three tests green. The checkpointer is now memoised per test, and the acceptance-criterion-2 test asserts that exactly one graph node ran during recovery — a `START` replay re-runs `prepare` as well — so the fixture change is itself pinned.
+- **Blocker (round 2).** Adding `add_done_callback(_log_unexpected_completion)` to the maintenance task promoted every unhandled exception in that loop into a full orchestrator shutdown, and `leader.is_leader()` sat outside the per-iteration `try`. `AsyncpgLeader` re-raises whatever the database did, so a Postgres failover would have exited the process — where `Scheduler.run` retries the identical call forever. The probe is now inside the guard, with `test_leadership_probe_failure_does_not_kill_the_loop` as the regression test.
+- **`build_task_packet` regression (round 2).** Closing the request means a later recovery re-offer of the same job finds no `dispatched` row and falls back to the *bootstrap* planner packet, whose execution ID `{job_id}-plan` `accept_event` always rejects — turning a pre-existing stuck run (see Known Issues) into a control-stream abort on every retry. `build_task_packet` now refuses to build a packet for a run that has execution history but no dispatched request; the scheduler skips such a candidate and the unanswered-offer limit bounds it.
+- **Unbounded re-queue (round 2).** A re-queue spends no retry budget, so nothing would have capped how many agent executions one wedged phase could buy. `_LOST_EXECUTION_REQUEUE_LIMIT` (5) now bounds it.
+- **Head-of-line starvation (round 2).** A run whose recovery raised kept its old `updated_at` and so reoccupied the bounded batch every tick. `recover_stalled_workflow_run` now bumps `updated_at` for every run it touches, so a failing run backs off one stall window.
+- **Coverage gaps (round 2).** The sweep's terminal-run rule, the re-queue limit, the `updated_at` back-off and the `build_task_packet` guard were all uncovered; each now has a test, verified by mutation.
 
 ## Decisions
 
@@ -1144,15 +1150,22 @@ The issue's step 2 says offer expiry leaks `dispatched` rows. That is no longer 
 - Full repository tests: Not run — no Go, proto, or web change in this diff.
 - Failing-test-first evidence: recorded above. Additionally mutation-checked after the fix — each production change was reverted in turn and `StalledRunRecoveryIntegrationTests` re-run against a freshly migrated database:
 
-  | Reverted change | Tests that fail |
+  | Reverted change | Result |
   | --- | --- |
-  | `accept_event` closing the request | 3 of 4 (all but the lost-planner case) |
-  | `close_orphaned_execution_requests` (stubbed to return 0) | both lost-execution tests |
-  | `find_stalled_workflow_runs` allow-list (back to the old blocklist) | both lost-execution tests |
-  | the `orphaned` / terminal split (always advance the graph) | `test_lost_execution_never_advances_the_graph_past_its_phase`, with `AssertionError: 'pipeline' unexpectedly found in ['developer', 'pipeline', 'planner']` — the lost implementation is skipped and the pipeline dispatched, exactly the defect the review found |
-  | `recover_stalled_workflow_run` clearing `awaiting_execution` | `test_committed_transition_without_a_graph_invocation_is_recovered` |
+  | `accept_event` closing the request | killed (3 integration tests) |
+  | `close_orphaned_execution_requests` stubbed to return 0 | killed (3) |
+  | the sweep's terminal-run rule replaced by `false` | killed (`test_open_requests_on_a_terminal_run_are_closed`) |
+  | `find_stalled_workflow_runs` allow-list, back to the old blocklist | killed (2) |
+  | the `orphaned` / terminal split — always advance the graph | killed, with `AssertionError: 'pipeline' unexpectedly found in ['developer', 'pipeline', 'planner']`: the lost implementation is skipped and the pipeline dispatched, exactly the defect round 1 found |
+  | `recover_stalled_workflow_run` clearing `awaiting_execution` | killed (`test_committed_transition_without_a_graph_invocation_is_recovered`) |
+  | the `_LOST_EXECUTION_REQUEUE_LIMIT` check | killed (`test_recover_stalled_workflow_run_stops_replacing_a_repeatedly_lost_execution`) |
+  | the `updated_at` bump for runs the loop could not repair | killed (`test_recover_stalled_workflow_run_defers_a_run_it_could_not_repair`) |
+  | the `build_task_packet` guard | killed (`test_build_task_packet_refuses_a_run_with_history_but_no_dispatched_request`) |
+  | sweeping *after* detecting instead of before | killed (2) |
+  | the leadership probe moved back outside the iteration's `try` | killed (`test_leadership_probe_failure_does_not_kill_the_loop`) |
+  | the test fixture's memoised checkpointer, back to one saver per call | killed (`test_committed_transition_without_a_graph_invocation_is_recovered`) — this is what pins the tests to the real `aupdate_state` + `ainvoke(None, config)` resume path rather than a replay from `START` |
 
-  No production line in this diff is uncovered.
+  Not covered by any test, and stated here rather than claimed: the two `FOR UPDATE` clauses (`_resolve_dispatched_execution`, `recover_stalled_workflow_run`) and the batch `LIMIT`/`ORDER BY`. Those are concurrency and scale properties that the suite has no way to exercise; the lock ordering is argued in Decisions instead.
 - Build: Not applicable (Python only).
 - Lint: Passed — `make lint` → `All checks passed!`.
 - Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-94` → `Success: no issues found in 47 source files` (private cache, so sibling worktrees are unaffected).
@@ -1165,8 +1178,9 @@ The issue's step 2 says offer expiry leaks `dispatched` rows. That is no longer 
 - Issue: `accept_offer` overwrites the workflow run's phase with `preparing`, so a successful **developer** terminal event produces no workflow transition.
   - Severity: P1 (pre-existing, not introduced here, but this change alters its symptom).
   - Impact: `workflow_transition_for_terminal_event` maps the `developer` role only from `implementing` or `pushing`. In production the run is `preparing` by then, so the terminal event commits nothing, the job stays `running` until its lease expires, and `expire_leases` → `recover_one` re-offers it. Before this change the request row was still `dispatched`, so `build_task_packet` produced a developer packet and the run re-ran the developer forever. Now the row is closed, so `build_task_packet` falls back to a **planner** packet, the runner emits `{job_id}-plan`, `_resolve_dispatched_execution` rejects it and `accept_event` raises `StaleLeaseError` — the control stream aborts. Both are unrecoverable loops; the new one also burns a reconnect per attempt.
-  - Evidence: reproduced against real Postgres during review — after a successful developer event, `graph nodes run: []`, `run status: preparing`, `job status: running`; the subsequent packet is `executionId '<job>-plan', role 'planner'` on this branch versus `'<request>-implement', role 'developer'` on `8956d84`.
-  - Suggested resolution: stop `accept_offer` clobbering `current_phase` (or make the `developer` branch of `runner_events.py` phase-independent). Both files are outside this issue's ownership; filed separately.
+  - Evidence: reproduced against real Postgres during review — after a successful developer event, `graph nodes run: []`, `run status: preparing`, `job status: running`.
+  - What this change does about it: the recovery re-offer no longer emits a bogus planner packet (`build_task_packet` refuses), so the symptom is a skipped scheduling candidate and an offer that expires, bounded by `unanswered_offer_limit`, rather than a control-stream abort per retry. The underlying loop is unchanged and still P1.
+  - Suggested resolution: stop `accept_offer` clobbering `current_phase` (or make the `developer` branch of `runner_events.py` phase-independent). Both files are outside this issue's ownership; filed separately as [#141](https://github.com/alexandre-leites/moirai/issues/141).
 - Issue: a `queued` request on a live run whose job can never be claimed is not swept, and starves the global queue.
   - Severity: P2.
   - Impact: `schedule_execution` orders candidates by `request.created_at, request.id` and returns `None` for the whole tick when the head candidate's job is not in `('completed','failed','cancelled')`, so one unclaimable head row blocks placement for every project.
@@ -1185,4 +1199,4 @@ The issue's step 2 says offer expiry leaks `dispatched` rows. That is no longer 
 
 ## Next Recommended Implementation
 
-Unchanged from the previous session: issues [#114](https://github.com/alexandre-leites/moirai/issues/114) and [#136](https://github.com/alexandre-leites/moirai/issues/136). Within the orchestrator track, the `accept_offer` phase clobber recorded under Known Issues is the highest-value next fix: it makes every developer execution transition-less, which is a P1 break of the core loop independent of this change.
+Unchanged from the previous session: issues [#114](https://github.com/alexandre-leites/moirai/issues/114) and [#136](https://github.com/alexandre-leites/moirai/issues/136). Within the orchestrator track, the `accept_offer` phase clobber recorded under Known Issues ([#141](https://github.com/alexandre-leites/moirai/issues/141)) is the highest-value next fix: it makes every developer execution transition-less, which is a P1 break of the core loop independent of this change.

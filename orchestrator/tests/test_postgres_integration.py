@@ -738,6 +738,23 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.control_plane.accept_offer(job_id, runner_id, _NOW)
         return workflow_run_id, job_id, runner_id
 
+    async def _nodes_that_ran(self, workflow_run_id: str) -> int:
+        """How many graph nodes have committed a transition for this run.
+
+        Every node calls `AsyncpgWorkflowPersistence.transition`, which appends
+        one `workflow_transition` event, so the count is a direct read of how
+        much of the graph executed.
+        """
+        return int(
+            await self.pool.fetchval(
+                """
+                SELECT COUNT(*) FROM app.workflow_events
+                WHERE workflow_run_id = $1 AND event_type = 'workflow_transition'
+                """,
+                UUID(workflow_run_id),
+            )
+        )
+
     async def _run_status(self, workflow_run_id: str) -> str:
         status = await self.pool.fetchval(
             "SELECT status FROM app.workflow_runs WHERE id = $1", UUID(workflow_run_id)
@@ -859,10 +876,17 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (workflow_run_id,),
         )
 
+        nodes_before = await self._nodes_that_ran(workflow_run_id)
         recovered, _ = await self._run_maintenance_once(
             self._advance(runtime), _NOW + timedelta(hours=1)
         )
 
+        # Exactly one node ran: the graph resumed from the suspended edge out
+        # of `plan` (`aupdate_state` + `ainvoke(None, config)`). A replay from
+        # START would have re-run `prepare` as well -- which is what happens if
+        # the recovering runtime is handed a checkpointer that does not carry
+        # the run's thread.
+        self.assertEqual(await self._nodes_that_ran(workflow_run_id) - nodes_before, 1)
         # The execution reported, so the graph is re-entered rather than the
         # phase re-queued, and the suspension flag is cleared so the resumed
         # edge can actually move.
@@ -909,6 +933,42 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 _NOW + timedelta(hours=2), timedelta(seconds=30)
             ),
             (),
+        )
+
+    async def test_open_requests_on_a_terminal_run_are_closed(self) -> None:
+        """A run that reached a terminal status must leave nothing schedulable
+        behind: `schedule_execution` matches on the request alone, so an open
+        row would keep offering work for a finished run."""
+        workflow_run_id, job_id, _, _ = await self._planning_run()
+        await self.pool.execute(
+            """
+            UPDATE app.workflow_execution_requests SET status = 'queued', dispatched_at = NULL
+            WHERE workflow_run_id = $1
+            """,
+            UUID(workflow_run_id),
+        )
+        await self.pool.execute(
+            """
+            UPDATE app.workflow_runs
+            SET status = 'blocked', current_phase = 'blocked', terminal_reason = 'test'
+            WHERE id = $1
+            """,
+            UUID(workflow_run_id),
+        )
+        await self._lose_the_job(job_id)
+
+        closed = await self.control_plane.close_orphaned_execution_requests(
+            _NOW + timedelta(hours=1), timedelta(minutes=2)
+        )
+
+        self.assertEqual(closed, 1)
+        self.assertEqual(
+            await self._request_statuses(workflow_run_id), [("planner", 1, "orphaned")]
+        )
+        self.assertIsNone(
+            await self.control_plane.schedule_execution(
+                _NOW + timedelta(hours=1), timedelta(minutes=5)
+            )
         )
 
     async def test_lost_execution_never_advances_the_graph_past_its_phase(self) -> None:

@@ -324,6 +324,9 @@ class _DurablePool:
         self.unanswered_since: datetime | None = None
         self.last_event_sequence = 0
         self.execution_request_id = "00000000-0000-0000-0000-000000000007"
+        # A bootstrap offer by default: the run has never queued an execution
+        # request, which is the one case the planner fallback packet is for.
+        self.has_execution_history = False
         self.execution_request_status = "none"
         self.dispatched_requests: list[tuple[str, str, int]] = []
         self.project_circuit: dict[str, object] | None = None
@@ -376,6 +379,7 @@ class _DurablePool:
                 "local_repository_path": None,
                 "default_branch": "main",
             }
+            record["has_execution_history"] = self.has_execution_history
             if self.execution_request_status == "dispatched":
                 record["execution_request_id"] = self.execution_request_id
                 record["execution_role"] = "developer"
@@ -525,6 +529,21 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packet["role"], "planner")
         self.assertEqual(packet["repository"]["url"], "https://example.test/repo.git")
         self.assertEqual(packet["constraints"], {"mayModifyFiles": False, "mayPush": False, "mayMerge": False})
+
+    async def test_build_task_packet_refuses_a_run_with_history_but_no_dispatched_request(self) -> None:
+        """The planner fallback packet is the *bootstrap* packet. Handing it to
+        a run that is mid-implementation would send `{job_id}-plan`, which
+        accept_event rejects, aborting the runner's control stream on every
+        retry (issue #94: the request row is now closed on its terminal event,
+        so a recovery re-offer can reach this state)."""
+        pool = _DurablePool()
+        pool.has_execution_history = True
+        control_plane = AsyncpgControlPlane(pool)
+        scheduled = await control_plane.schedule(NOW, timedelta(seconds=30))
+        assert scheduled is not None
+
+        with self.assertRaises(ValueError):
+            await control_plane.build_task_packet(scheduled)
 
     async def test_schedule_execution_claims_a_queued_developer_request_and_builds_its_packet(self) -> None:
         pool = _DurablePool()
@@ -1213,7 +1232,9 @@ class _OutboxPool:
         self.stalled_rows: list[dict[str, object]] = []
         self.orphaned_rows: list[dict[str, object]] = []
         self.workflow_status = workflow_status
-        self.last_request = last_request or {"role": None, "request_status": None, "next_attempt": None}
+        self.last_request = last_request or {
+            "role": None, "request_status": None, "next_attempt": None, "lost_attempts": 0
+        }
 
     def acquire(self) -> _OutboxConnection:
         return _OutboxConnection(self)
@@ -1309,7 +1330,7 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
         the graph on the edge out of a dispatching node, so leaving it set
         would route the resumed graph straight back to END (issue #94)."""
         pool = _OutboxPool(
-            last_request={"role": "planner", "request_status": "completed", "next_attempt": 2}
+            last_request={"role": "planner", "request_status": "completed", "next_attempt": 2, "lost_attempts": 0}
         )
 
         recovered, delivered = await self._recover(pool)
@@ -1328,7 +1349,7 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
         never pushed. The phase is queued again instead, and the graph stays
         suspended waiting for it."""
         pool = _OutboxPool(
-            last_request={"role": "developer", "request_status": "orphaned", "next_attempt": 2}
+            last_request={"role": "developer", "request_status": "orphaned", "next_attempt": 2, "lost_attempts": 1}
         )
 
         recovered, delivered = await self._recover(pool)
@@ -1344,10 +1365,45 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
             any("'execution_requeued'" in query for query, _ in pool.calls)
         )
 
+    async def test_recover_stalled_workflow_run_stops_replacing_a_repeatedly_lost_execution(self) -> None:
+        """A re-queue spends no retry budget, so nothing else would ever bound
+        how many agent executions one wedged phase can buy."""
+        pool = _OutboxPool(
+            last_request={
+                "role": "developer", "request_status": "orphaned",
+                "next_attempt": 7, "lost_attempts": 6,
+            }
+        )
+
+        recovered, delivered = await self._recover(pool)
+
+        self.assertFalse(recovered)
+        self.assertEqual(delivered, [])
+        self.assertFalse(
+            any("INSERT INTO app.workflow_execution_requests" in query for query, _ in pool.calls)
+        )
+
+    async def test_recover_stalled_workflow_run_defers_a_run_it_could_not_repair(self) -> None:
+        """`updated_at` is what the detector reads. Bumping it for every run the
+        loop touches -- not only the ones it repairs -- stops a permanently
+        failing run from occupying the bounded batch on every tick."""
+        pool = _OutboxPool(
+            last_request={"role": "planner", "request_status": "completed", "next_attempt": 2, "lost_attempts": 0}
+        )
+
+        await self._recover(pool)
+
+        self.assertTrue(
+            any(
+                "UPDATE app.workflow_runs SET updated_at" in query and arguments[1] == NOW
+                for query, arguments in pool.calls
+            )
+        )
+
     async def test_recover_stalled_workflow_run_skips_a_run_that_became_terminal(self) -> None:
         pool = _OutboxPool(
             workflow_status="blocked",
-            last_request={"role": "planner", "request_status": "orphaned", "next_attempt": 2},
+            last_request={"role": "planner", "request_status": "orphaned", "next_attempt": 2, "lost_attempts": 1},
         )
 
         recovered, delivered = await self._recover(pool)
@@ -1366,11 +1422,10 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
         closed = await control_plane.close_orphaned_execution_requests(NOW, timedelta(minutes=2))
 
         self.assertEqual(closed, 2)
-        query, arguments = next(
+        _, arguments = next(
             call for call in pool.calls if "UPDATE app.workflow_execution_requests" in call[0]
         )
-        self.assertIn("SET status = 'orphaned'", query)
-        self.assertEqual(arguments, (NOW - timedelta(minutes=2),))
+        self.assertEqual(arguments, (NOW - timedelta(minutes=2), "orphaned"))
 
 
 class _ListWorkflowsPool:

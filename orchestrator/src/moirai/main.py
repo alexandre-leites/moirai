@@ -539,9 +539,14 @@ async def _run_workflow_maintenance_loop(
     """
     try:
         while not stop_event.is_set():
-            if await leader.is_leader():
+            stalled: tuple[str, ...] = ()
+            # The leadership probe is inside the guard on purpose: AsyncpgLeader
+            # re-raises whatever the database did, and an unhandled exception
+            # here now ends the whole process through the task's done-callback.
+            # A failover blip must cost this loop one tick, not the orchestrator.
+            try:
                 current = now()
-                try:
+                if await leader.is_leader():
                     await control_plane.drain_pending_transitions(on_transition, current)
                     orphaned = await control_plane.close_orphaned_execution_requests(
                         current, _WORKFLOW_STALL_AFTER
@@ -553,25 +558,24 @@ async def _run_workflow_maintenance_loop(
                     stalled = await control_plane.find_stalled_workflow_runs(
                         current, _WORKFLOW_STALL_AFTER, _WORKFLOW_STALL_BATCH
                     )
+            except Exception:
+                _LOGGER.exception("workflow maintenance loop iteration failed")
+            for workflow_run_id in stalled:
+                try:
+                    recovered = await control_plane.recover_stalled_workflow_run(
+                        workflow_run_id, on_transition, current
+                    )
                 except Exception:
-                    _LOGGER.exception("workflow maintenance loop iteration failed")
-                    stalled = ()
-                for workflow_run_id in stalled:
-                    try:
-                        recovered = await control_plane.recover_stalled_workflow_run(
-                            workflow_run_id, on_transition, current
-                        )
-                    except Exception:
-                        _LOGGER.exception(
-                            "stalled workflow run recovery failed",
-                            extra={"workflow_run_id": workflow_run_id},
-                        )
-                        continue
-                    if recovered:
-                        _LOGGER.info(
-                            "recovered stalled workflow run",
-                            extra={"workflow_run_id": workflow_run_id},
-                        )
+                    _LOGGER.exception(
+                        "stalled workflow run recovery failed",
+                        extra={"workflow_run_id": workflow_run_id},
+                    )
+                    continue
+                if recovered:
+                    _LOGGER.info(
+                        "recovered stalled workflow run",
+                        extra={"workflow_run_id": workflow_run_id},
+                    )
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=interval.total_seconds())
             except TimeoutError:

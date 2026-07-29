@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -57,6 +58,8 @@ from moirai.workflows.task_packets import (
     task_execution,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 # Number of identical terminal outcomes that blocks a workflow. README's
 # "Workflow recovery guarantees" documents four; `non_progress_attempts`
 # counts *repeats*, so it is 0 for the first outcome of a run and N-1 once
@@ -71,6 +74,13 @@ _TERMINAL_WORKFLOW_STATUSES = frozenset({"completed", "blocked", "failed", "canc
 # row". It is the signal recover_stalled_workflow_run reads to tell a lost
 # execution (re-run the phase) from a delivered one (advance the graph).
 _ORPHANED_REQUEST_STATUS = "orphaned"
+
+# How many times one phase's execution may be lost and re-queued before the
+# maintenance loop stops replacing it. A re-queue deliberately spends no retry
+# budget (the attempt was charged when the node dispatched it), so without this
+# nothing would bound the number of agent executions a repeatedly-failing
+# environment could buy.
+_LOST_EXECUTION_REQUEUE_LIMIT = 5
 
 # Result-document keys that identify a single attempt rather than its content.
 # Both are required or emitted per execution, so they must never take part in
@@ -849,7 +859,11 @@ class AsyncpgControlPlane:
             SELECT j.id AS job_id, i.external_id, i.title, i.body, p.id AS project_id,
                     p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
                     w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
-                    request.id AS execution_request_id, request.role AS execution_role
+                    request.id AS execution_request_id, request.role AS execution_role,
+                    EXISTS (
+                        SELECT 1 FROM app.workflow_execution_requests AS any_request
+                        WHERE any_request.workflow_run_id = w.id
+                    ) AS has_execution_history
             FROM app.jobs AS j
             JOIN app.workflow_runs AS w ON w.id = j.workflow_run_id
             JOIN app.issues AS i ON i.id = w.issue_id
@@ -867,6 +881,16 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("scheduled job is unavailable")
+        if record.get("execution_request_id") is None and bool(record.get("has_execution_history")):
+            # No dispatched request, but this run has queued executions before:
+            # the planner fallback below is the *bootstrap* packet and would
+            # send a run that is mid-implementation back to planning with an
+            # execution ID (`{job_id}-plan`) that accept_event is guaranteed to
+            # reject, aborting the runner's control stream on every retry.
+            # Refuse instead. The scheduler skips a candidate whose packet fails
+            # to build and lets its offer expire on its own TTL, which is
+            # bounded by the unanswered-offer limit.
+            raise ValueError("scheduled job has no dispatched execution request")
         job_id = str(record["job_id"])
         project_id = str(record["project_id"])
         issue_external_id = str(record["external_id"])
@@ -2168,7 +2192,7 @@ class AsyncpgControlPlane:
         rows = await self._pool.fetch(
             """
             UPDATE app.workflow_execution_requests AS req
-            SET status = 'orphaned'  -- keep in step with _ORPHANED_REQUEST_STATUS
+            SET status = $2
             WHERE req.status IN ('queued', 'dispatched')
               AND (
                   EXISTS (
@@ -2189,6 +2213,7 @@ class AsyncpgControlPlane:
             RETURNING req.id
             """,
             now - stale_after,
+            _ORPHANED_REQUEST_STATUS,
         )
         return len(rows)
 
@@ -2286,7 +2311,7 @@ class AsyncpgControlPlane:
                 record = await connection.fetchrow(
                     """
                     SELECT wr.status, request.role, request.status AS request_status,
-                           request.next_attempt
+                           request.next_attempt, request.lost_attempts
                     FROM app.workflow_runs AS wr
                     LEFT JOIN LATERAL (
                         SELECT r.role, r.status,
@@ -2294,7 +2319,13 @@ class AsyncpgControlPlane:
                                    SELECT MAX(a.attempt) + 1
                                    FROM app.workflow_execution_requests AS a
                                    WHERE a.workflow_run_id = wr.id AND a.role = r.role
-                               ) AS next_attempt
+                               ) AS next_attempt,
+                               (
+                                   SELECT COUNT(*)
+                                   FROM app.workflow_execution_requests AS a
+                                   WHERE a.workflow_run_id = wr.id AND a.role = r.role
+                                     AND a.status = $2
+                               ) AS lost_attempts
                         FROM app.workflow_execution_requests AS r
                         WHERE r.workflow_run_id = wr.id
                         ORDER BY r.created_at DESC, r.id DESC
@@ -2304,13 +2335,34 @@ class AsyncpgControlPlane:
                     FOR UPDATE OF wr
                     """,
                     _uuid(workflow_run_id),
+                    _ORPHANED_REQUEST_STATUS,
                 )
                 if record is None:
                     return False
                 status = str(record["status"])
                 if status in _TERMINAL_WORKFLOW_STATUSES:
                     return False
+                # Whichever branch runs, this run has had its turn: the
+                # timestamp is what the detector reads, so bumping it here --
+                # rather than relying on the repair succeeding -- keeps a run
+                # that fails to recover from occupying the batch every tick and
+                # starving newer stalls.
+                await connection.execute(
+                    "UPDATE app.workflow_runs SET updated_at = $2 WHERE id = $1",
+                    _uuid(workflow_run_id),
+                    now,
+                )
                 if record["request_status"] == _ORPHANED_REQUEST_STATUS:
+                    if int(record["lost_attempts"]) > _LOST_EXECUTION_REQUEUE_LIMIT:
+                        _LOGGER.error(
+                            "refusing to requeue a repeatedly lost execution",
+                            extra={
+                                "workflow_run_id": workflow_run_id,
+                                "role": str(record["role"]),
+                                "lost_attempts": int(record["lost_attempts"]),
+                            },
+                        )
+                        return False
                     await self._requeue_lost_execution(
                         connection, workflow_run_id, str(record["role"]),
                         int(record["next_attempt"]), now,
@@ -2322,6 +2374,11 @@ class AsyncpgControlPlane:
     async def _requeue_lost_execution(
         self, connection: Any, workflow_run_id: str, role: str, attempt: int, now: datetime
     ) -> None:
+        # The attempt counters were already charged when the node dispatched
+        # the execution that was lost, so the replacement deliberately spends
+        # no further budget: it delivers the attempt that was already paid for.
+        # `_LOST_EXECUTION_REQUEUE_LIMIT` is what bounds it instead, since no
+        # retry budget would ever trip.
         await connection.execute(
             """
             INSERT INTO app.workflow_execution_requests
@@ -2332,14 +2389,6 @@ class AsyncpgControlPlane:
             _uuid(workflow_run_id),
             role,
             attempt,
-            now,
-        )
-        # The attempt counters were already charged when the node dispatched
-        # the execution that was lost, so the replacement deliberately spends
-        # no further budget: it delivers the attempt that was already paid for.
-        await connection.execute(
-            "UPDATE app.workflow_runs SET updated_at = $2 WHERE id = $1",
-            _uuid(workflow_run_id),
             now,
         )
         await connection.execute(

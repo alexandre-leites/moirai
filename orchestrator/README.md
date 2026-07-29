@@ -39,6 +39,8 @@ Resuming from that edge is a checkpointer capability. Without a checkpointer the
 
 Only `queued` and `dispatched` count as open. Leaving a finished request open is what previously made stalled-run recovery unreachable (issue #94), because the detector requires a run to have no open request.
 
+The open row is also what tells `build_task_packet` which role an offer is for. A job offered for a run that has queued executions before but has no `dispatched` request is therefore refused rather than sent the bootstrap planner packet: that packet carries the execution ID `{job_id}-plan`, which `accept_event` is guaranteed to reject, and the runner's control stream would abort on every retry. A refused packet makes the scheduler skip the candidate and lets the offer expire on its own TTL, which the unanswered-offer limit bounds.
+
 ### Workflow maintenance loop
 
 One elected instance runs a 30-second maintenance loop (`main._run_workflow_maintenance_loop`) with three arms, in order:
@@ -51,12 +53,14 @@ Arm 3 does one of two things, decided by how the run's most recent execution req
 
 | Last request | What happened | Repair |
 | --- | --- | --- |
-| `orphaned` | The execution was lost — no runner will ever report it. | Write a fresh `queued` request for the **same role** and leave the graph suspended. `schedule_execution` re-offers it, and its terminal event resumes the graph through the normal path. |
+| `orphaned` | The execution was lost — no runner will ever report it. | Write a fresh `queued` request for the **same role** and leave the graph suspended. `schedule_execution` re-offers it, and its terminal event resumes the graph through whatever path that role's terminal event normally takes. |
 | `completed` / `failed` / `cancelled` | The execution reported and `accept_event` committed the new status; only the graph invocation was lost. | Re-enter the graph with `awaiting_execution` cleared, so the suspended edge can move. |
 
 The distinction is load-bearing, not tidiness. Three of the six dispatching nodes (`implement`, `repair`, `push`) have **unconditional** outgoing edges, so clearing `awaiting_execution` on a run whose execution was lost would not re-run the phase — it would *skip* it. On `push` that means creating a pull request for a branch that was never pushed, and then merging it.
 
-The re-queued attempt spends no additional retry budget: the counters were charged when the node dispatched the execution that was lost, so the replacement delivers an attempt that was already paid for.
+The re-queued attempt spends no additional retry budget: the counters were charged when the node dispatched the execution that was lost, so the replacement delivers an attempt that was already paid for. Because no retry budget can therefore ever trip, the replacement is bounded separately — after five lost attempts for the same role the loop stops replacing it and logs, rather than buying unbounded agent executions.
+
+Runs the loop touched but could not repair have their `updated_at` bumped anyway. The detector reads that column, so a permanently failing run backs off by a full stall window instead of occupying the bounded batch on every tick.
 
 The advancing branch does not replay the state updates that rode on the outbox row, so a gate the lost invocation would have set (`plan_valid`, `pipeline_passed`, `review_approved`) stays as it was and the graph re-runs that phase rather than advancing on a verdict it never saw. That is safe and bounded by the same retry budgets, but it does cost one repeated execution; making it exact depends on replaying stuck outbox rows ([#96](https://github.com/alexandre-leites/moirai/issues/96)).
 
