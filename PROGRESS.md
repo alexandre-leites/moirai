@@ -471,93 +471,31 @@ Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce 
 
 ---
 
-# Session: issue-103 — bootstrap NameError and step order-dependence (F16)
+## Issue #103 — Bootstrap NameError and step order-dependence (F16)
 
-## Current Status
-
-- Overall status: Complete; branch `issue-103` pushed with a PR open against `main`.
-- Current phase: Platform review remediation, finding F16 (GitHub issue #103).
-- Active implementation: None.
-- Last updated: 2026-07-29
-- Agent/session identifier: agent/issue-103
-
-## Done
+### Done
 
 - [x] Make `_bootstrap_initial_setup` restartable and its steps order-independent
   - Completed: 2026-07-29
   - Relevant files: `orchestrator/src/moirai/main.py`, `orchestrator/tests/test_main_bootstrap.py`, `orchestrator/README.md`, `.env.example`, `compose.yaml`
   - Behavior delivered:
-    - `uuid4` is imported at module scope. The pre-fix conditional import made both `uuid4`
-      and (via a redundant local `import json`) `json` function-locals bound only inside the
-      "seed project is missing" branch, so a database holding the seed project with no users
-      raised `UnboundLocalError: cannot access local variable 'uuid4'` (a `NameError` subclass)
-      before the runner registration token was seeded. Confirmed pre-fix with
-      `_bootstrap_initial_setup.__code__.co_varnames` containing `uuid4` and `json`.
-    - Bootstrap is now three independent steps — `_bootstrap_admin_user`,
-      `_bootstrap_seed_project`, `_bootstrap_registration_token` — each guarded by its own
-      existence check and its own configuration. Previously one early return for "any user
-      exists" and another for "no admin password" silently skipped the project and token
-      steps, so a bootstrap interrupted after creating the admin user never seeded the rest,
-      and a deployment that configured `RUNNER_REGISTRATION_TOKEN` after first start never
-      seeded a token at all.
-    - Both seed inserts carry `ON CONFLICT DO NOTHING` on their unique columns, and the admin
-      step treats a lost insert race as satisfied only after re-reading `app.users`, so two
-      instances starting against the same empty database cannot duplicate rows or crash.
-    - The token existence check deliberately still ignores `used_at`/`expires_at`: registration
-      tokens are single-use, so re-seeding a spent hash would re-open it.
-    - Dead code removed: the `else` branch re-read a `project_id` nothing used.
-    - `_seed_issue_if_needed` uses the module-scope `uuid4` instead of its `_uuid4` alias, the
-      pattern the conditional import came from.
-    - `LOOP_SEED_PROJECT_NAME=""` now disables seed-project bootstrap; `compose.yaml` uses
-      `${LOOP_SEED_PROJECT_NAME-demo}` so an empty value in `.env` survives substitution.
-      Because each step re-checks every start, a seeded row deleted by hand is otherwise
-      re-created; this is the documented opt-out.
-  - Validation performed:
-    - Regression proof: the new tests run against the pre-fix `main.py` produce
-      `ERROR ... UnboundLocalError: cannot access local variable 'uuid4'` plus 5 failures for
-      the order-dependent steps; against the fixed file all 15 pass.
-    - Real PostgreSQL (`postgres:16-alpine`, throwaway container) driving the real SQL after
-      `MigrationRunner`: F16 state (project, no users) -> users/projects/tokens `(1, 1, 1)`;
-      two further runs -> `(1, 1, 1)`; user-only state -> `(1, 1, 1)`; no admin password ->
-      `(0, 1, 1)`; four concurrent bootstraps -> `(1, 1, 1)`; seed issue inserted once; blank
-      seed project name -> `(1, 0, 1)`. Pre-fix code on the same database raised
-      `UnboundLocalError` with 0 registration tokens seeded.
-  - Commands executed:
-    - `make test-orchestrator` — `Ran 301 tests ... OK (skipped=2)`
-    - `make lint` — `All checks passed!`
-    - `make typecheck` — `Success: no issues found in 47 source files`
-    - `make compose` — renders; `LOOP_SEED_PROJECT_NAME= docker compose config` renders `""`
-    - `LOOP_TEST_DATABASE_URL='postgresql://loop:loop@127.0.0.1:55403/loop' make test-postgres-integration` — `Ran 2 tests ... OK`
-  - Notes: `make test-runner`, `make test-api`, `make test-web` and `make proto-check` were not
-    run; this change touches no Go, web, or protobuf source.
+    - `uuid4` imported at module scope. Pre-fix conditional import caused `UnboundLocalError`.
+    - Bootstrap split into three independent steps (`_bootstrap_admin_user`, `_bootstrap_seed_project`, `_bootstrap_registration_token`), each with its own existence check. Previously one early return silently skipped downstream steps, so interrupt or deferred config never seeded the rest.
+    - Seed inserts carry `ON CONFLICT DO NOTHING`; admin step re-reads after insert race. Token check ignores `used_at`/`expires_at` (single-use).
+    - `LOOP_SEED_PROJECT_NAME=""` disables seed-project bootstrap; `compose.yaml` uses `${LOOP_SEED_PROJECT_NAME-demo}`.
+  - Validation: `make test-orchestrator` (301 tests, OK), `make test-postgres-integration` (2 tests, OK), `make lint`, `make typecheck`, `make compose`.
 
-## Validation Status
+## Issue #91 — Offer expiry must not cancel in-flight workflows (finding F4)
 
-- Targeted tests: Passed — `test_main_bootstrap.py`, 15 tests.
-- Service tests: Passed — `make test-orchestrator`, 301 tests, 2 skipped.
-- Full repository tests: Not run (no Go/web/proto changes).
-- Build: Not run.
-- Lint: Passed — `make lint`.
-- Type checks: Passed — `make typecheck`.
-- Database migrations: Passed — `make test-postgres-integration` against a throwaway PostgreSQL 16.
-- Docker Compose: Passed — `make compose`.
+### Done
 
-## Known Issues
-
-- Issue: The seeded runner registration token still expires 15 minutes after it is written and
-  is consumed by the first registration, so a runner that first registers later needs a token
-  minted through the API.
-  - Severity: P3
-  - Impact: Only affects a stack whose runner starts long after the orchestrator's first boot.
-  - Evidence: `_bootstrap_registration_token` TTL and `persistence/control_plane.register_runner`
-    stamping `used_at`.
-  - Suggested resolution: Out of scope for F16 — deliberately unchanged, since re-seeding a
-    consumed hash would re-open a spent secret.
-
-## Next Recommended Implementation
-
-Continue the 2026-07-29 platform review remediation queue in
-`docs/reviews/2026-07-29-platform-review.md` (recommended order: #88 → #89/#90 → #104 + #106).
+- [x] Offer expiry and rejection no longer cancel in-flight workflow runs
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/scheduler.py`, `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_scheduler_service.py`, `orchestrator/tests/test_postgres_integration.py`, `docs/architecture.md`
+  - Behavior delivered:
+    - `expire_offers` and `reject_offer` share one release path distinguishing bootstrap (cancel) from re-offer (requeue). Consecutive failures bounded by `unanswered_offer_limit` + `unanswered_offer_grace`. Accepting an offer resets the streak.
+    - `Scheduler.tick` no longer routes packet-build errors into `reject_offer`: logs and skips.
+  - Validation: `make test-orchestrator` (303 tests, OK), `make test-postgres-integration` (8 tests, OK), `make test-runner`, `make test-api`, `make lint`, `make typecheck`, `make compose`.
 ---
 
 # Issue #89 — Runner: a missing or invalid result document must not be reported as success
@@ -602,3 +540,271 @@ Continue the 2026-07-29 platform review remediation queue in
 - Lint/format: Passed — `gofmt -l .` empty, `go vet ./...` clean.
 - Build: Passed — `cd runner && go build ./...`.
 - Orchestrator, API, web tests: Not run — change is confined to the runner's agent backend.
+
+---
+
+# Non-progress fingerprinting (issue #101, finding F14, 2026-07-29)
+
+## Current Status
+
+- Overall status: Complete, awaiting review.
+- Current phase: P3 hardening from the 2026-07-29 platform review.
+- Active implementation: none — issue #101 finished (session `issue-101`, 2026-07-29).
+- Last updated: 2026-07-29
+- Agent/session identifier: `issue-101`
+
+## Done
+
+- [x] Fix non-progress fingerprinting: cross-phase collisions and unstable failure fingerprints (issue #101, finding F14)
+  - Completed: 2026-07-29
+  - Relevant files:
+    - `orchestrator/src/moirai/persistence/control_plane.py` (`_record_progress_evidence`, the
+      non-progress comparison in `accept_event`, and the new outcome-identity helpers)
+    - `orchestrator/src/moirai/workflows/persistence.py` (`transition` durable-column writer)
+    - `orchestrator/tests/test_asyncpg_control_plane.py`, `orchestrator/tests/test_workflow_persistence.py`
+    - `README.md` ("Workflow recovery guarantees")
+  - Behavior delivered:
+    - A terminal outcome now has a *kind-scoped, role-scoped* identity. Successes are
+      identified by a diff hash over `(role, sorted changed files, exit code, result document
+      minus per-attempt identifiers)`; failures and cancellations by a fingerprint over
+      `(role, event type, exit code, stable failure fingerprint)`. Every zero-diff success no
+      longer collides on `sha256("[]")` across phases.
+    - The failure identity is the runner's own `failureFingerprint` when the payload carries
+      one, so volatile fields (`durationMs`, counters) can no longer make two identical
+      failures hash differently. When no fingerprint is supplied (older runners, `cancelled`
+      events) the orchestrator derives one with `_runner_failure_fingerprint`, a byte-exact
+      port of the runner's `dispatch.FailureFingerprint`, applied to the first five lines of
+      the failure text. The two ends now share one definition; no runner change was required.
+    - Comparison is like-with-like: a success is only ever compared with `last_diff_hash`, a
+      failure only with `last_failure_fingerprint`. The SQL writer uses
+      `COALESCE($n, column)` so recording one kind never erases the other kind's identity,
+      which is what previously let an intervening success hide a repeated failure.
+    - Blocking now happens at the documented threshold: `NON_PROGRESS_OUTCOME_LIMIT = 4`
+      identical outcomes (the counter stores repeats, so the code compares `repeats + 1`).
+      Previously five outcomes were required.
+    - "No diff" has exactly one encoding, SQL NULL. `_record_progress_evidence` reports only
+      the column it actually wrote instead of `"" `, and `AsyncpgWorkflowPersistence.transition`
+      normalises an empty string to NULL for both outcome-identity columns. `_stored_outcome`
+      reads legacy `""` rows as absent.
+  - Validation performed:
+    - Defects reproduced first: the seven new behavioural tests in `NonProgressEvidenceTests`
+      were written against the unmodified detector and all seven failed
+      (`FAILED (failures=7)`; e.g. `test_zero_diff_successes_from_different_phases_do_not_collide`
+      → `AssertionError: 1 != 0`, `test_identical_failures_survive_volatile_payload_fields`
+      → `AssertionError: 0 != 1`, `test_four_identical_failures_block_at_the_documented_threshold`
+      → `AssertionError: 0 != 1`, `test_healthy_plan_implement_pipeline_review_never_increments`
+      → `AssertionError: 1 != 0`). All seven pass after the fix.
+    - `test_transition_stores_an_empty_outcome_hash_as_null` likewise failed first with
+      `AssertionError: '' is not None`.
+    - The Python fingerprint port was cross-checked against the Go implementation itself by
+      running `dispatch.FailureFingerprint` over six messages in a scratch copy of `runner/`;
+      output was byte-identical, including PR #128's published value
+      `agent:42051f1c5fc5560d`. Those values are pinned in
+      `FailureFingerprintDefinitionTests.test_matches_the_runner_implementation`.
+  - Commands executed:
+    - `make test-orchestrator` — OK, 299 tests, 2 skipped.
+    - `make lint` — `All checks passed!`
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-101` — `Success: no issues found in 47 source files`.
+    - `make test-runner` — all packages `ok` (runner untouched; run to confirm the fingerprint
+      contract this change depends on still holds).
+  - Notes:
+    - `MYPY_CACHE` was overridden because the Makefile default `/tmp/moirai-mypy-cache` is
+      shared across every worktree and `make typecheck` deletes it; concurrent agents were
+      active in sibling worktrees.
+    - No migration was needed: both columns and the counter already exist and keep their
+      meaning.
+
+## Decisions
+
+- Decision: The documented threshold wins — four identical terminal outcomes block, and the code was changed to match the README rather than the README changed to match the code.
+  - Context: README's "Workflow recovery guarantees" promised four identical outcomes; the code blocked at `non_progress_attempts >= 4` with a counter that starts at 0 and only increments on the *second* identical outcome, so five outcomes were actually required.
+  - Alternatives considered: (a) relax the README to "five"; (b) redefine the column to count outcomes rather than repeats so `>= 4` becomes literally correct.
+  - Reason: The published guarantee is the contract, and four is the more useful bound given the retry budget usually preempts the detector. (b) would have silently changed the meaning of an existing persisted column for every other reader.
+  - Consequences: `NON_PROGRESS_OUTCOME_LIMIT = 4` is the single source of truth for both the comparison and the `blocking_reason` text; `non_progress_attempts` keeps its existing "repeats since the run started" meaning, so 0 still means "no repetition" and no migration or backfill is needed.
+
+- Decision: Zero-diff successes still count toward non-progress, but a zero-diff is no longer an identity on its own.
+  - Context: The issue asked whether zero-diff successes should count at all, noting that the pending evidence-gate work reclassifies a zero-diff developer "success" as a failure. Planner, pipeline and reviewer executions legitimately never change files, so under the old changed-files-only hash they all collided.
+  - Alternatives considered: (a) count only failures and ignore successes entirely; (b) count successes only for mutating roles (developer, repairer); (c) keep counting all successes but widen the identity.
+  - Reason: (a) would discard the genuinely useful signal of a reviewer returning the same findings or a planner returning the same rejected plan four times in a row — a real stuck loop. (b) hard-codes a role policy that the evidence gate is about to make redundant. (c) removes the false positives (role and result document are in the hash) while keeping the true positives.
+  - Consequences: A repeated identical *same-role* success still blocks; a healthy plan → implement → pipeline → review sequence never increments the counter, which is covered by `test_healthy_plan_implement_pipeline_review_never_increments`. When the evidence gate lands, a zero-diff developer success simply arrives as a `failed` event and is handled by the failure path with no further change here.
+
+## Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed — `orchestrator.tests.test_asyncpg_control_plane` (41) and `orchestrator.tests.test_workflow_persistence` (15).
+- Service tests: Passed — `make test-orchestrator`, 299 tests, 2 skipped.
+- Full repository tests: Not run (`make test-api` / `make test-web` not exercised; no Go API or web sources changed).
+- Build: Not run.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-101`.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run.
+- End-to-end workflow: Not run against a live stack. The terminal-event path is covered in-process by `NonProgressEvidenceTests`, which replays whole runner-event sequences through `accept_event` against a stateful fake that reproduces the progress columns.
+- Runner tests: Passed — `make test-runner` (runner unchanged).
+
+## Next Recommended Implementation
+
+Continue the P3 hardening track from `docs/reviews/2026-07-29-platform-review.md`: F15 (runner lifecycle hardening, issue #102) and F16 (bootstrap `NameError`, issue #103) are both unblocked and independent of this change.
+## Label reconciliation data loss and nondeterministic terminal labels (issue #99, F12, 2026-07-29)
+
+### Done
+
+- [x] Scope label reconciliation to the `agent:*` namespace and make terminal-label convergence deterministic
+  - Completed: 2026-07-29
+  - Agent/session identifier: issue-99 worktree, branch `issue-99`
+  - Relevant files:
+    - `orchestrator/src/moirai/domain/issues.py`
+    - `orchestrator/src/moirai/services/issue_sync.py`
+    - `orchestrator/src/moirai/persistence/control_plane.py` (`list_latest_workflow_runs_for_project` only)
+    - `orchestrator/tests/test_issues.py`, `orchestrator/tests/test_issue_sync.py`, `orchestrator/tests/test_postgres_integration.py`
+    - `README.md`, `orchestrator/README.md`
+  - Behavior delivered:
+    - `LabelPolicy` gained `managed_prefix` (`agent:`) and a `__post_init__` invariant: every state label must live inside the managed namespace and `priority_prefix` must stay outside it. A misconfiguration that would re-introduce the data loss now fails fast.
+    - `reconcile_labels(current, desired, *, managed_prefix=...)` computes removals as `(current ∩ managed_namespace) - desired`. Triage labels, `agent-priority:N`, and every other human-applied label survive a sync pass. An empty prefix is rejected instead of silently meaning "manage everything".
+    - `IssueSync.reconcile_project_labels` persists the real resulting label set `(current - to_remove) | to_add` instead of overwriting the stored labels with the agent-only desired set.
+    - `AsyncpgControlPlane.list_active_workflows_for_project` was renamed to `list_latest_workflow_runs_for_project` and now returns one row per issue — the newest run by `created_at` — via `SELECT DISTINCT ON (wr.issue_id) ... ORDER BY wr.issue_id ASC, wr.created_at DESC, wr.id DESC`. It also returns `created_at`, and no longer selects the unused `i.labels` column.
+    - `IssueSync` additionally collapses runs per issue in `_latest_run_per_issue` so convergence does not depend on the control-plane implementation's row order.
+  - Validation performed (all commands run in this worktree):
+    - `make test-orchestrator` — `Ran 298 tests ... OK (skipped=3)` (baseline before the change: 288 tests, OK).
+    - `make lint` — `All checks passed!`
+    - `make typecheck` — `Success: no issues found in 47 source files`
+    - `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@127.0.0.1:55499/ci_like make test-postgres-integration` — `Ran 3 tests ... OK`, against a throwaway `postgres:16-alpine` container bound to port 55499 and removed afterwards.
+  - Failing-test-first evidence (the review marks F12 *(verify)*): the new tests were run against the pre-fix sources extracted with `git archive HEAD` into a scratch tree, with only the control-plane method name adapted.
+    - `test_label_reconciliation_never_removes_labels_outside_the_agent_namespace` failed with
+      `removed == [('42', ['agent-priority:5', 'agent:ready', 'bug', 'enhancement', 'needs-design'])]`.
+    - `test_repeated_sync_cycles_preserve_user_priority_and_triage_labels` failed with `priority 0 != 10` on the second sync cycle, confirming that deleting `agent-priority:10` resets the issue priority to `LabelPolicy.default_priority`.
+    - `test_label_reconciliation_converges_on_the_newest_run_in_any_order` failed in both list orders; with `[run-new, run-old]` the pre-fix code applied `agent:blocked` last, overwriting `agent:delivered`.
+    - `test_label_reconciliation_reads_only_the_newest_workflow_run_per_issue` failed against the pre-fix SQL on a real database: the issue whose newest run was `completed` resolved to `blocked`.
+  - Notes: acceptance criteria met — a sync pass never removes a label outside `agent:*`, and terminal-label convergence is deterministic under multiple historical runs.
+
+### Decisions
+
+- Decision: rename `list_active_workflows_for_project` to `list_latest_workflow_runs_for_project` and return the newest workflow run per issue, rather than adding an "active" status filter.
+  - Context: the method never filtered by status despite its name, and ordered by `wr.id ASC` (random UUIDs). Label reconciliation processed every historical run for an issue, so the last row processed decided the label.
+  - Alternatives considered: (a) filter to non-terminal statuses only — rejected, because reconciliation exists precisely to converge the terminal `agent:blocked` / `agent:delivered` labels, so an "active-only" filter would remove the feature; (b) prefer non-terminal runs and fall back to the latest terminal run — rejected as more machinery for a case that only arises from stale rows, where the newest run is still the honest answer; (c) keep the name and document the behavior — rejected, a name that says "active" while returning everything is how this defect stayed invisible.
+  - Reason: an issue's newest workflow run is its current truth. `DISTINCT ON (wr.issue_id)` with `ORDER BY wr.issue_id, wr.created_at DESC, wr.id DESC` is total, so the result is deterministic even when two runs share a `created_at`. The new name states exactly what the query returns.
+  - Consequences: one row per issue instead of every historical run, so reconciliation also issues fewer GitHub calls. Callers must use the new name; the only caller is `IssueSync.reconcile_project_labels`. `created_at` is now part of the returned payload.
+
+- Decision: keep the per-issue collapse in `IssueSync._latest_run_per_issue` even though the SQL already returns one row per issue.
+  - Context: `IssueSync` takes an untyped `control_plane`, so the guarantee would otherwise rest on one implementation.
+  - Alternatives considered: rely on the query alone — rejected, because the regression test for deterministic convergence would then only run in the Postgres integration job.
+  - Reason: label reconciliation mutates a live repository; the determinism guarantee should hold for any control-plane implementation and be covered by the fast unit suite.
+  - Consequences: about ten lines of defensive code whose purpose is documented at the call site.
+
+### Validation Status
+
+Record only validation that was actually run.
+
+- Targeted tests: Passed — `PYTHONPATH=orchestrator/src .venv/bin/python3 -m unittest discover -s orchestrator/tests -p 'test_issue*.py'`: 31 tests, OK.
+- Service tests: Passed — `make test-orchestrator`: 298 tests, OK (skipped=3).
+- Full repository tests: Not run (`make test` also builds the Go and web modules, untouched here).
+- Build: Not run.
+- Lint: Passed — `make lint`.
+- Type checks: Passed — `make typecheck`.
+- Database migrations: Applied by the integration run; no new migration was required.
+- Docker Compose: Not run.
+- End-to-end workflow: Not run.
+
+### Known Issues
+
+- Issue: `test_control_plane_persists_project_runner_issue_and_lease_lifecycle` assumes a pristine database.
+  - Severity: P3
+  - Impact: `make test-postgres-integration` only passes on the first run against a given database; a second run fails on `list_projects() == [project]`.
+  - Evidence: pre-existing at `HEAD` — the unmodified test file from `git show HEAD:orchestrator/tests/test_postgres_integration.py` passes on run 1 and fails on run 2 against the same fresh database. CI creates a new Postgres service container per job, so it is green there. The new `test_label_reconciliation_reads_only_the_newest_workflow_run_per_issue` deletes its own project, issues, and workflow runs, and passes on repeated runs.
+  - Suggested resolution: scope the assertion to the project the test created, or truncate `app` tables in `asyncSetUp`.
+
+### Next Recommended Implementation
+
+Pick up the next *(verify)* finding from `docs/reviews/2026-07-29-platform-review.md` that no other agent has claimed — F10 (`blocked` agent results flattened to `failed` in `runner/internal/dispatch/control_loop.go`) is the highest-value remaining one, since it makes the orchestrator's planner-`blocked` handling unreachable.
+# Session: F6 / issue #93 — Runner terminal-event durability (branch `issue-93`)
+
+## Current Status
+
+- Overall status: Complete for the runner side of finding F6.
+- Current phase: Bug fix from the 2026-07-29 platform review (`docs/reviews/2026-07-29-platform-review.md`, F6, P1, marked *(verify)*).
+- Active implementation: issue-93 agent session, 2026-07-29 — runner terminal-event loss.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-93.
+
+## Done
+
+- [x] Runner: terminal execution events are no longer silently lost
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/control/events.go`, `runner/internal/control/events_test.go`, `runner/internal/dispatch/control_loop.go`, `runner/internal/dispatch/control_loop_test.go`, `runner/README.md`.
+  - Behavior delivered:
+    - `EventReporter.Abandon` (lease expiry) now discards only a job's `log`/`progress` events. Its terminal events stay in the pending queue and in the crash-safe outbox, still fenced by their lease generation.
+    - `Abandon` retains the expired lease in a separate `expired` map so a still-running execution can still sequence, persist, and attempt delivery of its terminal event. Non-terminal emits against a retained lease keep returning `ErrNoActiveEventLease`. `Finish` clears the retained record.
+    - `Emit` no longer rejects a lifecycle event because chatty log output filled the shared buffer. Events carry a priority (terminal 2 > `started` 1 > `log`/`progress` 0); a higher-priority event evicts the oldest queued event of the lowest priority below it. Terminal events are never evicted. `log`/`progress` never evict anything and are still rejected with the new exported `control.ErrEventBufferFull`.
+    - `ControlLoop.execute` no longer discards emit errors with `_, _ =`. The new `emitEvent` helper distinguishes "queued but undelivered" (`WARN`, retried from the outbox on reconnect) from "never queued" — a lost terminal event is logged at `ERROR` with `msg="terminal execution event lost"`, job id, execution id, lease generation, event type, and reason.
+    - The effective event buffer is raised to twice the runner capacity when configured lower, covering each running execution plus one whose lease expired while still winding down. It is a floor, not a guarantee; a longer pile-up is reported by the error log rather than passing silently.
+    - A terminal event that cannot be queued is retried once stripped to its classification fields (`status`, `exitCode`, `error`, `failureFingerprint`, `durationMs`, `branch`), each string truncated to 2 KiB on a UTF-8 rune boundary, so neither an oversized `result.Raw` document nor an unbounded `error` string costs the run its outcome.
+    - `Reporter.Finish` is now deferred in `execute` and its `false` return is logged, so a panic while building a terminal payload cannot leak the retained lease record.
+  - Validation performed: failing tests were written and confirmed failing before the fix, then confirmed passing after it; full runner suite with the race detector; `gofmt`; `go vet`.
+  - Commands executed:
+    - Before the fix (all reproductions failed):
+      `cd runner && go test -race ./internal/control/ -run 'TestEventReporterKeepsTerminalEventsWhenLeaseExpires|TestEventReporterQueuesTerminalEventEmittedAfterLeaseExpiry|TestEventReporterEvictsDroppableEventsForTerminalEvent' -v`
+      → `pending events after lease expiry = 0, want 1 terminal event`; `Emit(failed) after expiry = (0, runner event lease is not active)`; `Emit(completed) on a full buffer = (0, execution event buffer is full)`.
+      `cd runner && go test -race ./internal/dispatch/ -run 'TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected|TestControlLoopLogsTerminalEventLoss' -v`
+      → `pending events = 0, want 1`; `terminal event loss was not logged`.
+      `TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected` was additionally checked against the pre-fix buffer behavior → `event outbox never contained a "completed" event`.
+    - After the fix: `make test-runner` → all 10 packages `ok`; `cd runner && gofmt -l .` → no output; `cd runner && go vet ./...` → no output.
+  - Notes: Tests added — `TestEventReporterKeepsTerminalEventsWhenLeaseExpires`, `TestEventReporterQueuesTerminalEventEmittedAfterLeaseExpiry`, `TestEventReporterEvictsDroppableEventsForTerminalEvent`, `TestEventReporterRejectsTerminalEventWhenBufferHoldsOnlyTerminalEvents`, `TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected`, `TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected`, `TestControlLoopLogsTerminalEventLoss`. `TestEventReporterRejectsStaleLeaseAndBoundsPendingEvents` was updated: a post-expiry terminal emit is now accepted, so it asserts the `ErrEventBufferFull` sentinel and the retained-lease rules instead.
+
+## Post-review corrections
+
+A `silent-failure-hunter` review of the first commit (`bc09597`) found ten issues; the material ones were fixed in a follow-up commit on the same PR, each with a test that was confirmed failing first.
+
+- Critical — `expired` was keyed by job ID alone, so a job re-offered at the next generation clobbered the retained record of the superseded execution, and that execution's terminal `Emit` then returned `ErrStaleEventLease`. This reintroduced the exact loss #93 exists to fix. Now keyed by `(jobID, generation)`. Test: `TestEventReporterRetainsEveryExpiredGenerationOfAJob` (failed with `Emit(failed, gen 2) = (0, runner event lease is stale)`).
+- High — `makeRoomLocked` evicted a queued event but the persist-failure rollback in `Emit` never restored it, so a failed emit silently destroyed a log event and diverged memory from the on-disk outbox. The victim and its index are now returned and re-inserted, and the "discarded" warning moved after a successful persist so it can no longer report a trade that did not happen. Test: `TestEventReporterRestoresEvictedEventWhenPersistFails` (failed with `pending events = 1`).
+- High — the `eventBufferSize >= capacity` floor did not provide the invariant its comment claimed, because `control.OfferState.Expire` frees the capacity slot while the abandoned execution still owes a terminal event. Raised to `2*capacity` and the comment corrected to state it is a floor, not a guarantee.
+- High/Medium — `Reporter.Finish`'s return value was discarded one line below the fix that removed exactly that pattern from `Emit`, and it was not deferred. Now `defer`red with a warning on `false`.
+- Medium (fixed in two passes) — terminal loss was logged but unmitigated. The most likely real-world trigger is the 16 KiB payload limit, since `terminalPayload` embeds `changedFiles`, `commandsRun`, and the whole `result.Raw` document. `emitEvent` now retries once with a minimal payload. Test: `TestControlLoopRescuesOversizedTerminalEventWithMinimalPayload` (without the retry: `timed out waiting for execution events` — the outcome was lost outright).
+- Second review pass — the first version of that retry was incomplete: `minimalTerminalPayload` whitelisted `error` verbatim, and `control_loop.go` sets it to `failure.Error()`, which is unbounded. A `failed` result whose error string alone exceeds 16 KiB still failed the retry and landed in "terminal execution event lost" — precisely the case the retry exists for, on the terminal type most likely to carry a huge string (a wedged agent dumping stderr into the returned error). String fields in the reduced payload are now truncated to 2 KiB on a UTF-8 rune boundary with a `… [truncated]` marker. Test: `TestControlLoopRescuesTerminalEventWithOversizedErrorText` (failed with `ERROR terminal execution event lost ... error="execution event payload is too large"`).
+- Also tightened the "is this actually a reduction?" guard from a key-count comparison to a set comparison plus a truncation flag, so a same-sized disjoint payload is no longer skipped. Test: `TestMinimalTerminalPayloadReducesOnlyWhenSomethingChanges`, plus `TestTruncateUTF8StopsOnARuneBoundary`.
+- Corrected an overstated doc comment: "reached the crash-safe outbox" only holds when an outbox path is configured; `NewControlLoop` and `NewControlLoopWithRedaction` pass `""`.
+- Accepted as-is: cross-job eviction of another job's `started` (the orchestrator tolerates a terminal event arriving while the job row is still `preparing`), and the cosmetic case where an in-flight event chosen as an eviction victim is both delivered and logged as discarded.
+
+## Decisions
+
+- Decision: Keep terminal events on lease expiry rather than purging the job's whole queue.
+  - Context: `Reporter.Abandon` rewrote the outbox without the job's events, and lease expiry happens precisely when the stream is down and events are queued.
+  - Alternatives considered: Keep purging and rely on the orchestrator's lease-expiry recovery.
+  - Reason: Recovery discards the run's actual outcome, which breaks the "orchestrator is authoritative, runner reports truth" contract. Terminal events remain fenced by lease generation, so keeping them costs the orchestrator nothing.
+  - Consequences: The runner briefly retains an expired lease (until `Finish`) so the in-flight execution can report its outcome. Sequence numbers can now contain gaps where log events were discarded; the orchestrator only requires strictly increasing sequences, so gaps are safe.
+
+- Decision: Priority-based eviction instead of a second queue for lifecycle events.
+  - Context: Log and terminal events shared one `maxPending` budget, so a chatty agent during a disconnect starved the terminal emit.
+  - Alternatives considered: A separate small queue reserved for `started`/terminal events.
+  - Reason: A single queue preserves global send ordering and one durable outbox format; a priority ladder gets the same guarantee with far less machinery.
+  - Consequences: Log output can be discarded under buffer pressure; each discard is logged at `WARN` with the job, execution, discarded type, and sequence.
+
+- Decision (step 4 of the issue — analysis only, orchestrator not modified this session): the orchestrator should accept a late terminal event for an expired-lease job as informational.
+  - Context: `domain/leases.py:accept_event` raises `StaleLeaseError` when `lease.expires_at <= now`, and `grpc/runner_control.py` turns that into a `_StreamFailure` that `context.abort`s the whole bidirectional stream.
+  - Evidence: `orchestrator/src/moirai/domain/leases.py:17-25`, `orchestrator/src/moirai/grpc/runner_control.py:256-276`.
+  - Recommendation: (a) keep generation fencing exactly as it is; (b) for a terminal event whose generation matches but whose lease has expired, record the reported outcome as informational instead of discarding it, so lease-expiry recovery can use the real result; and (c) regardless of (b), stop aborting the stream on a rejected event — reject the single event and keep the session, otherwise a late terminal event costs the runner a full reconnect cycle. The runner change is safe without any of this: `Client.SendExecutionEvent` treats a successful stream `Send` as delivery, so a rejected event is dropped from the outbox rather than becoming a poison pill.
+  - Consequences: Until the orchestrator side lands, an expired-lease terminal event is durably queued and delivered once, and the orchestrator drops it and tears the stream down once.
+
+## Validation Status
+
+- Targeted tests: Passed — `cd runner && go test -race ./internal/control/ ./internal/dispatch/`.
+- Service tests: Passed — `make test-runner` (`cd runner && go test -race ./...`), 10 packages `ok`.
+- Full repository tests: Not run — this change is confined to the Go runner.
+- Build: Not run separately; `go test -race ./...` compiles every runner package.
+- Lint: Passed — `cd runner && gofmt -l .` (no output) and `cd runner && go vet ./...` (no output). These are the runner's CI checks (`.github/workflows/ci.yml`, `runner` job).
+- Type checks: Not applicable — no Python changed. `make lint` / `make typecheck` were deliberately not run because they touch the shared `/tmp/moirai-mypy-cache` while other agents work in sibling worktrees.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run.
+
+## Known Issues
+
+- Issue: An expired-lease terminal event is *guaranteed* to be rejected by the orchestrator, and the rejection aborts the control stream.
+  - Severity: P2
+  - Impact: The runner now durably records and delivers the outcome, but the orchestrator discards it and the runner pays one reconnect. `expire_leases` (`persistence/control_plane.py:1225-1229`) sets `status='recovering'` and `lease_generation + 1` for exactly the leases the runner is abandoning, so all three predicates of the `accept_event` guard (`:1490-1492`) fail at once — rejection is certain, not merely likely. The runner cannot observe this: `Client.SendExecutionEvent` is a bare `stream.Send` that returns nil on hand-off, so the event is dropped from the outbox regardless. Issue #93 step 3 explicitly asks the runner to persist and attempt delivery, so this is the intended runner-side behavior pending the orchestrator half.
+  - Evidence: `orchestrator/src/moirai/domain/leases.py:20-21` and `orchestrator/src/moirai/grpc/runner_control.py:159-160, 274-276`.
+  - Suggested resolution: Implement step 4 of issue #93 on the orchestrator side as described under Decisions.
+
+## Next Recommended Implementation
+
+Implement the orchestrator half of issue #93 step 4 in `orchestrator/src/moirai/domain/leases.py` and `orchestrator/src/moirai/grpc/runner_control.py`: keep generation fencing, accept a generation-matching terminal event for an expired lease as informational so lease-expiry recovery can use the real outcome, and reject a single bad event without aborting the runner's control stream. Targeted validation: `make test-orchestrator`, plus new cases in `orchestrator/tests/test_leases.py` and `orchestrator/tests/test_control_plane.py`.

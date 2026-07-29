@@ -9,12 +9,20 @@ import (
 	"math/big"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
 )
 
 const defaultEventBufferSize = 128
+
+// A reduced terminal payload keeps its string fields within this budget so that
+// an unbounded one — `error` carries whatever the agent wrote to stderr — cannot
+// push the retry back over the event payload limit.
+const maxTerminalPayloadFieldBytes = 2048
+
+const truncationMarker = "… [truncated]"
 
 type ControlClient interface {
 	control.OfferClient
@@ -89,6 +97,15 @@ func NewControlLoopWithEventBuffer(client ControlClient, dispatcher executionDis
 	}
 	if eventBufferSize < 1 {
 		eventBufferSize = defaultEventBufferSize
+	}
+	// Each execution owes a terminal event, and an expired lease frees its
+	// capacity slot (control.OfferState.Expire) while the superseded execution
+	// is still winding down and still owes one. Two terminal slots per unit of
+	// capacity covers that overlap. It is a floor, not a guarantee: a longer
+	// pile-up of undelivered terminal events can still exhaust the buffer, in
+	// which case the loss is reported by emitEvent rather than passing silently.
+	if eventBufferSize < 2*capacity {
+		eventBufferSize = 2 * capacity
 	}
 	reporter, err := control.NewEventReporter(client, eventBufferSize, redactionPrefixes, outboxPath)
 	if err != nil {
@@ -355,15 +372,22 @@ func (loop *ControlLoop) Busy() bool {
 }
 
 func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
+	// Deferred so a panic while building the terminal payload cannot leak the
+	// reporter's retained lease record.
+	defer func() {
+		if !loop.Reporter.Finish(lease.JobID, lease.Generation) {
+			loop.logger().Warn("execution finished without a matching event lease", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
+		}
+	}()
 	started := time.Now()
 	loop.logger().Info("runner execution started", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation)
-	_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "started", map[string]any{"status": "running"})
+	loop.emitEvent(lease, "started", map[string]any{"status": "running"})
 	result, err := loop.Dispatcher.Execute(ctx, lease)
 	usage := executionUsage(started, result)
 	cancelled := loop.finish(lease) || errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)
 	if cancelled {
 		payload := terminalPayload("cancelled", result, usage)
-		_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "cancelled", payload)
+		loop.emitEvent(lease, "cancelled", payload)
 	} else if err != nil || result.Status != "completed" {
 		failure := err
 		if failure == nil {
@@ -372,14 +396,105 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 		payload := terminalPayload("failed", result, usage)
 		payload["failureFingerprint"] = FailureFingerprint("execution", failure)
 		payload["error"] = failure.Error()
-		_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "failed", payload)
+		loop.emitEvent(lease, "failed", payload)
 	} else {
 		payload := terminalPayload(result.Status, result, usage)
-		_, _ = loop.Reporter.Emit(lease.JobID, lease.Generation, "completed", payload)
+		loop.emitEvent(lease, "completed", payload)
 	}
 	loop.logger().Info("runner execution terminal", "job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation, "status", terminalStatus(cancelled, err, result))
 	loop.Offers.Abandon(lease.JobID, lease.Generation)
-	loop.Reporter.Finish(lease.JobID, lease.Generation)
+}
+
+// emitEvent reports an execution lifecycle event and, unlike a discarded
+// error, makes both failure modes visible. A non-zero sequence means the event
+// was queued (and persisted to the outbox when one is configured) and delivery
+// is retried on reconnect; a zero sequence means the event was never queued,
+// which for a terminal event is a lost run outcome and is logged at error
+// level. A terminal event that could not be queued is retried once stripped to
+// its essential fields, since an oversized payload is the failure mode a
+// successful large run is most likely to hit.
+func (loop *ControlLoop) emitEvent(lease control.Lease, eventType string, payload map[string]any) {
+	sequence, err := loop.Reporter.Emit(lease.JobID, lease.Generation, eventType, payload)
+	if err == nil {
+		return
+	}
+	if sequence == 0 && control.IsTerminalEventType(eventType) {
+		if reduced := minimalTerminalPayload(payload); reduced != nil {
+			if retrySequence, retryErr := loop.Reporter.Emit(lease.JobID, lease.Generation, eventType, reduced); retrySequence > 0 {
+				loop.logger().Warn("terminal execution event reduced to its essential fields after a failed emit",
+					"job_id", lease.JobID, "execution_id", lease.Packet.ExecutionID, "lease_generation", lease.Generation,
+					"event_type", eventType, "event_sequence", retrySequence, "error", err)
+				sequence, err = retrySequence, retryErr
+				if err == nil {
+					return
+				}
+			}
+		}
+	}
+	fields := []any{
+		"job_id", lease.JobID,
+		"execution_id", lease.Packet.ExecutionID,
+		"lease_generation", lease.Generation,
+		"event_type", eventType,
+		"error", err,
+	}
+	if sequence > 0 {
+		loop.logger().Warn("execution event queued for delivery after a transport failure", append(fields, "event_sequence", sequence)...)
+		return
+	}
+	if control.IsTerminalEventType(eventType) {
+		loop.logger().Error("terminal execution event lost", fields...)
+		return
+	}
+	loop.logger().Warn("execution event dropped", fields...)
+}
+
+// minimalTerminalPayload strips a terminal payload down to the fields the
+// orchestrator needs to classify the outcome, dropping the unbounded ones
+// (changed files, commands, the raw result document) and truncating the fields
+// it keeps. Keeping `error` is not enough on its own: it carries whatever the
+// agent wrote to stderr, so a wedged agent can blow the payload limit with that
+// field alone. It returns nil when nothing was dropped or truncated, so the
+// caller does not re-emit an identical event that would fail the same way.
+func minimalTerminalPayload(payload map[string]any) map[string]any {
+	reduced := make(map[string]any, len(minimalTerminalPayloadKeys))
+	truncated := false
+	for _, key := range minimalTerminalPayloadKeys {
+		value, present := payload[key]
+		if !present {
+			continue
+		}
+		if text, isText := value.(string); isText {
+			if shortened := truncateUTF8(text, maxTerminalPayloadFieldBytes); shortened != text {
+				value = shortened + truncationMarker
+				truncated = true
+			}
+		}
+		reduced[key] = value
+	}
+	for key := range payload {
+		if _, kept := reduced[key]; !kept {
+			return reduced
+		}
+	}
+	if truncated {
+		return reduced
+	}
+	return nil
+}
+
+var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch"}
+
+// truncateUTF8 shortens value to at most limit bytes without splitting a rune.
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	end := limit
+	for end > 0 && !utf8.RuneStart(value[end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func executionUsage(started time.Time, result Result) map[string]any {

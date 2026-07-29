@@ -57,14 +57,53 @@ from moirai.workflows.task_packets import (
     task_execution,
 )
 
+# Number of identical terminal outcomes that blocks a workflow. README's
+# "Workflow recovery guarantees" documents four; `non_progress_attempts`
+# counts *repeats*, so it is 0 for the first outcome of a run and N-1 once
+# N identical outcomes have been observed.
+NON_PROGRESS_OUTCOME_LIMIT = 4
+
+# Result-document keys that identify a single attempt rather than its content.
+# Both are required or emitted per execution, so they must never take part in
+# an outcome identity.
+_VOLATILE_RESULT_KEYS = frozenset({"executionId", "sessionId"})
+
+# Kept byte-identical to the runner's dispatch.FailureFingerprint, including
+# the ordering, which is load-bearing: markers truncate the message in place
+# and the first matching category wins.
+_FINGERPRINT_SECRET_MARKERS = ("token", "secret", "credential", "password", "authorization")
+_FINGERPRINT_CATEGORIES = (
+    "workspace",
+    "repository",
+    "git",
+    "pipeline",
+    "agent",
+    "executor",
+    "disk",
+    "environment",
+)
+_FINGERPRINT_MESSAGE_LINES = 5
+
 
 class AsyncpgControlPlane:
-    def __init__(self, pool: Any, circuit_probe_cooldown: timedelta = timedelta(minutes=5)) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        circuit_probe_cooldown: timedelta = timedelta(minutes=5),
+        unanswered_offer_limit: int = 5,
+        unanswered_offer_grace: timedelta = timedelta(minutes=15),
+    ) -> None:
         if circuit_probe_cooldown <= timedelta():
             raise ValueError("circuit probe cooldown must be positive")
+        if unanswered_offer_limit < 1:
+            raise ValueError("unanswered offer limit must be positive")
+        if unanswered_offer_grace < timedelta():
+            raise ValueError("unanswered offer grace must not be negative")
         self._pool = pool
         self._authentication = AsyncpgAuthentication(pool)
         self._circuit_probe_cooldown = circuit_probe_cooldown
+        self._unanswered_offer_limit = unanswered_offer_limit
+        self._unanswered_offer_grace = unanswered_offer_grace
 
     @property
     def pool(self) -> Any:
@@ -262,14 +301,21 @@ class AsyncpgControlPlane:
             now,
         )
 
-    async def list_active_workflows_for_project(self, project_id: str) -> list[dict[str, object]]:
+    async def list_latest_workflow_runs_for_project(self, project_id: str) -> list[dict[str, object]]:
+        """Return the newest workflow run per issue, ordered by issue.
+
+        Label reconciliation needs exactly one authoritative run per issue.
+        Returning every historical run made the terminal label depend on row
+        order, so a stale `blocked` run could overwrite `agent:delivered`.
+        """
         records = await self._pool.fetch(
             """
-            SELECT wr.id, wr.status, i.external_id, i.id AS issue_id, i.labels
+            SELECT DISTINCT ON (wr.issue_id)
+                   wr.id, wr.status, wr.created_at, i.external_id, i.id AS issue_id
             FROM app.workflow_runs wr
             JOIN app.issues i ON i.id = wr.issue_id
             WHERE wr.project_id = $1
-            ORDER BY wr.id ASC
+            ORDER BY wr.issue_id ASC, wr.created_at DESC, wr.id DESC
             """,
             _uuid(project_id),
         )
@@ -277,6 +323,7 @@ class AsyncpgControlPlane:
             {
                 "id": str(record["id"]),
                 "status": str(record["status"]),
+                "created_at": record["created_at"],
                 "external_id": str(record["external_id"]),
                 "issue_id": str(record["issue_id"]),
             }
@@ -1184,35 +1231,234 @@ class AsyncpgControlPlane:
                     )
                     if offer is None:
                         break
-                    job = await connection.fetchrow(
-                        """
-                        UPDATE app.jobs
-                        SET status = 'cancelled', finished_at = $2, recovery_reason = 'offer_expired'
-                        WHERE id = $1 AND status = 'offered'
-                        RETURNING workflow_run_id, project_id
-                        """,
-                        offer["job_id"],
-                        now,
-                    )
-                    if job is None:
-                        continue
-                    await connection.execute(
-                        """
-                        UPDATE app.workflow_runs
-                        SET status = 'cancelled', current_phase = 'cancelled', terminal_reason = 'offer_expired',
-                            completed_at = $2, updated_at = $2
-                        WHERE id = $1
-                        """,
-                        job["workflow_run_id"],
-                        now,
-                    )
-                    await connection.execute(
-                        "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
-                        job["project_id"],
-                        job["workflow_run_id"],
-                    )
-                    expired.append(str(offer["job_id"]))
+                    if await self._release_unanswered_offer(
+                        connection, offer["job_id"], None, "offer_expired", now
+                    ):
+                        expired.append(str(offer["job_id"]))
         return tuple(expired)
+
+    async def _release_unanswered_offer(
+        self, connection: Any, job_id: Any, runner_id: Any, reason: str, now: datetime
+    ) -> bool:
+        """Releases a job whose offer was never answered, without destroying
+        work the run already completed (issue #91).
+
+        A bootstrap offer -- a run `schedule()` just created that has never
+        accepted a job -- is cancelled: it owns no branch, no pull request and
+        no execution history, and cancelling it hands the issue straight back
+        to the global queue.
+
+        Every other offer belongs to a run with progress, so it is returned to
+        a schedulable state instead: the workflow keeps its phase and its
+        project lock, a leaked `dispatched` execution request goes back to
+        `queued` for `schedule_execution`, and a recovery offer goes back to
+        `recovering` for `recover_one`. Runs cannot ping-pong forever: once the
+        unanswered offers for a job reach `unanswered_offer_limit` and have been
+        failing for longer than `unanswered_offer_grace`, the run is blocked
+        with a specific reason and stops holding the project lock.
+
+        Returns False when the job is no longer offered (it was accepted or
+        released concurrently), leaving the caller to decide what that means.
+        """
+        context = await connection.fetchrow(
+            """
+            SELECT j.workflow_run_id, j.project_id, request.id AS request_id,
+                   w.status IN ('completed', 'blocked', 'failed', 'cancelled') AS terminal,
+                   (
+                       w.status = 'offered' AND w.current_phase = 'offered'
+                       AND w.branch_name IS NULL AND w.pull_request_external_id IS NULL
+                       AND w.total_agent_executions = 0
+                       AND NOT EXISTS (SELECT 1 FROM app.executions AS e WHERE e.job_id = j.id)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM app.workflow_execution_requests AS r
+                           WHERE r.workflow_run_id = w.id
+                       )
+                   ) AS bootstrap
+            FROM app.jobs AS j
+            JOIN app.workflow_runs AS w ON w.id = j.workflow_run_id
+            LEFT JOIN LATERAL (
+                SELECT id FROM app.workflow_execution_requests
+                WHERE workflow_run_id = w.id AND status = 'dispatched'
+                ORDER BY dispatched_at DESC, id DESC
+                LIMIT 1
+            ) AS request ON true
+            WHERE j.id = $1 AND j.status = 'offered'
+              AND ($2::uuid IS NULL OR j.runner_id = $2)
+            FOR UPDATE OF j, w
+            """,
+            job_id,
+            runner_id,
+        )
+        if context is None:
+            return False
+        workflow_run_id = context["workflow_run_id"]
+        if bool(context["terminal"]):
+            # The run reached a terminal status while this offer was
+            # outstanding: release the job without resurrecting the run.
+            await self._cancel_offered_job(connection, job_id, context, reason, now, cancel_run=False)
+            return True
+        if bool(context["bootstrap"]):
+            await self._cancel_offered_job(connection, job_id, context, reason, now)
+            return True
+        streak = await connection.fetchrow(
+            """
+            SELECT COUNT(*) AS unanswered, MIN(created_at) AS started_at
+            FROM app.job_offers
+            WHERE job_id = $1 AND status IN ('expired', 'rejected')
+              AND created_at > COALESCE(
+                  (SELECT MAX(created_at) FROM app.job_offers WHERE job_id = $1 AND status = 'accepted'),
+                  '-infinity'::timestamptz
+              )
+            """,
+            job_id,
+        )
+        unanswered = int(streak["unanswered"]) if streak is not None else 1
+        started_at = streak["started_at"] if streak is not None else now
+        exhausted = unanswered >= self._unanswered_offer_limit and (
+            started_at is None or started_at <= now - self._unanswered_offer_grace
+        )
+        if exhausted:
+            await self._block_unanswered_run(connection, job_id, context, reason, now)
+        elif context["request_id"] is not None:
+            # Hand the execution request back to schedule_execution, which
+            # re-offers this same job on a later tick.
+            await connection.execute(
+                """
+                UPDATE app.workflow_execution_requests
+                SET status = 'queued', dispatched_at = NULL
+                WHERE id = $1 AND status = 'dispatched'
+                """,
+                context["request_id"],
+            )
+            await connection.execute(
+                """
+                UPDATE app.jobs
+                SET status = 'cancelled', finished_at = $2, recovery_reason = $3
+                WHERE id = $1
+                """,
+                job_id,
+                now,
+                reason,
+            )
+            await connection.execute(
+                "UPDATE app.workflow_runs SET updated_at = $2 WHERE id = $1",
+                workflow_run_id,
+                now,
+            )
+        else:
+            # No execution request to requeue (a recovery offer, or a run whose
+            # progress predates one): fence the lease and hand it to recover_one.
+            await connection.execute(
+                """
+                UPDATE app.jobs
+                SET status = 'recovering', lease_generation = lease_generation + 1,
+                    finished_at = NULL, recovery_reason = $2
+                WHERE id = $1
+                """,
+                job_id,
+                reason,
+            )
+            await connection.execute(
+                "UPDATE app.workflow_runs SET status = 'recovering', updated_at = $2 WHERE id = $1",
+                workflow_run_id,
+                now,
+            )
+        await connection.execute(
+            """
+            INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
+            VALUES ($1, 'offer_unanswered', $2, $3::jsonb, $4)
+            """,
+            workflow_run_id,
+            "error" if exhausted else "warning",
+            json.dumps(
+                {
+                    "job_id": str(job_id),
+                    "reason": reason,
+                    "unanswered_offers": unanswered,
+                    "outcome": "blocked" if exhausted else "requeued",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            now,
+        )
+        return True
+
+    async def _cancel_offered_job(
+        self,
+        connection: Any,
+        job_id: Any,
+        context: Any,
+        reason: str,
+        now: datetime,
+        *,
+        cancel_run: bool = True,
+    ) -> None:
+        await connection.execute(
+            """
+            UPDATE app.jobs
+            SET status = 'cancelled', finished_at = $2, recovery_reason = $3
+            WHERE id = $1
+            """,
+            job_id,
+            now,
+            reason,
+        )
+        if cancel_run:
+            await connection.execute(
+                """
+                UPDATE app.workflow_runs
+                SET status = 'cancelled', current_phase = 'cancelled', terminal_reason = $3,
+                    completed_at = $2, updated_at = $2
+                WHERE id = $1
+                """,
+                context["workflow_run_id"],
+                now,
+                reason,
+            )
+        await connection.execute(
+            "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+            context["project_id"],
+            context["workflow_run_id"],
+        )
+
+    async def _block_unanswered_run(
+        self, connection: Any, job_id: Any, context: Any, reason: str, now: datetime
+    ) -> None:
+        await connection.execute(
+            """
+            UPDATE app.jobs
+            SET status = 'cancelled', finished_at = $2, recovery_reason = $3
+            WHERE id = $1
+            """,
+            job_id,
+            now,
+            reason,
+        )
+        await connection.execute(
+            """
+            UPDATE app.workflow_runs
+            SET status = 'blocked', current_phase = 'blocked', blocking_reason = $3,
+                terminal_reason = $3, completed_at = COALESCE(completed_at, $2), updated_at = $2
+            WHERE id = $1
+            """,
+            context["workflow_run_id"],
+            now,
+            "unanswered_offer_limit",
+        )
+        await connection.execute(
+            """
+            UPDATE app.workflow_execution_requests
+            SET status = 'expired'
+            WHERE workflow_run_id = $1 AND status IN ('queued', 'dispatched')
+            """,
+            context["workflow_run_id"],
+        )
+        await connection.execute(
+            "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+            context["project_id"],
+            context["workflow_run_id"],
+        )
 
     async def expire_leases(self, now: datetime) -> tuple[str, ...]:
         expired: list[str] = []
@@ -1404,6 +1650,10 @@ class AsyncpgControlPlane:
         return JobLease(str(job_id), runner_id, int(job["lease_generation"]), job["lease_expires_at"])
 
     async def reject_offer(self, job_id: str, runner_id: str, now: datetime) -> None:
+        """Releases an offer the assigned runner refused (or the scheduler
+        could not deliver). A refusal says nothing about the work the run has
+        already done, so it takes the same non-destructive release path as an
+        expired offer."""
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 offer = await connection.fetchrow(
@@ -1419,33 +1669,11 @@ class AsyncpgControlPlane:
                 )
                 if offer is None:
                     raise OfferError("job offer is no longer active")
-                job = await connection.fetchrow(
-                    """
-                    UPDATE app.jobs
-                    SET status = 'cancelled', finished_at = $3, recovery_reason = 'runner_rejected_offer'
-                    WHERE id = $1 AND runner_id = $2 AND status = 'offered'
-                    RETURNING workflow_run_id, project_id
-                    """,
-                    _uuid(job_id),
-                    _uuid(runner_id),
-                    now,
+                released = await self._release_unanswered_offer(
+                    connection, _uuid(job_id), _uuid(runner_id), "runner_rejected_offer", now
                 )
-                if job is None:
+                if not released:
                     raise OfferError("job offer is no longer active")
-                await connection.execute(
-                    """
-                    UPDATE app.workflow_runs
-                    SET status = 'cancelled', current_phase = 'cancelled', updated_at = $2
-                    WHERE id = $1
-                    """,
-                    job["workflow_run_id"],
-                    now,
-                )
-                await connection.execute(
-                    "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
-                    job["project_id"],
-                    job["workflow_run_id"],
-                )
 
     async def renew_lease(
         self, job_id: str, runner_id: str, generation: int, expires_at: datetime, now: datetime
@@ -1515,16 +1743,24 @@ class AsyncpgControlPlane:
                 transition = workflow_transition_for_terminal_event(
                     summary, current_workflow_status, role=resolved_role
                 )
-                progress_updates = await self._record_progress_evidence(connection, job, summary, event.payload, now)
-                non_progress_attempts = progress_updates.get("non_progress_attempts", 0)
-                if isinstance(non_progress_attempts, int) and non_progress_attempts >= 4:
+                progress_updates = await self._record_progress_evidence(
+                    connection, job, summary, event.payload, now, resolved_role
+                )
+                repeats = progress_updates.get("non_progress_attempts", 0)
+                # The stored counter is 0 for the first outcome of a run, so a
+                # run of N identical outcomes stores N-1.
+                identical_outcomes = repeats + 1 if isinstance(repeats, int) else 0
+                if identical_outcomes >= NON_PROGRESS_OUTCOME_LIMIT:
                     transition = WorkflowTransition(
                         new_status="blocked",
                         state_updates={
                             **(transition.state_updates if transition is not None else {}),
                             **progress_updates,
                             "status": "blocked",
-                            "blocking_reason": "workflow stopped after four identical execution outcomes",
+                            "blocking_reason": (
+                                f"workflow stopped after {NON_PROGRESS_OUTCOME_LIMIT} "
+                                "identical execution outcomes"
+                            ),
                         },
                     )
 
@@ -1677,39 +1913,37 @@ class AsyncpgControlPlane:
         summary: Any,
         payload: dict[str, Any],
         now: datetime,
+        role: str | None,
     ) -> dict[str, object]:
+        """Records the identity of a terminal outcome and counts how many times
+        it has repeated.
+
+        A terminal outcome is either a success, identified by a diff hash, or a
+        failure, identified by a failure fingerprint. Both identities are scoped
+        by the execution's role, and each is only ever compared with the stored
+        identity of its own kind -- a failure is never measured against a diff
+        hash. The two columns therefore hold the last outcome *per kind*: a
+        success does not erase the failure a later failure must be compared
+        with, and vice versa.
+        """
         if not summary.terminal:
             return {}
-        diff_hash = (
-            sha256(json.dumps(sorted(summary.changed_files), separators=(",", ":")).encode("utf-8")).hexdigest()
-            if summary.succeeded
-            else None
-        )
-        fingerprint = sha256(
-            json.dumps(
-                {
-                    "event_type": summary.event_type,
-                    "exit_code": summary.exit_code,
-                    "changed_files": sorted(summary.changed_files),
-                    "result": summary.result,
-                    "payload": payload,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
-        current = diff_hash or fingerprint
-        previous = _optional_text(job.get("last_diff_hash")) or _optional_text(
-            job.get("last_failure_fingerprint")
-        )
-        same_outcome = previous == current
+        scope = role or "unknown"
+        diff_hash: str | None = None
+        fingerprint: str | None = None
+        if summary.succeeded:
+            diff_hash = current = _success_outcome_hash(scope, summary)
+            previous = _stored_outcome(job.get("last_diff_hash"))
+        else:
+            fingerprint = current = _failure_outcome_hash(scope, summary, payload)
+            previous = _stored_outcome(job.get("last_failure_fingerprint"))
+        same_outcome = previous is not None and previous == current
         attempts = int(job.get("non_progress_attempts") or 0) + 1 if same_outcome else 0
         await connection.execute(
             """
             UPDATE app.workflow_runs
-            SET last_diff_hash = $2,
-                last_failure_fingerprint = $3,
+            SET last_diff_hash = COALESCE($2, last_diff_hash),
+                last_failure_fingerprint = COALESCE($3, last_failure_fingerprint),
                 non_progress_attempts = $4,
                 last_progress_at = CASE WHEN $5 THEN $6 ELSE last_progress_at END,
                 updated_at = $6
@@ -1722,12 +1956,19 @@ class AsyncpgControlPlane:
             not same_outcome,
             now,
         )
-        return {
-            "last_diff_hash": diff_hash or "",
-            "last_failure_fingerprint": fingerprint,
+        # Only the column this outcome actually wrote is reported, so replaying
+        # these updates through the workflow persistence layer cannot clear the
+        # other kind's identity. "No diff" has one encoding -- SQL NULL -- so
+        # the key is absent rather than "".
+        updates: dict[str, object] = {
             "non_progress_attempts": attempts,
             "progressed": not same_outcome,
         }
+        if diff_hash is not None:
+            updates["last_diff_hash"] = diff_hash
+        else:
+            updates["last_failure_fingerprint"] = fingerprint
+        return updates
 
     async def _resolve_dispatched_execution(
         self, connection: Any, workflow_run_id: str, job_id: str, execution_id: str
@@ -1985,6 +2226,104 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _runner_failure_fingerprint(component: str, message: str) -> str:
+    """Port of the runner's `dispatch.FailureFingerprint`
+    (runner/internal/dispatch/fingerprint.go), so both ends of the protocol
+    agree on one definition of "the same failure".
+
+    The runner already sends this value as `failureFingerprint` on `failed`
+    events; this reproduces it for terminal events that carry none (older
+    runners, `cancelled` events), and any value it returns is therefore
+    directly comparable with a runner-supplied one.
+    """
+    normalized = message.lower()
+    for marker in _FINGERPRINT_SECRET_MARKERS:
+        index = normalized.find(marker)
+        if index >= 0:
+            normalized = normalized[:index] + marker
+    for category in _FINGERPRINT_CATEGORIES:
+        if category in normalized:
+            component = category
+            break
+    digest = sha256(f"{component}\n{normalized}".encode()).hexdigest()
+    return f"{component}:{digest[:16]}"
+
+
+def _failure_message(summary: Any, payload: dict[str, Any]) -> str:
+    """The most specific human-readable failure text a terminal payload
+    carries, truncated to its first few lines so that trailing volatile
+    detail cannot destabilise the fingerprint."""
+    for key in ("error", "summary", "message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            lines = value.strip().splitlines()[:_FINGERPRINT_MESSAGE_LINES]
+            return "\n".join(lines)
+    return f"{summary.event_type} exit={summary.exit_code}"
+
+
+def _stable_result(result: Any) -> dict[str, Any] | None:
+    """The agent result document without its per-attempt identifiers. Those
+    change on every execution, so leaving them in would make two identical
+    outcomes look different."""
+    if not isinstance(result, dict):
+        return None
+    return {key: value for key, value in result.items() if key not in _VOLATILE_RESULT_KEYS}
+
+
+def _success_outcome_hash(role: str, summary: Any) -> str:
+    """Identity of a successful terminal outcome. Scoped by role so a zero-diff
+    planner success can never collide with a zero-diff pipeline or reviewer
+    success, and keyed on the result document so two attempts that produced
+    different plans or review findings count as progress."""
+    return sha256(
+        json.dumps(
+            {
+                "kind": "success",
+                "role": role,
+                "changed_files": sorted(summary.changed_files),
+                "exit_code": summary.exit_code,
+                "result": _stable_result(summary.result),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+
+
+def _failure_outcome_hash(role: str, summary: Any, payload: dict[str, Any]) -> str:
+    """Identity of a failed or cancelled terminal outcome. Built from the
+    runner's own stable fingerprint when it sent one, otherwise from the same
+    algorithm applied to the failure text -- never from the raw payload, whose
+    durations and counters differ on every execution."""
+    supplied = payload.get("failureFingerprint")
+    core = (
+        supplied.strip()
+        if isinstance(supplied, str) and supplied.strip()
+        else _runner_failure_fingerprint("execution", _failure_message(summary, payload))
+    )
+    return sha256(
+        json.dumps(
+            {
+                "kind": "failure",
+                "role": role,
+                "event_type": summary.event_type,
+                "exit_code": summary.exit_code,
+                "fingerprint": core,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
+def _stored_outcome(value: Any) -> str | None:
+    """Reads a stored outcome hash, treating the legacy empty-string encoding
+    of "no diff" as the absent value it was always meant to be."""
+    text = _optional_text(value)
+    return text if text else None
 
 
 def _json(values: list[str]) -> str:
