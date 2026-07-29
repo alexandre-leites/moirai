@@ -256,12 +256,20 @@ func readRemoteRevision(t *testing.T, remote, reference string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// TestRecordedWorkInProgressSurvivesTheNextPreparation is the answer to #136 for
-// this feature: the next preparation of a job re-creates its branch from the
-// base revision, so the commit of a failed run is only durable if something
-// outside refs/heads holds it. Real git, because that is where the guarantee
+// TestRecordedWorkInProgressSurvivesAPreparationThatMovesTheBranch is what is
+// left of this feature's answer to #136 now that #136 is fixed.
+//
+// The original test asserted that *every* preparation rewound the execution
+// branch to the base revision, which is no longer true: a preparation now
+// re-creates the branch from its own tip, and a failed run's commit sitting
+// there is exactly what the next execution of the job inherits (see
+// TestPrepareResumesAJobFromThePreviousExecutionsWork). The anchor still earns
+// its keep in the case the branch cannot cover: when the branch has been
+// published elsewhere, the preparation resets the local branch onto the
+// published tip, and the commit of a failed run is then reachable only through
+// a reference outside refs/heads. Real git, because that is where the guarantee
 // lives.
-func TestRecordedWorkInProgressSurvivesTheNextPreparation(t *testing.T) {
+func TestRecordedWorkInProgressSurvivesAPreparationThatMovesTheBranch(t *testing.T) {
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin")
 	runRealGit(t, root, "init", "-q", "-b", "main", origin)
@@ -288,8 +296,17 @@ func TestRecordedWorkInProgressSurvivesTheNextPreparation(t *testing.T) {
 		t.Fatalf("RecordWorkInProgress() error = %v", err)
 	}
 
-	// The same job runs again: Prepare removes the workspace and force-resets
-	// the execution branch to the base revision (#136).
+	// Another runner delivers the same job and publishes the branch, so the
+	// next preparation here resets the local branch onto the published tip and
+	// the work of the failed run is left on no branch at all.
+	runRealGit(t, origin, "checkout", "-q", "-b", request.Branch)
+	if err := os.WriteFile(filepath.Join(origin, "delivered.go"), []byte("package delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "delivered.go")
+	runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+	runRealGit(t, origin, "checkout", "-q", "main")
+
 	if _, err := manager.Prepare(context.Background(), request); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}

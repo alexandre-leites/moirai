@@ -392,9 +392,11 @@ func (dispatcher Dispatcher) deliver(ctx context.Context, workspace repository.W
 // branch.
 //
 // It never writes to the delivery branch. That branch means "this run produced
-// deliverable work", and the next attempt re-creates it from the base revision,
-// so a work-in-progress commit there would both misrepresent the outcome and be
-// rejected as a non-fast-forward push on the following attempt.
+// deliverable work", so publishing a work-in-progress commit there would
+// misrepresent the outcome. The commit does sit on the execution branch, which
+// the next attempt of the same job continues from (#136) — so the work is
+// inherited by that attempt and reaches the delivery branch only underneath a
+// genuine delivery, which is the point of retaining it.
 //
 // Every failure here is reported and swallowed: the execution has already
 // failed for another reason, and preserving its remains must not replace the
@@ -418,8 +420,11 @@ func (dispatcher Dispatcher) retainWorkInProgress(ctx context.Context, workspace
 		result.FinalRevision = commitResult.Revision
 	}
 	// The commit sits on the execution branch, which the next preparation of
-	// this job re-creates from the base revision — so without an anchor of its
-	// own the work would be unreachable by the time anything came looking. The
+	// this job continues from where it can (#136). The anchor covers where it
+	// cannot: when that branch has been published elsewhere and this runner's
+	// copy does not contain the published tip, the preparation re-creates the
+	// branch there, and only a reference outside refs/heads still reaches this
+	// commit by the time anything comes looking for it. The
 	// local ref is written for every role; only a role granted mayPush can also
 	// publish it, and today the orchestrator grants that to the developer alone.
 	if err := dispatcher.Delivery.RecordWorkInProgress(ctx, workspace, workInProgressReference(packet.ExecutionID)); err != nil {
