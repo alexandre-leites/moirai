@@ -799,6 +799,34 @@ class AsyncpgControlPlane:
                     )
         return _runner_record(record)
 
+    async def set_runner_draining(self, runner_id: str, draining: bool) -> None:
+        """Record a runner's own report of whether it is draining.
+
+        Writing `draining` is the whole fix -- every placement query already
+        gates on `r.draining = false`, so the next scheduling pass stops
+        considering the runner.
+
+        Narrower than `set_runner_state` in the columns it touches: a runner
+        reports one fact about itself, so an operator's `enabled` and
+        `revoked_at` decisions survive the report. It is *not* narrower in
+        `draining` itself, which both methods write -- a runner reporting
+        `draining=false` clears an operator drain, and an operator `enable`
+        clears a runner's. Separating the two owners needs a second column and
+        a change to the three placement predicates; until then #119, which owns
+        the operator side, has to decide how the two reconcile.
+
+        A revoked runner matches nothing and the report is rejected, which ends
+        its control stream -- the same thing its next message would do, since
+        `_load_runner_credential` refuses revoked rows.
+        """
+        updated = await self._pool.execute(
+            "UPDATE app.runners SET draining = $2 WHERE id = $1 AND revoked_at IS NULL",
+            _uuid(runner_id),
+            draining,
+        )
+        if updated != "UPDATE 1":
+            raise ValueError("runner is unknown or revoked")
+
     async def list_runners(self) -> list[RunnerRecord]:
         records = await self._pool.fetch(
             "SELECT id, name, enabled, draining, status, labels, last_seen_at FROM app.runners ORDER BY name ASC, id ASC"
