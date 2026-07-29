@@ -10,10 +10,16 @@ class _Checkpoints:
         self,
         checkpoint: tuple[int, dict[str, object]] | None = None,
         seed: dict[str, object] | None = None,
+        open_request: dict[str, object] | None = None,
     ) -> None:
         self.current = checkpoint
         self.seed = seed or {}
         self.saved: list[tuple[str, dict[str, object]]] = []
+        self.open_request = open_request
+
+    async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, object] | None:
+        del workflow_run_id
+        return self.open_request
 
     async def latest_checkpoint(self, workflow_run_id: str) -> tuple[int, dict[str, object]] | None:
         del workflow_run_id
@@ -164,6 +170,42 @@ class PersistedWorkflowRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(graph.calls), 1)
         self.assertEqual(result["status"], "local_pipeline")
+
+    async def test_a_transition_replayed_while_an_execution_is_open_does_not_advance(self) -> None:
+        """Issue #96: the transition outbox is at-least-once, so a delivery that
+        already advanced the graph can arrive again with its gate cleared. The
+        run still has an execution open, so re-asserting the gate is what keeps
+        the second delivery from walking onto the next phase."""
+        checkpoints = _Checkpoints(
+            (2, {"status": "implementing", "awaiting_execution": True}),
+            seed={"status": "implementing"},
+            open_request={"id": "request-1", "role": "developer", "attempt": 1, "created": False},
+        )
+        graph = _Graph({"status": "local_pipeline"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run("workflow-1", {"status": "implementing", "awaiting_execution": False})
+
+        self.assertEqual(graph.calls, [])
+        self.assertIs(result["awaiting_execution"], True)
+        self.assertEqual(result["status"], "implementing")
+
+    async def test_an_open_request_never_holds_back_a_terminal_run(self) -> None:
+        """A terminal run is already finished; the maintenance loop closes the
+        request it leaked. Consulting the gate first would only delay the
+        checkpoint that records the terminal state."""
+        checkpoints = _Checkpoints(
+            seed={"status": "blocked"},
+            open_request={"id": "request-1", "role": "developer", "attempt": 1, "created": False},
+        )
+        graph = _Graph({"status": "blocked"})
+        runtime = PersistedWorkflowRuntime(graph, checkpoints)
+
+        result = await runtime.run("workflow-1", {"status": "blocked"})
+
+        self.assertEqual(graph.calls, [])
+        self.assertNotIn("awaiting_execution", result)
+        self.assertEqual(checkpoints.saved, [("workflow-1", result)])
 
     async def test_node_exception_transitions_run_to_failed_instead_of_propagating(self) -> None:
         checkpoints = _TransitioningCheckpoints()

@@ -762,6 +762,47 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         return str(status)
 
+    async def _counters(self, workflow_run_id: str) -> dict[str, int]:
+        row = await self.pool.fetchrow(
+            """
+            SELECT planning_attempts, implementation_attempts, pipeline_repair_attempts,
+                   review_cycles, ci_repair_attempts, total_agent_executions
+            FROM app.workflow_runs WHERE id = $1
+            """,
+            UUID(workflow_run_id),
+        )
+        assert row is not None
+        return {key: int(value) for key, value in dict(row).items()}
+
+    async def _outbox_statuses(self, workflow_run_id: str) -> list[str]:
+        rows = await self.pool.fetch(
+            """
+            SELECT status FROM app.workflow_transition_outbox
+            WHERE workflow_run_id = $1 ORDER BY created_at
+            """,
+            UUID(workflow_run_id),
+        )
+        return [str(row["status"]) for row in rows]
+
+    def _advance_only(self, runtime: Any, workflow_run_id: str) -> Any:
+        """`_advance`, restricted to one run.
+
+        `drain_pending_transitions` is a global query against a database shared
+        with every other integration test, so an unrestricted callback would
+        also hand other fixtures' rows to this test's graph runtime.
+        """
+        advance = self._advance(runtime)
+        delivered: list[tuple[str, str, dict[str, object]]] = []
+
+        async def advance_one(target: str, new_status: str, updates: dict[str, object]) -> None:
+            if target != workflow_run_id:
+                return
+            delivered.append((target, new_status, dict(updates)))
+            await advance(target, new_status, updates)
+
+        advance_one.delivered = delivered  # type: ignore[attr-defined]
+        return advance_one
+
     async def _request_statuses(self, workflow_run_id: str) -> list[tuple[str, int, str]]:
         """Every execution request for the run as (role, attempt, status).
 
@@ -850,6 +891,111 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
 
+    async def test_a_redelivered_outbox_transition_changes_nothing(self) -> None:
+        """Issue #96, acceptance criterion 1: delivering the same outbox
+        transition twice is observationally identical to delivering it once.
+
+        The crash modelled here is the one the outbox exists for: the graph was
+        invoked and committed everything it does, and the process died before
+        the row could be marked processed."""
+        workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+        runtime = await self._runtime()
+        await self._deliver_planner_result(
+            job_id, runner_id, request_id, on_transition=self._advance(runtime)
+        )
+        requests = await self._request_statuses(workflow_run_id)
+        counters = await self._counters(workflow_run_id)
+        status = await self._run_status(workflow_run_id)
+        nodes = await self._nodes_that_ran(workflow_run_id)
+        self.assertEqual(requests, [("developer", 1, "queued"), ("planner", 1, "completed")])
+        await self.pool.execute(
+            """
+            UPDATE app.workflow_transition_outbox
+            SET status = 'pending', processing_started_at = NULL, processed_at = NULL
+            WHERE workflow_run_id = $1
+            """,
+            UUID(workflow_run_id),
+        )
+
+        advance = self._advance_only(runtime, workflow_run_id)
+        await self.control_plane.drain_pending_transitions(advance, _NOW)
+
+        self.assertEqual(len(advance.delivered), 1)
+        self.assertEqual(await self._request_statuses(workflow_run_id), requests)
+        self.assertEqual(await self._counters(workflow_run_id), counters)
+        self.assertEqual(await self._run_status(workflow_run_id), status)
+        # No node ran a second time, so the graph is still suspended on the
+        # edge that is waiting for the developer execution.
+        self.assertEqual(await self._nodes_that_ran(workflow_run_id), nodes)
+        self.assertEqual(await self._outbox_statuses(workflow_run_id), ["processed"])
+
+    async def test_a_redelivery_after_the_scheduler_claimed_the_request_changes_nothing(self) -> None:
+        """The same replay, one step later: the scheduler has already offered
+        the queued request, so the row this run is waiting on is `dispatched`.
+        Matching only `queued` rows is what let a replay queue the same agent
+        work twice."""
+        workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+        runtime = await self._runtime()
+        await self._deliver_planner_result(
+            job_id, runner_id, request_id, on_transition=self._advance(runtime)
+        )
+        await self.pool.execute(
+            "UPDATE app.jobs SET status = 'completed', finished_at = $2 WHERE id = $1",
+            UUID(job_id),
+            _NOW,
+        )
+        offered = await self.control_plane.schedule_execution(_NOW, timedelta(minutes=5))
+        assert offered is not None
+        requests = await self._request_statuses(workflow_run_id)
+        counters = await self._counters(workflow_run_id)
+        self.assertEqual(requests, [("developer", 1, "dispatched"), ("planner", 1, "completed")])
+        await self.pool.execute(
+            """
+            UPDATE app.workflow_transition_outbox
+            SET status = 'pending', processing_started_at = NULL, processed_at = NULL
+            WHERE workflow_run_id = $1
+            """,
+            UUID(workflow_run_id),
+        )
+
+        advance = self._advance_only(runtime, workflow_run_id)
+        await self.control_plane.drain_pending_transitions(advance, _NOW)
+
+        self.assertEqual(len(advance.delivered), 1)
+        self.assertEqual(await self._request_statuses(workflow_run_id), requests)
+        self.assertEqual(await self._counters(workflow_run_id), counters)
+
+    async def test_an_outbox_row_stuck_in_processing_is_reclaimed(self) -> None:
+        """Issue #96, acceptance criterion 2: no outbox row stays in
+        `processing` indefinitely. The claim is committed before the delivery
+        starts, so a drainer that dies mid-delivery cannot release its own
+        row -- only the lease can."""
+        workflow_run_id, job_id, runner_id, request_id = await self._planning_run()
+        runtime = await self._runtime()
+        await self._deliver_planner_result(
+            job_id, runner_id, request_id, on_transition=self._advance(runtime)
+        )
+        await self.pool.execute(
+            """
+            UPDATE app.workflow_transition_outbox
+            SET status = 'processing', processing_started_at = $2, processed_at = NULL
+            WHERE workflow_run_id = $1
+            """,
+            UUID(workflow_run_id),
+            _NOW,
+        )
+
+        held = self._advance_only(runtime, workflow_run_id)
+        await self.control_plane.drain_pending_transitions(held, _NOW + timedelta(seconds=30))
+        self.assertEqual(held.delivered, [])
+        self.assertEqual(await self._outbox_statuses(workflow_run_id), ["processing"])
+
+        reclaimed = self._advance_only(runtime, workflow_run_id)
+        await self.control_plane.drain_pending_transitions(reclaimed, _NOW + timedelta(minutes=10))
+
+        self.assertEqual(len(reclaimed.delivered), 1)
+        self.assertEqual(await self._outbox_statuses(workflow_run_id), ["processed"])
+
     async def test_committed_transition_without_a_graph_invocation_is_recovered(self) -> None:
         """Acceptance criterion 2: a crash between committing a terminal
         transition and invoking the graph runtime is repaired by the
@@ -858,9 +1004,8 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         runtime = await self._runtime()
 
         # The crash: accept_event commits the transition and the outbox row,
-        # then the process dies before invoking the graph. The outbox row is
-        # left mid-drain ('processing'), which the drain arm never retries, so
-        # recovery can only come from the stalled-run arm.
+        # then the process dies with the row claimed mid-drain ('processing',
+        # with no lease recorded because the drainer never got that far).
         await self._deliver_planner_result(job_id, runner_id, request_id, on_transition=None)
         await self.pool.execute(
             "UPDATE app.workflow_transition_outbox SET status = 'processing' WHERE workflow_run_id = $1",
@@ -888,20 +1033,22 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         # the recovering runtime is handed a checkpointer that does not carry
         # the run's thread.
         self.assertEqual(await self._nodes_that_ran(workflow_run_id) - nodes_before, 1)
-        # The execution reported, so the graph is re-entered rather than the
-        # phase re-queued, and the suspension flag is cleared so the resumed
-        # edge can actually move.
+        # The stranded claim is reclaimed by the drain arm (issue #96), so the
+        # run is recovered by the transition that was actually committed --
+        # `plan_valid` and all -- rather than by the stalled-run arm's bare
+        # `awaiting_execution` clear. The planner's verdict is not thrown away,
+        # so the resumed `plan` edge routes forward into `implement` instead of
+        # spending a second planning attempt on work that already succeeded.
         self.assertEqual(
-            recovered, [(workflow_run_id, "implementing", {"awaiting_execution": False})]
+            [entry for entry in recovered if entry[0] == workflow_run_id],
+            [(workflow_run_id, "implementing", {
+                "status": "implementing", "plan_valid": True, "awaiting_execution": False,
+            })],
         )
-        # `plan_valid` rode on the outbox row that was never drained, so the
-        # resumed `plan` edge routes back into the planning phase and queues a
-        # second planner attempt rather than advancing on a verdict the graph
-        # never saw. The run is making progress again, bounded by
-        # `planning_attempts` -- which is what recovery has to guarantee.
+        self.assertEqual(await self._outbox_statuses(workflow_run_id), ["processed"])
         self.assertEqual(
             await self._request_statuses(workflow_run_id),
-            [("planner", 1, "completed"), ("planner", 2, "queued")],
+            [("developer", 1, "queued"), ("planner", 1, "completed")],
         )
         self.assertEqual(
             await self.control_plane.find_stalled_workflow_runs(

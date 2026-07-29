@@ -39,6 +39,18 @@ _TERMINAL_STATUSES = frozenset({"completed", "blocked", "failed", "cancelled"})
 # control plane's own writer can never disagree about what "no diff" means.
 _NULL_WHEN_EMPTY_COLUMNS = frozenset({"last_diff_hash", "last_failure_fingerprint"})
 
+# The newest request that has neither been reported on nor closed. Newest
+# rather than oldest: a run that legitimately re-queued a phase (the
+# maintenance loop's lost-execution repair) has older closed rows for the same
+# role, and the graph is suspended on the most recent one.
+_OPEN_EXECUTION_REQUEST_QUERY = """
+    SELECT id, role, attempt
+    FROM app.workflow_execution_requests
+    WHERE workflow_run_id = $1 AND status IN ('queued', 'dispatched')
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+"""
+
 
 class AsyncpgWorkflowPersistence:
     def __init__(self, pool: Any, now: Callable[[], datetime] | None = None) -> None:
@@ -319,26 +331,33 @@ class AsyncpgWorkflowPersistence:
                 )
         return int(version)
 
-    async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
-        record = await self._pool.fetchrow(
-            """
-            SELECT id, role, attempt
-            FROM app.workflow_execution_requests
-            WHERE workflow_run_id = $1 AND status = 'queued'
-            ORDER BY created_at ASC
-            LIMIT 1
-            """,
-            _uuid(workflow_run_id),
-        )
-        if record is None:
-            return None
-        return {
-            "id": str(record["id"]),
-            "role": str(record["role"]),
-            "attempt": int(record["attempt"]),
-        }
+    async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
+        """The execution request this run is still waiting on, if any.
 
-    async def dispatch(self, workflow_run_id: str, role: str) -> str:
+        "Open" is `queued` or `dispatched`: the scheduler moves a request from
+        one to the other the moment it offers the work, and both mean the same
+        thing to the graph -- an execution was requested and has not reported
+        back yet. Every other status is closed: `accept_event` stamps the
+        runner's terminal event on the row in the same transaction that records
+        the outcome, and the maintenance loop closes the rest as `orphaned` or
+        `expired`. A closed row must never be mistaken for live work, or the
+        phase it belonged to would never run again.
+        """
+        record = await self._pool.fetchrow(_OPEN_EXECUTION_REQUEST_QUERY, _uuid(workflow_run_id))
+        return None if record is None else _execution_request(record, created=False)
+
+    async def dispatch(self, workflow_run_id: str, role: str) -> dict[str, Any]:
+        """Ensures the run has an open execution request, and reports whether
+        this call is the one that created it.
+
+        A workflow run has at most one execution in flight, so an already-open
+        request is returned as-is instead of queueing a second one. That makes
+        the whole dispatch idempotent under the outbox's at-least-once
+        delivery, and it is decided inside the transaction that holds the run's
+        row lock, so two concurrent deliveries cannot both insert. `created` is
+        what tells the caller whether an attempt was actually spent: reusing a
+        request must never charge the retry budget a second time.
+        """
         if role not in _VALID_ROLES:
             raise ValueError("workflow execution role is invalid")
         now = self._now()
@@ -351,6 +370,11 @@ class AsyncpgWorkflowPersistence:
                 )
                 if workflow is None:
                     raise ValueError("workflow run is unknown")
+                open_request = await connection.fetchrow(
+                    _OPEN_EXECUTION_REQUEST_QUERY, _uuid(workflow_run_id)
+                )
+                if open_request is not None:
+                    return _execution_request(open_request, created=False)
                 attempt = await connection.fetchval(
                     """
                     SELECT COALESCE(MAX(attempt), 0) + 1
@@ -372,7 +396,16 @@ class AsyncpgWorkflowPersistence:
                     int(attempt),
                     now,
                 )
-        return str(execution_id)
+        return {"id": str(execution_id), "role": role, "attempt": int(attempt), "created": True}
+
+
+def _execution_request(record: Any, created: bool) -> dict[str, Any]:
+    return {
+        "id": str(record["id"]),
+        "role": str(record["role"]),
+        "attempt": int(record["attempt"]),
+        "created": created,
+    }
 
 
 def _optional_text(value: object) -> str | None:

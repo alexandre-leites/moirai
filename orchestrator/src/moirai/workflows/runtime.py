@@ -16,6 +16,8 @@ class WorkflowCheckpointStore(Protocol):
 
     async def load_state(self, workflow_run_id: str) -> dict[str, object]: ...
 
+    async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None: ...
+
 
 class WorkflowGraph(Protocol):
     def ainvoke(
@@ -94,6 +96,22 @@ class PersistedWorkflowRuntime:
                 terminal_state = {**state_updates, "workflow_run_id": workflow_run_id}
                 await self._checkpoints.checkpoint(workflow_run_id, terminal_state)
                 return terminal_state
+            if state_updates.get("awaiting_execution") is not True and await self._execution_in_flight(
+                workflow_run_id
+            ):
+                # The caller is clearing the suspension gate for an execution
+                # that has already reported, yet this run still has one open --
+                # so this is a transition being delivered a second time (the
+                # outbox is at-least-once). Advancing would walk the graph one
+                # node past the execution it is actually waiting on: a phase
+                # whose gates nobody has produced yet would be entered, and the
+                # terminal event that eventually arrives would resume from that
+                # wrong edge and skip the phase entirely. Re-assert the gate
+                # instead, so the replay ends exactly where the first delivery
+                # did. Nothing can wedge here: the only ways a request stays
+                # open are an execution that is genuinely running and one the
+                # maintenance loop will close as `orphaned`.
+                state_updates["awaiting_execution"] = True
             if self._has_checkpointer:
                 app_checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
                 if app_checkpoint is None:
@@ -135,6 +153,9 @@ class PersistedWorkflowRuntime:
         state["workflow_run_id"] = workflow_run_id
         await self._checkpoints.checkpoint(workflow_run_id, state)
         return state
+
+    async def _execution_in_flight(self, workflow_run_id: str) -> bool:
+        return (await self._checkpoints.get_open_execution_request(workflow_run_id)) is not None
 
     async def _fail(
         self, workflow_run_id: str, initial_state: dict[str, object], error: Exception

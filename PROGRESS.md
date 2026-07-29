@@ -1511,3 +1511,80 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 ## Next Recommended Implementation
 
 Issue #96 (finding F9) — make transition replay idempotent. It is the highest-priority platform-review issue with no `ai-working` label as of this session (#90, #92, #94 and #100 were all claimed). The transition outbox is at-least-once, but `_dispatch` in `workflows/nodes.py` increments attempt counters and `total_agent_executions` even when it reuses a queued request, and creates a duplicate request for the same role when the previous one already moved to `dispatched`; outbox rows set to `processing` are never retried after a crash. Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/persistence/control_plane.py` (`drain_pending_transitions`, `_dispatch`). Expected behavior: replaying one transition twice leaves the same counters and the same single execution request. Targeted validation: new cases in `orchestrator/tests/test_workflow_nodes.py` and `orchestrator/tests/test_asyncpg_control_plane.py`, plus a PostgreSQL integration test that drains the same outbox row twice. Those budgets are what open a project circuit in the first place, so double-counting them is what makes the breaker above fire early.
+
+---
+
+# Session: issue #96 — transition replay idempotency (agent `issue-96`, 2026-07-29)
+
+## Current Status
+
+- Overall status: complete, pending review.
+- Current phase: platform-review remediation (finding F9).
+- Active implementation: none — issue #96 finished by agent session `issue-96` at 2026-07-29T08:20Z.
+- Last updated: 2026-07-29
+- Agent/session identifier: `issue-96`
+
+## Done
+
+- [x] Issue [#96](https://github.com/alexandre-leites/moirai/issues/96) — make transition replay idempotent (double-counted budgets, duplicate requests, stuck outbox rows).
+  - Completed: 2026-07-29
+  - Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/persistence.py`, `orchestrator/src/moirai/workflows/runtime.py`, `orchestrator/src/moirai/persistence/control_plane.py` (outbox drain only), `orchestrator/migrations/007_outbox_processing_lease.sql`, `orchestrator/README.md`, `README.md`, and the five test modules listed under Validation.
+  - Behavior delivered:
+    - **One open execution request per run, enforced where it is decided.** `AsyncpgWorkflowPersistence.dispatch` now looks for an open (`queued` *or* `dispatched`) request inside the transaction that already holds the workflow run's `FOR UPDATE` lock, and returns it with `created = False` instead of inserting a second row. The dispatching node reads `created` to decide whether an attempt was really spent. Closed rows (`completed`/`failed`/`cancelled`/`orphaned`/`expired`) are never open, so this composes with #94 rather than resurrecting finished work.
+    - **The replay check moved ahead of the retry-budget gates.** The per-node counter checks (`planning_attempts`, `implementation_attempts`, `review_cycles`, `pipeline_repair_attempts`, `ci_repair_attempts`) and the `total_agent_executions` check now live inside `_dispatch`, after the replay lookup. This was a second, unlisted half of the same bug: the dispatch that spends the last unit of a budget writes the counter that makes the *same node* read "exhausted" on the way back in, so a replay blocked the run for retries that never happened. Each repair node still spends only its own counter (#98) and `pipeline` still spends none (#90).
+    - **A node that finds another phase's request open suspends instead of dispatching.** It writes nothing: the committed phase belongs to the execution that is actually running.
+    - **The graph no longer advances while an execution is open.** `PersistedWorkflowRuntime.run` re-asserts `awaiting_execution` when the caller clears it for a run that still has an open request. This is what a duplicate delivery actually did before: it walked the graph one node *past* the execution it was waiting on, so the developer's own terminal event then resumed from the `pipeline` edge and routed out of the phase without the deterministic pipeline ever running — silently re-opening finding F3.
+    - **`processing` is a lease, not a state.** `drain_pending_transitions` stamps `processing_started_at` when it claims a row and reclaims any claim older than 90 seconds; `accept_event`'s inline delivery takes the same lease, so a maintenance tick landing between its commit and its delivery cannot deliver the same transition twice, and a drainer that loses the claim does nothing rather than duplicating work.
+  - Validation performed: see Validation Status below. Failing-test-first evidence is recorded there.
+  - Commands executed: `make dev-install`, `make test-orchestrator`, `make lint`, `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-96`, `LOOP_TEST_DATABASE_URL=… make test-postgres-integration`.
+  - Notes: `orchestrator/src/moirai/persistence/control_plane.py` was touched only in the outbox-drain region (`_drain_outbox_entry`, `drain_pending_transitions`, and the new `_OUTBOX_PROCESSING_LEASE` constant) to stay clear of the concurrent session on issue #111, which owns `set_runner_state` ~1100 lines away. `get_queued_execution_request` on `AsyncpgControlPlane` (line ~873) is dead code — nothing calls it — and was deliberately left alone for the same reason; the live copy is the one on `AsyncpgWorkflowPersistence`.
+
+## Decisions
+
+- Decision: the outbox uses a lease on `processing`, not a transaction that reverts to `pending` on failure.
+  - Context: step 3 of issue #96 offered either. `drain_pending_transitions` already reverts to `pending` when the delivery *raises*; the transition that was lost forever is the one whose drainer died.
+  - Alternatives considered: (a) hold the row in an open transaction for the whole delivery and let a rollback revert it; (b) never mark `processing` at all and rely on the delivery being idempotent; (c) a lease column with a reclaim window.
+  - Reason: (a) cannot work — the delivery invokes the graph runtime, which reaches GitHub, so it would hold a database transaction open across an unbounded external call, and a killed process still commits nothing while blocking every other drainer on the row's lock. It also does not solve the actual failure: a process that dies does not roll back, it simply disappears, and the row's `processing` mark was committed before the delivery began. (b) leaves the row `pending` for its whole delivery, so every maintenance tick re-delivers a slow transition — safe now that replay is idempotent, but it converts a rare duplicate into a routine one. (c) is the only option that bounds recovery for a crashed drainer while still excluding a live one.
+  - Consequences: a new nullable column, `app.workflow_transition_outbox.processing_started_at` (migration `007_outbox_processing_lease.sql`), and a 90-second constant, `_OUTBOX_PROCESSING_LEASE`. The lease must outlast a real delivery and stay inside the 2-minute stall window, so a stranded transition is always recovered by the drain arm rather than by the stalled-run arm — which recovers it *without* the state updates that rode on the row. A crashed drainer costs at most 90 seconds; a delivery slower than that is delivered twice, which is now harmless. The migration also hands back any row already sitting in `processing` with no claim time, since migrations run at startup before this process drains anything, so such a row is stranded by definition.
+
+- Decision: the "don't advance past an open execution" rule lives in the runtime, not only in the nodes.
+  - Context: the node-level guard alone satisfies the issue's acceptance criterion on counters, request rows and status — but the reproduction test showed the replay still dispatched an extra `pipeline` execution, because the graph had already advanced a node before any guard could run.
+  - Alternatives considered: (a) node-level guard only, accepting that the graph position drifts by one node per duplicate delivery; (b) deduplicate deliveries so a transition is never replayed at all.
+  - Reason: (b) is impossible — a crash after `on_transition` returns and before the row is marked processed is exactly the window the outbox exists to cover, so at-least-once is a property, not a defect. Under (a) the drifted position is not cosmetic: the run ends up suspended on the `pipeline` edge while the developer execution is still running, and that execution's terminal event then routes straight out of the phase, so the deterministic pipeline gate is skipped — the defect finding F3 exists to prevent. `test_a_replayed_transition_never_skips_the_pipeline_gate` pins it.
+  - Consequences: one extra indexed lookup per graph invocation, and `WorkflowCheckpointStore` gains `get_open_execution_request`. It cannot wedge a run: the only ways a request stays open are an execution that is genuinely running and one the maintenance loop closes as `orphaned`. Terminal runs short-circuit before the check, so a leaked request cannot delay the checkpoint that records a finished run.
+
+- Decision: the dedup key is "any open request for this run", not "an open request with this role".
+  - Context: `repair` and `ci_repair` share the `repairer` role (#98), and `implement` and `push` share `developer`, so role alone is not a node identity.
+  - Alternatives considered: persist a per-node dispatch key on the request row and guard the insert with `INSERT … ON CONFLICT`, as the issue's step 2 suggests.
+  - Reason: a workflow run has at most one execution in flight — one job per run, one active run per project — so "this run has an open request" is the stronger and simpler invariant, and it needs no new column. `(workflow_run_id, role, attempt)` is already unique, but `attempt` is a per-role sequence and cannot be derived from a node's counter, so an `ON CONFLICT` guard would have needed a synthetic key for a case the run-level rule already covers.
+  - Consequences: a role match additionally re-states the phase, so a first pass that queued the execution and then died before writing its transition still lands the status it was moving to; a role mismatch writes nothing. One accepted gap, narrower than the bug being fixed: a crash *between* the request insert and the counter write leaves that attempt uncharged, because the replay correctly sees `created = False`. Under-counting is the safe direction — over-counting is what blocked runs for exhausted retries that never ran — and the execution itself still runs exactly once.
+
+## Validation Status
+
+- Targeted tests: Passed. Failing-test-first evidence, captured against unmodified `origin/issue-96` (`09a6c1b`) with only the new tests added: `test_replaying_a_transition_is_identical_to_delivering_it_once` failed on both subtests with `AssertionError: Lists differ: ['planner', 'developer', 'pipeline'] != ['planner', 'developer']` (the replay queued a third execution), and `test_a_replayed_transition_never_skips_the_pipeline_gate` failed with `AssertionError: terminal developer event produced no workflow transition` (the run had been moved to `local_pipeline` behind the developer's back). `Ran 16 tests … FAILED (failures=3)`.
+- Service tests: Passed — `make test-orchestrator` → `Ran 428 tests in 1.289s … OK (skipped=27)`. 17 tests added across `test_end_to_end.py`, `test_workflow_nodes.py`, `test_workflow_persistence.py`, `test_workflow_runtime.py`, `test_asyncpg_control_plane.py` and `test_postgres_integration.py`.
+- Full repository tests: Not run — no Go, proto or web change; `make test` deliberately not invoked.
+- Build: Not applicable — Python only.
+- Lint: Passed — `make lint` → `All checks passed!`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-96` → `Success: no issues found in 48 source files` (own cache directory, so it cannot collide with a sibling worktree).
+- Database migrations: Passed — `007_outbox_processing_lease.sql` applied by `MigrationRunner` against a throwaway PostgreSQL 16 container bound to port 55496, removed afterwards. `test_migrations_are_recorded_and_idempotent` covers the version being recorded and the re-run being a no-op.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Partially — `LOOP_TEST_DATABASE_URL=… make test-postgres-integration` → `Ran 27 tests in 4.161s … OK` against a fresh database. Four of those exercise the real drain: a redelivered outbox row (queued and dispatched variants), a row stranded in `processing`, and the maintenance loop's recovery of a run whose graph invocation was lost.
+
+## Known Issues
+
+- Issue: `007` is the next free migration version, and nothing prevents a concurrent session from claiming it too.
+  - Severity: P3
+  - Impact: two files with the same numeric prefix do not conflict in git, but `MigrationRunner._discover_migrations` raises `ValueError: duplicate migration version: 7` and the orchestrator fails to start. This has happened in this repository before.
+  - Evidence: at the time of writing, `git ls-tree origin/<branch> orchestrator/migrations/` shows nothing above `006` on any of `issue-97`, `issue-111`, `issue-113`, `issue-136`, `issue-109` or `issue-144`, and no open PR touches `orchestrator/migrations/`.
+  - Suggested resolution: whoever merges second renumbers to the next free version. `test_discovery_rejects_duplicate_versions` already fails loudly rather than silently skipping a migration.
+
+- Issue: `make test-postgres-integration` is still not repeatable against the same database.
+  - Severity: P3
+  - Impact: unchanged from the issue #92 session — the second run against one database fails `OfferExpiryIntegrationTests.test_expired_recovery_offer_returns_the_run_to_recovering` with two expired leases instead of one.
+  - Evidence: re-confirmed pre-existing in this worktree. With the whole change stashed: run 1 `Ran 24 tests … OK`, run 2 `Ran 24 tests … FAILED (failures=1)`. With the change applied the behaviour is identical (run 1 `Ran 27 tests … OK`, run 2 same single failure), so it is not a regression. CI creates a fresh PostgreSQL service per job.
+  - Suggested resolution: as previously recorded — have `PostgreSQLPersistenceIntegrationTests.test_control_plane_persists_project_runner_issue_and_lease_lifecycle` clean up its job and workflow run, or truncate the `app` schema in `asyncSetUp`.
+
+## Next Recommended Implementation
+
+Issue [#101](https://github.com/alexandre-leites/moirai/issues/101) (finding F14) — fix non-progress fingerprinting. `_record_progress_evidence` in `orchestrator/src/moirai/persistence/control_plane.py` is the closest remaining orchestrator-side correctness item to the work just finished: it decides when a workflow is blocked for repeating itself, using the same terminal-event path this session's outbox lease now delivers exactly once. Relevant files: `orchestrator/src/moirai/persistence/control_plane.py` (`_record_progress_evidence`, `_success_outcome_hash`, `_failure_outcome_hash`), `orchestrator/tests/test_asyncpg_control_plane.py` (`NonProgressEvidenceTests`). Expected behavior: an outcome identity that distinguishes real repetition from incidental payload variation, so a workflow making genuine progress is never blocked and a stuck one still is. Targeted validation: extend `NonProgressEvidenceTests`, which already replays whole terminal-event sequences against a stateful fake.
