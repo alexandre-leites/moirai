@@ -59,6 +59,10 @@ type ControlLoop struct {
 	ReconnectMin   time.Duration
 	ReconnectMax   time.Duration
 	ExpiryInterval time.Duration
+	// OfferTimeout bounds how long an accepted offer may wait for its lease
+	// acknowledgement before the reservation is released. Non-positive falls
+	// back to control.DefaultOfferTimeout.
+	OfferTimeout time.Duration
 
 	mu       sync.Mutex
 	draining bool
@@ -212,8 +216,17 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 	}
 	if acknowledgement := message.GetLeaseAcknowledged(); acknowledgement != nil {
 		jobID := acknowledgement.GetJobId()
-		_, alreadyActive := loop.Offers.ActiveLease(jobID)
+		held, alreadyActive := loop.Offers.ActiveLease(jobID)
 		if !loop.Offers.ApplyAcknowledgement(acknowledgement) {
+			// A duplicate or non-advancing renewal acknowledgement for a lease
+			// the runner still holds at the same generation is routine and
+			// changes nothing. Anything else matched neither a reservation nor
+			// a lease — most often a reservation that timed out waiting for
+			// exactly this message — and dropping it silently made a released
+			// capacity slot indistinguishable from a lost one.
+			if !alreadyActive || held.Generation != acknowledgement.GetLeaseGeneration() {
+				loop.logger().Warn("runner discarded an unmatched lease acknowledgement", "job_id", jobID, "lease_generation", acknowledgement.GetLeaseGeneration())
+			}
 			return nil
 		}
 		if alreadyActive {
@@ -314,9 +327,25 @@ func (loop *ControlLoop) expiryInterval() time.Duration {
 	return time.Second
 }
 
+func (loop *ControlLoop) offerTimeout() time.Duration {
+	if loop != nil && loop.OfferTimeout > 0 {
+		return loop.OfferTimeout
+	}
+	return control.DefaultOfferTimeout
+}
+
 func (loop *ControlLoop) expire() {
 	if loop == nil || loop.Offers == nil || loop.Reporter == nil {
 		return
+	}
+	// A reservation has no execution and no event lease — Reporter.Begin runs
+	// only once the acknowledgement lands — so releasing the slot and recording
+	// the offer is the whole of the work here.
+	timeout := loop.offerTimeout()
+	for _, reservation := range loop.Offers.ExpirePending(timeout) {
+		loop.logger().Warn("runner offer reservation expired without a lease acknowledgement",
+			"job_id", reservation.JobID, "execution_id", reservation.ExecutionID,
+			"lease_generation", reservation.Generation, "reserved_at", reservation.ReservedAt, "offer_timeout", timeout)
 	}
 	for _, expired := range loop.Offers.Expire() {
 		loop.logger().Warn("runner lease expired", "job_id", expired.JobID, "execution_id", expired.Packet.ExecutionID, "lease_generation", expired.Generation)
@@ -342,7 +371,7 @@ func (loop *ControlLoop) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// Busy reports whether the runner is at its concurrency capacity.
+// WaitForIdle blocks until no execution is running or ctx is done.
 func (loop *ControlLoop) WaitForIdle(ctx context.Context) error {
 	if loop == nil {
 		return nil
@@ -364,11 +393,15 @@ func (loop *ControlLoop) WaitForIdle(ctx context.Context) error {
 	}
 }
 
+// Busy reports whether the runner is at its concurrency capacity. It counts
+// reservations as well as acknowledged leases so the heartbeat matches the
+// predicate OfferState.Admit uses: a runner that would reject the next offer as
+// busy must never advertise itself as available.
 func (loop *ControlLoop) Busy() bool {
 	if loop == nil || loop.Offers == nil {
 		return false
 	}
-	return loop.Offers.ActiveCount() >= loop.Offers.Capacity()
+	return loop.Offers.ReservedCount() >= loop.Offers.Capacity()
 }
 
 func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {

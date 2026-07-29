@@ -891,3 +891,85 @@ A `silent-failure-hunter` review of the first commit (`bc09597`) found ten issue
 ## Next Recommended Implementation
 
 Implement the orchestrator half of issue #93 step 4 in `orchestrator/src/moirai/domain/leases.py` and `orchestrator/src/moirai/grpc/runner_control.py`: keep generation fencing, accept a generation-matching terminal event for an expired lease as informational so lease-expiry recovery can use the real outcome, and reject a single bad event without aborting the runner's control stream. Targeted validation: `make test-orchestrator`, plus new cases in `orchestrator/tests/test_leases.py` and `orchestrator/tests/test_control_plane.py`.
+
+# Session: F8 / issue #95 — Runner: expire pending offer reservations and wire the unused OfferTimeout (branch `issue-95`)
+
+## Current Status
+
+Complete. Branch `issue-95`, based on `main` at `bb1e876` and merged with `origin/main` at `a9a1d3b` (which brought in #127, #129, #130, #131, #132). The runner now ages out accepted-but-unacknowledged offers, counts them against its own capacity, and consumes `Config.OfferTimeout`.
+
+## Done
+
+- Issue #95 (platform review finding F8, marked *(verify)*): a pending offer reservation that never received a `LeaseAcknowledged` held a runner capacity slot forever.
+  - Root cause: `control.OfferState.Admit` inserted the accepted offer into `s.pending`; `Expire()` swept only `s.active` and `Abandon` ran post-execution, so nothing ever aged `s.pending` out. `ControlLoop.Busy()` reported `ActiveCount() >= Capacity()` while `Admit` rejected on `len(pending)+len(active) >= capacity`, so with capacity 1 a single lost acknowledgement made the runner refuse all work while its heartbeat still said idle. `Config.OfferTimeout` was parsed and validated but had no consumer anywhere in the tree.
+  - Reproduced first, before any fix (`make test-runner` equivalent, `go test -race ./internal/dispatch/`):
+    - `control_loop_offer_expiry_test.go:69: heartbeat advertises the runner as idle while an unacknowledged reservation holds the only capacity slot`
+    - with that assertion removed so the capacity leak shows on its own: `control_loop_offer_expiry_test.go:77: accepted = []string{"job-1"}, want job-3 admitted after the reservation timed out`
+    - `control_loop_offer_expiry_test.go:116: late acknowledgement resurrected an expired offer reservation`
+  - `runner/internal/control/offer.go`: `pendingOffer` carries `reservedAt`; new `OfferState.ExpirePending(timeout) []Reservation` releases reservations past the timeout; new exported `Reservation` type and `DefaultOfferTimeout` constant; new `OfferState.ReservedCount()`.
+  - `runner/internal/dispatch/control_loop.go`: new `ControlLoop.OfferTimeout` field, swept by the existing `expire()` (ticker every `ExpiryInterval`, plus every heartbeat via `Reconcile`); `Busy()` now uses `ReservedCount()`; an acknowledgement that matches nothing is logged instead of dropped silently.
+  - `runner/cmd/runner/main.go`: `loop.OfferTimeout = settings.OfferTimeout` — the consumer `Config.OfferTimeout` never had.
+  - Docs: `runner/README.md` (`LOOP_RUNNER_OFFER_TIMEOUT` and `LOOP_RUNNER_HEARTBEAT_INTERVAL` rows) and `docs/architecture.md` ("Job offer lifecycle") now describe the runner half of offer reclamation.
+  - Acceptance criteria: (1) with capacity 1 an unacknowledged offer leaves the runner accepting new offers — `TestControlLoopReleasesCapacityWhenOfferIsNeverAcknowledged`; (2) `grep -rn OfferTimeout --include='*.go' runner/ | grep -v _test.go` now shows `runner/cmd/runner/main.go:238` alongside the config definition.
+  - Notes: tests added — `TestControlLoopReleasesCapacityWhenOfferIsNeverAcknowledged`, `TestControlLoopHonorsConfiguredOfferTimeout`, `TestControlLoopRejectsLeaseAcknowledgementForExpiredOffer` (new file `runner/internal/dispatch/control_loop_offer_expiry_test.go`), and `TestOfferStateExpiresUnacknowledgedReservationAndFreesCapacity`, `TestOfferStateRejectsAcknowledgementForExpiredReservation`, `TestOfferStateKeepsAcknowledgedLeaseThroughPendingExpirySweep`, `TestOfferStateExpiresOnlyTheReservationsPastTheTimeout`, `TestOfferStateStartsTheAcknowledgementWaitWhenTheAcceptanceIsSent`, `TestOfferStateExpirePendingFallsBackToTheDefaultTimeout` in `runner/internal/control/offer_test.go`. No existing test was modified.
+
+## Post-review corrections
+
+An adversarial review of the first commit confirmed the mechanism (no double-release, no un-released slot, no resurrection, expiry composes with the retained-lease logic from #93/PR #134 because a reservation never has a `leaseState` to retain) but found that the *justification* written into the comments was wrong on two counts, plus one new race. All were fixed before the PR was opened.
+
+- The comment and `docs/architecture.md` claimed the orchestrator ages the same offer out through `app.job_offers.expires_at`. It does not: `accept_offer` sets that row to `'accepted'` (`persistence/control_plane.py`), and `expire_offers` matches `status = 'offered'` only. The job is reclaimed by `expire_leases` against `app.jobs.lease_expires_at` on the scheduler's offer TTL, hardcoded to 600s in `orchestrator/src/moirai/main.py`, which also marks the runner offline until its next heartbeat. The *conclusion* — do not send an offer rejection — still holds and is now stated with the real reason (`reject_offer` on an accepted offer raises `OfferError` → `FAILED_PRECONDITION` → an aborted control stream). The consequent claim that a late acknowledgement would start "an execution the orchestrator has already reassigned" was also false at 30s and was corrected.
+- The doc implied the `Busy()` change has a scheduling effect. It does not today: the orchestrator never reads `Heartbeat.busy` (zero references to `busy` in `orchestrator/src/moirai/`), and placement is gated on its own `app.jobs` count against `runners.capacity`. Recorded as an internal consistency guarantee instead.
+- New race introduced by the first commit: `reservedAt` was stamped before `client.AcceptOffer`, which sends on the control stream outside the state lock. A send that blocked for longer than `OfferTimeout` could have its reservation swept mid-flight and then succeed, leaving the orchestrator believing the runner accepted while the runner held nothing. The wait is now re-stamped after a successful `AcceptOffer` (guarded by pointer identity so a send that outlived its own timeout cannot re-stamp a newer reservation for the same job), because an acknowledgement cannot arrive before the acceptance is on the wire. The creation-time stamp is deliberately kept as the initial value so an `AcceptOffer` that never returns still cannot hold the slot forever — that is the leak this change exists to prevent. Test: `TestOfferStateStartsTheAcknowledgementWaitWhenTheAcceptanceIsSent` (without the re-stamp: `ExpirePending() = [...ReservedAt:12:00:00...], want the wait measured from the acceptance`).
+- The new "unmatched acknowledgement" warning fired on two benign paths — a duplicate/non-advancing renewal acknowledgement for a lease the runner still holds, and a renewal acknowledgement landing after `execute()` calls `Abandon`. It is now gated on the runner not holding that job at that generation, and the message no longer asserts a cause it cannot know.
+- Two test comments overclaimed (one said it proved the `main.go` assignment, which it does not exercise; one gave a false reason for the mutex on the test clock). Both corrected rather than deleted.
+- Coverage gaps the review named were closed: capacity > 1 with a sweep that expires some but not all reservations (`TestOfferStateExpiresOnlyTheReservationsPastTheTimeout`), and the concurrent accept/expiry window above.
+
+## Decisions
+
+- Decision: `Busy()` counts pending reservations, rather than leaving it on `ActiveCount()` once expiry bounds the leak.
+  - Context: step 3 of the issue offers both. `Admit` rejects on `len(pending)+len(active) >= capacity`; `Busy()` reported `ActiveCount() >= Capacity()`. Expiry bounds the divergence to one `OfferTimeout` but does not remove it.
+  - Alternatives considered: keep `Busy()` as-is and rely on expiry. That leaves a window in which the runner's only public availability signal contradicts the predicate it actually admits on, and re-opens the full inconsistency the moment any future code path holds a reservation for longer.
+  - Reason: one predicate, one answer. `ReservedCount() >= Capacity()` is literally the condition under which the next offer is refused, so the signal cannot disagree with the behaviour by construction. It costs one map length.
+  - Consequences: `Busy()` is true for the whole reservation window, not just while an execution runs. `WaitForIdle` is unaffected (it keys off in-flight executions, not capacity), drain is unaffected, and every pre-existing `Busy()` assertion still passes. It has no effect on scheduling today because the orchestrator ignores `Heartbeat.busy`; it is a correctness guarantee for whenever that field is read, and for any in-process consumer.
+
+- Decision: expiry is local — the runner never tells the orchestrator that a reservation lapsed.
+  - Context: the runner has already sent `AcceptOffer`, so the orchestrator's offer row is `accepted` and its job is `preparing`.
+  - Alternatives considered: send `RejectOffer` on expiry so the job can be reassigned promptly.
+  - Reason: `reject_offer` requires `status = 'offered'`; on an accepted offer it raises `OfferError`, which `grpc/runner_control.py` turns into a `FAILED_PRECONDITION` that aborts the whole bidirectional stream. Freeing a slot would cost a full reconnect and every queued event's delivery attempt.
+  - Consequences: the runner frees its slot in ~`OfferTimeout` while the orchestrator holds the job until `expire_leases` fires at the 600s offer TTL. The two clocks are intentionally unequal — the runner's job is to keep taking work, the orchestrator's is to decide when a job needs recovering — but the gap means a job lost to a dropped acknowledgement waits out the orchestrator's TTL before it is re-offered. See Known Issues.
+
+- Decision: `ControlLoop.OfferTimeout` is an assignable field with a `control.DefaultOfferTimeout` fallback, and `ExpirePending` clamps a non-positive timeout to that same default.
+  - Context: `OfferState` is built inside `NewControlLoopWithEventBuffer`, whose signature already has nine parameters; `ReconnectMin`, `ReconnectMax`, and `ExpiryInterval` are all late-bound fields set by `main.go`.
+  - Alternatives considered: a tenth constructor parameter or another `NewControlLoopWith…` variant.
+  - Reason: it matches the tuning pattern already in the file and leaves every existing call site compiling unchanged.
+  - Consequences: a caller that forgets the field still gets expiry at 30s rather than the old unbounded behaviour, and a zero or negative configured value cannot silently disable expiry.
+
+## Validation Status
+
+- Targeted tests: Passed — `cd runner && go test -race ./internal/control/ ./internal/dispatch/` → both `ok`.
+- Service tests: Passed — `make test-runner` (`cd runner && go test -race ./...`), 10 packages `ok`, 1 with no test files.
+- Failing-test-first evidence: recorded under Done. Additionally mutation-checked — reverting `Busy()` to `ActiveCount()` fails 2 tests, removing the `ExpirePending` call from `expire()` fails 3, flipping the expiry boundary comparison fails 3, and removing the post-accept re-stamp fails 1.
+- Build: Not run separately; `go test -race ./...` compiles every runner package.
+- Lint: Passed — `cd runner && gofmt -l .` (no output) and `cd runner && go vet ./...` (no output). These are the runner's CI checks.
+- Type checks: Not applicable — no Python changed. `make lint` / `make typecheck` deliberately not run; they share `/tmp/moirai-mypy-cache` with sibling worktrees.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose or configuration-file change. `LOOP_RUNNER_OFFER_TIMEOUT` was already parsed and documented; only its consumer is new.
+- End-to-end workflow: Not run.
+
+## Known Issues
+
+- Issue: the runner and the orchestrator reclaim a dropped acknowledgement on very different clocks — ~30s versus 600s.
+  - Severity: P3
+  - Impact: the runner is back in service quickly (the point of this issue), but the job it accepted stays `preparing` until `expire_leases` fires at the scheduler's offer TTL, and that sweep also flips the runner to `offline` until its next heartbeat. The work is not lost, only delayed.
+  - Evidence: `orchestrator/src/moirai/main.py` constructs `Scheduler(..., timedelta(seconds=600))`; `persistence/control_plane.py` `expire_leases` matches `status IN ('preparing','running') AND lease_expires_at <= now` and then runs `UPDATE app.runners SET status = 'offline' WHERE id = $1`.
+  - Suggested resolution: orchestrator-side, either shorten the acceptance-to-acknowledgement window separately from the execution lease TTL, or accept an explicit runner signal for "reservation lapsed" that does not reuse `reject_offer`'s `status = 'offered'` precondition. Both are orchestrator changes and out of scope here.
+
+- Issue: an `AcceptOffer` send that blocks for longer than `OfferTimeout` and then succeeds leaves a phantom acceptance.
+  - Severity: P4
+  - Impact: the reservation is swept while the send is in flight, so the acceptance reaches the orchestrator but the runner holds no slot and discards the acknowledgement. Bounded by the orchestrator's lease expiry, and requires a control stream wedged for longer than the whole offer timeout — in which case `Disconnect` normally makes the send fail instead, taking the clean rollback path.
+  - Evidence: `runner/internal/control/offer.go` `Admit` calls `s.client.AcceptOffer` outside `s.mu` by design (`TestOfferStateAcceptsOutsideStateLock`).
+  - Suggested resolution: only if it is ever observed. Closing it fully means either holding the state lock across a network send or making a reservation un-expirable while its accept is in flight; both trade a bounded, rare stall for an unbounded one.
+
+## Next Recommended Implementation
+
+Unchanged from the previous session: the orchestrator half of issue #93 step 4.

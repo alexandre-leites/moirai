@@ -11,6 +11,12 @@ import (
 
 var ErrOfferStateConfiguration = errors.New("runner offer state configuration is invalid")
 
+// DefaultOfferTimeout bounds how long an accepted offer may wait for its lease
+// acknowledgement before the reservation is released. It matches the
+// LOOP_RUNNER_OFFER_TIMEOUT default so an unconfigured runner still ages
+// reservations out; callers that have the configured value pass it instead.
+const DefaultOfferTimeout = 30 * time.Second
+
 type OfferClient interface {
 	AcceptOffer(string) error
 	RejectOffer(string, string) error
@@ -28,6 +34,21 @@ type pendingOffer struct {
 	jobID      string
 	generation int64
 	packet     taskpacket.Packet
+	// reservedAt is when the acceptance reached the control stream, or when the
+	// reservation was built while that send is still in flight. A reservation
+	// has no lease yet, so it carries no orchestrator-issued expiry; the runner
+	// ages it out against its own offer timeout instead.
+	reservedAt time.Time
+}
+
+// Reservation is an offer the runner accepted and that is still waiting for the
+// orchestrator's lease acknowledgement. It holds a capacity slot but has no
+// execution, no lease, and no event stream.
+type Reservation struct {
+	JobID       string
+	Generation  int64
+	ExecutionID string
+	ReservedAt  time.Time
 }
 
 type activeLease struct {
@@ -85,7 +106,7 @@ func (s *OfferState) Admit(offer *runnerv1.JobOffer) (bool, error) {
 		return false, s.client.RejectOffer(offer.GetJobId(), "task packet is invalid")
 	}
 
-	reservation := &pendingOffer{jobID: offer.GetJobId(), generation: offer.GetLeaseGeneration(), packet: packet}
+	reservation := &pendingOffer{jobID: offer.GetJobId(), generation: offer.GetLeaseGeneration(), packet: packet, reservedAt: s.now()}
 	s.mu.Lock()
 	if len(s.pending)+len(s.active) >= s.capacity {
 		s.mu.Unlock()
@@ -102,9 +123,28 @@ func (s *OfferState) Admit(offer *runnerv1.JobOffer) (bool, error) {
 		s.mu.Unlock()
 		return false, err
 	}
+
+	// The acknowledgement cannot arrive before the acceptance is on the wire,
+	// so the wait starts here, not when the reservation was built: AcceptOffer
+	// blocks on the control stream and a slow send must not spend the
+	// reservation's own timeout. The reservation is still stamped at creation
+	// so that an AcceptOffer which never returns cannot hold the slot forever
+	// — that is the leak this expiry exists to prevent. The pointer identity
+	// check keeps a send that outlived its own timeout from re-stamping a
+	// newer reservation for the same job.
+	s.mu.Lock()
+	if s.pending[reservation.jobID] == reservation {
+		reservation.reservedAt = s.now()
+	}
+	s.mu.Unlock()
 	return true, nil
 }
 
+// ApplyAcknowledgement promotes a matching reservation to an active lease, or
+// extends an existing lease, reporting whether the acknowledgement was applied.
+// It never creates state it was not already holding, so an acknowledgement that
+// arrives after ExpirePending released the reservation is stale and is rejected
+// rather than resurrecting the slot.
 func (s *OfferState) ApplyAcknowledgement(acknowledgement *runnerv1.LeaseAcknowledged) bool {
 	if acknowledgement == nil || acknowledgement.GetJobId() == "" || acknowledgement.GetLeaseGeneration() < 1 {
 		return false
@@ -184,7 +224,50 @@ func (s *OfferState) Abandon(jobID string, generation int64) bool {
 	return false
 }
 
+// ExpirePending removes and returns every reservation that has waited longer
+// than timeout for its lease acknowledgement. Without it a single lost
+// acknowledgement — a withdrawn offer, a job handed to another runner, or a
+// message dropped on a reconnect — holds a capacity slot forever, and Admit
+// rejects every later offer as "runner is busy".
+//
+// A non-positive timeout falls back to DefaultOfferTimeout rather than
+// disabling expiry, so a misconfigured caller cannot silently reinstate the
+// leak.
+//
+// Expiry is deliberately local: the runner does not send an offer rejection.
+// Once the acceptance is recorded the orchestrator's offer row is 'accepted',
+// which its expire_offers sweep (status = 'offered' only) no longer matches, so
+// a rejection for it is a FAILED_PRECONDITION that aborts the whole control
+// stream. The job itself is reclaimed by the orchestrator's lease expiry
+// against app.jobs.lease_expires_at, on the much longer scheduler offer TTL.
+// Releasing the slot locally is therefore the only thing the runner can do,
+// and the only thing it needs to do.
+func (s *OfferState) ExpirePending(timeout time.Duration) []Reservation {
+	if timeout <= 0 {
+		timeout = DefaultOfferTimeout
+	}
+	deadline := s.now().Add(-timeout)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var expired []Reservation
+	for jobID, reservation := range s.pending {
+		if reservation.reservedAt.After(deadline) {
+			continue
+		}
+		expired = append(expired, Reservation{
+			JobID:       reservation.jobID,
+			Generation:  reservation.generation,
+			ExecutionID: reservation.packet.ExecutionID,
+			ReservedAt:  reservation.reservedAt,
+		})
+		delete(s.pending, jobID)
+	}
+	return expired
+}
+
 // Expire removes and returns every active lease that is past its expiry.
+// Reservations that have not been acknowledged yet carry no lease expiry and
+// are aged out by ExpirePending instead.
 func (s *OfferState) Expire() []Lease {
 	now := s.now()
 	s.mu.Lock()
@@ -214,6 +297,16 @@ func (s *OfferState) ActiveCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.active)
+}
+
+// ReservedCount reports how many capacity slots the runner currently holds:
+// acknowledged leases plus offers accepted but not yet acknowledged. It is the
+// quantity Admit compares against capacity, so callers that report availability
+// must use it rather than ActiveCount.
+func (s *OfferState) ReservedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pending) + len(s.active)
 }
 
 func (s *OfferState) Capacity() int {

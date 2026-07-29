@@ -21,11 +21,11 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_LABELS` | | Comma-separated capability labels. |
 | `LOOP_RUNNER_CAPACITY` | `1` | Concurrent execution capacity. |
 | `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | | Comma-separated task environment variable allow-list; set `GITHUB_TOKEN` for GitHub-backed projects. |
-| `LOOP_RUNNER_HEARTBEAT_INTERVAL` | `10s` | Heartbeat and local lease-expiry check interval. |
+| `LOOP_RUNNER_HEARTBEAT_INTERVAL` | `10s` | Heartbeat, local lease-expiry, and offer-reservation expiry check interval. |
 | `LOOP_RUNNER_RECONNECT_MIN` / `LOOP_RUNNER_RECONNECT_MAX` | `1s` / `1m` | Control-stream exponential-backoff bounds. |
 | `LOOP_RUNNER_RECONNECT_GRACE` | `1m` | Reconnection grace configuration. |
 | `LOOP_RUNNER_LEASE_DURATION` / `LOOP_RUNNER_LEASE_RENEWAL_LEAD` | `1m` / `15s` | Lease request duration and renewal lead. |
-| `LOOP_RUNNER_OFFER_TIMEOUT` | `30s` | Job-offer timeout configuration. |
+| `LOOP_RUNNER_OFFER_TIMEOUT` | `30s` | How long an accepted offer waits for its lease acknowledgement before the runner releases the capacity slot. The slot is freed on the first expiry sweep at or after this point, so the effective wait is up to one `LOOP_RUNNER_HEARTBEAT_INTERVAL` longer. |
 | `LOOP_RUNNER_EVENT_BUFFER_SIZE` | `128` | Bounded queued execution-event count. |
 | `LOOP_RUNNER_EVENT_PAYLOAD_BYTES` / `LOOP_RUNNER_LOG_CHUNK_BYTES` | `16384` / `6144` | Event payload and log-chunk limits. |
 | `LOOP_RUNNER_MAX_LOG_BYTES` | `4194304` | Per-stream persisted agent-log limit. |
