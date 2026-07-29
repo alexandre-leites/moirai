@@ -1995,3 +1995,94 @@ An adversarial review of the first draft was run before committing. It found ten
   - Impact: the offer is placed on a runner that is going away. No work is lost — the runner rejects it (`control_loop.go:198`, `"runner is draining"`) and `reject_offer` requeues the run.
   - Evidence: the drain report and the candidate query are separate transactions; there is no lock spanning them.
   - Suggested resolution: none needed. This is the ordinary offer-rejection path, and the unanswered-offer bounds already cover the case where the runner dies without answering.
+
+# Session: issue #148 — A runner never clears its drain flag, so it is stranded after a restart (branch `issue-148`)
+
+## Current Status
+
+- Overall status: Complete for issue #148.
+- Current phase: P2 bug fix; unblocks any change to the runner's shutdown ordering (#102).
+- Active implementation: issue-148 agent session, 2026-07-29 — report the runner's drain state on connect.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-148.
+
+## Done
+
+- [x] The runner reports its actual drain state on every control stream it establishes
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/dispatch/control_loop.go`, `runner/internal/dispatch/control_loop_drain_test.go` (new), `runner/internal/dispatch/control_loop_test.go`, `runner/cmd/runner/main.go`, `runner/cmd/runner/main_stream_test.go` (new), `docs/architecture.md`.
+  - Behavior delivered:
+    - `ControlLoop.Resume()` reports `RunnerDraining{draining: Draining()}` and then flushes buffered events. It is wired as `StreamSupervisor.OnConnected`, replacing the bare `loop.FlushEvents`, so it runs on every stream the runner establishes — including the first one after a restart, where `Draining()` is `false` and the report clears an `app.runners.draining = true` left behind by the previous incarnation of the same runner identity. No orchestrator change was needed: the #111 handler already persists whichever boolean arrives.
+    - It reports `Draining()`, never a bare `false`. A runner that reconnects while genuinely draining — a transport blip mid-drain, or an orchestrator-initiated drain whose report never left the dying stream — re-asserts the drain instead of advertising itself as available.
+    - Reading the state and sending it are one critical section (`ControlLoop.drainReports`), so a `Drain()` landing during a reconnect cannot be overtaken by the reconnect's already-sampled `false`. Deliberately a second mutex rather than `loop.mu`: a report blocks for as long as a gRPC send does, and `loop.mu` also guards the active-execution map that `WaitForIdle` and every terminal execution touch. Nothing acquires `drainReports` while holding `loop.mu`, so the two cannot deadlock, and the ordering argument does not rely on `draining` being monotonic — it survives a future un-drain, because the state write lands under `loop.mu` before the writer queues on `drainReports` and every reporter re-reads inside that lock.
+    - The report precedes the event flush, so the orchestrator stops placing work before the runner spends the fresh stream on a backlog. A failed report fails the resume rather than running a whole connection on a stale view; `StreamSupervisor` then drops the stream and retries when the failure is transient (`ErrNotConnected` and `io.EOF` both classify as `codes.Unknown`, which `isTransientTransportError` treats as transient), and stops the runner when it is not — the same treatment the flush already had.
+    - `Drain()` now reports through the same path. Its failure is still only a warning: the drain holds locally regardless, so no offer is accepted, and the next `Resume()` re-asserts it. That recovery is new — before this change a report lost on a dying stream was lost for good.
+    - `SetDraining(bool) error` moved into the `ControlClient` interface and the optional `drainingClient` type assertion was deleted. A client that could not report its drain state used to be a silent no-op, which is exactly the stranding this issue is about; it is now a compile error.
+    - `run()`'s `StreamSupervisor` literal was extracted into `controlStreamSupervisor(...)` in `runner/cmd/runner/main.go` so the wiring itself is testable. Without that, reverting `OnConnected` to `loop.FlushEvents` — a one-token full reintroduction of this bug — passed the entire runner suite.
+  - Validation performed: five new dispatch tests plus one `package main` wiring test, all confirmed failing against nine separate mutations; `make test-runner`; `gofmt`; `go vet`.
+  - Commands executed:
+    - `make test-runner` → `cd runner && go test -race ./...`, all 10 packages `ok` (`internal/metrics` has no test files).
+    - `cd runner && gofmt -l .` → no output.
+    - `cd runner && go vet ./...` → no output.
+    - `cd runner && go test ./internal/dispatch/ ./cmd/runner/ -race -count=3` → `ok`, `ok`.
+  - Mutation testing (each applied alone, then reverted; every one is killed):
+    - Sample the drain state before taking the report lock → `TestControlLoopResumeCannotReportAStaleDrainState` fails.
+    - Remove the serialization entirely → same test fails.
+    - `Resume` sends a literal `false` → 4 tests fail across both packages.
+    - `Resume` does not report at all (pre-fix behaviour) → 5 tests fail across both packages.
+    - `Resume` flushes events before reporting → the ordering test fails.
+    - `Resume` swallows a failed drain report → the delivery-failure test fails.
+    - `main.go` wired back to `OnConnected: loop.FlushEvents` → the `package main` wiring test fails.
+    - `Resume` swallows the flush error → the ordering test fails.
+    - `Drain` drops its already-draining short circuit → the state test fails.
+  - Notes: `proto/runner_control.proto` already defined `RunnerDraining` in both directions and the orchestrator handler landed in #111, so no contract and no orchestrator code changed.
+
+## Decisions
+
+- **Report `Draining()`, not `false`.** The issue's suggested approach allows either. Sending a bare `false` on connect is the one way to get the second acceptance criterion wrong, and it would have made an orchestrator-initiated drain (`OrchestratorToRunner.drain`, already handled by `control_loop.go`) evaporate on the next transport blip.
+- **A second mutex, not `loop.mu`.** See above: correctness needs the read and the send to be atomic with respect to other reporters, but `loop.mu` is on the hot path of `WaitForIdle`, `finish`, and offer handling, and a gRPC send can block on flow control.
+- **`SetDraining` promoted into `ControlClient`.** The type assertion it replaced degraded silently to "never report", which is the failure mode of this very issue. One test fake needed the method; nothing else implements the interface.
+- **`controlStreamSupervisor` extracted from `run()`.** Adversarial review showed the fix's only production wiring was a line no test could defend. The extraction is the smallest change that makes `OnConnected` observable.
+- **Did not pre-empt #119's column split.** See Known Issues: the two-writers problem is real and this change interacts with it, but resolving it needs a migration and edits to three placement predicates in `orchestrator/src/moirai/persistence/control_plane.py`, which is both out of scope and owned elsewhere.
+
+## Post-review corrections
+
+An adversarial review of the diff found four issues that were fixed before commit:
+
+- **The production wiring was untested** (high). Reverting `OnConnected: loop.Resume` to `loop.FlushEvents` — a complete reintroduction of the bug in the shipped binary — passed `go test -race ./...` in `runner/`. The supervisor test built its own `control.StreamSupervisor` literal, so it proved `Resume` works *as* an `OnConnected`, not that anything used it that way. Fixed by extracting `controlStreamSupervisor` and adding `runner/cmd/runner/main_stream_test.go`.
+- **The concurrency test could degrade into a vacuous pass** (medium). Its first version used a 100 ms sleep to let a goroutine queue on the report lock, and nothing asserted the interleaving happened. With a 300 ms scheduling delay injected in front of that goroutine — a loaded CI box — the "state sampled outside the lock" mutant survived. Replaced with a `runtime.Stack` barrier that waits for a goroutine to actually park inside `reportDrainState`; re-verified that the mutant now dies 3/3 *with* the 300 ms delay applied, and that the unmutated code still passes with it. The `t.Errorf`-from-a-goroutine hazard on the failure path went away with it: the queued resume now returns its error over a channel.
+- **A behaviour regression had no test** (medium-low). `Resume` swallowing the flush error passed everything, even though the hook it replaced (`loop.FlushEvents`) failed the connect on exactly that. The ordering test now drives a resume whose drain report succeeds and whose flush fails, and asserts the error propagates.
+- **Two claims were overstated** (low). "`StreamSupervisor` drops the stream and retries" is only the transient branch — a non-transient status unwinds `Run` and stops the runner. "The last value the orchestrator receives is always the runner's final one" describes ordering of *delivered* reports; a `Drain()` whose report dies with the stream leaves the orchestrator briefly wrong until the next connect. Both the code comments and `docs/architecture.md` now say so.
+
+Two review findings were accepted as-is: the `reportDrainState` nil-client guard is unreachable in production (its comment now says so rather than overselling it), and `StreamSupervisor` resets its backoff on every successful `Connect`, so a hook that always fails pins retries at `ReconnectMin` — pre-existing, identical in shape to the heartbeat path, and unreachable here since nothing makes the drain report fail while the heartbeat succeeds.
+
+## Validation Status
+
+- Targeted tests: Passed — `TestControlLoopResumeReportsTheDrainStateTheRunnerActuallyHas`, `TestControlLoopResumeCannotReportAStaleDrainState`, `TestControlLoopResumeReportsDrainStateBeforeFlushingBufferedEvents`, `TestControlLoopResumeFailsWhenTheDrainReportCannotBeDelivered`, `TestStreamSupervisorReportsTheRunnersDrainStateOnConnect` (`runner/internal/dispatch/control_loop_drain_test.go`) and `TestControlStreamSupervisorReportsTheRunnersDrainStateOnConnect` (`runner/cmd/runner/main_stream_test.go`). All confirmed failing against the mutations listed above.
+- Service tests: Passed — `make test-runner` (race detector on), all packages `ok`.
+- Full repository tests: Not run — no orchestrator, API, web, or proto change. `make test` was deliberately not invoked.
+- Build: Passed — `cd runner && go build ./...`.
+- Lint: Passed — `cd runner && gofmt -l .` produced no output.
+- Type checks: Passed — `cd runner && go vet ./...`.
+- Database migrations: Not applicable — no schema change; `app.runners.draining` already exists.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. The orchestrator half is covered by #111's existing tests, including `orchestrator/tests/test_runner_grpc.py::test_connect_drain_report_of_false_clears_the_flag`, which already proves a `draining: false` report clears the column and restores placement.
+
+## Known Issues
+
+- Issue: `app.runners.draining` still has two writers and one bit, and this change makes `draining: false` a *frequent* write where it was previously never sent.
+  - Severity: P2 — no impact today, a constraint on #119 the moment it ships.
+  - Impact: before this change nothing in `runner/` ever sent `false`, so an operator drain written straight to the column would have survived. Now a runner that is not draining writes `false` on every connect, and the control stream reconnects on any transport blip — so an operator drain applied by writing the column alone would be cleared within seconds. An operator drain that also sends `OrchestratorToRunner.drain` stays consistent: the runner mirrors it into its own state via `ControlLoop.Drain()` and re-asserts it on every subsequent stream.
+  - Evidence: `set_runner_state` maps `"drain"` to `(enabled=True, draining=True)` and `"enable"` to `(enabled=True, draining=False)`; `set_runner_draining` writes the same column. Harmless today only because `set_runner_state` has no callers.
+  - Suggested resolution: unchanged from #111 — belongs to #119, which owns the operator side. A separate `runner_reported_draining` column with the three placement predicates gating on `draining OR runner_reported_draining` separates the owners cleanly. Until then, #119 must drive an operator drain through `OrchestratorToRunner.drain` (already handled by the runner) rather than through the column alone. Recorded on #119 as a comment and in `docs/architecture.md`. Deliberately not resolved here: it needs a migration and edits to `schedule()`, `schedule_execution()` and `recover_one()`, none of which are in this session's scope.
+
+- Issue: the SIGTERM path still never delivers its drain report.
+  - Severity: P3 — cosmetic now that the report is self-correcting, but it means a graceful shutdown tells the orchestrator nothing.
+  - Impact: the orchestrator learns the runner is gone from the heartbeat timeout rather than from the drain report, so it may place one more offer that nobody answers. The unanswered-offer bounds already cover that.
+  - Evidence: `StreamSupervisor.Run` calls `s.Client.Disconnect()` on `ctx.Done()` (`runner/internal/control/stream.go:103-106`) before `main` reaches `loop.Drain()` (`runner/cmd/runner/main.go:288`), so `Client.send` hits `c.stream == nil` and returns `ErrNotConnected`.
+  - Suggested resolution: it belongs to #102's shutdown hardening, and this issue was the prerequisite — with the drain state now reported on connect, fixing that ordering no longer strands the runner after its first graceful shutdown.
+
+## Next Recommended Implementation
+
+- #102 (runner lifecycle hardening) is now unblocked on its shutdown-ordering item: delivering the SIGTERM drain report can no longer strand a runner, because the next connect clears it.
+- #119 (operator drain/revoke API) should decide the `draining` column ownership before it ships. See Known Issues above for the constraint this change adds.
