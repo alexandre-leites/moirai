@@ -87,8 +87,19 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 // workspace was prepared — precisely the ones that must not be forced. Failing
 // loudly is the right outcome there: the runner has not seen that work and
 // cannot merge it unattended, and the execution that follows resumes from the
-// published tip and delivers. `--force-with-lease` is no safer here, because
-// the lease would be taken against a cache that Prepare has just fetched.
+// published tip and delivers.
+//
+// "--force-with-lease" is not the safer alternative it looks like, and the two
+// repository modes disagree about it in opposite directions. Given no expected
+// value it reads this repository's own remote-tracking ref — which the runner's
+// *previous push* already advanced to the very tip it is about to overwrite, so
+// in existing_path mode the lease is satisfied by construction and the force
+// goes through. It protects against a push the runner never saw; it does not
+// protect against the runner's own stale base, which is what this defect was.
+// In managed_clone mode there is no remote-tracking ref at all — a mirror cache
+// keeps the remote's branches as its own refs/heads/* — so the same push is
+// refused outright with "! [rejected] … (stale info)". Both reproduced with git
+// 2.43.0.
 //
 // PushWorkInProgress does force, and may: its ref is named after a single
 // execution, which nothing else writes.

@@ -157,11 +157,18 @@ func (job deliveryJob) publishOutsideTheRunner(name, contents, message string) s
 // completed executions of one workflow all publish, and the branch on the code
 // host ends up holding the latest execution's work.
 //
-// Three deliveries rather than two, because a fix that only rebased the second
-// one onto the published tip — say, by preferring the remote unconditionally —
-// would pass at two and fail at three. The failed execution between them is the
-// repair loop the issue is about: it publishes to its own `wip/<execution>`
-// branch and must leave the delivery branch to the delivery that follows it.
+// Three deliveries rather than the two the criterion names: preparation
+// re-resolves the branch from scratch every time, so only a third run shows
+// that the state a delivery leaves behind is one the next preparation can
+// continue from, rather than one that happened to work once.
+//
+// The failed execution between them is the repair loop the issue is about. It
+// commits to the execution branch and publishes only to its own
+// `wip/<executionId>` branch, so the delivery that follows must inherit its
+// work while the delivery branch stays exactly where the last delivery left it.
+// A preparation that resolved the start point from the remote alone would push
+// a perfectly good fast-forward here and still silently drop that commit, which
+// is why the files are asserted and not just the ancestry.
 func TestConsecutiveDeliveriesToOneExecutionBranchAllReachTheCodeHost(t *testing.T) {
 	for _, mode := range []RepositoryMode{RepositoryModeManagedClone, RepositoryModeExistingPath} {
 		t.Run(string(mode), func(t *testing.T) {
