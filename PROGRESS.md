@@ -1150,6 +1150,12 @@ An adversarial review of the first commit (`a737315`) confirmed the three wedge 
 
 ## Known Issues
 
+- Issue: `TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected` is flaky in CI.
+  - Severity: P3
+  - Impact: it failed the `runner` job on the first CI run of PR #138 (`delivered events = []*runnerv1.ExecutionEvent(nil), want the terminal event`, 0.62s) and passed on a re-run of the same commit, 23s. Unrelated to this change: the branch modifies zero Go files (`git diff origin/main...HEAD --name-only` lists only Python, tests and Markdown).
+  - Evidence: `cd runner && go test -race -count=3 -run TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected ./internal/dispatch/` → `ok` locally; `gh run rerun 30426255735 --failed` → `runner pass 23s`, whole run `success`. The test drives a lease expiry against a disconnected stream and asserts on delivery timing, so it is time-dependent on a loaded runner.
+  - Suggested resolution: belongs to whoever owns `runner/internal/dispatch` (issue #93's area) — wait on the delivered-event condition rather than a fixed window.
+
 - Issue: `make test-postgres-integration` is not repeatable against the same database.
   - Severity: P3
   - Impact: the second run of the file against one database fails `OfferExpiryIntegrationTests.test_expired_recovery_offer_returns_the_run_to_recovering` with two expired leases instead of one.
