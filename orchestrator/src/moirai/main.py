@@ -527,9 +527,10 @@ async def _run_workflow_maintenance_loop(
     2. Close execution requests that can never be executed or reported on, so
        the runs holding them stop looking busy.
     3. Repair runs whose status says an execution should be in flight while
-       nothing is: re-queue the lost execution, or replay the transition that
-       was committed but never invoked (see persistence/control_plane.py's
-       recover_stalled_workflow_run).
+       nothing is: re-queue the execution that was lost, or hand a run whose
+       execution did report back to the graph at the status that was committed
+       (see persistence/control_plane.py's recover_stalled_workflow_run for
+       which of the two applies and why the distinction matters).
 
     Arm 2 has to run before arm 3: a leaked `dispatched` request is exactly
     what makes arm 3's detector unable to see the run (issue #94).
