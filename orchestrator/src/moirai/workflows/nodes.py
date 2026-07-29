@@ -5,7 +5,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Protocol
 
-from moirai.code_hosts import ChecksResult, CodeHost, GitHubCliError, checks_result
+from moirai.code_hosts import (
+    ChecksResult,
+    CodeHost,
+    GitHubCliError,
+    PullRequest,
+    checks_result,
+)
 from moirai.issue_trackers import IssueTracker
 
 from .issue_graph import IssueWorkflowNodes, IssueWorkflowState, WorkflowUpdate
@@ -213,19 +219,112 @@ class PersistedWorkflowNodes:
         return await self._transition(state, "waiting_human", updates)
 
     async def merge(self, state: IssueWorkflowState) -> WorkflowUpdate:
+        """Merges the pull request, and reports success only once the code host
+        confirms the merge happened.
+
+        `gh pr merge` returning without an error is not a merge. GitHub may
+        have queued an auto-merge behind a branch-protection rule, another
+        actor may have closed the pull request while the run waited for a
+        human, and a merge can be blocked by a race the CLI reports as
+        success. So the node re-reads the pull request afterwards and routes on
+        what the code host says, not on what the merge command did:
+
+        - merged -- the merge commit and merge timestamp go into the durable
+          record and `route_after_merge` lets the graph reach `complete`, which
+          is the only place the issue is closed and `agent:delivered` applied
+          (`PROJECT.md`'s "agents do not decide completion").
+        - closed without a merge -- terminal, and a distinct reason from a
+          merge that failed, because nothing about it will get better by
+          waiting.
+        - anything else, including an unreadable code host -- unverified. The
+          run stays in the re-enterable `merging` status; nothing is closed and
+          nothing is labelled delivered.
+
+        Re-entry is a no-op for a pull request that is already merged: the
+        state is read before anything is attempted, so `gh pr merge` is never
+        issued a second time for a merge that already landed (`AGENTS.md` §12,
+        idempotent external side effects).
+        """
         code_host = await self._resolve_code_host(state)
-        if code_host is not None and state.get("pull_request_id"):
-            method = state.get("merge_method", "squash")
+        pull_request_id = state.get("pull_request_id")
+        if code_host is None or not pull_request_id:
+            return await self._merge_unverified(state, "no code host reported on the pull request")
+        try:
+            pull_request = await code_host.get_pull_request(pull_request_id)
+        except GitHubCliError as error:
+            return await self._merge_unverified(state, f"pull request could not be read: {error}")
+        if not pull_request.merged and not pull_request.closed:
             try:
-                pull_request = await code_host.get_pull_request(state["pull_request_id"])
-                if pull_request.state.lower() != "merged":
-                    await code_host.merge_pull_request(state["pull_request_id"], method)
+                await code_host.merge_pull_request(
+                    pull_request_id, state.get("merge_method", "squash")
+                )
             except GitHubCliError as error:
                 return await self._transition(state, "blocked", {
                     "status": "blocked",
                     "blocking_reason": f"merge failed: {error}",
+                    **_pull_request_record(pull_request),
                 })
-        return await self._transition(state, "merging", {"status": "merging"})
+            try:
+                pull_request = await code_host.get_pull_request(pull_request_id)
+            except GitHubCliError as error:
+                # The merge may well have landed -- this only says the
+                # confirming read failed. Blocking here would strand a merged
+                # pull request on a transient GitHub hiccup, so the run waits
+                # and re-reads instead.
+                return await self._merge_unverified(
+                    state, f"merge could not be confirmed: {error}", pull_request
+                )
+        if pull_request.merged:
+            return await self._transition(state, "merging", {
+                "status": "merging",
+                "pull_request_merged": True,
+                **_pull_request_record(pull_request),
+            })
+        if pull_request.closed:
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "blocking_reason": (
+                    f"pull request {pull_request_id} was closed without being merged"
+                ),
+                **_pull_request_record(pull_request),
+            })
+        return await self._merge_unverified(
+            state, f"the code host still reports it {pull_request.state}", pull_request
+        )
+
+    async def _merge_unverified(
+        self,
+        state: IssueWorkflowState,
+        detail: str,
+        pull_request: PullRequest | None = None,
+    ) -> WorkflowUpdate:
+        """Parks the run in `merging` while the merge stays unconfirmed, under a
+        bound.
+
+        `merging` is a waiting status, not a delivered one: `route_after_merge`
+        sends it to END, so the run holds its place and re-entering the node
+        re-reads the pull request. The counter is what stops that from being
+        unbounded -- a pull request that never merges (a permanently queued
+        auto-merge, a code host that cannot be read) would otherwise re-enter
+        forever, which `PROJECT.md`'s "bounded loops" forbids. Once the budget
+        is spent the run blocks with the last thing the code host actually
+        said, which is the part a human needs.
+        """
+        attempts = _attempts(state, "merge_verification_attempts") + 1
+        record = {} if pull_request is None else _pull_request_record(pull_request)
+        if attempts >= _BUDGET.merge_verification_attempts:
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "merge_verification_attempts": attempts,
+                "blocking_reason": f"merge was not confirmed after {attempts} attempts: {detail}",
+                **record,
+            })
+        return await self._transition(state, "merging", {
+            "status": "merging",
+            "merge_verification_attempts": attempts,
+            "pull_request_merged": False,
+            **record,
+        })
 
     async def complete(self, state: IssueWorkflowState) -> WorkflowUpdate:
         issue_tracker = await self._resolve_issue_tracker(state)
@@ -355,6 +454,26 @@ class PersistedWorkflowNodes:
     ) -> WorkflowUpdate:
         await _await(self.persistence.transition(_workflow_run_id(state), status, updates))
         return updates
+
+
+def _pull_request_record(pull_request: PullRequest) -> WorkflowUpdate:
+    """The pull request as the durable record should hold it.
+
+    Every field the `app.pull_requests` upsert writes travels together, so a
+    transition can never refresh one half of the row and blank the other: the
+    upsert reads `pull_request_id` as its trigger and would otherwise overwrite
+    `head_commit` and `state` with empty strings. Absent timestamps and commits
+    are empty strings rather than None so the graph state stays JSON-plain; the
+    persistence layer is what turns them back into SQL NULLs.
+    """
+    return {
+        "pull_request_id": pull_request.external_id,
+        "pull_request_url": pull_request.url,
+        "pull_request_head_commit": pull_request.head_commit,
+        "pull_request_state": pull_request.state,
+        "pull_request_merged_at": pull_request.merged_at or "",
+        "pull_request_merge_commit": pull_request.merge_commit or "",
+    }
 
 
 def _attempts(state: IssueWorkflowState, counter: str | None) -> int:

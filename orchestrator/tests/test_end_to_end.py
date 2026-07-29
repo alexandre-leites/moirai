@@ -892,15 +892,35 @@ class _EntryPointControlPlane:
 
 
 class _FakeCodeHost:
-    def __init__(self, checks_pass: bool = True) -> None:
+    """A code host whose pull request really becomes merged when it is merged.
+
+    The merge node verifies the merge by re-reading the pull request, so a fake
+    that always answers `open` is a fake that never delivers (issue #121). The
+    state is flipped by `merge_pull_request` rather than being fixed at
+    construction so these tests exercise the real sequence: read, merge,
+    re-read, and only then complete.
+    """
+
+    def __init__(self, checks_pass: bool = True, merges: bool = True) -> None:
         self.created_prs: list[tuple[str, str, str, str, str | None]] = []
         self.checked_prs: list[str] = []
         self.merged_prs: list[tuple[str, str]] = []
         self.checks_pass = checks_pass
+        self.merges = merges
+        self.state = "open"
 
     async def get_pull_request(self, pull_request_id: str) -> Any:
         from moirai.code_hosts import PullRequest
-        return PullRequest(external_id=pull_request_id, url="https://example.test/pr/42", state="open", head_branch="agent/42/run-1", head_commit="abc123")
+        merged = self.state == "merged"
+        return PullRequest(
+            external_id=pull_request_id,
+            url="https://example.test/pr/42",
+            state=self.state,
+            head_branch="agent/42/run-1",
+            head_commit="abc123",
+            merged_at="2026-01-01T00:00:00+00:00" if merged else None,
+            merge_commit="def456" if merged else None,
+        )
 
     async def create_or_find_pull_request(
         self, workflow_id: str, branch: str, base_branch: str, title: str, issue_number: str | None = None,
@@ -917,6 +937,8 @@ class _FakeCodeHost:
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:
         self.merged_prs.append((pull_request_id, method))
+        if self.merges:
+            self.state = "merged"
 
 
 class _FakeIssueTracker:

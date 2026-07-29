@@ -34,6 +34,11 @@ class RetryBudget:
     review_cycles: int = 3
     ci_repair_attempts: int = 3
     total_agent_executions: int = 10
+    # How many times the merge node may re-read a pull request that the code
+    # host has not reported merged before the run blocks. It costs no agent
+    # execution -- it is a bound on waiting, not on work -- so it can afford to
+    # be more generous than the repair budgets.
+    merge_verification_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,11 @@ class GateState:
     review_cycles: int = 0
     ci_repair_attempts: int = 0
     total_agent_executions: int = 0
+    # Set only by the merge node, and only from a pull request the code host
+    # reported merged after the merge was asked for. It defaults to False so
+    # every path that has not verified a merge -- including one that never
+    # reached the merge node -- routes as "not merged".
+    pull_request_merged: bool = False
 
 
 def route_after_plan(state: GateState, budget: RetryBudget) -> WorkflowRoute:
@@ -93,6 +103,27 @@ def route_after_checks(state: GateState, budget: RetryBudget) -> WorkflowRoute:
     if state.ci_repair_attempts < budget.ci_repair_attempts:
         return _agent_budget_route(state, budget, WorkflowRoute.CI_REPAIR)
     return WorkflowRoute.BLOCKED
+
+
+def route_after_merge(state: GateState) -> WorkflowRoute:
+    """Where the graph goes once the merge node has reported.
+
+    COMPLETE is reachable on one condition only: the code host confirmed the
+    pull request merged. Completion closes the issue and applies
+    `agent:delivered`, and `PROJECT.md` lists merge among the deterministic
+    gates that must hold before that happens, so a merge command that returned
+    without an error is not enough.
+
+    Everything else routes back to MERGE, which `build_issue_graph` maps to
+    END: the run parks in the `merging` status with nothing closed and nothing
+    labelled, and re-entering the node re-reads the pull request. This branch
+    carries no budget of its own -- the merge node bounds its own waiting and
+    reports `blocked` when that bound is spent, exactly as the dispatching
+    nodes do, so the limit lives in one place instead of two that can drift.
+    """
+    if state.pull_request_merged:
+        return WorkflowRoute.COMPLETE
+    return WorkflowRoute.MERGE
 
 
 def route_after_human_response(approved: bool, changes_requested: bool) -> WorkflowRoute:

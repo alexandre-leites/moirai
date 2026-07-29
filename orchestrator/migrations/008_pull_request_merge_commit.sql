@@ -1,0 +1,18 @@
+-- The merge commit a pull request landed as.
+--
+-- `app.pull_requests` already had `merged_at` and nothing ever wrote it: the
+-- merge node fired `gh pr merge` and transitioned straight on, so the durable
+-- record could not tell an attempted merge from a completed one (issue #121).
+-- Verifying the merge means re-reading the pull request afterwards, and what
+-- comes back is a timestamp *and* the commit the merge produced -- the commit
+-- being the part that identifies what actually landed on the default branch.
+--
+-- Nullable with no default and no backfill: every pull request that predates
+-- this column merged (or did not) without anyone recording which commit it
+-- became, and inventing a value would be worse than an honest NULL. Rows are
+-- filled in by the merge node's confirming read from here on.
+--
+-- Idempotent, and safe to re-run: ADD COLUMN IF NOT EXISTS is a no-op once the
+-- column is there, and the statement takes no table rewrite because the column
+-- has no default.
+ALTER TABLE app.pull_requests ADD COLUMN IF NOT EXISTS merge_commit TEXT;

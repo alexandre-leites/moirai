@@ -32,13 +32,46 @@ class ChecksResult(StrEnum):
     FAILED = "failed"
 
 
+# The identity of a pull request as the workflow needs it. `mergedAt` and
+# `mergeCommit` are requested everywhere a pull request is read so "merged" is
+# never inferred from the absence of an error: the merge node re-reads the
+# pull request after asking for the merge and only advances on these fields.
+_PULL_REQUEST_FIELDS = "number,url,state,headRefName,headRefOid,mergedAt,mergeCommit"
+
+
 @dataclass(frozen=True)
 class PullRequest:
     external_id: str
     url: str
+    # Normalised to lower case at the adapter boundary: `gh` reports
+    # `OPEN`/`CLOSED`/`MERGED`, the database's own default is the literal
+    # `open`, and a durable column that spells the same state two ways is a
+    # column nothing can query. Comparisons go through `merged`/`closed` so no
+    # caller has to know which casing it was handed.
     state: str
     head_branch: str
     head_commit: str
+    # None whenever the code host reports no merge -- an open pull request, or
+    # one closed without merging. A merged pull request that GitHub reports
+    # without these is still merged; the workflow stamps its own timestamp
+    # rather than treating the gap as "not merged".
+    merged_at: str | None = None
+    merge_commit: str | None = None
+
+    @property
+    def merged(self) -> bool:
+        return self.state == "merged"
+
+    @property
+    def closed(self) -> bool:
+        """Closed without being merged.
+
+        GitHub reports a merged pull request as `MERGED`, never as `CLOSED`,
+        so the two are genuinely disjoint outcomes and the workflow must not
+        collapse them: one is delivery, the other is a human rejecting the
+        change while the run was waiting.
+        """
+        return self.state == "closed"
 
 
 @dataclass(frozen=True)
@@ -84,6 +117,27 @@ def checks_pass(checks: Sequence[PullRequestCheck]) -> bool:
     return checks_result(checks) is ChecksResult.PASSED
 
 
+# `gh` fills an absent timestamp with Go's zero time rather than null on some
+# subcommands, and a zero timestamp is not a merge.
+_ZERO_TIMESTAMP_PREFIX = "0001-01-01"
+
+
+def _optional_string(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.startswith(_ZERO_TIMESTAMP_PREFIX):
+        return None
+    return text
+
+
+def _commit_oid(value: object) -> object:
+    """The SHA out of `gh`'s commit object, which is null on an unmerged pull request."""
+    if isinstance(value, dict):
+        return value.get("oid")
+    return None
+
+
 class GitHubCliCodeHost:
     def __init__(
         self,
@@ -108,7 +162,7 @@ class GitHubCliCodeHost:
             "--limit",
             "1",
             "--json",
-            "number,url,state,headRefName,headRefOid",
+            _PULL_REQUEST_FIELDS,
         )
         if not isinstance(payload, list):
             raise GitHubCliError("GitHub CLI pull request list response is not an array")
@@ -124,7 +178,7 @@ class GitHubCliCodeHost:
             "--repo",
             self._repository.slug,
             "--json",
-            "number,url,state,headRefName,headRefOid",
+            _PULL_REQUEST_FIELDS,
         )
         return self._pull_request_from_json(payload)
 
@@ -297,9 +351,11 @@ class GitHubCliCodeHost:
             return PullRequest(
                 external_id=str(value["number"]),
                 url=str(value["url"]),
-                state=str(value["state"]),
+                state=str(value["state"]).strip().lower(),
                 head_branch=str(value["headRefName"]),
                 head_commit=str(value["headRefOid"]),
+                merged_at=_optional_string(value.get("mergedAt")),
+                merge_commit=_optional_string(_commit_oid(value.get("mergeCommit"))),
             )
         except (KeyError, TypeError, ValueError) as error:
             raise GitHubCliError("GitHub CLI pull request item is missing required fields") from error
