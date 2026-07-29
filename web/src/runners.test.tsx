@@ -32,6 +32,26 @@ function render(props: Partial<RunnersViewProps> = {}): string {
   );
 }
 
+/** The markup of one `<tbody>` row, found by the runner name it contains. */
+function row(html: string, name: string): string {
+  const found = html
+    .split("<tr")
+    .slice(1)
+    .find((candidate) => candidate.includes(`<div>${name}</div>`));
+  if (!found) throw new Error(`no row for "${name}" in:\n${html}`);
+  return found;
+}
+
+/** The contents of one `<td>` of a row, counting from zero. */
+function cell(rowHtml: string, index: number): string {
+  const cells = rowHtml.split("<td>").slice(1);
+  if (cells.length <= index) throw new Error(`row has ${cells.length} cells, wanted #${index}`);
+  return cells[index].split("</td>")[0];
+}
+
+const DRAINING_CELL = 3;
+const HEARTBEAT_CELL = 4;
+
 describe("RunnersView", () => {
   it("shows a loading line before the first response", () => {
     const html = render({ runners: null, loading: true });
@@ -39,7 +59,7 @@ describe("RunnersView", () => {
     expect(html).not.toContain("<table");
   });
 
-  it("renders one row per runner with name, status, labels, draining and heartbeat age", () => {
+  it("renders one row per runner with name, status, labels and heartbeat age", () => {
     const html = render({
       runners: [
         runner({
@@ -47,19 +67,34 @@ describe("RunnersView", () => {
           name: "runner-a",
           lastSeenAt: new Date(NOW - 8_000).toISOString(),
         }),
-        runner({ id: "bbbbbbbb-0000-0000-0000-000000000002", name: "runner-b", draining: true }),
+        runner({ id: "bbbbbbbb-0000-0000-0000-000000000002", name: "runner-b" }),
       ],
     });
     expect(html.match(/<tr/g)).toHaveLength(3); // header + two runners
-    expect(html).toContain("runner-a");
-    expect(html).toContain("runner-b");
     expect(html).toContain("aaaaaaaa");
-    expect(html).toContain("Online");
-    expect(html).toContain("linux");
-    expect(html).toContain("docker");
-    expect(html).toContain("Draining");
-    expect(html).toContain("8s ago");
-    expect(html).toContain("2/2 online");
+    expect(row(html, "runner-a")).toContain("Online");
+    expect(row(html, "runner-a")).toContain("linux");
+    expect(row(html, "runner-a")).toContain("docker");
+    expect(cell(row(html, "runner-a"), HEARTBEAT_CELL)).toContain("8s ago");
+    expect(cell(row(html, "runner-b"), HEARTBEAT_CELL)).toContain("just now");
+  });
+
+  it("shows the draining flag in its own cell, per runner", () => {
+    const html = render({
+      runners: [
+        runner({ id: "aaaaaaaa-0000-0000-0000-000000000001", name: "steady" }),
+        runner({ id: "bbbbbbbb-0000-0000-0000-000000000002", name: "leaving", draining: true }),
+      ],
+    });
+    expect(cell(row(html, "leaving"), DRAINING_CELL)).toContain("Draining");
+    expect(cell(row(html, "steady"), DRAINING_CELL)).not.toContain("Draining");
+    expect(cell(row(html, "steady"), DRAINING_CELL)).toContain("No");
+  });
+
+  it("carries the absolute heartbeat time in the cell's title attribute", () => {
+    const seenAt = new Date(NOW - 8_000);
+    const html = render({ runners: [runner({ lastSeenAt: seenAt.toISOString() })] });
+    expect(cell(row(html, "runner-a"), HEARTBEAT_CELL)).toContain(`title="${seenAt.toLocaleString()}"`);
   });
 
   it("renders every column header the acceptance criteria name", () => {
@@ -80,20 +115,36 @@ describe("RunnersView", () => {
         }),
       ],
     });
-    const rows = html.split("<tr").slice(1);
-    const fresh = rows.find((row) => row.includes("fresh"));
-    const gone = rows.find((row) => row.includes("gone"));
-    expect(fresh).not.toContain("runner-row--stale");
-    expect(fresh).not.toContain(">Stale<");
-    expect(gone).toContain("runner-row--stale");
-    expect(gone).toContain(">Stale<");
-    expect(gone).toContain("4m ago");
+    expect(row(html, "fresh")).not.toContain("runner-row--stale");
+    expect(row(html, "fresh")).not.toContain(">Stale<");
+    expect(row(html, "fresh")).toContain(">Online<");
+    // Stale is signalled three ways, none of them colour alone: the status
+    // pill, a badge next to the age, and the row stripe.
+    expect(row(html, "gone")).toContain("runner-row--stale");
+    expect(cell(row(html, "gone"), 1)).toContain(">Stale<");
+    expect(cell(row(html, "gone"), HEARTBEAT_CELL)).toContain(">Stale<");
+    expect(cell(row(html, "gone"), HEARTBEAT_CELL)).toContain("4m ago");
   });
 
   it("marks a runner that has never reported as stale", () => {
     const html = render({ runners: [runner({ lastSeenAt: "" })] });
     expect(html).toContain("runner-row--stale");
     expect(html).toContain("never");
+  });
+
+  it("counts only reachable runners in the header, not the row count", () => {
+    const html = render({
+      runners: [
+        runner({ id: "aaaaaaaa-0000-0000-0000-000000000001", name: "up" }),
+        runner({ id: "bbbbbbbb-0000-0000-0000-000000000002", name: "down", status: "offline" }),
+        runner({
+          id: "cccccccc-0000-0000-0000-000000000003",
+          name: "silent",
+          lastSeenAt: new Date(NOW - 4 * 60_000).toISOString(),
+        }),
+      ],
+    });
+    expect(html).toContain("1/3 online");
   });
 
   it("shows an explicit empty state instead of an empty table", () => {
@@ -127,8 +178,13 @@ describe("RunnersView", () => {
     expect(html).toContain("No runner is registered.");
   });
 
+  it("leaves the refresh control usable while a request is outstanding", () => {
+    // A hung request must not lock the operator out of retrying.
+    expect(render({ runners: [runner()], loading: true })).not.toContain("disabled");
+  });
+
   it("tolerates a runner with no labels", () => {
     const html = render({ runners: [runner({ labels: [] })] });
-    expect(html).toContain("none");
+    expect(cell(row(html, "runner-a"), 2)).toContain("none");
   });
 });

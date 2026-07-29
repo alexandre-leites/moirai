@@ -18,7 +18,8 @@ export type Workflow = {
 // orchestrator's own column, currently "online" or "offline"; it is typed as a
 // plain string so a value added server-side does not break the client.
 // `lastSeenAt` is an ISO-8601 timestamp with an offset, or "" when the runner
-// has never reported a heartbeat.
+// has never reported a heartbeat. `labels` is always an array here — see
+// `listRunners`, which normalizes the wire's `null`.
 export type Runner = {
   id: string;
   name: string;
@@ -28,6 +29,11 @@ export type Runner = {
   labels: string[];
   lastSeenAt: string;
 };
+
+// What the wire actually carries. The handler marshals the protobuf's repeated
+// `labels` field straight to JSON, and an empty repeated field is a nil slice
+// in Go, which encoding/json writes as `null` rather than `[]`.
+type RunnerPayload = Omit<Runner, "labels"> & { labels: string[] | null };
 
 export type RunnerToken = {
   id: string;
@@ -228,15 +234,17 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
 
     async listRunners(signal?: AbortSignal): Promise<Runner[]> {
       const res = await fetchClient("/api/v1/runners", { signal, credentials: "include" });
-      const body: { runners?: Runner[] } = await json(res);
+      const body: { runners?: RunnerPayload[] } = await json(res);
       // `runners` is required by the OpenAPI schema. If it is missing the
       // response is not the one we asked for, and returning [] here would
       // render the "no runner is registered" empty state for what is really a
-      // broken response — the exact silent failure the runners view must not have.
+      // broken response — the exact silent failure the runners view must not
+      // have. Not an ApiError: the server answered 200, this is our own read of
+      // the body failing, and claiming an HTTP status it never sent would lie.
       if (!Array.isArray(body.runners)) {
-        throw new ApiError(res.status, "The runner list response was malformed.");
+        throw new Error("The runner list response was malformed.");
       }
-      return body.runners;
+      return body.runners.map((runner) => ({ ...runner, labels: runner.labels ?? [] }));
     },
 
     async listTokens(signal?: AbortSignal): Promise<RunnerToken[]> {

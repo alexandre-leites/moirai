@@ -26,6 +26,9 @@ function runner(overrides: Partial<Runner> = {}): Runner {
   };
 }
 
+const fresh = describeHeartbeat(new Date(NOW - 2_000).toISOString(), NOW);
+const missed = describeHeartbeat(new Date(NOW - 10 * 60_000).toISOString(), NOW);
+
 describe("formatAge", () => {
   it("reads durations the way an operator does", () => {
     expect(formatAge(0)).toBe("just now");
@@ -38,7 +41,7 @@ describe("formatAge", () => {
     expect(formatAge(25 * 60 * 60_000)).toBe("1d ago");
   });
 
-  it("does not render a negative age when the runner clock is ahead", () => {
+  it("does not render a negative age when the two clocks disagree", () => {
     expect(formatAge(-30_000)).toBe("just now");
   });
 });
@@ -62,11 +65,28 @@ describe("describeHeartbeat", () => {
   });
 
   it("treats a runner that never reported as stale rather than fresh", () => {
-    for (const value of ["", undefined, "not-a-timestamp"]) {
+    for (const value of ["", null, undefined]) {
       const heartbeat = describeHeartbeat(value, NOW);
       expect(heartbeat.stale).toBe(true);
       expect(heartbeat.label).toBe("never");
     }
+  });
+
+  it("separates an unreadable timestamp from a runner that never reported", () => {
+    const heartbeat = describeHeartbeat("not-a-timestamp", NOW);
+    expect(heartbeat.stale).toBe(true);
+    expect(heartbeat.label).toBe("unknown");
+    expect(heartbeat.title).toContain("not-a-timestamp");
+  });
+
+  it("reads the orchestrator's own timestamp format, offset and microseconds included", () => {
+    // What `datetime.isoformat()` emits for the TIMESTAMPTZ column, per
+    // orchestrator/src/moirai/grpc/control_plane.py.
+    // 7.071s before NOW: the offset is honoured (a naive read would be hours
+    // out) and the sub-millisecond digits are truncated, not rejected.
+    const heartbeat = describeHeartbeat("2026-07-29T11:59:52.928921+00:00", NOW);
+    expect(heartbeat.label).toBe("7s ago");
+    expect(heartbeat.stale).toBe(false);
   });
 
   it("keeps the absolute timestamp for the title attribute", () => {
@@ -84,28 +104,48 @@ describe("describeHeartbeat", () => {
 
 describe("describeRunnerStatus", () => {
   it("maps the fleet states to the specification's pills", () => {
-    expect(describeRunnerStatus(runner())).toEqual({ label: "Online", variant: "ok" });
-    expect(describeRunnerStatus(runner({ draining: true }))).toEqual({ label: "Draining", variant: "warn" });
-    expect(describeRunnerStatus(runner({ enabled: false }))).toEqual({ label: "Disabled", variant: "idle" });
-    expect(describeRunnerStatus(runner({ status: "offline" }))).toEqual({ label: "Offline", variant: "bad" });
-  });
-
-  it("reports a disconnected runner as offline even while it is draining", () => {
-    expect(describeRunnerStatus(runner({ status: "offline", draining: true })))
+    expect(describeRunnerStatus(runner(), fresh)).toEqual({ label: "Online", variant: "ok" });
+    expect(describeRunnerStatus(runner({ draining: true }), fresh))
+      .toEqual({ label: "Draining", variant: "warn" });
+    expect(describeRunnerStatus(runner({ enabled: false }), fresh))
+      .toEqual({ label: "Disabled", variant: "idle" });
+    expect(describeRunnerStatus(runner({ status: "offline" }), fresh))
       .toEqual({ label: "Offline", variant: "bad" });
   });
 
-  it("shows a status the server adds later instead of mislabelling it", () => {
-    expect(describeRunnerStatus(runner({ status: "quarantined" })))
-      .toEqual({ label: "Quarantined", variant: "bad" });
-    expect(describeRunnerStatus(runner({ status: "" }))).toEqual({ label: "Unknown", variant: "bad" });
+  it("does not report a runner that stopped heartbeating as online", () => {
+    // `runners.status` only returns to 'offline' through lease expiry or
+    // revocation, so a killed idle runner keeps status = 'online' forever.
+    expect(describeRunnerStatus(runner(), missed)).toEqual({ label: "Stale", variant: "warn" });
+    expect(describeRunnerStatus(runner({ draining: true }), missed))
+      .toEqual({ label: "Stale", variant: "warn" });
+    expect(describeRunnerStatus(runner({ enabled: false }), missed))
+      .toEqual({ label: "Stale", variant: "warn" });
+  });
+
+  it("reports a disconnected runner as offline even while it is draining or stale", () => {
+    expect(describeRunnerStatus(runner({ status: "offline", draining: true }), missed))
+      .toEqual({ label: "Offline", variant: "bad" });
+  });
+
+  it("names a status the server adds later instead of mislabelling it as critical", () => {
+    expect(describeRunnerStatus(runner({ status: "quarantined" }), fresh))
+      .toEqual({ label: "Quarantined", variant: "idle" });
+    expect(describeRunnerStatus(runner({ status: "" }), fresh))
+      .toEqual({ label: "Unknown", variant: "idle" });
   });
 });
 
 describe("countOnline", () => {
-  it("counts only the connected runners", () => {
-    expect(countOnline([runner(), runner({ id: "b", status: "offline" }), runner({ id: "c" })])).toBe(2);
-    expect(countOnline([])).toBe(0);
+  it("counts only the runners the orchestrator can currently reach", () => {
+    const runners = [
+      runner({ id: "a" }),
+      runner({ id: "b", status: "offline" }),
+      runner({ id: "c", lastSeenAt: new Date(NOW - 10 * 60_000).toISOString() }),
+      runner({ id: "d", lastSeenAt: "" }),
+    ];
+    expect(countOnline(runners, NOW)).toBe(1);
+    expect(countOnline([], NOW)).toBe(0);
   });
 });
 
@@ -151,6 +191,14 @@ describe("ApiClient.listRunners", () => {
     await expect(api.listRunners()).resolves.toEqual([runner()]);
   });
 
+  it("normalizes the null the Go handler emits for a runner with no labels", async () => {
+    // encoding/json writes a nil []string as `null`, so an unlabelled runner
+    // arrives with labels: null even though the OpenAPI schema says array.
+    const api = createApiClient(async () => okResponse({ runners: [{ ...runner(), labels: null }] }));
+    const [loaded] = await api.listRunners();
+    expect(loaded.labels).toEqual([]);
+  });
+
   it("requests the documented endpoint with the session cookie", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const api = createApiClient(async (url, init) => {
@@ -160,6 +208,17 @@ describe("ApiClient.listRunners", () => {
     await api.listRunners();
     expect(calls[0].url).toBe("/api/v1/runners");
     expect(calls[0].init?.credentials).toBe("include");
+  });
+
+  it("forwards the abort signal it was given", async () => {
+    const ctrl = new AbortController();
+    let seen: AbortSignal | null | undefined;
+    const api = createApiClient(async (_url, init) => {
+      seen = init?.signal;
+      return okResponse({ runners: [] });
+    });
+    await api.listRunners(ctrl.signal);
+    expect(seen).toBe(ctrl.signal);
   });
 
   it("raises the problem+json detail instead of returning nothing", async () => {

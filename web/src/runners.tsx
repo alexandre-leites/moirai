@@ -37,8 +37,8 @@ function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
   return (
     <>
       {runners.map((runner) => {
-        const status = describeRunnerStatus(runner);
         const heartbeat = describeHeartbeat(runner.lastSeenAt, now);
+        const status = describeRunnerStatus(runner, heartbeat);
         return (
           <tr key={runner.id} className={heartbeat.stale ? "runner-row--stale" : undefined}>
             <td>
@@ -46,7 +46,7 @@ function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
               <div className="mono muted">{runner.id.slice(0, 8)}</div>
             </td>
             <td><span className={`pill pill--${status.variant}`}>{status.label}</span></td>
-            <td><LabelList labels={runner.labels ?? []} /></td>
+            <td><LabelList labels={runner.labels} /></td>
             <td>
               {runner.draining
                 ? <span className="pill pill--warn">Draining</span>
@@ -55,7 +55,7 @@ function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
             <td>
               <span className="mono" title={heartbeat.title}>{heartbeat.label}</span>
               {heartbeat.stale && (
-                <span className="pill pill--bad stale-badge" title={STALE_HINT}>Stale</span>
+                <span className="pill pill--warn stale-badge" title={STALE_HINT}>Stale</span>
               )}
             </td>
           </tr>
@@ -72,18 +72,19 @@ function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
  * (docs/design/web-console/tasks.md B1).
  */
 export function RunnersView({ runners, error, loading, now, onRefresh }: RunnersViewProps) {
-  const online = runners ? countOnline(runners) : 0;
   return (
     <div>
       <div className="page-header">
         <h2>Runners</h2>
         <div className="page-header-aside">
           {runners && runners.length > 0 && (
-            <span className="page-hint mono">{online}/{runners.length} online</span>
+            <span className="page-hint mono" aria-live="polite">
+              {countOnline(runners, now)}/{runners.length} online
+            </span>
           )}
-          <button onClick={onRefresh} disabled={loading}>
-            {loading ? "Refreshing..." : "Refresh"}
-          </button>
+          {/* Never disabled: a request that hangs must not lock the operator
+              out of retrying, and a click restarts the load from scratch. */}
+          <button onClick={onRefresh}>{loading ? "Refreshing..." : "Refresh"}</button>
         </div>
       </div>
 
@@ -95,7 +96,7 @@ export function RunnersView({ runners, error, loading, now, onRefresh }: Runners
               : "The runner fleet could not be loaded."}
           </p>
           <p>{error}</p>
-          <button onClick={onRefresh} disabled={loading}>Retry</button>
+          <button onClick={onRefresh}>Retry</button>
         </div>
       )}
 
@@ -135,43 +136,58 @@ export function RunnersPage({ api }: { api: ApiClient }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(() => Date.now());
-  // Bumped by the Refresh/Retry button to re-run the effect below.
+  // Bumped by the Refresh/Retry button to re-run the effect below, which
+  // abandons whatever request is in flight and starts a clean one.
   const [refreshToken, setRefreshToken] = useState(0);
 
   const onRefresh = useCallback(() => setRefreshToken((token) => token + 1), []);
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    setLoading(true);
+    let cancelled = false;
+    // One request at a time. Without this, a slow orchestrator lets the poll
+    // stack requests that then resolve out of order, and an older snapshot can
+    // overwrite a newer one.
+    let inFlight: AbortController | null = null;
 
-    const refresh = async () => {
-      const result = await loadRunners(api, ctrl.signal);
-      if (ctrl.signal.aborted) return;
-      // `now` moves with the data: heartbeat ages are only as fresh as the
-      // response they were computed from.
-      setNow(Date.now());
-      if (result.kind === "error") {
-        setError(result.message);
-      } else {
-        setRunners(result.runners);
-        setError(null);
-      }
-      setLoading(false);
+    const refresh = (background: boolean) => {
+      if (inFlight) return;
+      const ctrl = new AbortController();
+      inFlight = ctrl;
+      // Sampled before the request, not after: heartbeat ages are relative to
+      // when the orchestrator was asked. Sampling on arrival would add the
+      // whole round-trip to every age and report a healthy fleet as stale
+      // exactly when the orchestrator is slow.
+      const requestedAt = Date.now();
+      if (!background) setLoading(true);
+
+      void loadRunners(api, ctrl.signal).then((result) => {
+        inFlight = null;
+        if (cancelled) return;
+        setNow(requestedAt);
+        if (result.kind === "error") {
+          setError(result.message);
+        } else {
+          setRunners(result.runners);
+          setError(null);
+        }
+        setLoading(false);
+      });
     };
 
-    void refresh();
+    refresh(false);
 
     // Interim polling per specification §4.5 — paused while the tab is hidden.
     const interval = setInterval(() => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden) refresh(true);
     }, POLL_INTERVAL_MS);
     const onVisibilityChange = () => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden) refresh(true);
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      ctrl.abort();
+      cancelled = true;
+      inFlight?.abort();
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };

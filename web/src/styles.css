@@ -216,6 +216,9 @@ td { font-size: 14px; }
   font-size: 12px;
 }
 
+/* A missed heartbeat is warn, not crit, per the console specification's
+   staleness rule for probes. The stripe and the tint only reinforce the
+   "Stale" pill: state is never carried by colour alone. */
 .stale-badge { margin-left: 8px; }
-.runner-row--stale { background: rgba(248, 81, 73, 0.08); }
-.runner-row--stale > td:first-child { box-shadow: inset 3px 0 0 var(--danger); }
+.runner-row--stale { background: color-mix(in srgb, var(--warning) 10%, transparent); }
+.runner-row--stale > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }

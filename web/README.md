@@ -23,6 +23,21 @@ visible, and has a Refresh button. Drain, disable and revoke controls need
 `POST /api/v1/runners/{id}/state`, which the API does not serve yet
 ([`docs/design/web-console/tasks.md`](../docs/design/web-console/tasks.md) B1).
 
+A runner that has stopped heartbeating shows as `Stale`, not `Online`, even though the
+orchestrator's `runners.status` column still says `online`: that column only returns to `offline`
+through lease expiry or revocation, so an idle runner that is killed would otherwise be reported
+connected indefinitely. The header count (`n/m online`) excludes stale runners for the same reason.
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VITE_RUNNER_HEARTBEAT_INTERVAL_MS` | `10000` | The heartbeat interval the runners page assumes, in milliseconds. Set it to match `LOOP_RUNNER_HEARTBEAT_INTERVAL` when the fleet does not use the runner's 10s default, otherwise every runner is reported stale. |
+
+This is a Vite variable, so it is read at **build** time (`npm run build` / `make build-web` /
+`docker build`), not at container start. It goes away once `GET /api/v1/runners` reports the
+interval itself ([`docs/design/web-console/tasks.md`](../docs/design/web-console/tasks.md) A12).
+
 ## Development
 
 ```bash
@@ -48,5 +63,3 @@ Tests are [Vitest](https://vitest.dev) files next to the code they cover (`src/*
 components that fetch, with `react-dom/client` under the per-file `// @vitest-environment jsdom`
 docblock. There is no MSW layer yet: components take an `ApiClient` as a prop, so a stub object is
 enough. Widening this into the full test infrastructure the design package asks for is issue #123.
-
-There are no application-specific web environment variables in the current source tree.

@@ -2,22 +2,24 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { Root } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
 import type { ApiClient, Runner } from "./api";
 import { RunnersPage } from "./runners";
+import { POLL_INTERVAL_MS } from "./runner-status";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-afterEach(async () => {
-  // Unmounting also clears the view's polling interval.
+async function unmountAll(): Promise<void> {
   for (const { root, container } of mounted.splice(0)) {
     await act(async () => root.unmount());
     container.remove();
   }
-});
+}
+
+afterEach(unmountAll);
 
 function fleet(overrides: Partial<Runner> = {}): Runner {
   return {
@@ -48,11 +50,11 @@ async function mount(api: ApiClient): Promise<HTMLElement> {
   return container;
 }
 
-function clickButton(container: HTMLElement, label: string): Promise<void> {
-  const button = Array.from(container.querySelectorAll("button")).find(
-    (candidate) => candidate.textContent === label
+function click(container: HTMLElement, label: RegExp): Promise<void> {
+  const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
+    label.test(candidate.textContent ?? "")
   );
-  if (!button) throw new Error(`no "${label}" button on screen`);
+  if (!button) throw new Error(`no button matching ${label} on screen`);
   return act(async () => {
     button.click();
   });
@@ -80,6 +82,17 @@ describe("RunnersPage", () => {
     expect(container.textContent).not.toContain("Loading runners");
   });
 
+  it("shows the failure when the fetch never reaches the API at all", async () => {
+    const container = await mount(
+      stubApi(async () => {
+        throw new TypeError("Failed to fetch");
+      })
+    );
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(container.textContent).toContain("Failed to fetch");
+    expect(container.querySelector("table")).toBeNull();
+  });
+
   it("shows the empty state, not a failure, when the fleet is genuinely empty", async () => {
     const container = await mount(stubApi(async () => []));
     expect(container.querySelector('[role="alert"]')).toBeNull();
@@ -96,7 +109,7 @@ describe("RunnersPage", () => {
       })
     );
     expect(container.querySelector("table")).toBeNull();
-    await clickButton(container, "Retry");
+    await click(container, /^Retry$/);
     expect(container.querySelector('[role="alert"]')).toBeNull();
     expect(container.textContent).toContain("runner-a");
   });
@@ -111,7 +124,7 @@ describe("RunnersPage", () => {
       })
     );
     expect(container.textContent).toContain("runner-a");
-    await clickButton(container, "Refresh");
+    await click(container, /^Refresh/);
     expect(container.querySelector('[role="alert"]')).not.toBeNull();
     expect(container.textContent).toContain("may be out of date");
     expect(container.textContent).toContain("runner-a");
@@ -137,25 +150,137 @@ describe("RunnersPage", () => {
     expect(gone?.className).toContain("runner-row--stale");
     expect(gone?.textContent).toContain("Stale");
     expect(gone?.textContent).toContain("10m ago");
+    expect(container.textContent).toContain("1/2 online");
   });
 
-  it("does not report an aborted in-flight load as a failure after unmount", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    let reject: (error: unknown) => void = () => undefined;
-    const pending = new Promise<Runner[]>((_, rejectPending) => {
-      reject = rejectPending;
-    });
+  it("does not let an abandoned request overwrite a newer one", async () => {
+    const pending: Array<(runners: Runner[]) => void> = [];
+    const container = await mount(
+      stubApi(
+        () =>
+          new Promise<Runner[]>((resolve) => {
+            pending.push(resolve);
+          })
+      )
+    );
+    expect(container.textContent).toContain("Loading runners");
+
+    // Refresh abandons request #1 and starts #2.
+    await click(container, /^Refresh/);
+    expect(pending).toHaveLength(2);
+
+    await act(async () => pending[1]([fleet({ name: "current" })]));
+    expect(container.textContent).toContain("current");
+
+    // The abandoned request now answers, with the older snapshot.
+    await act(async () => pending[0]([fleet({ name: "outdated" })]));
+    expect(container.textContent).toContain("current");
+    expect(container.textContent).not.toContain("outdated");
+  });
+
+  it("measures heartbeat age from when the orchestrator was asked, not when it answered", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveRequest: ((runners: Runner[]) => void) | null = null;
+      // The runner beat 8s before the page asked; the answer takes 35s to
+      // arrive. Measuring from arrival would report it 43s old — past the
+      // 30s budget — and paint a healthy runner stale.
+      const lastSeenAt = new Date(Date.now() - 8_000).toISOString();
+      const container = await mount(
+        stubApi(
+          () =>
+            new Promise<Runner[]>((resolve) => {
+              resolveRequest = resolve;
+            })
+        )
+      );
+      await act(async () => {
+        vi.advanceTimersByTime(35_000);
+      });
+      await act(async () => resolveRequest?.([fleet({ lastSeenAt })]));
+
+      expect(container.querySelector("tbody tr")?.className).not.toContain("runner-row--stale");
+      expect(container.textContent).toContain("8s ago");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("RunnersPage polling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refreshes on the poll interval while the tab is visible", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    await mount(
+      stubApi(async () => {
+        calls += 1;
+        return [fleet()];
+      })
+    );
+    expect(calls).toBe(1);
     await act(async () => {
-      root.render(<RunnersPage api={stubApi(() => pending)} />);
+      vi.advanceTimersByTime(POLL_INTERVAL_MS);
     });
-    await act(async () => root.unmount());
+    expect(calls).toBe(2);
+  });
+
+  it("pauses polling while the tab is hidden", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    await mount(
+      stubApi(async () => {
+        calls += 1;
+        return [fleet()];
+      })
+    );
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    try {
+      await act(async () => {
+        vi.advanceTimersByTime(POLL_INTERVAL_MS * 3);
+      });
+      expect(calls).toBe(1);
+    } finally {
+      hidden.mockRestore();
+    }
     await act(async () => {
-      reject(new DOMException("The operation was aborted.", "AbortError"));
-      await pending.catch(() => undefined);
+      document.dispatchEvent(new Event("visibilitychange"));
     });
-    expect(container.textContent).toBe("");
-    container.remove();
+    expect(calls).toBe(2);
+  });
+
+  it("never stacks requests when the orchestrator is slow to answer", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    await mount(
+      stubApi(() => {
+        calls += 1;
+        return new Promise<Runner[]>(() => undefined);
+      })
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS * 5);
+    });
+    expect(calls).toBe(1);
+  });
+
+  it("stops polling once the page is unmounted", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    await mount(
+      stubApi(async () => {
+        calls += 1;
+        return [fleet()];
+      })
+    );
+    await unmountAll();
+    await act(async () => {
+      vi.advanceTimersByTime(POLL_INTERVAL_MS * 5);
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(calls).toBe(1);
   });
 });
