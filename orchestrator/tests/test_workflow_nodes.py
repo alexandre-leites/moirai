@@ -120,6 +120,39 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["execution_id"], "workflow-1-pipeline")
         self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "pipeline")])
 
+    async def test_pipeline_execution_does_not_spend_the_agent_budget(self) -> None:
+        """The pipeline runs the project's commands, not an agent, so it must
+        not consume `total_agent_executions`. Counting it would make the now
+        mandatory pipeline halve the agent attempts a workflow gets."""
+        update = await self.nodes.pipeline(
+            cast(IssueWorkflowState, {"workflow_run_id": "workflow-1", "total_agent_executions": 4})
+        )
+        self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "pipeline")])
+        self.assertNotIn("total_agent_executions", update)
+        self.assertNotIn("total_agent_executions", self.persistence.transitions[-1][2])
+
+    async def test_pipeline_still_blocks_once_no_agent_run_is_affordable(self) -> None:
+        """Not spending the budget is not the same as ignoring it: both of the
+        pipeline's successors dispatch agents, so an exhausted budget blocks
+        here rather than paying for a verdict with nowhere to route."""
+        update = await self.nodes.pipeline(
+            cast(IssueWorkflowState, {"workflow_run_id": "workflow-1", "total_agent_executions": 10})
+        )
+        self.assertEqual(update["status"], "blocked")
+        self.assertEqual(update["blocking_reason"], "workflow retry budget exhausted")
+        self.assertEqual(self.dispatcher.dispatches, [])
+
+    async def test_pipeline_dispatches_even_when_the_gate_is_already_set(self) -> None:
+        """The local pipeline is the deterministic completion gate, so entering
+        the phase always runs it. An inherited `pipeline_passed` -- from an
+        earlier pipeline run, or from any future caller that seeds the gate --
+        must never skip the execution, and the node must never write the gate."""
+        update = await self.nodes.pipeline({"workflow_run_id": "workflow-1", "pipeline_passed": True})
+        self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "pipeline")])
+        self.assertTrue(update["awaiting_execution"])
+        self.assertNotIn("pipeline_passed", update)
+        self.assertNotIn("pipeline_passed", self.persistence.transitions[-1][2])
+
     async def test_dispatching_marks_the_workflow_as_awaiting_the_execution(self) -> None:
         """The gate the graph reads to end the invocation after a dispatch."""
         for node in (self.nodes.plan, self.nodes.implement, self.nodes.pipeline, self.nodes.review,
@@ -129,10 +162,8 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_short_circuiting_nodes_clear_the_awaiting_gate(self) -> None:
         plan = await self.nodes.plan({"workflow_run_id": "workflow-1", "plan_valid": True})
-        pipeline = await self.nodes.pipeline({"workflow_run_id": "workflow-1", "pipeline_passed": True})
         exhausted = await self.nodes.review({"workflow_run_id": "workflow-1", "review_cycles": 3})
         self.assertFalse(plan["awaiting_execution"])
-        self.assertFalse(pipeline["awaiting_execution"])
         self.assertFalse(exhausted["awaiting_execution"])
         self.assertEqual(exhausted["status"], "blocked")
         self.assertEqual(self.dispatcher.dispatches, [])
