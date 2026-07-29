@@ -15,6 +15,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "22"
+  UV_VERSION: "0.11.33"
 
 jobs:
   test-orchestrator:
@@ -23,13 +24,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          version: "0.11.33"
+          version: ${{ env.UV_VERSION }}
       - name: Provision Python ${{ env.PYTHON_VERSION }}
-        env:
-          UV_PYTHON_PREFERENCE: only-managed
         run: |
+          set -euo pipefail
           uv python install "$PYTHON_VERSION"
-          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
+          # --system excludes virtualenvs from the lookup. A leftover .venv in the
+          # workspace is itself built from the managed interpreter, so it would
+          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
+          # PATH ahead of everything. Assigning before dirname matters too:
+          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
+          # lookup fails, which would silently prepend the repo root to PATH.
+          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
+          test -x "$interpreter"
+          "$interpreter" --version
+          dirname "$interpreter" >> "$GITHUB_PATH"
       - run: make test-orchestrator
 
   test-postgres-integration:
@@ -54,13 +63,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          version: "0.11.33"
+          version: ${{ env.UV_VERSION }}
       - name: Provision Python ${{ env.PYTHON_VERSION }}
-        env:
-          UV_PYTHON_PREFERENCE: only-managed
         run: |
+          set -euo pipefail
           uv python install "$PYTHON_VERSION"
-          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
+          # --system excludes virtualenvs from the lookup. A leftover .venv in the
+          # workspace is itself built from the managed interpreter, so it would
+          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
+          # PATH ahead of everything. Assigning before dirname matters too:
+          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
+          # lookup fails, which would silently prepend the repo root to PATH.
+          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
+          test -x "$interpreter"
+          "$interpreter" --version
+          dirname "$interpreter" >> "$GITHUB_PATH"
       - run: make test-postgres-integration
 
   lint:
@@ -69,13 +86,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          version: "0.11.33"
+          version: ${{ env.UV_VERSION }}
       - name: Provision Python ${{ env.PYTHON_VERSION }}
-        env:
-          UV_PYTHON_PREFERENCE: only-managed
         run: |
+          set -euo pipefail
           uv python install "$PYTHON_VERSION"
-          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
+          # --system excludes virtualenvs from the lookup. A leftover .venv in the
+          # workspace is itself built from the managed interpreter, so it would
+          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
+          # PATH ahead of everything. Assigning before dirname matters too:
+          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
+          # lookup fails, which would silently prepend the repo root to PATH.
+          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
+          test -x "$interpreter"
+          "$interpreter" --version
+          dirname "$interpreter" >> "$GITHUB_PATH"
       - run: make lint
 
   typecheck:
@@ -84,13 +109,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          version: "0.11.33"
+          version: ${{ env.UV_VERSION }}
       - name: Provision Python ${{ env.PYTHON_VERSION }}
-        env:
-          UV_PYTHON_PREFERENCE: only-managed
         run: |
+          set -euo pipefail
           uv python install "$PYTHON_VERSION"
-          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
+          # --system excludes virtualenvs from the lookup. A leftover .venv in the
+          # workspace is itself built from the managed interpreter, so it would
+          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
+          # PATH ahead of everything. Assigning before dirname matters too:
+          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
+          # lookup fails, which would silently prepend the repo root to PATH.
+          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
+          test -x "$interpreter"
+          "$interpreter" --version
+          dirname "$interpreter" >> "$GITHUB_PATH"
       - run: make typecheck
 
   runner:
@@ -169,13 +202,21 @@ jobs:
           cd ../runner && govulncheck ./...
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          version: "0.11.33"
+          version: ${{ env.UV_VERSION }}
       - name: Provision Python ${{ env.PYTHON_VERSION }}
-        env:
-          UV_PYTHON_PREFERENCE: only-managed
         run: |
+          set -euo pipefail
           uv python install "$PYTHON_VERSION"
-          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
+          # --system excludes virtualenvs from the lookup. A leftover .venv in the
+          # workspace is itself built from the managed interpreter, so it would
+          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
+          # PATH ahead of everything. Assigning before dirname matters too:
+          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
+          # lookup fails, which would silently prepend the repo root to PATH.
+          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
+          test -x "$interpreter"
+          "$interpreter" --version
+          dirname "$interpreter" >> "$GITHUB_PATH"
       - name: Scan Python lockfile dependencies
         run: |
           python3 - <<'PY' > .audit-requirements.txt

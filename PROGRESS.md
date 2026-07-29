@@ -2354,6 +2354,30 @@ CI had been red on `main` itself since `3ba81c2` ("Change CI runner to self-host
 - **Removed the redundant `pip install` rather than forcing it through.** `--break-system-packages` would have kept a step that installs into an environment nothing reads. The `Makefile` owns the install; the workflow should not duplicate it badly.
 - **Left `compose-smoke` and `test-postgres-integration` failing.** Deleting them, marking them `continue-on-error`, or replacing the Postgres service container with a non-Docker Postgres would all have produced a green tick by testing less. The red signal is accurate and should persist until the runners are fixed.
 
+## Post-review corrections
+
+An adversarial review of the diff found two defects in the provisioning step, both fixed before the PR was finalised. Both were verified by direct experiment rather than by reading documentation.
+
+- **`dirname "$(uv python find …)"` swallowed a failed lookup** (critical). `dirname ""` prints `.` and exits `0`, and `bash -e` does not help because the line's exit status is `dirname`'s, not the substitution's. Confirmed: `bash -e -c 'dirname "$(false)" >> gp.txt; echo continued'` prints `continued` and exits `0`, leaving `.` in the file. Two consequences: CI would silently fall back to the host's Python 3.13.5 and still pass — the exact failure this change exists to prevent — and `.` on `PATH` ahead of `/usr/bin` means any executable committed at the repo root (`python3`, `make`, `git`, `docker`) would be run by every later step, on a `pull_request`-triggered workflow with a persistent self-hosted `$HOME`. Fixed by assigning first (`interpreter="$(…)"`, which *does* abort under `set -e`), then `test -x`, then `dirname`.
+- **`UV_PYTHON_PREFERENCE: only-managed` was the wrong guard** (high, latent). It filters toolchain *sources*, not virtualenv discovery. Reproduced against uv 0.11.33 with a `.venv` built from the uv-managed 3.12 — exactly what `make dev-install` creates in CI:
+
+  | invocation | result |
+  | --- | --- |
+  | `uv python find 3.12` | `.venv/bin/python3` |
+  | `UV_PYTHON_PREFERENCE=only-managed uv python find 3.12` | `.venv/bin/python3` |
+  | `uv python find --managed-python 3.12` | `.venv/bin/python3` |
+  | `uv python find --system --managed-python 3.12` | the managed interpreter |
+
+  Only `--system` excludes virtualenvs. A surviving `.venv` would have put `.venv/bin` — carrying `ruff`, `mypy` and `pytest` shims — on `PATH` ahead of everything. Latent today because `actions/checkout` runs `git clean -ffdx` and `.venv/` is gitignored (confirmed in job log `90637745448`), but the guard did not do what it claimed. Fixed by switching to `--system --managed-python` and deleting the misleading env block.
+
+The hardened step was then tested end to end as CI runs it (`/usr/bin/bash -e script`): the positive path exits `0` and writes the managed `bin` directory; the negative path (`PYTHON_VERSION=3.99`) exits `2` and leaves `$GITHUB_PATH` **empty** rather than injecting `.`.
+
+Also applied from the review: `version: "0.11.33"` was duplicated across all five provisioning blocks, so a bump needed five edits and a missed one would yield a mixed toolchain. Hoisted to a workflow-level `UV_VERSION`, matching how `PYTHON_VERSION` and `NODE_VERSION` are already handled.
+
+Three review findings were accepted without change, all pre-existing and out of scope for a CI-restoration fix: `pip-audit` is resolved unpinned by `uv tool run` (exactly as the previous `pip install pip-audit` was, so no regression); the audit derives its requirements from `orchestrator/uv.lock` while `make dev-install` resolves fresh from PyPI, so the gate audits versions CI does not actually install; and the provisioning block remains duplicated across five jobs, which a composite action would solve at the cost of a larger diff than this fix warrants.
+
+The review separately confirmed by experiment that the deleted install step was not load-bearing, that `uv tool run pip-audit` still exits non-zero on findings, that concurrent `uv python install` into a shared directory is serialised by an advisory lock, and that `validate`'s `needs:` list is byte-identical to `main`.
+
 ## Validation Status
 
 - Targeted tests: Passed — `make test-orchestrator`, locally (`Ran 449 tests`, `OK (skipped=30)`) and in CI job `90638757510`.
