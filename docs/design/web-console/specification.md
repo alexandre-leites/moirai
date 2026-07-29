@@ -200,7 +200,14 @@ that")** — today's client logs the user out on both, which breaks viewer accou
 
 ### 3.3 Status vocabulary
 
-UI labels for `workflow_runs.status` (domain enum → pill label / variant):
+UI labels for `workflow_runs.status` (domain enum → pill label / variant). In the workflow list
+(`ListWorkflows` → `GET /api/v1/workflows`) the `phase` field is `workflow_runs.current_phase`,
+which is *not* a copy of the status: the status carries the scheduling lifecycle (`preparing`
+while a runner holds the job, `recovering`/`offered` while a fenced job is being re-placed)
+while the phase stays on the workflow node the graph committed, so a run whose developer
+execution is in flight reads `preparing` / `implementing`. Both are worth showing. (The
+`SubmitHumanDecision` response is the exception: it echoes the resumed graph state's status in
+both fields.) See "Run status versus run phase" in `orchestrator/README.md`.
 
 | Status | Label | Pill |
 |---|---|---|
