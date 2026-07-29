@@ -1626,7 +1626,7 @@ Issue #96 (finding F9) — make transition replay idempotent, still the highest-
 ## Validation Status
 
 - Targeted tests: Passed. Failing-test-first evidence, captured against unmodified `origin/issue-96` (`09a6c1b`) with only the new tests added: `test_replaying_a_transition_is_identical_to_delivering_it_once` failed on both subtests with `AssertionError: Lists differ: ['planner', 'developer', 'pipeline'] != ['planner', 'developer']` (the replay queued a third execution), and `test_a_replayed_transition_never_skips_the_pipeline_gate` failed with `AssertionError: terminal developer event produced no workflow transition` (the run had been moved to `local_pipeline` behind the developer's back). `Ran 16 tests … FAILED (failures=3)`.
-- Service tests: Passed — `make test-orchestrator` → `Ran 428 tests in 1.289s … OK (skipped=27)`. 17 tests added across `test_end_to_end.py`, `test_workflow_nodes.py`, `test_workflow_persistence.py`, `test_workflow_runtime.py`, `test_asyncpg_control_plane.py` and `test_postgres_integration.py`.
+- Service tests: Passed — `make test-orchestrator` → `Ran 428 tests in 1.289s … OK (skipped=27)`. 18 tests added across `test_end_to_end.py`, `test_workflow_nodes.py`, `test_workflow_persistence.py`, `test_workflow_runtime.py`, `test_asyncpg_control_plane.py` and `test_postgres_integration.py`.
 - Full repository tests: Not run — no Go, proto or web change; `make test` deliberately not invoked.
 - Build: Not applicable — Python only.
 - Lint: Passed — `make lint` → `All checks passed!`.

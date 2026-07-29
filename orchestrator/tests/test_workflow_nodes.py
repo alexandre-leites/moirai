@@ -5,6 +5,7 @@ from typing import Any, cast
 from moirai.code_hosts import CheckStatus, GitHubCliError, PullRequest, PullRequestCheck
 from moirai.workflows.issue_graph import IssueWorkflowState
 from moirai.workflows.nodes import PersistedWorkflowNodes
+from moirai.workflows.policy import RetryBudget
 
 
 def _request(identifier: str, role: str, created: bool = False) -> dict[str, Any]:
@@ -251,32 +252,35 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         must therefore be recognised before any budget gate, or the run is
         blocked for retries that never happened -- the whole point of issue #96.
         """
-        for node_name, counter, limit in (
-            ("plan", "planning_attempts", 3),
-            ("implement", "implementation_attempts", 3),
-            ("review", "review_cycles", 3),
-            ("repair", "pipeline_repair_attempts", 3),
-            ("ci_repair", "ci_repair_attempts", 3),
+        budget = RetryBudget()
+        for node_name, role, counter in (
+            ("plan", "planner", "planning_attempts"),
+            ("implement", "developer", "implementation_attempts"),
+            ("review", "reviewer", "review_cycles"),
+            ("repair", "repairer", "pipeline_repair_attempts"),
+            ("ci_repair", "repairer", "ci_repair_attempts"),
         ):
             with self.subTest(node=node_name):
                 dispatcher = _Dispatcher()
-                role = "developer" if node_name == "implement" else {
-                    "plan": "planner", "review": "reviewer",
-                    "repair": "repairer", "ci_repair": "repairer",
-                }[node_name]
                 persistence = _Persistence(open_request=_request("open-1", role))
                 nodes = PersistedWorkflowNodes(persistence, dispatcher)
 
+                # Both budgets read exactly as this node's own last dispatch
+                # left them: its counter at its limit and the global agent
+                # budget fully spent.
                 update = await getattr(nodes, node_name)(
                     cast(IssueWorkflowState, {
-                        "workflow_run_id": "workflow-1", counter: limit,
-                        "total_agent_executions": 10,
+                        "workflow_run_id": "workflow-1",
+                        counter: getattr(budget, counter),
+                        "total_agent_executions": budget.total_agent_executions,
                     })
                 )
 
                 self.assertNotEqual(update["status"], "blocked")
                 self.assertEqual(update["execution_id"], "open-1")
                 self.assertEqual(dispatcher.dispatches, [])
+                self.assertNotIn(counter, update)
+                self.assertNotIn("total_agent_executions", update)
 
     async def test_an_open_request_for_another_role_suspends_instead_of_dispatching(self) -> None:
         """One workflow run has at most one execution in flight. A node reached
