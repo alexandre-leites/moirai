@@ -68,6 +68,30 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 	return CommitResult{Committed: true, Revision: strings.TrimSpace(revision)}, nil
 }
 
+// Push publishes a completed execution's work to the job's execution branch.
+//
+// The push is deliberately not forced, and that is a decision rather than an
+// omission ([#156](https://github.com/alexandre-leites/moirai/issues/156)).
+// Every execution of a workflow shares one branch name, so the second delivery
+// to it — a repair iteration, a retry — is only accepted if it descends from
+// what the first one published. It does: Manager.Prepare starts each workspace
+// from the execution branch's tip rather than from the base revision (#136), so
+// an ordinary delivery is a fast-forward.
+//
+// Forcing would make the same deliveries "succeed" without that guarantee, and
+// would be wrong. The branch is not owned by the workflow: a human may amend
+// the agent's work on it, and a runner leasing a concurrent execution of the
+// same job publishes to it too. A force replaces such a commit with no trace,
+// which is exactly what this repository has ruled out elsewhere. The only
+// deliveries a plain push now rejects are those whose branch moved after the
+// workspace was prepared — precisely the ones that must not be forced. Failing
+// loudly is the right outcome there: the runner has not seen that work and
+// cannot merge it unattended, and the execution that follows resumes from the
+// published tip and delivers. `--force-with-lease` is no safer here, because
+// the lease would be taken against a cache that Prepare has just fetched.
+//
+// PushWorkInProgress does force, and may: its ref is named after a single
+// execution, which nothing else writes.
 func (manager Manager) Push(ctx context.Context, workspace Workspace, branch string, environment map[string]string) (PushResult, error) {
 	if err := validateWorkspace(workspace); err != nil {
 		return PushResult{}, err

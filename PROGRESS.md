@@ -2429,3 +2429,101 @@ Final per-job status on run `30471380437`, read from `gh api repos/alexandre-lei
 
 - Fix Docker group membership on both runners, then confirm `compose-smoke` and `test-postgres-integration` go green — they need no repository change once the daemon is reachable.
 - Consider whether `validate` should also gate on `test-postgres-integration`; it currently does not appear in that job's `needs:` list, so a Postgres integration regression would not block the aggregate check even when the job can run.
+
+---
+
+# Session: issue #156 — Second delivery to a workflow's execution branch is rejected non-fast-forward (branch `issue-156`)
+
+## Current Status
+
+- Overall status: Complete for issue #156. The reported behaviour no longer occurs; this session pins it, and pins the design that was deliberately *not* chosen.
+- Current phase: P0 bug verification and regression coverage. Only the first completed execution of a workflow reached the code host, so every repair iteration and retry was lost.
+- Active implementation: issue-156 agent session, 2026-07-29 — consecutive deliveries to one execution branch.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-156.
+
+## Done
+
+- [x] Reproduced the reported failure before changing anything
+  - Plain git 2.43.0, the script from the issue body, mirroring `Prepare` → `Commit` → `Push` across two executions of one workflow:
+
+    ```
+    git init -q --bare -b main origin.git   # seeded with one commit on main
+    git clone -q --mirror origin.git cache.git
+    # execution 1
+    git --git-dir cache.git worktree add -q -B agent/x wt1 main
+    (cd wt1 && echo one > a && git add -A && git commit -qm one \
+       && git -c remote.origin.mirror=false push --set-upstream origin agent/x)   # OK, new branch
+    git --git-dir cache.git worktree remove --force wt1
+    # execution 2 — the pre-#146 Prepare force-resets agent/x back to main
+    git --git-dir cache.git worktree add -q -B agent/x wt2 main
+    (cd wt2 && echo two > b && git add -A && git commit -qm two \
+       && git -c remote.origin.mirror=false push --set-upstream origin agent/x)
+    #  ! [rejected]  agent/x -> agent/x (non-fast-forward)   (exit 1)
+    ```
+
+- [x] Established that the runner-side fix had already landed, and proved it rather than assuming it
+  - The issue was filed at 2026-07-29T11:41:54Z citing `manager.go:103` (`git worktree add -B <branch> <path> <base>`). PR #146 (issue #136) merged at 13:11:02Z — **after** the issue was filed — and replaced that unconditional reset with `Manager.prepareBaseRevision`, which starts each workspace from the execution branch's published or local tip and falls back to the default branch only for a job whose branch exists nowhere. The issue's own "How to tackle" names this as option (2) and calls it "probably the right long-term answer".
+  - Consequence: every workspace now starts from a revision that already contains the published tip, so a delivery push is an ordinary fast-forward by construction. The line number in the issue is stale; the failure is not reachable through the `Manager` API on `c4dbe94`.
+  - Verified by driving the real `Prepare` → `Commit` → `Push` → `Cleanup` cycle three times over one branch in both repository modes, plus the branch deleted between executions, the default branch moving between executions, a human commit landing on the execution branch, and a second delivery from a different runner with a cold cache. All pass unchanged.
+
+- [x] Added the regression coverage the issue's acceptance criteria ask for, which did not exist
+  - `runner/internal/repository/delivery_sequence_test.go` (new). The guarantee is a property of the *pair* `Prepare` and `Push`, and neither half's tests observed it: the preparation tests stop at the workspace revision and never push, and the delivery tests push exactly once.
+  - `TestConsecutiveDeliveriesToOneExecutionBranchAllReachTheCodeHost` — both repository modes, real Git. Three deliveries, not two, with a *failed* repair iteration in between that commits to the execution branch and publishes only to `wip/execution-2`. Asserts the final tip and every file read back out of the origin repository, the ancestry chain `first → second → third`, that the failed run's commit was inherited by the delivery after it, and that the delivery branch advancing left `wip/execution-2` alone.
+  - `TestDeliveryKeepsACommitTheRunnerDidNotMake` — both modes. Someone outside the runner pushes to the execution branch between two executions; the next delivery must carry that commit forward.
+  - `TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt` — both modes. The branch moves *after* the workspace is prepared. The push must fail and leave the other publisher's commit intact, and the execution that follows must resume from the published tip and deliver, preserving it. This pins that the remaining rejection is correct behaviour rather than a residual bug, and that it does not livelock.
+  - `TestPushNamesNoForcingFlag` — a recorded-arguments guard. The real-git tests above cannot fail fast on a forced push, because adding `--force-with-lease` leaves a fast-forward a fast-forward and they would all keep passing while the guarantee was gone.
+
+- [x] Documented the decision where it is load-bearing
+  - `runner/internal/repository/delivery.go`: `Push` had no doc comment. It now records why the delivery push is deliberately not forced, why `PushWorkInProgress` may force (its ref is named after a single execution), and why `--force-with-lease` is no safer here.
+
+## Decisions
+
+- Decision: keep option (2) — preparation continues from the published branch — and do **not** force the delivery push, in any form.
+  - Context: the issue offers three shapes: (1) `--force-with-lease` on the delivery push, (2) prepare from the published branch, (3) a branch name per execution.
+  - Reason: (2) is already in effect and makes forcing buy nothing. With the workspace starting from the published tip, the only pushes a plain push rejects are those whose branch moved *after* the workspace was prepared — precisely the ones that must not be forced, because the runner has not seen that work and cannot merge it unattended. `--force-with-lease` would not even be a weaker guard here: the lease is taken against a cache that `Prepare` has just fetched, so it would authorise exactly the overwrite it is supposed to prevent.
+  - Evidence that (1) is not a safe interim: with `Prepare` reverted to its pre-#146 form and `--force-with-lease` added to `Push`, the second delivery *succeeds* in `existing_path` mode and **deletes the first delivery's file from the code host** — `git show refs/heads/agent/issue-156/run-1:first.txt` exits 128. That is the fourth acceptance criterion violated, demonstrated rather than argued.
+  - (3) was rejected as the issue frames it: one branch per attempt litters the repository and breaks "one PR per workflow".
+
+- Decision: this session changes no runner behaviour, and says so plainly rather than manufacturing a diff.
+  - The behaviour required by the acceptance criteria already holds. What was missing was the proof and the guard, both of which are now present and both of which fail against the pre-fix code.
+
+- Decision: the orchestrator's one-branch-per-workflow-run naming (`orchestrator/src/moirai/workflows/persistence.py`) is left exactly as it is.
+  - It is not the defect. Reusing one branch across executions is what makes a repair loop cumulative and keeps "one PR per workflow" true; the defect was the runner discarding that branch on every preparation. The file is also owned by concurrent work on issue #121, so changing it here would collide.
+
+## Validation Status
+
+- Targeted tests: Passed — `cd runner && go test ./internal/repository/ -run 'TestConsecutiveDeliveries|TestDeliveryKeeps|TestDeliveryIsRejected|TestPushNamesNoForcingFlag' -v` → all pass, both repository-mode subtests included.
+- Service tests: Passed — `make test-runner` (`go test -race ./...`) → every package `ok`, including `internal/repository` and `internal/dispatch`.
+- Evidence the new tests bite: with `Prepare`'s resolved base revision temporarily overwritten by `defaultBranchRevision(request)` — the pre-#146 behaviour — all three real-git tests fail with the exact symptom the issue reports, in **both** modes:
+
+  ```
+  Push() error = push branch: git -C: exit status 1:
+   ! [rejected]  agent/issue-156/run-1 -> agent/issue-156/run-1 (non-fast-forward)
+  ```
+
+  With `--force-with-lease` added on top of that revert, they still fail — one of them because the forced push silently destroyed the first delivery. `TestPushNamesNoForcingFlag` fails immediately on the flag itself. The temporary patches were reverted; `git status` confirms the only source change is the `Push` doc comment.
+- Lint / formatting: Passed — `gofmt -l runner` empty, `cd runner && go vet ./...` clean.
+- Orchestrator tests, lint, typecheck: Not run — no Python changed in this branch.
+- Full repository tests: Not run — a runner-package change does not warrant it.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — unaffected, and `compose-smoke` cannot execute on the self-hosted runners (see the CI session above).
+
+## Known Issues
+
+- Issue: `runner/README.md` line 121 is now stale. It states "Until [#147] is fixed, no push from a `managed_clone` workspace succeeds, so in that mode nothing is ever published: step 1 does not fire … and a job resumed on a *different* runner still starts from the default branch." #147 was fixed by PR #154, so `managed_clone` does publish and step 1 does fire.
+  - Severity: P3 — documentation only; the code is correct.
+  - Impact: a reader of the runner README will believe cross-runner resumption is broken in the default repository mode when it is not.
+  - Evidence: `TestPushFromManagedCloneWorkspacePublishesTheDeliveryBranch` and this session's `second-delivery-from-a-different-runner` check both publish and resume in `managed_clone`.
+  - Suggested resolution: delete that sentence. **Deliberately not done here:** `runner/README.md` is owned by open PR #164 (issue #104), so editing it would collide. It should be dropped by whoever lands #164, or in a follow-up once #164 merges.
+
+- Issue: two concurrent executions of the *same* job publishing to the same branch is still resolved by one of them failing.
+  - Severity: P3 — correct behaviour, not a defect, but worth naming so it is not re-reported as #156.
+  - Impact: the losing execution's push is rejected; its work stays on `refs/moirai-wip/<executionId>` and on the local branch, and the next execution of the job resumes from the published tip.
+  - Evidence: `TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt`, which also asserts the retry after it delivers, so the state is not a livelock.
+  - Suggested resolution: none at the runner. If the orchestrator ever leases two executions of one job concurrently, that is the thing to fix.
+
+## Next Recommended Implementation
+
+- Land the `runner/README.md` correction above once PR #164 is merged.
+- Consider whether the orchestrator should surface a rejected delivery distinctly from other push failures, so a branch that moved under an execution is visible as such in the workflow's history rather than as a generic `push repository changes` error.
