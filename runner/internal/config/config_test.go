@@ -105,6 +105,65 @@ func TestLoadDefaultsEndpointDataDirectoryAndHostname(t *testing.T) {
 	}
 }
 
+// TestLoadRetainsFailedWorkspacesWithinBoundsByDefault pins the default that
+// makes iterative repair possible: a failed run's worktree, terminal result,
+// and agent logs survive for the next attempt, and they are bounded so that
+// keeping them cannot fill the runner's disk.
+func TestLoadRetainsFailedWorkspacesWithinBoundsByDefault(t *testing.T) {
+	config, err := Load(lookup(nil), func() (string, error) { return "runner-host", nil })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(config.WorkspaceRetention) != 1 || config.WorkspaceRetention[0] != "failed" {
+		t.Fatalf("Load() workspace retention = %#v, want failed runs retained by default", config.WorkspaceRetention)
+	}
+	if config.RetentionMaxAge != 72*time.Hour || config.RetentionMaxCount != 10 {
+		t.Fatalf("Load() retention bounds = %v/%d", config.RetentionMaxAge, config.RetentionMaxCount)
+	}
+	if !config.PushWorkInProgress {
+		t.Fatal("Load() PushWorkInProgress = false, want failed work published by default")
+	}
+}
+
+func TestLoadAcceptsExplicitRetentionOverrides(t *testing.T) {
+	config, err := Load(lookup(map[string]string{
+		"LOOP_RUNNER_RETAIN_WORKSPACES":        "none",
+		"LOOP_RUNNER_RETENTION_MAX_AGE":        "6h",
+		"LOOP_RUNNER_RETENTION_MAX_WORKSPACES": "3",
+		"LOOP_RUNNER_PUSH_WORK_IN_PROGRESS":    "false",
+	}), func() (string, error) { return "runner-host", nil })
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(config.WorkspaceRetention) != 0 {
+		t.Fatalf("Load() workspace retention = %#v, want none", config.WorkspaceRetention)
+	}
+	if config.RetentionMaxAge != 6*time.Hour || config.RetentionMaxCount != 3 || config.PushWorkInProgress {
+		t.Fatalf("Load() retention overrides = %#v", config)
+	}
+}
+
+func TestValidateRejectsUnboundedRetention(t *testing.T) {
+	base, err := Load(lookup(nil), func() (string, error) { return "runner-host", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	unboundedAge := base
+	unboundedAge.RetentionMaxAge = 0
+	unboundedCount := base
+	unboundedCount.RetentionMaxCount = 0
+	for name, candidate := range map[string]Config{"no age bound": unboundedAge, "no count bound": unboundedCount} {
+		if err := candidate.Validate(); err == nil {
+			t.Fatalf("Validate() accepted retention with %s", name)
+		}
+	}
+	disabled := unboundedAge
+	disabled.WorkspaceRetention = nil
+	if err := disabled.Validate(); err != nil {
+		t.Fatalf("Validate() rejected disabled retention: %v", err)
+	}
+}
+
 func TestLoadRejectsUnreadableRegistrationTokenFile(t *testing.T) {
 	if _, err := Load(lookup(map[string]string{"LOOP_RUNNER_REGISTRATION_TOKEN_FILE": "/missing/token"}), func() (string, error) { return "runner", nil }); err == nil {
 		t.Fatal("Load() accepted an unreadable registration token file")
@@ -182,5 +241,21 @@ func lookup(values map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		value, ok := values[key]
 		return value, ok
+	}
+}
+
+func TestLoadRejectsInvalidRetentionBounds(t *testing.T) {
+	for name, environment := range map[string]map[string]string{
+		"zero age":          {"LOOP_RUNNER_RETENTION_MAX_AGE": "0s"},
+		"negative age":      {"LOOP_RUNNER_RETENTION_MAX_AGE": "-1h"},
+		"unparsable age":    {"LOOP_RUNNER_RETENTION_MAX_AGE": "forever"},
+		"zero count":        {"LOOP_RUNNER_RETENTION_MAX_WORKSPACES": "0"},
+		"unparsable count":  {"LOOP_RUNNER_RETENTION_MAX_WORKSPACES": "many"},
+		"invalid wip push":  {"LOOP_RUNNER_PUSH_WORK_IN_PROGRESS": "sometimes"},
+		"none with another": {"LOOP_RUNNER_RETAIN_WORKSPACES": "none,failed"},
+	} {
+		if _, err := Load(lookup(environment), func() (string, error) { return "runner", nil }); err == nil {
+			t.Fatalf("Load() accepted %s", name)
+		}
 	}
 }

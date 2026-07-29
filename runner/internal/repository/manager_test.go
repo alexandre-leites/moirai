@@ -382,3 +382,67 @@ func readGitCommands(t *testing.T, path string) [][]string {
 	}
 	return commands
 }
+
+// TestRetainedWorkspaceDoesNotBlockThePreparationOfTheNextExecution exercises
+// real Git rather than the recording stub, because the hazard is Git's own
+// rule: a branch checked out by one worktree cannot be re-created in another.
+// The orchestrator reuses a single branch name for every execution of a
+// workflow, so a retained failed workspace would otherwise make that workflow's
+// next attempt fail in Prepare.
+func TestRetainedWorkspaceDoesNotBlockThePreparationOfTheNextExecution(t *testing.T) {
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	runRealGit(t, root, "init", "-q", "-b", "main", origin)
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "README.md")
+	runRealGit(t, origin, "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid", "commit", "-qm", "initial")
+
+	manager := Manager{DataDirectory: filepath.Join(root, "data"), GitCommitterName: "Moirai Runner", GitCommitterEmail: "runner@example.invalid"}
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Repository, "partial.go"), []byte("package partial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Loop, "task-packet.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := manager.Commit(context.Background(), workspace, "wip(failed): developer: A task (7)")
+	if err != nil || !commit.Committed {
+		t.Fatalf("Commit() = %#v, %v", commit, err)
+	}
+	committed, err := manager.gitOutput(context.Background(), "-C", workspace.Repository, "show", "--name-only", "--pretty=format:", "HEAD")
+	if err != nil || !strings.Contains(committed, "partial.go") || strings.Contains(committed, ".loop") {
+		t.Fatalf("committed files = %q, %v", committed, err)
+	}
+
+	// Retention keeps this workspace, so its branch has to be released.
+	if err := manager.ReleaseBranch(context.Background(), workspace); err != nil {
+		t.Fatalf("ReleaseBranch() error = %v", err)
+	}
+
+	retry := request
+	retry.JobID = "job-2"
+	if _, err := manager.Prepare(context.Background(), retry); err != nil {
+		t.Fatalf("Prepare() after retention error = %v", err)
+	}
+	revision, err := manager.gitOutput(context.Background(), "-C", workspace.Repository, "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(statusLine(revision)) != commit.Revision {
+		t.Fatalf("retained workspace HEAD = %q, %v, want the work-in-progress commit %q", revision, err, commit.Revision)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Repository, "partial.go")); err != nil {
+		t.Fatalf("retained workspace lost the agent's files: %v", err)
+	}
+}
+
+func TestReleaseBranchRejectsWorkspacesOutsideTheDataDirectory(t *testing.T) {
+	manager := Manager{DataDirectory: t.TempDir()}
+	escaped := t.TempDir()
+	if err := manager.ReleaseBranch(context.Background(), Workspace{Root: escaped, Repository: filepath.Join(escaped, "repository")}); err == nil {
+		t.Fatal("ReleaseBranch() accepted a workspace outside the data directory")
+	}
+}

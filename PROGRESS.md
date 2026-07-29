@@ -1061,6 +1061,92 @@ Record only validation that was actually run.
 
 Issues [#114](https://github.com/alexandre-leites/moirai/issues/114) (a write path for `app.project_pipeline_steps`) and [#136](https://github.com/alexandre-leites/moirai/issues/136) (stop force-resetting each execution's workspace to the default branch). The orchestrator now guarantees the gate is dispatched and that only the gate's own execution decides it; those two make what the gate runs, and what it runs *against*, real. Neither is an orchestrator change.
 
+---
+
+# Session: retain and commit failed work so retries can build on it (#100 / F13)
+
+- Agent/session identifier: runner-agent-issue-100
+- Last updated: 2026-07-29
+- Branch: `issue-100`
+- Scope: `runner/` only. No orchestrator, API, web, proto, or Compose file was touched.
+
+## Done
+
+- [x] Commit and publish the work of a run that does not complete (#100, review finding F13)
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/dispatch/dispatch.go`, `runner/internal/dispatch/retention.go` (new), `runner/internal/dispatch/logtail.go` (new), `runner/internal/dispatch/control_loop.go`, `runner/internal/repository/delivery.go`, `runner/internal/repository/manager.go`, `runner/internal/config/config.go`, `runner/cmd/runner/main.go`, `runner/README.md`, and the matching tests.
+  - Behavior delivered:
+    - A run that fails or is blocked now commits what the agent produced (`wip(failed):` / `wip(blocked):`) and, when the packet grants `mayPush`, publishes it to a per-execution `wip/<executionId>` branch. `deliver` (the packet's branch, upstream set) is now reached only by a genuinely completed run — previously a `blocked` result still delivered.
+    - The terminal payload of a non-delivering run carries `wipCommit`, `wipPushed`, `wipBranch`, and a bounded `logTail`; `branch`/`pushed` stay absent/false. `wipBranch`/`wipCommit`/`wipPushed` are also in the reduced payload the emit-failure retry sends; `logTail` deliberately is not.
+    - The commit is anchored at `refs/moirai-wip/<executionId>` in the runner's own repository for **every** non-delivering run, published or not. Without that anchor the commit is unreachable as soon as the next preparation re-creates the execution branch from base (#136) — which matters most for the roles the orchestrator does not grant `mayPush`: today only `developer` has it, so a repairer's work is preserved locally only.
+    - `LOOP_RUNNER_RETAIN_WORKSPACES` defaults to `failed`, so the worktree, `terminal-result.json`, and the agent logs survive a failed run — until the next execution of that same job prepares, which removes the directory it is about to reuse. Retention therefore covers inspection between a failure and the workflow's next attempt; the artefact that survives *across* attempts is the work-in-progress commit, not the workspace. Retention is registered in `<data>/retained` and released by a sweep bounded by age (`72h`), count (`10`), and free disk (`LOOP_RUNNER_MINIMUM_FREE_BYTES`).
+    - The sweep only considers registered — therefore finished — workspaces, and skips any job claimed by a running execution. The claim is taken before the sweep in `Execute`, which is what makes it safe: one job ID serves every execution of a workflow run, so a record left by an earlier execution names the very path the next one prepares.
+    - A retained workspace's HEAD is detached, so it can never be the reason a later `git worktree add -B` fails. A workspace that cannot be registered is cleaned up instead of kept; one that cannot be detached is still kept, because the collision it guards against is not reachable through today's `Prepare` (which removes the colliding directory first) and forensics are worth more than the guard.
+  - Validation performed: see `Validation Status` below.
+
+- [x] Fix `Manager.Commit`, which failed in every prepared workspace
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/repository/delivery.go`, `runner/internal/repository/manager_test.go`, `runner/internal/repository/delivery_test.go`.
+  - Behavior delivered: staging was `git add -A -- . :!.loop :!.loop/**`. Git reports an error and exits non-zero when a pathspec explicitly matches an ignored path, and `Prepare` puts `/.loop/` in the worktree's exclude file and then creates `.loop` — so *every* commit in a real workspace failed with `stage repository changes: exit status 1`. Staging is now `git add -A -- .` (the exclude file already keeps `.loop` out) followed by `git reset --quiet -- .loop`, which restores the belt-and-braces guarantee without the failure. Discovered while writing the real-git retention test; the existing tests missed it because none combined `Prepare` with `Commit`.
+  - Note: this was a prerequisite, not a detour — with it unfixed, no work-in-progress commit could ever have been produced on a real runner.
+
+## Decisions
+
+- Decision: push semantics are decided by outcome — only a completed run writes to the packet's branch; failed and blocked runs publish to a per-execution `wip/<executionId>` ref; cancelled runs publish nothing.
+  - Context: the issue requires the diff of a failed run to be recoverable, without letting a failed run look delivered. Three candidate targets existed: the packet's branch with a payload marker, a separate ref, or a local commit only.
+  - Alternatives considered: (1) commit and push to the packet's branch with a `wip:` marker in the payload; (2) commit locally and never push.
+  - Reason: (1) is unsafe twice over. `branch`/`pushed` in the terminal payload are the platform's "this run produced deliverable work" signal, and the next attempt of the same workflow re-creates that same branch name from the base revision (#136), so a later delivery push would be rejected as a non-fast-forward — a failed run would break the run that follows it. (2) leaves the work on one runner's disk, where a retry scheduled elsewhere cannot reach it. A per-execution ref is unique by construction, is never read as delivery, and cannot collide with the delivery branch. Because a *local* anchor costs one `git update-ref` and is the only thing that survives #136's branch reset, both are done: the anchor always, the push when permitted. Cancelled runs are excluded because their context is already cancelled: every git command would fail anyway, and the workspace is preserved by the `abandoned` retention policy instead.
+  - Consequences: failed runs leave `wip/*` refs on the code host and `refs/moirai-wip/*` in the runner's repositories. Both are bounded by the number of non-delivering executions rather than by time, both are visible, and `LOOP_RUNNER_PUSH_WORK_IN_PROGRESS=false` suppresses the remote half for repositories where such refs are unwelcome. The push is `--force` because the ref belongs to exactly one execution and a redelivered execution must be able to replace its own earlier remains. Nothing yet deletes either; recovering and pruning them is orchestrator work (#106), noted in `runner/README.md`.
+  - Scope note: `may_push = role == "developer"` (`workflows/task_packets.py`), so today only a developer failure is durable *across runners*. A repairer failure is durable only on the runner that produced it. Granting the repairer a publish path is orchestrator work and was out of scope here.
+
+- Decision: retention is bounded by construction — a workspace is kept only if it can be registered, and the registry is swept by age, count, and free disk.
+  - Context: the default had to change to keep failed workspaces, and "keep every failed run" on a long-lived runner fills the disk. `MinimumFreeBytes` already existed as a hard precondition for starting an execution, so unbounded retention would eventually have turned every offer into an "insufficient runner disk space" failure.
+  - Alternatives considered: (1) keep failed workspaces with no bound and rely on operators to clean up; (2) scan `<data>/workspaces` directly instead of maintaining a registry; (3) sweep on the heartbeat.
+  - Reason: (1) is the failure mode the issue explicitly rules out. (2) cannot distinguish a finished workspace from one belonging to a concurrently running execution (`LOOP_RUNNER_CAPACITY > 1`), so a sweep could delete a live worktree; a registry also carries the repository mode needed to unregister the worktree properly rather than merely unlinking it. A registry alone is *not* sufficient, though — see the consequences below. (3) adds a directory scan every 10s for a set that only grows when executions finish; startup plus pre-execution covers every moment new workspace disk is about to be consumed, and running it before the free-space check means retained forensics cost the next execution capacity instead of blocking it.
+  - Consequences: retention now requires a data directory (`RetentionPolicy.Directory`); a `Dispatcher` constructed without one cleans up as before rather than leaking untracked workspaces. The registry is self-healing: records whose workspace is gone, or which are unparsable, are discarded on the next sweep. **The adversarial review found that dropping a reused job's record before `Prepare` was not enough on its own** — it is a check-then-act, and with `LOOP_RUNNER_CAPACITY > 1` another execution's sweep could have loaded that record first, blocked on the repository lock for the whole of the re-preparation, and then deleted the live worktree. `ActiveWorkspaces` closes it: `Execute` claims its job ID before it sweeps, and the sweep skips claimed jobs, so no workspace can be released while any execution owns it. An idle runner still holds workspaces past `MaxAge` until its next execution; the count bound keeps the footprint fixed regardless.
+
+## Known Issues
+
+- Issue: the recovery half of this feature is not implemented — the runner reports `wipBranch`/`wipCommit`, but nothing consumes them.
+  - Severity: P2
+  - Impact: acceptance criterion 1 is met (the diff is recoverable and named in the event payload), but a retry does not yet *automatically* build on it. Until the orchestrator fetches the ref, the benefit is manual recoverability plus the retained workspace.
+  - Evidence: `grep -rn "wipBranch\|wipCommit" orchestrator/src` → no matches. `orchestrator/src/moirai/workflows/task_packets.py` still sends `currentCommit`/`diffSummary` empty.
+  - Suggested resolution: [#106](https://github.com/alexandre-leites/moirai/issues/106) (Autonomy L3, populate task-packet context fields). Orchestrator-side, and orchestrator files were owned by other agents during this session, so deliberately untouched. The runner side is complete and documented in `runner/README.md`.
+
+- Issue: pipeline commands never reach a file-modifying packet, so the issue's literal "pipeline-failed run retains its diff" path is unreachable through today's orchestrator.
+  - Severity: P3 — naming, not behaviour.
+  - Impact: none on the outcome the issue wants. `pipeline_task_execution` is the only producer of `pipeline=` and builds a `role="pipeline"` packet, which has `may_modify_files=False` and therefore no diff of its own to retain (the runner's own validator rejects a pipeline packet that could modify files). In production the retention path is exercised by a failing or blocked `developer`/`repairer` execution, which is where the discarded diff actually was. A developer packet carrying pipeline commands is legal, handled, and covered by tests; the orchestrator simply does not build it.
+  - Evidence: `orchestrator/src/moirai/workflows/task_packets.py::pipeline_task_execution`; `runner/internal/taskpacket/taskpacket.go` (`RolePipeline` may not modify or push); `runner/internal/dispatch/dispatch.go` returns early for `RolePipeline` before any delivery.
+  - Suggested resolution: none needed in the runner. Worth remembering when reading the F13 write-up, which describes the runner's developer-with-pipeline code path rather than a shape the orchestrator emits.
+
+- Issue: a repairer's failed work is durable only on the runner that produced it.
+  - Severity: P2
+  - Impact: `may_push = role == "developer"`, so `retainWorkInProgress` cannot publish a repairer's commit. The local `refs/moirai-wip/<executionId>` anchor keeps it reachable in that runner's repository, and the terminal payload still reports `wipCommit`, but a retry scheduled on another runner cannot fetch it.
+  - Evidence: `orchestrator/src/moirai/workflows/task_packets.py:131`.
+  - Suggested resolution: orchestrator-side — either grant file-modifying roles a publish-only credential, or have #106 fetch from the reporting runner. Not attempted here: `orchestrator/` was owned by other agents this session, and widening `mayPush` in the runner would violate a packet constraint the runner is meant to enforce.
+
+- Issue: interaction with [#136](https://github.com/alexandre-leites/moirai/issues/136) (`Prepare` force-resets the agent branch).
+  - Severity: assessed, not blocking.
+  - Impact: assessed and designed around, but it is the reason one piece exists. #136 means the work-in-progress commit's *branch* is rewound on the next preparation, and the retained *workspace* at `workspaces/job-<jobId>` is removed by that same preparation (one job ID per workflow run). So neither the branch nor the workspace is a durable carrier across attempts. What is durable: the pushed `wip/<executionId>` ref (developer runs), and the local `refs/moirai-wip/<executionId>` anchor (all non-delivering runs, same runner). The retained workspace covers inspection between the failure and the next attempt. This design does not depend on #136 being fixed, and does not break when it is.
+  - Evidence: `TestRecordedWorkInProgressSurvivesTheNextPreparation` (real git) commits in a prepared workspace, anchors it, re-prepares the same job, and then asserts the anchor still resolves to the commit **and that the execution branch no longer does** — i.e. it fails if the anchor is removed, and self-invalidates if #136 is ever fixed underneath it. The branch-collision half is covered by `TestRetainedWorkspaceDoesNotBlockThePreparationOfTheNextExecution`; reproduced with plain git, `worktree add -B agent/x wt2 main` fails with `fatal: 'agent/x' is already used by worktree at .../wt1` while the first worktree holds it, and succeeds after `checkout --detach`.
+
+## Validation Status
+
+- Targeted tests: Passed — `go test ./internal/dispatch/ ./internal/repository/ ./internal/config/` in `runner/`.
+- Service tests: Passed — `make test-runner` → all runner packages `ok` (`go test -race ./...`, 10 packages, `internal/metrics` has no test files).
+- Formatting: Passed — `gofmt -l .` in `runner/` printed nothing.
+- Static analysis: Passed — `go vet ./...` in `runner/` printed nothing.
+- Real-git coverage (not stubs), because the guarantees are about refs and Git's own rules:
+  - `TestRetainedWorkspaceDoesNotBlockThePreparationOfTheNextExecution` — `Prepare` → commit → `ReleaseBranch` → `Prepare` again with the same branch name; also asserts the commit excludes `.loop` and the retained worktree keeps its files.
+  - `TestPushWorkInProgressPublishesFailedWorkWithoutAdvancingTheDeliveryBranch` — the work reaches `refs/heads/wip/execution-1` on the remote, the delivery branch does not exist there, no upstream is set, and a redelivered execution replaces its own ref.
+- End-to-end within the runner: `TestControlLoopReportsRecoverableWorkAfterAPipelineFailure` drives an offer and lease acknowledgement through `ControlLoop`, and asserts the emitted `failed` event payload carries `wipBranch`, `wipCommit`, `wipPushed`, and `logTail`, carries no `branch`, that the agent branch was never pushed, that the work-in-progress push used the resolved `GITHUB_TOKEN` environment, and that the workspace was retained and registered.
+- Payload bounds: `logTail` is sanitised (ANSI/control characters removed, invalid UTF-8 dropped) and cut to 2 KiB **as JSON encodes it**, not raw. The adversarial review found the raw bound insufficient: Go's encoder escapes `<`, `>`, and `&` to six bytes each, so 2 KiB of ordinary Python-traceback text (`<module>`) encoded to 12,302 bytes of the 16 KiB payload. `jsonEncodedSize` now models the encoder exactly (`TestJSONEncodedSizeMatchesTheEncoder` compares it against `json.Marshal` for quotes, backslashes, HTML-significant bytes, tabs, newlines, and multi-byte runes) and `TestLogTailBoundsAndSanitisesUnboundedOutput` asserts the encoded bound across four adversarial inputs. The failed terminal payload has 17 fields against the orchestrator's `MAX_PAYLOAD_FIELDS = 32`, guarded by an assertion in `TestTerminalPayloadReportsRetainedWorkSeparatelyFromDelivery`.
+- Orchestrator, API, web, Compose, proto: not run. No file in those trees changed.
+- Adversarial review: run against the full diff before the final commit. It found one P1 (the sweep/preparation TOCTOU above) and two P2s (the raw-vs-encoded log-tail bound, and documentation claiming retained workspaces survive into the next attempt when the same job's preparation removes them). All were fixed rather than documented away, except the last, which is a true limitation and is now stated as one. It also found that a stuck workspace aborted the disk-pressure loop (now stepped over), that discarding forensics when `ReleaseBranch` fails was the wrong trade (now retained with a warning), and that the age bound does not apply to an idle runner (claim corrected). Its verification that no failed run can reach the delivery branch, and that the `Manager.Commit` staging change is a fix rather than a regression, was reproduced independently with plain git.
+
+## Next Recommended Implementation
+
+[#106](https://github.com/alexandre-leites/moirai/issues/106) — consume the runner's new `wipBranch`/`wipCommit` in the orchestrator: fetch the work-in-progress ref when building a retry packet and populate `currentCommit`/`diffSummary` from it (`orchestrator/src/moirai/workflows/task_packets.py`, `runner_events.py`). That closes the loop this change opens: the runner now preserves and reports the work, but no retry yet starts from it. [#136](https://github.com/alexandre-leites/moirai/issues/136) should land alongside it so the fetched work is not reset away by the next preparation.
 # Session: F5 / issue #92 — Circuit-breaker wedge states (branch `issue-92`)
 
 ## Current Status
