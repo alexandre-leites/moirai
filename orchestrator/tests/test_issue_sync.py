@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -44,9 +45,33 @@ class _FakeTracker:
 
     async def add_labels(self, external_id: str, labels: list[str]) -> None:
         self.added.append((external_id, labels))
+        self._mutate(external_id, lambda current: current | set(labels))
 
     async def remove_labels(self, external_id: str, labels: list[str]) -> None:
         self.removed.append((external_id, labels))
+        self._mutate(external_id, lambda current: current - set(labels))
+
+    def _mutate(self, external_id: str, change: Any) -> None:
+        for index, issue in enumerate(self._issues):
+            if issue.external_id == external_id:
+                self._issues[index] = replace(issue, labels=tuple(sorted(change(set(issue.labels)))))
+
+
+def _workflow(
+    status: str,
+    external_id: str = "42",
+    issue_id: str = "issue-42",
+    run_id: str = "run-1",
+    created_at: datetime = NOW,
+) -> dict[str, Any]:
+    return {
+        "project_id": "project-1",
+        "id": run_id,
+        "issue_id": issue_id,
+        "external_id": external_id,
+        "status": status,
+        "created_at": created_at,
+    }
 
 
 class _FakeControlPlane:
@@ -63,11 +88,12 @@ class _FakeControlPlane:
 
     async def upsert_issue(self, **kwargs: Any) -> None:
         self.upserted.append(kwargs)
+        self.issue_labels[f"issue-{kwargs['external_id']}"] = sorted(kwargs["labels"])
 
     async def list_enabled_projects(self) -> list[Project]:
         return [p for p in self.projects if p.enabled]
 
-    async def list_active_workflows_for_project(self, project_id: str) -> list[dict[str, Any]]:
+    async def list_latest_workflow_runs_for_project(self, project_id: str) -> list[dict[str, Any]]:
         return [w for w in self.active_workflows if w["project_id"] == project_id]
 
     async def get_issue_labels(self, issue_id: str) -> list[str]:
@@ -141,14 +167,7 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_label_reconciliation_updates_persisted_labels_after_provider_success(self) -> None:
         sync, control_plane, tracker = self._sync()
-        control_plane.active_workflows = [
-            {
-                "project_id": "project-1",
-                "issue_id": "issue-1",
-                "external_id": "42",
-                "status": "waiting_human",
-            }
-        ]
+        control_plane.active_workflows = [_workflow("waiting_human", issue_id="issue-1")]
         control_plane.issue_labels["issue-1"] = ["agent:ready"]
         await sync.reconcile_project_labels(Project("project-1", True))
         self.assertEqual(tracker.added, [("42", ["agent:human-approval", "agent:running"])])
@@ -157,14 +176,7 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_label_reconciliation_is_idempotent_after_persistence(self) -> None:
         sync, control_plane, tracker = self._sync()
-        control_plane.active_workflows = [
-            {
-                "project_id": "project-1",
-                "issue_id": "issue-1",
-                "external_id": "42",
-                "status": "blocked",
-            }
-        ]
+        control_plane.active_workflows = [_workflow("blocked", issue_id="issue-1")]
         control_plane.issue_labels["issue-1"] = ["agent:blocked"]
         await sync.reconcile_project_labels(Project("project-1", True))
         self.assertEqual(tracker.added, [])
@@ -173,8 +185,8 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_workflows_receive_blocked_and_delivered_labels(self) -> None:
         sync, control_plane, tracker = self._sync()
         control_plane.active_workflows = [
-            {"project_id": "project-1", "issue_id": "issue-blocked", "external_id": "42", "status": "blocked"},
-            {"project_id": "project-1", "issue_id": "issue-delivered", "external_id": "43", "status": "completed"},
+            _workflow("blocked", external_id="42", issue_id="issue-blocked"),
+            _workflow("completed", external_id="43", issue_id="issue-delivered", run_id="run-2"),
         ]
         control_plane.issue_labels = {
             "issue-blocked": ["agent:running"],
@@ -187,6 +199,59 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
             tracker.added,
             [("42", ["agent:blocked"]), ("43", ["agent:delivered"])],
         )
+
+    async def test_label_reconciliation_never_removes_labels_outside_the_agent_namespace(self) -> None:
+        sync, control_plane, tracker = self._sync()
+        control_plane.active_workflows = [_workflow("implementing")]
+        control_plane.issue_labels["issue-42"] = [
+            "agent:ready",
+            "agent-priority:5",
+            "bug",
+            "enhancement",
+            "needs-design",
+        ]
+        await sync.reconcile_project_labels(Project("project-1", True))
+        self.assertEqual(tracker.added, [("42", ["agent:running"])])
+        self.assertEqual(tracker.removed, [("42", ["agent:ready"])])
+        self.assertEqual(
+            control_plane.issue_labels["issue-42"],
+            ["agent-priority:5", "agent:running", "bug", "enhancement", "needs-design"],
+        )
+
+    async def test_label_reconciliation_converges_on_the_newest_run_in_any_order(self) -> None:
+        older = _workflow("blocked", run_id="run-old", created_at=NOW - timedelta(hours=2))
+        newer = _workflow("completed", run_id="run-new", created_at=NOW)
+        for workflows in ([older, newer], [newer, older]):
+            with self.subTest(order=[w["id"] for w in workflows]):
+                sync, control_plane, tracker = self._sync()
+                control_plane.active_workflows = list(workflows)
+                control_plane.issue_labels["issue-42"] = ["agent:running"]
+                await sync.reconcile_project_labels(Project("project-1", True))
+                self.assertEqual(tracker.added, [("42", ["agent:delivered"])])
+                self.assertEqual(tracker.removed, [("42", ["agent:running"])])
+                self.assertEqual(control_plane.issue_labels["issue-42"], ["agent:delivered"])
+
+    async def test_repeated_sync_cycles_preserve_user_priority_and_triage_labels(self) -> None:
+        issue = ExternalIssue(
+            external_id="42",
+            title="Fix bug",
+            body="Body",
+            state="open",
+            labels=("agent:ready", "agent-priority:10", "bug"),
+            created_at=NOW - timedelta(days=1),
+            updated_at=NOW,
+        )
+        sync, control_plane, tracker = self._sync([issue])
+        control_plane.active_workflows = [_workflow("implementing")]
+
+        for cycle in range(3):
+            with self.subTest(cycle=cycle):
+                await sync.sync_all_projects(NOW + timedelta(seconds=60 * cycle))
+                self.assertEqual(control_plane.upserted[-1]["priority"], 10)
+                self.assertIn("bug", tracker._issues[0].labels)
+                self.assertIn("agent-priority:10", tracker._issues[0].labels)
+        self.assertEqual(tracker.removed, [("42", ["agent:ready"])])
+        self.assertEqual(tracker.added, [("42", ["agent:running"])])
 
     async def test_sync_project_raises_on_tracker_failure(self) -> None:
         sync, _, _ = self._sync(tracker_fail=True)
