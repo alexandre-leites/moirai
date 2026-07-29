@@ -21,9 +21,15 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          version: "0.11.33"
+      - name: Provision Python ${{ env.PYTHON_VERSION }}
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          uv python install "$PYTHON_VERSION"
+          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
       - name: Install orchestrator with dev extras
         run: python3 -m pip install -e "./orchestrator[dev]"
       - run: make test-orchestrator
@@ -47,10 +53,16 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          version: "0.11.33"
+      - name: Provision Python ${{ env.PYTHON_VERSION }}
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          uv python install "$PYTHON_VERSION"
+          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
       - name: Install orchestrator with dev extras
         run: python3 -m pip install -e "./orchestrator[dev]"
       - run: make test-postgres-integration
@@ -59,9 +71,15 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          version: "0.11.33"
+      - name: Provision Python ${{ env.PYTHON_VERSION }}
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          uv python install "$PYTHON_VERSION"
+          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
       - name: Install orchestrator with dev extras
         run: python3 -m pip install -e "./orchestrator[dev]"
       - run: make lint
@@ -70,9 +88,15 @@ jobs:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          version: "0.11.33"
+      - name: Provision Python ${{ env.PYTHON_VERSION }}
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          uv python install "$PYTHON_VERSION"
+          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
       - name: Install orchestrator with dev extras
         run: python3 -m pip install -e "./orchestrator[dev]"
       - run: make typecheck
@@ -151,9 +175,15 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           cd api && govulncheck ./...
           cd ../runner && govulncheck ./...
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          version: "0.11.33"
+      - name: Provision Python ${{ env.PYTHON_VERSION }}
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          uv python install "$PYTHON_VERSION"
+          dirname "$(uv python find "$PYTHON_VERSION")" >> "$GITHUB_PATH"
       - name: Scan Python lockfile dependencies
         run: |
           python3 -m pip install pip-audit
@@ -179,6 +209,53 @@ jobs:
           scan-ref: .
           scanners: secret
           exit-code: "1"
+
+  runner-probe:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Probe identity and docker access
+        run: |
+          set +e
+          echo "--- whoami / id ---"; whoami; id
+          echo "--- os ---"; cat /etc/os-release | head -3; uname -m
+          echo "--- docker socket ---"; ls -l /var/run/docker.sock; stat -c '%U:%G %a' /var/run/docker.sock
+          echo "--- getent group docker ---"; getent group docker
+          echo "--- docker info ---"; docker info --format '{{.ServerVersion}}'; echo "exit=$?"
+          echo "--- sudo -n true ---"; sudo -n true; echo "exit=$?"
+          echo "--- sudo -n docker info ---"; sudo -n docker info --format '{{.ServerVersion}}'; echo "exit=$?"
+          echo "--- rootless sockets ---"; ls -l /run/user/*/docker.sock 2>&1; echo "DOCKER_HOST=${DOCKER_HOST:-unset}"
+          echo "--- XDG_RUNTIME_DIR ---"; echo "${XDG_RUNTIME_DIR:-unset}"
+          echo "--- podman? ---"; command -v podman; podman --version 2>&1
+          true
+      - name: Probe system python
+        run: |
+          set +e
+          echo "--- python3 ---"; command -v python3; python3 --version
+          echo "--- all pythons ---"; ls -1 /usr/bin/python3* 2>&1
+          echo "--- venv module ---"; python3 -m venv --help >/dev/null 2>&1; echo "venv exit=$?"
+          echo "--- pip module ---"; python3 -m pip --version 2>&1
+          echo "--- PEP668 marker ---"; ls -1 /usr/lib/python3*/EXTERNALLY-MANAGED 2>&1
+          true
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: "0.11.33"
+      - name: Probe uv-managed python
+        env:
+          UV_PYTHON_PREFERENCE: only-managed
+        run: |
+          set +e
+          echo "--- uv ---"; uv --version
+          echo "--- uv python install ---"; uv python install "$PYTHON_VERSION"; echo "exit=$?"
+          echo "--- uv python find ---"; uv python find "$PYTHON_VERSION"; echo "exit=$?"
+          PYBIN="$(dirname "$(uv python find "$PYTHON_VERSION")")"
+          echo "PYBIN=$PYBIN"; ls -1 "$PYBIN"
+          echo "--- version ---"; "$PYBIN/python3" --version
+          echo "--- pip present? ---"; "$PYBIN/python3" -m pip --version 2>&1; echo "pip exit=$?"
+          echo "--- venv works? ---"; "$PYBIN/python3" -m venv /tmp/probe-venv-$$ 2>&1 | tail -3; echo "venv exit=$?"
+          ls -1 "/tmp/probe-venv-$$/bin" 2>&1; rm -rf "/tmp/probe-venv-$$"
+          echo "--- uv tool install works? ---"; uv tool install pip-audit >/dev/null 2>&1; echo "uv tool exit=$?"
+          true
 
   validate:
     needs: [test-orchestrator, lint, typecheck, runner, api, build-web, compose-smoke, vulnerability-scan]
