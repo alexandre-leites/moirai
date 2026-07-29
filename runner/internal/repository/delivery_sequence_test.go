@@ -26,17 +26,17 @@ import (
 // reading the result back out of the origin repository, which is the only place
 // that can prove a delivery actually landed.
 //
-// The rejected alternative is pinned here as well. A forced delivery push would
-// also make the second delivery "succeed", and it is the fix a future
-// non-fast-forward report will tempt someone into: the execution branch looks
-// like it belongs to the workflow. It does not. Anyone may push to it — a human
-// amending the agent's work, a second runner that leased a concurrent execution
-// — and a force replaces such a commit with no trace, which is exactly what
-// this repository has already ruled out for repudiated commits. Because the
-// workspace now starts from the published tip, forcing buys nothing: the only
-// deliveries a plain push rejects are the ones whose base moved after the
-// workspace was prepared, and those are precisely the ones that must not be
-// forced.
+// The rejected alternative is pinned here as well, because `--force` on the
+// delivery push is the fix a future non-fast-forward report will tempt someone
+// into: the execution branch looks like it belongs to the workflow. It does
+// not. Anyone may push to it — a human amending the agent's work, a second
+// runner that was re-offered the job after its lease expired — and a force
+// replaces such a commit with no trace, which is exactly what this repository
+// has already ruled out for repudiated commits. Because the workspace now
+// starts from the published tip, forcing buys nothing: the only deliveries a
+// plain push rejects are the ones whose branch moved after Prepare resolved it,
+// and those are precisely the ones that must not be forced. See Push's own
+// comment for why `--force-with-lease` is not the middle ground it looks like.
 
 // deliveryJob drives one workflow's executions against a single execution
 // branch, the way the dispatcher does: prepare, modify, commit, optionally
@@ -304,12 +304,20 @@ func TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt(t *testing.
 	}
 }
 
-// TestPushNamesNoForcingFlag pins the shape of the delivery push itself. The
-// tests above prove the behaviour through real Git, but they cannot fail fast
-// on the change that would remove it — adding `--force-with-lease` still leaves
-// a fast-forward a fast-forward, so a lease taken from a cache that has just
-// fetched the branch would let every one of them keep passing while the
-// guarantee they exist for was gone.
+// TestPushNamesNoForcingFlag pins the shape of the delivery push itself.
+//
+// It is deliberately redundant, and the redundancy was measured rather than
+// assumed: with `Prepare` intact, adding `--force` fails
+// TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt in both
+// modes, and adding `--force-with-lease` fails three of the real-git subtests.
+// Neither variant would slip past.
+//
+// What this adds is the message. A forced push surfaces there as a Git
+// transcript in a delivery that should have failed, several assertions deep in
+// a test about branch movement; here it surfaces at the flag itself, naming why
+// the flag is wrong, in milliseconds and without Git. The temptation this
+// guards against — reaching for `--force` the next time a non-fast-forward is
+// reported — is answered at exactly the line where someone would type it.
 func TestPushNamesNoForcingFlag(t *testing.T) {
 	binary, recorded := fakeGit(t)
 	workspace := Workspace{Repository: filepath.Join(t.TempDir(), "repository")}

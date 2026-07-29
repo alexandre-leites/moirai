@@ -78,28 +78,38 @@ func (manager Manager) Commit(ctx context.Context, workspace Workspace, message 
 // from the execution branch's tip rather than from the base revision (#136), so
 // an ordinary delivery is a fast-forward.
 //
-// Forcing would make the same deliveries "succeed" without that guarantee, and
-// would be wrong. The branch is not owned by the workflow: a human may amend
-// the agent's work on it, and a runner leasing a concurrent execution of the
-// same job publishes to it too. A force replaces such a commit with no trace,
-// which is exactly what this repository has ruled out elsewhere. The only
-// deliveries a plain push now rejects are those whose branch moved after the
-// workspace was prepared — precisely the ones that must not be forced. Failing
-// loudly is the right outcome there: the runner has not seen that work and
-// cannot merge it unattended, and the execution that follows resumes from the
-// published tip and delivers.
+// Forcing with "--force" would make the same deliveries "succeed" without that
+// guarantee, and would be wrong. The branch is not owned by the workflow: a
+// human may amend the agent's work on it, and a runner leasing a concurrent
+// execution of the same job publishes to it too — a lease that expires while
+// its runner is alive is re-offered, so that is reachable rather than
+// hypothetical. A force replaces such a commit with no trace, which is exactly
+// what this repository has ruled out elsewhere.
 //
-// "--force-with-lease" is not the safer alternative it looks like, and the two
-// repository modes disagree about it in opposite directions. Given no expected
-// value it reads this repository's own remote-tracking ref — which the runner's
-// *previous push* already advanced to the very tip it is about to overwrite, so
-// in existing_path mode the lease is satisfied by construction and the force
-// goes through. It protects against a push the runner never saw; it does not
-// protect against the runner's own stale base, which is what this defect was.
-// In managed_clone mode there is no remote-tracking ref at all — a mirror cache
-// keeps the remote's branches as its own refs/heads/* — so the same push is
-// refused outright with "! [rejected] … (stale info)". Both reproduced with git
+// What a plain push rejects is narrow: a delivery whose branch moved between
+// the moment Prepare resolved it and this push. (The window opens at Prepare's
+// ls-remote, not at the push.) That is precisely the case that must not be
+// forced, and failing loudly is the right outcome — the runner has not seen
+// that work and cannot merge it unattended, and the execution that follows
+// resumes from the published tip and delivers. A remote may of course reject a
+// push for its own reasons too, a protected branch or a pre-receive hook, which
+// no amount of forcing would help either.
+//
+// "--force-with-lease" is not the safer middle ground it looks like; the two
+// repository modes break it in opposite directions, both reproduced with git
 // 2.43.0.
+//
+//   - managed_clone: unusable. A mirror cache keeps the remote's branches as
+//     its own refs/heads/*, so there is no remote-tracking ref for the lease to
+//     read, and *every* push is refused — including a job's first delivery:
+//     "! [rejected] agent/z -> agent/z (stale info)".
+//   - existing_path: the lease reads refs/remotes/origin/<branch>, which only
+//     this runner's own previous push ever writes — Prepare deliberately fetches
+//     the published tip to refs/moirai-remote/<branch> instead. So the lease
+//     does reject a third party's push, but it is satisfied by construction when
+//     the runner's *own* base is stale, and the force then destroys the runner's
+//     previous delivery. It guards the case a plain push already guards, and not
+//     the case this defect was.
 //
 // PushWorkInProgress does force, and may: its ref is named after a single
 // execution, which nothing else writes.
