@@ -216,13 +216,17 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 	}
 	if acknowledgement := message.GetLeaseAcknowledged(); acknowledgement != nil {
 		jobID := acknowledgement.GetJobId()
-		_, alreadyActive := loop.Offers.ActiveLease(jobID)
+		held, alreadyActive := loop.Offers.ActiveLease(jobID)
 		if !loop.Offers.ApplyAcknowledgement(acknowledgement) {
-			// The runner holds no reservation or lease this acknowledgement
-			// matches — most often because the reservation already timed out
-			// waiting for it. Dropping it silently made a released slot look
-			// like a lost message, so record it.
-			loop.logger().Warn("runner discarded a stale lease acknowledgement", "job_id", jobID, "lease_generation", acknowledgement.GetLeaseGeneration())
+			// A duplicate or non-advancing renewal acknowledgement for a lease
+			// the runner still holds at the same generation is routine and
+			// changes nothing. Anything else matched neither a reservation nor
+			// a lease — most often a reservation that timed out waiting for
+			// exactly this message — and dropping it silently made a released
+			// capacity slot indistinguishable from a lost one.
+			if !alreadyActive || held.Generation != acknowledgement.GetLeaseGeneration() {
+				loop.logger().Warn("runner discarded an unmatched lease acknowledgement", "job_id", jobID, "lease_generation", acknowledgement.GetLeaseGeneration())
+			}
 			return nil
 		}
 		if alreadyActive {

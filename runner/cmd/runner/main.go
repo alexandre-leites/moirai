@@ -235,6 +235,7 @@ func run(ctx context.Context) error {
 	loop.ReconnectMin = settings.ReconnectMin
 	loop.ReconnectMax = settings.ReconnectMax
 	loop.ExpiryInterval = settings.HeartbeatInterval
+	loop.OfferTimeout = settings.OfferTimeout
 	dispatcher.EmitLog = loop.Reporter.EmitLog
 	streamSettings := newReloadableStreamSettings(settings)
 	reloadSignal := make(chan os.Signal, 1)

@@ -34,9 +34,10 @@ type pendingOffer struct {
 	jobID      string
 	generation int64
 	packet     taskpacket.Packet
-	// reservedAt is when the offer was accepted. A reservation has no lease
-	// yet, so it carries no orchestrator-issued expiry; the runner ages it out
-	// against its own offer timeout instead.
+	// reservedAt is when the acceptance reached the control stream, or when the
+	// reservation was built while that send is still in flight. A reservation
+	// has no lease yet, so it carries no orchestrator-issued expiry; the runner
+	// ages it out against its own offer timeout instead.
 	reservedAt time.Time
 }
 
@@ -122,6 +123,20 @@ func (s *OfferState) Admit(offer *runnerv1.JobOffer) (bool, error) {
 		s.mu.Unlock()
 		return false, err
 	}
+
+	// The acknowledgement cannot arrive before the acceptance is on the wire,
+	// so the wait starts here, not when the reservation was built: AcceptOffer
+	// blocks on the control stream and a slow send must not spend the
+	// reservation's own timeout. The reservation is still stamped at creation
+	// so that an AcceptOffer which never returns cannot hold the slot forever
+	// — that is the leak this expiry exists to prevent. The pointer identity
+	// check keeps a send that outlived its own timeout from re-stamping a
+	// newer reservation for the same job.
+	s.mu.Lock()
+	if s.pending[reservation.jobID] == reservation {
+		reservation.reservedAt = s.now()
+	}
+	s.mu.Unlock()
 	return true, nil
 }
 
@@ -220,9 +235,13 @@ func (s *OfferState) Abandon(jobID string, generation int64) bool {
 // leak.
 //
 // Expiry is deliberately local: the runner does not send an offer rejection.
-// The orchestrator ages the same offer out through app.job_offers.expires_at,
-// and a rejection for an offer it no longer considers active is a
-// FAILED_PRECONDITION that tears down the whole control stream.
+// Once the acceptance is recorded the orchestrator's offer row is 'accepted',
+// which its expire_offers sweep (status = 'offered' only) no longer matches, so
+// a rejection for it is a FAILED_PRECONDITION that aborts the whole control
+// stream. The job itself is reclaimed by the orchestrator's lease expiry
+// against app.jobs.lease_expires_at, on the much longer scheduler offer TTL.
+// Releasing the slot locally is therefore the only thing the runner can do,
+// and the only thing it needs to do.
 func (s *OfferState) ExpirePending(timeout time.Duration) []Reservation {
 	if timeout <= 0 {
 		timeout = DefaultOfferTimeout

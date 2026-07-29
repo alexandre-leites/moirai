@@ -10,8 +10,9 @@ import (
 	"github.com/loop-engineering/runner/internal/control"
 )
 
-// offerExpiryClock is a race-safe manual clock. The control loop reads the
-// clock from its own goroutines, so the test cannot advance a bare time.Time.
+// offerExpiryClock is a manual clock. It guards its reading so that a test
+// which does let the loop start an execution goroutine can still advance time
+// without tripping the race detector.
 type offerExpiryClock struct {
 	mu      sync.Mutex
 	current time.Time
@@ -88,10 +89,10 @@ func TestControlLoopReleasesCapacityWhenOfferIsNeverAcknowledged(t *testing.T) {
 	}
 }
 
-// TestControlLoopHonorsConfiguredOfferTimeout proves the second acceptance
-// criterion end to end: the value main.go copies out of
-// config.Config.OfferTimeout, not the built-in default, decides when a
-// reservation is released.
+// TestControlLoopHonorsConfiguredOfferTimeout covers the second acceptance
+// criterion at the seam main.go writes to: the configured OfferTimeout, not the
+// built-in default, decides when a reservation is released. The assignment
+// itself (loop.OfferTimeout = settings.OfferTimeout) is in main.go.
 func TestControlLoopHonorsConfiguredOfferTimeout(t *testing.T) {
 	client := &loopClient{}
 	clock := &offerExpiryClock{current: time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)}

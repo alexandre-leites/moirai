@@ -312,6 +312,55 @@ func TestOfferStateKeepsAcknowledgedLeaseThroughPendingExpirySweep(t *testing.T)
 	}
 }
 
+func TestOfferStateExpiresOnlyTheReservationsPastTheTimeout(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state, err := NewOfferStateWithCapacity(client, func() time.Time { return now }, time.Minute, 15*time.Second, 3)
+	if err != nil {
+		t.Fatalf("NewOfferStateWithCapacity() error = %v", err)
+	}
+	if admitted, err := state.Admit(validOffer(t, "job-old", 1)); err != nil || !admitted {
+		t.Fatalf("Admit(job-old) = (%v, %v)", admitted, err)
+	}
+	now = now.Add(20 * time.Second)
+	if admitted, err := state.Admit(validOffer(t, "job-new", 1)); err != nil || !admitted {
+		t.Fatalf("Admit(job-new) = (%v, %v)", admitted, err)
+	}
+
+	now = now.Add(11 * time.Second)
+	expired := state.ExpirePending(DefaultOfferTimeout)
+	if len(expired) != 1 || expired[0].JobID != "job-old" {
+		t.Fatalf("ExpirePending() = %#v, want only the reservation past the timeout", expired)
+	}
+	if state.ReservedCount() != 1 {
+		t.Fatalf("ReservedCount() = %d, want the younger reservation kept", state.ReservedCount())
+	}
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-new", LeaseGeneration: 1, ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}) {
+		t.Fatal("the surviving reservation could no longer be acknowledged")
+	}
+}
+
+func TestOfferStateStartsTheAcknowledgementWaitWhenTheAcceptanceIsSent(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state := newOfferState(t, client, &now)
+	// A control-stream send that blocks must not spend the reservation's own
+	// wait: the acknowledgement cannot arrive until the acceptance lands.
+	client.onAccept = func() { now = now.Add(20 * time.Second) }
+	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
+		t.Fatalf("Admit() = (%v, %v)", admitted, err)
+	}
+
+	now = now.Add(DefaultOfferTimeout - time.Second)
+	if expired := state.ExpirePending(DefaultOfferTimeout); len(expired) != 0 {
+		t.Fatalf("ExpirePending() = %#v, want the wait measured from the acceptance", expired)
+	}
+	now = now.Add(time.Second)
+	if expired := state.ExpirePending(DefaultOfferTimeout); len(expired) != 1 {
+		t.Fatalf("ExpirePending() = %#v, want expiry a full timeout after the acceptance", expired)
+	}
+}
+
 func TestOfferStateExpirePendingFallsBackToTheDefaultTimeout(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	client := &offerClient{}
