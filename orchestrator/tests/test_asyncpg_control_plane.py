@@ -15,6 +15,16 @@ from moirai.workflows.runner_events import ROLE_TO_SUFFIX
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+def _probe_releases(queries: list[str]) -> list[str]:
+    """The statements that hand a half-open circuit back to `open` (issue #92)."""
+    return [
+        query
+        for query in queries
+        if "WHERE probe_workflow_run_id = $1 AND state = 'half_open'" in query
+        and "SET state = 'open'" in query
+    ]
+
+
 class _Transaction:
     async def __aenter__(self) -> Self:
         return self
@@ -88,8 +98,8 @@ class _Pool:
         raise AssertionError(query)
 
 
-class _DurableConnection:
-    def __init__(self, pool: _DurablePool) -> None:
+class _CircuitReapConnection:
+    def __init__(self, pool: _CircuitReapPool) -> None:
         self.pool = pool
 
     async def __aenter__(self) -> Self:
@@ -99,6 +109,38 @@ class _DurableConnection:
         return None
 
     def transaction(self) -> _Transaction:
+        return _Transaction()
+
+    async def execute(self, query: str, *arguments: object) -> str:
+        self.pool.calls.append((query, arguments))
+        return self.pool.tags.pop(0)
+
+
+class _CircuitReapPool:
+    """A pool that hands back the command tags asyncpg would return, so the
+    reaper's row counting can be exercised without a database."""
+
+    def __init__(self, tags: list[str]) -> None:
+        self.tags = list(tags)
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def acquire(self) -> _CircuitReapConnection:
+        return _CircuitReapConnection(self)
+
+
+class _DurableConnection:
+    def __init__(self, pool: _DurablePool) -> None:
+        self.pool = pool
+        self.transactions_opened = 0
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    def transaction(self) -> _Transaction:
+        self.transactions_opened += 1
         return _Transaction()
 
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
@@ -260,6 +302,15 @@ class _DurableConnection:
     async def execute(self, query: str, *arguments: object) -> str:
         self.pool.queries.append(query)
         if "SET state = 'half_open'" in query:
+            if "provider_circuit_state" in query and self.pool.provider_claim_fails:
+                # Drives the defensive `claimed != "UPDATE 1"` arm. Both rows
+                # are held by `SELECT … FOR UPDATE` before either write, so
+                # under READ COMMITTED no concurrent claim can produce this;
+                # what can is a write the database refuses or suppresses, which
+                # is what the PostgreSQL test injects with a BEFORE UPDATE
+                # trigger. The arm exists so that arriving here still cannot
+                # commit the claim that already succeeded.
+                return "UPDATE 0"
             if "project_circuit_state" in query and self.pool.project_circuit is not None:
                 self.pool.project_circuit["state"] = "half_open"
             if "provider_circuit_state" in query and self.pool.provider_circuit is not None:
@@ -331,6 +382,7 @@ class _DurablePool:
         self.dispatched_requests: list[tuple[str, str, int]] = []
         self.project_circuit: dict[str, object] | None = None
         self.provider_circuit: dict[str, object] | None = None
+        self.provider_claim_fails = False
         self.queries: list[str] = []
         self.candidate: dict[str, object] | None = {
             "issue_id": "00000000-0000-0000-0000-000000000004",
@@ -615,6 +667,80 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(pool.project_circuit["state"], "open")
 
+    async def test_a_failed_second_claim_unwinds_the_claim_transaction(self) -> None:
+        """Issue #92: the project claim used to be committed by the caller's
+        `return None`, wedging the project at `half_open` with a probe pointing
+        at a workflow run `schedule()` never inserted.
+
+        This asserts the two halves of the mechanism a fake can observe: the
+        failed claim is reported as such, and the claim ran inside its own
+        nested transaction, which asyncpg issues as a SAVEPOINT because
+        `schedule()` already holds the outer one. That the savepoint really
+        discards the first claim is proved against PostgreSQL by
+        `test_postgres_integration.py`'s `test_a_partial_probe_claim_is_never_committed`.
+        """
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_claim_fails = True
+        connection = _DurableConnection(pool)
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        claimed = await control_plane._claim_circuit_probes(
+            connection, pool.project_id, "github", uuid4(), NOW
+        )
+
+        self.assertFalse(claimed)
+        self.assertEqual(connection.transactions_opened, 1)
+        self.assertEqual(sum("SET state = 'half_open'" in query for query in pool.queries), 2)
+
+    async def test_schedule_places_no_offer_when_a_probe_claim_fails(self) -> None:
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_claim_fails = True
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        self.assertIsNone(await control_plane.schedule(NOW, timedelta(seconds=30)))
+
+        self.assertFalse(any("INSERT INTO app.workflow_runs" in query for query in pool.queries))
+        self.assertFalse(any("INSERT INTO app.job_offers" in query for query in pool.queries))
+
+    async def test_a_stale_probe_pointer_does_not_veto_a_new_claim(self) -> None:
+        """`state = 'open'` means no probe is outstanding, so a pointer still on
+        the row is stale. Requiring it to be NULL made a circuit that had been
+        closed and reopened impossible to probe ever again (issue #92)."""
+        pool = _DurablePool()
+        pool.project_circuit = {"state": "open", "opened_at": NOW - timedelta(minutes=5)}
+        pool.provider_circuit = {
+            "state": "open",
+            "opened_at": NOW - timedelta(minutes=5),
+            "probe_workflow_run_id": uuid4(),
+        }
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        self.assertTrue(await control_plane._claim_circuit_probes(
+            _DurableConnection(pool), pool.project_id, "github", uuid4(), NOW
+        ))
+        claims = [query for query in pool.queries if "SET state = 'half_open'" in query]
+        self.assertEqual(len(claims), 2)
+        for claim in claims:
+            self.assertNotIn("probe_workflow_run_id IS NULL", claim)
+
+    async def test_reaping_orphaned_probes_reports_each_circuit_table(self) -> None:
+        pool = _CircuitReapPool(["UPDATE 2", "UPDATE 0"])
+        control_plane = AsyncpgControlPlane(pool, circuit_probe_cooldown=timedelta(minutes=5))
+
+        reaped = await control_plane.reap_orphaned_circuit_probes(NOW)
+
+        self.assertEqual(reaped, {"project_circuits": 2, "provider_circuits": 0})
+        self.assertIn("app.project_circuit_state", pool.calls[0][0])
+        self.assertIn("app.provider_circuit_state", pool.calls[1][0])
+        for query, arguments in pool.calls:
+            self.assertIn("WHERE state = 'half_open'", query)
+            self.assertIn("probe.status NOT IN ('completed', 'blocked', 'failed', 'cancelled')", query)
+            self.assertEqual(arguments, (NOW, NOW - timedelta(minutes=5)))
+
     async def test_accept_renew_and_fence_events_for_a_durable_job(self) -> None:
         pool = _DurablePool()
         control_plane = AsyncpgControlPlane(pool)
@@ -769,6 +895,40 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.workflow_status, "planning")
         self.assertEqual(pool.execution_request_status, "queued")
         self.assertTrue(pool.project_locked)
+
+    async def test_offer_release_paths_that_end_a_run_release_its_probe(self) -> None:
+        """Issue #92, wedge 2: these two paths take a run terminal in raw SQL,
+        never reaching AsyncpgWorkflowPersistence.transition -- and the run
+        offer expiry cancels is typically the probe `schedule()` just claimed."""
+        cancelled = _DurablePool()
+        cancelled.bootstrap_run()
+        cancelled.offer_expires_at = NOW
+        await AsyncpgControlPlane(cancelled).expire_offers(NOW)
+
+        blocked = _DurablePool()
+        blocked.execution_request_status = "dispatched"
+        blocked.offer_expires_at = NOW
+        blocked.unanswered_offers = 4
+        blocked.unanswered_since = NOW - timedelta(hours=1)
+        await AsyncpgControlPlane(blocked, unanswered_offer_limit=5).expire_offers(NOW)
+
+        for pool in (cancelled, blocked):
+            released = _probe_releases(pool.queries)
+            self.assertEqual(len(released), 2)
+            self.assertTrue(any("app.project_circuit_state" in query for query in released))
+            self.assertTrue(any("app.provider_circuit_state" in query for query in released))
+
+    async def test_releasing_an_offer_for_an_already_terminal_run_leaves_circuits_alone(self) -> None:
+        """That run resolved its own circuits when it transitioned; touching
+        them again could reopen a circuit its success had closed."""
+        pool = _DurablePool()
+        pool.workflow_status = "completed"
+        pool.workflow_phase = "completed"
+        pool.offer_expires_at = NOW
+
+        await AsyncpgControlPlane(pool).expire_offers(NOW)
+
+        self.assertEqual(_probe_releases(pool.queries), [])
 
     async def test_accept_offer_rejects_an_expired_durable_offer(self) -> None:
         pool = _DurablePool()

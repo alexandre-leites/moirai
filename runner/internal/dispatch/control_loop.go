@@ -516,7 +516,10 @@ func minimalTerminalPayload(payload map[string]any) map[string]any {
 	return nil
 }
 
-var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch"}
+// The work-in-progress fields are kept because they are short and are the only
+// pointer to a failed run's surviving work; the log tail is not, since it is the
+// kind of unbounded detail the reduced payload exists to shed.
+var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch", "wipBranch", "wipCommit", "wipPushed"}
 
 // truncateUTF8 shortens value to at most limit bytes without splitting a rune.
 func truncateUTF8(value string, limit int) string {
@@ -561,6 +564,19 @@ func terminalPayload(status string, result Result, usage map[string]any) map[str
 	}
 	if result.Branch != "" {
 		payload["branch"] = result.Branch
+	}
+	// A non-delivering run reports where its work survived instead. `wipBranch`
+	// is deliberately distinct from `branch`: the orchestrator can build a retry
+	// packet from it without any consumer mistaking it for delivered work.
+	if result.WorkInProgressCommit != "" {
+		payload["wipCommit"] = result.WorkInProgressCommit
+		payload["wipPushed"] = result.WorkInProgressPushed
+	}
+	if result.WorkInProgressBranch != "" {
+		payload["wipBranch"] = result.WorkInProgressBranch
+	}
+	if result.LogTail != "" {
+		payload["logTail"] = result.LogTail
 	}
 	if status == "completed" && result.Raw != nil {
 		payload["result"] = result.Raw

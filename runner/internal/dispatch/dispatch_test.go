@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/loop-engineering/runner/internal/agents"
 	"github.com/loop-engineering/runner/internal/control"
+	"github.com/loop-engineering/runner/internal/pipeline"
 	"github.com/loop-engineering/runner/internal/repository"
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
@@ -19,9 +21,19 @@ import (
 type workspaceManager struct {
 	workspace  repository.Workspace
 	prepareErr error
+	releaseErr error
 	prepared   repository.PrepareRequest
 	cleaned    bool
+	released   bool
 	artifacts  map[string]string
+}
+
+func (manager *workspaceManager) ReleaseBranch(context.Context, repository.Workspace) error {
+	if manager.releaseErr != nil {
+		return manager.releaseErr
+	}
+	manager.released = true
+	return nil
 }
 
 func (manager *workspaceManager) Prepare(_ context.Context, request repository.PrepareRequest) (repository.Workspace, error) {
@@ -56,6 +68,15 @@ func (manager *workspaceManager) recordArtifacts() error {
 		manager.artifacts[name] = string(contents)
 	}
 	return nil
+}
+
+type pipelineRunner struct {
+	results []pipeline.Result
+	err     error
+}
+
+func (runner pipelineRunner) Run(context.Context, string, []pipeline.Command) ([]pipeline.Result, error) {
+	return runner.results, runner.err
 }
 
 type revisionInspector struct {
@@ -212,11 +233,76 @@ func TestDispatcherRetainsWorkspacesByTerminalOutcome(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			manager := &workspaceManager{workspace: testWorkspace(t)}
-			_, _ = (Dispatcher{Workspaces: manager, Backend: test.backend, Retention: test.retention}).Execute(test.context, validLease())
+			retention := test.retention
+			retention.Directory = t.TempDir()
+			retention.MaxAge = time.Hour
+			retention.MaxWorkspaces = 4
+			_, _ = (Dispatcher{Workspaces: manager, Backend: test.backend, Retention: retention}).Execute(test.context, validLease())
 			if manager.cleaned == test.retained {
 				t.Fatalf("cleaned = %v, retained = %v", manager.cleaned, test.retained)
 			}
+			records, err := filepath.Glob(filepath.Join(retention.Directory, "retained", "*.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (len(records) == 1) != test.retained {
+				t.Fatalf("retention records = %#v, retained = %v", records, test.retained)
+			}
 		})
+	}
+}
+
+// TestDispatcherCleansUpWorkspacesItCannotRegisterForRetention proves retention
+// stays bounded: a workspace the sweep could never find again is not kept,
+// because nothing would ever release it.
+func TestDispatcherCleansUpWorkspacesItCannotRegisterForRetention(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{err: errors.New("agent exited")}, Retention: RetentionPolicy{KeepFailed: true}}
+
+	if _, err := dispatcher.Execute(context.Background(), validLease()); err == nil {
+		t.Fatal("Execute() succeeded despite backend failure")
+	}
+	if !manager.cleaned {
+		t.Fatal("an unregisterable workspace was retained without a bound")
+	}
+}
+
+// TestDispatcherKeepsForensicsWhenTheBranchCannotBeReleased pins the trade-off:
+// detaching is a guard against a collision that preparation already avoids, so
+// failing to detach must not cost the run its forensics.
+func TestDispatcherKeepsForensicsWhenTheBranchCannotBeReleased(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t), releaseErr: errors.New("worktree is locked")}
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend:    &backend{err: errors.New("agent exited")},
+		Retention:  RetentionPolicy{KeepFailed: true, Directory: t.TempDir(), MaxAge: time.Hour, MaxWorkspaces: 4},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), validLease()); err == nil {
+		t.Fatal("Execute() succeeded despite backend failure")
+	}
+	if manager.cleaned || manager.released {
+		t.Fatalf("cleaned = %v, released = %v", manager.cleaned, manager.released)
+	}
+}
+
+// TestDispatcherReleasesTheExecutionBranchOfRetainedWorkspaces guards the
+// interaction between retention and workspace preparation: git refuses to
+// re-create a branch that another worktree holds, and the orchestrator reuses
+// one branch name for every execution of a workflow.
+func TestDispatcherReleasesTheExecutionBranchOfRetainedWorkspaces(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend:    &backend{err: errors.New("agent exited")},
+		Retention:  RetentionPolicy{KeepFailed: true, Directory: t.TempDir(), MaxAge: time.Hour, MaxWorkspaces: 4},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), validLease()); err == nil {
+		t.Fatal("Execute() succeeded despite backend failure")
+	}
+	if manager.cleaned || !manager.released {
+		t.Fatalf("cleaned = %v, released = %v", manager.cleaned, manager.released)
 	}
 }
 
@@ -388,14 +474,19 @@ func TestProjectConcurrencyGuardRejectsDuplicateProjectUntilReleased(t *testing.
 }
 
 type deliveryManager struct {
-	mu           sync.Mutex
-	commitResult repository.CommitResult
-	commitErr    error
-	pushResult   repository.PushResult
-	pushErr      error
-	commits      []string
-	pushes       []string
-	pushEnv      map[string]string
+	mu                    sync.Mutex
+	commitResult          repository.CommitResult
+	commitErr             error
+	pushResult            repository.PushResult
+	pushErr               error
+	workInProgressPushErr error
+	recordErr             error
+	commits               []string
+	pushes                []string
+	workInProgressPushes  []string
+	recordedReferences    []string
+	pushEnv               map[string]string
+	workInProgressEnv     map[string]string
 }
 
 func (manager *deliveryManager) Commit(_ context.Context, _ repository.Workspace, message string) (repository.CommitResult, error) {
@@ -411,6 +502,24 @@ func (manager *deliveryManager) Push(_ context.Context, _ repository.Workspace, 
 	manager.pushes = append(manager.pushes, branch)
 	manager.pushEnv = environment
 	return manager.pushResult, manager.pushErr
+}
+
+func (manager *deliveryManager) RecordWorkInProgress(_ context.Context, _ repository.Workspace, reference string) error {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.recordedReferences = append(manager.recordedReferences, reference)
+	return manager.recordErr
+}
+
+func (manager *deliveryManager) PushWorkInProgress(_ context.Context, _ repository.Workspace, branch string, environment map[string]string) (repository.PushResult, error) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.workInProgressPushes = append(manager.workInProgressPushes, branch)
+	manager.workInProgressEnv = environment
+	if manager.workInProgressPushErr != nil {
+		return repository.PushResult{}, manager.workInProgressPushErr
+	}
+	return repository.PushResult{Branch: branch, Pushed: true}, nil
 }
 
 func deliverableLease() control.Lease {
@@ -460,15 +569,153 @@ func TestDispatcherFailsClosedWithoutDeliveryManagerWhenModifyingFiles(t *testin
 	}
 }
 
-func TestDispatcherDoesNotDeliverWhenExecutionFails(t *testing.T) {
-	manager := &workspaceManager{workspace: testWorkspace(t)}
-	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
-	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{err: errors.New("agent exited")}, Delivery: delivery}
-	if _, err := dispatcher.Execute(context.Background(), deliverableLease()); err == nil {
-		t.Fatal("Execute() succeeded despite backend failure")
+// TestDispatcherRetainsWorkInProgressWithoutDeliveringWhenExecutionFails covers
+// the delivery-safety contract for a non-delivering run: the work survives on a
+// per-execution work-in-progress branch, and the deliverable agent branch is
+// never written to.
+func TestDispatcherRetainsWorkInProgressWithoutDeliveringWhenExecutionFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend *backend
+	}{
+		{name: "agent failure", backend: &backend{err: errors.New("agent exited")}},
+		{name: "blocked agent", backend: &backend{result: agents.Result{Status: "blocked", Summary: "needs a decision"}}},
 	}
-	if len(delivery.commits) != 0 {
-		t.Fatalf("delivery committed despite failed execution: %#v", delivery)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &workspaceManager{workspace: testWorkspace(t)}
+			delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
+			dispatcher := Dispatcher{Workspaces: manager, Backend: test.backend, Delivery: delivery, PushWorkInProgress: true}
+
+			result, _ := dispatcher.Execute(context.Background(), deliverableLease())
+			if len(delivery.pushes) != 0 || result.Pushed || result.Branch != "" {
+				t.Fatalf("failed execution delivered to the agent branch: result = %#v, pushes = %#v", result, delivery.pushes)
+			}
+			if len(delivery.commits) != 1 || !strings.HasPrefix(delivery.commits[0], "wip(") {
+				t.Fatalf("work in progress commit messages = %#v", delivery.commits)
+			}
+			if result.WorkInProgressCommit != "deadbeef" || result.WorkInProgressBranch != "wip/execution-1" || !result.WorkInProgressPushed {
+				t.Fatalf("result = %#v", result)
+			}
+			if len(delivery.workInProgressPushes) != 1 || delivery.workInProgressPushes[0] != "wip/execution-1" {
+				t.Fatalf("work in progress pushes = %#v", delivery.workInProgressPushes)
+			}
+		})
+	}
+}
+
+func TestDispatcherRecordsPipelineFailureBranchCommitAndLogTail(t *testing.T) {
+	workspace := testWorkspace(t)
+	manager := &workspaceManager{workspace: workspace}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "cafebabe"}}
+	lease := deliverableLease()
+	lease.Packet.Pipeline = []taskpacket.PipelineCommand{{Command: "go test ./...", TimeoutSeconds: 5}}
+	dispatcher := Dispatcher{
+		Workspaces: manager,
+		Backend:    &backend{result: agents.Result{Status: "completed"}},
+		Delivery:   delivery,
+		Pipeline: pipelineRunner{
+			results: []pipeline.Result{{Command: "go test ./...", ExitCode: 1, Output: "\x1b[31mpipeline output: FAIL\x1b[0m\n"}},
+			err:     errors.New("pipeline command failed with exit code 1: go test ./..."),
+		},
+		PushWorkInProgress: true,
+		Retention:          RetentionPolicy{KeepFailed: true, Directory: t.TempDir(), MaxAge: time.Hour, MaxWorkspaces: 4},
+	}
+
+	result, err := dispatcher.Execute(context.Background(), lease)
+	if err == nil || result.Status != "failed" {
+		t.Fatalf("Execute() = (%#v, %v)", result, err)
+	}
+	if result.WorkInProgressCommit != "cafebabe" || result.WorkInProgressBranch != "wip/execution-1" || !result.WorkInProgressPushed {
+		t.Fatalf("pipeline failure did not retain its work: %#v", result)
+	}
+	if len(delivery.pushes) != 0 {
+		t.Fatalf("pipeline failure pushed the agent branch: %#v", delivery.pushes)
+	}
+	if result.LogTail != "pipeline output: FAIL" {
+		t.Fatalf("log tail = %q, want the sanitised pipeline output", result.LogTail)
+	}
+	if manager.cleaned {
+		t.Fatal("failed workspace was cleaned up despite the retention policy")
+	}
+	contents, err := os.ReadFile(filepath.Join(workspace.Loop, "terminal-result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted Result
+	if err := json.Unmarshal(contents, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.WorkInProgressBranch != "wip/execution-1" || persisted.WorkInProgressCommit != "cafebabe" || persisted.LogTail == "" {
+		t.Fatalf("terminal result = %#v", persisted)
+	}
+}
+
+func TestDispatcherKeepsWorkInProgressLocalWhenPushingIsNotPermitted(t *testing.T) {
+	tests := []struct {
+		name    string
+		mayPush bool
+		enabled bool
+	}{
+		{name: "packet forbids pushing", enabled: true},
+		{name: "runner disables work in progress pushes", mayPush: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &workspaceManager{workspace: testWorkspace(t)}
+			delivery := &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}}
+			lease := deliverableLease()
+			lease.Packet.Constraints.MayPush = test.mayPush
+			dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{err: errors.New("agent exited")}, Delivery: delivery, PushWorkInProgress: test.enabled}
+
+			result, _ := dispatcher.Execute(context.Background(), lease)
+			if result.WorkInProgressCommit != "deadbeef" || result.WorkInProgressBranch != "" || result.WorkInProgressPushed {
+				t.Fatalf("result = %#v", result)
+			}
+			if len(delivery.workInProgressPushes) != 0 {
+				t.Fatalf("work in progress pushes = %#v", delivery.workInProgressPushes)
+			}
+			// Unpublished work still has to survive the branch reset the next
+			// preparation of this job performs, or committing it achieved nothing.
+			if len(delivery.recordedReferences) != 1 || delivery.recordedReferences[0] != "refs/moirai-wip/execution-1" {
+				t.Fatalf("recorded references = %#v", delivery.recordedReferences)
+			}
+		})
+	}
+}
+
+// TestDispatcherReportsTheOriginalFailureWhenRetainingWorkFails proves that
+// preserving a failed run's remains never replaces the failure the orchestrator
+// has to see.
+func TestDispatcherReportsTheOriginalFailureWhenRetainingWorkFails(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitErr: errors.New("worktree is locked")}
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{err: errors.New("agent exited")}, Delivery: delivery, PushWorkInProgress: true}
+
+	result, err := dispatcher.Execute(context.Background(), deliverableLease())
+	if err == nil || !strings.Contains(err.Error(), "agent exited") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.WorkInProgressCommit != "" || result.Status != "failed" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestDispatcherSkipsWorkInProgressPushWhenNothingWasProduced(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{commitResult: repository.CommitResult{Revision: "initial"}}
+	inspector := &revisionInspector{summaries: []repository.RevisionSummary{{Revision: "initial"}, {Revision: "initial"}}}
+	dispatcher := Dispatcher{
+		Workspaces:         manager,
+		Backend:            &backend{err: errors.New("agent exited")},
+		Delivery:           delivery,
+		RevisionInspector:  inspector,
+		PushWorkInProgress: true,
+	}
+
+	result, _ := dispatcher.Execute(context.Background(), deliverableLease())
+	if result.WorkInProgressCommit != "" || len(delivery.workInProgressPushes) != 0 {
+		t.Fatalf("result = %#v, pushes = %#v", result, delivery.workInProgressPushes)
 	}
 }
 
@@ -528,4 +775,18 @@ func testWorkspace(t *testing.T) repository.Workspace {
 	t.Helper()
 	root := t.TempDir()
 	return repository.Workspace{Root: root, Repository: filepath.Join(root, "repository"), Loop: filepath.Join(root, "repository", ".loop")}
+}
+
+type callbackBackend struct {
+	onExecute func()
+}
+
+func (callbackBackend) Name() string                      { return "callback" }
+func (callbackBackend) HealthCheck(context.Context) error { return nil }
+func (callbackBackend) Cancel(string) error               { return nil }
+func (agent *callbackBackend) Execute(context.Context, agents.Request) (agents.Result, error) {
+	if agent.onExecute != nil {
+		agent.onExecute()
+	}
+	return agents.Result{Status: "completed"}, nil
 }

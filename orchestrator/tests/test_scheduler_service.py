@@ -76,6 +76,24 @@ class _RejectFailureControlPlane:
         raise RuntimeError("cleanup unavailable")
 
 
+class _CircuitReaperSpyControlPlane:
+    def __init__(self, delegate: InMemoryControlPlane) -> None:
+        self._delegate = delegate
+        self.calls: list[str] = []
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._delegate, name)
+
+    async def reap_orphaned_circuit_probes(self, now: datetime) -> dict[str, int]:
+        del now
+        self.calls.append("reap")
+        return {"project_circuits": 1, "provider_circuits": 0}
+
+    def schedule(self, now: datetime, offer_ttl: timedelta) -> object:
+        self.calls.append("schedule")
+        return self._delegate.schedule(now, offer_ttl)
+
+
 class _RejectSpyControlPlane:
     def __init__(self, delegate: InMemoryControlPlane) -> None:
         self._delegate = delegate
@@ -120,6 +138,23 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(delivered, [(scheduled[0].offer.job_id, {"jobId": scheduled[0].offer.job_id})])
+
+    async def test_tick_reopens_orphaned_circuit_probes_before_choosing_candidates(self) -> None:
+        """Issue #92: what an unresolvable half-open probe blocks is scheduling
+        -- the candidate query skips half-open projects and providers -- so the
+        reaper belongs at the head of this leader-gated pass, not after it."""
+        control_plane = _CircuitReaperSpyControlPlane(self._control_plane())
+
+        async def deliver(offer: Any, packet: dict[str, object]) -> bool:
+            del offer, packet
+            return True
+
+        scheduler = Scheduler(control_plane, deliver, lambda scheduled: {}, timedelta(seconds=30))
+        scheduled = await scheduler.tick(NOW)
+
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(control_plane.calls[0], "reap")
+        self.assertEqual(control_plane.calls.count("reap"), 1)
 
     async def test_tick_delivers_recovery_before_scheduling_a_new_offer(self) -> None:
         control_plane = _RecoveryFirstControlPlane(self._control_plane())

@@ -621,6 +621,90 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 3)
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_failing_checks_spend_the_ci_budget_and_leave_the_pipeline_budget_alone(self) -> None:
+        """Both repair sources in one run: a failing local pipeline spends
+        `pipeline_repair_attempts`, a failing GitHub check spends
+        `ci_repair_attempts`, and neither touches the other. The CI repair used
+        to increment the pipeline counter, so the two were indistinguishable and
+        `ci_repair_attempts` never left 0."""
+        code_host = _FakeCodeHost()
+        workflow = _EventDrivenWorkflow(code_host=code_host, issue_tracker=_FakeIssueTracker())
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+
+        state = await workflow.deliver("pipeline", "pipeline", event_type="failed", exit_code=1)
+        self.assertEqual(state["status"], "repairing")
+        self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 1)
+        self.assertEqual(workflow.store.durable["ci_repair_attempts"], 0)
+
+        await workflow.deliver("repairer", "repair")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+
+        code_host.checks_pass = False
+        state = await workflow.deliver("developer", "implement")
+
+        self.assertEqual(state["status"], "repairing")
+        self.assertEqual(workflow.store.roles[-1], "repairer")
+        self.assertEqual(workflow.store.durable["ci_repair_attempts"], 1)
+        self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 1)
+        self.assertEqual(code_host.merged_prs, [])
+
+        # The CI repair rejoins the workflow where a local repair does: its own
+        # pipeline verdict on the repaired tree, not a straight re-push.
+        state = await workflow.deliver("repairer", "repair")
+        self.assertEqual(state["status"], "local_pipeline")
+        self.assertEqual(workflow.store.roles[-1], "pipeline")
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_the_ci_repair_budget_stops_the_failing_check_loop(self) -> None:
+        """`ci_repair_attempts` is enforceable: the failing-check loop stops
+        because the CI counter reached its bound, with the local repair budget
+        untouched. While CI repairs incremented the pipeline counter this was
+        impossible -- the CI counter never left 0, so the bound it gates could
+        never be what stopped anything.
+
+        The starting counters are deliberately synthetic: `ci_repair_attempts`
+        is seeded ahead so that the CI bound, and not `total_agent_executions`
+        or `review_cycles`, is the first bound the loop meets. A real workflow
+        row with two CI repairs would also carry roughly eight agent executions,
+        and the global budget would stop the loop first -- which is why
+        `orchestrator/README.md` documents the CI bound as a knob that only
+        binds once the other budgets are raised, and why this test isolates it
+        rather than pretending the default configuration reaches it."""
+        code_host = _FakeCodeHost(checks_pass=False)
+        workflow = _EventDrivenWorkflow(code_host=code_host, issue_tracker=_FakeIssueTracker())
+        # Seeded on the app.workflow_runs row, which PersistedWorkflowRuntime
+        # reads back into graph state on every resume.
+        workflow.store.durable["ci_repair_attempts"] = 2
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+
+        state = await workflow.deliver("developer", "implement")
+        self.assertEqual(state["status"], "repairing")
+        self.assertEqual(workflow.store.durable["ci_repair_attempts"], 3)
+
+        await workflow.deliver("repairer", "repair")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        state = await workflow.deliver("developer", "implement")
+
+        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["blocking_reason"], "workflow retry budget exhausted")
+        self.assertEqual(workflow.store.durable["ci_repair_attempts"], 3)
+        self.assertEqual(workflow.store.durable["pipeline_repair_attempts"], 0)
+        self.assertEqual(workflow.store.roles.count("repairer"), 1)
+        # The CI bound tripped, not the global one: 7 of 10 agent runs spent,
+        # and `review_cycles` (2 of 3) had room as well.
+        self.assertEqual(workflow.store.durable["total_agent_executions"], 7)
+        self.assertEqual(workflow.store.durable["review_cycles"], 2)
+        self.assertEqual(code_host.merged_prs, [])
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_human_approval_interrupt_pauses_before_merge(self) -> None:
         """With human approval required the graph stops before wait_for_human
         and merges only once the decision resumes it."""
@@ -713,10 +797,11 @@ class _EntryPointControlPlane:
 
 
 class _FakeCodeHost:
-    def __init__(self) -> None:
+    def __init__(self, checks_pass: bool = True) -> None:
         self.created_prs: list[tuple[str, str, str, str, str | None]] = []
         self.checked_prs: list[str] = []
         self.merged_prs: list[tuple[str, str]] = []
+        self.checks_pass = checks_pass
 
     async def get_pull_request(self, pull_request_id: str) -> Any:
         from moirai.code_hosts import PullRequest
@@ -732,7 +817,8 @@ class _FakeCodeHost:
     async def required_checks(self, pull_request_id: str) -> list[Any]:
         self.checked_prs.append(pull_request_id)
         from moirai.code_hosts import CheckStatus, PullRequestCheck
-        return [PullRequestCheck(name="ci", status=CheckStatus.PASSING)]
+        status = CheckStatus.PASSING if self.checks_pass else CheckStatus.FAILING
+        return [PullRequestCheck(name="ci", status=status)]
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:
         self.merged_prs.append((pull_request_id, method))

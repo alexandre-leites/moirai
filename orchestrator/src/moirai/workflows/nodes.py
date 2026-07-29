@@ -25,8 +25,9 @@ _BUDGET = RetryBudget()
 # workflow gets: a review-driven repair cycle would cost three units instead of
 # two, and an approved review could land on an exhausted budget and block with
 # the work finished but no pull request. It cannot run away either: `pipeline` is
-# reachable only from `implement` and `repair`, both of which dispatch a counted
-# agent execution first and are capped by their own attempt counters.
+# reachable only from `implement`, `repair` and `ci_repair`, each of which
+# dispatches a counted agent execution first and is capped by its own attempt
+# counter.
 _NON_AGENT_ROLES = frozenset({"pipeline"})
 
 
@@ -67,6 +68,7 @@ class PersistedWorkflowNodes:
             pipeline=self.pipeline,
             review=self.review,
             repair=self.repair,
+            ci_repair=self.ci_repair,
             push=self.push,
             create_pull_request=self.create_pull_request,
             wait_for_checks=self.wait_for_checks,
@@ -110,9 +112,35 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "reviewer", "ai_review", "review_cycles")
 
     async def repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
+        # Repairs asked for before the work leaves the machine: a failing local
+        # pipeline, an AI review requesting changes, a human requesting changes.
         if int(state.get("pipeline_repair_attempts", 0)) >= _BUDGET.pipeline_repair_attempts:
             return await self._budget_exhausted(state)
         return await self._dispatch(state, "repairer", "repairing", "pipeline_repair_attempts")
+
+    async def ci_repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
+        # Repairs asked for by failing GitHub checks. Same repairer role and
+        # `repairing` phase as `repair` -- the runner does the same work and
+        # `runner_events` translates the terminal event the same way -- but a
+        # distinct counter, because which node dispatched the repair is the only
+        # record of why it happened. Dispatching CI repairs from `repair` left
+        # `ci_repair_attempts` with no writer at all, so `route_after_checks`
+        # gated on a counter frozen at 0 (the CI bound could never trip) while
+        # every CI repair quietly spent the local pipeline's repair budget.
+        #
+        # Sharing the role costs one invariant: `_dispatch`'s replay guard
+        # identifies "my own queued request" by role, so it can no longer tell
+        # a replayed `repair` from a replayed `ci_repair`. Adopting the other
+        # node's queued request would skip an attempt increment. It is
+        # unreachable today because reaching the other repair node requires a
+        # terminal event for the first execution, and a terminal event is only
+        # accepted for a request whose row is still `dispatched`
+        # (`_resolve_execution_identity` in persistence/control_plane.py) --
+        # never for one that offer recovery returned to `queued`. Anything that
+        # relaxes that has to give the two nodes distinguishable requests.
+        if int(state.get("ci_repair_attempts", 0)) >= _BUDGET.ci_repair_attempts:
+            return await self._budget_exhausted(state)
+        return await self._dispatch(state, "repairer", "repairing", "ci_repair_attempts")
 
     async def push(self, state: IssueWorkflowState) -> WorkflowUpdate:
         return await self._dispatch(state, "developer", "pushing", None)

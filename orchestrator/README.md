@@ -20,7 +20,7 @@ The consequence is that a seeded row deleted by hand is re-created on the next s
 
 ## Workflow execution model
 
-The issue workflow is an event-driven state machine, not a run-to-completion function. Every node that queues an agent execution (`plan`, `implement`, `pipeline`, `review`, `repair`, `push`) sets `awaiting_execution` and its outgoing edge ends the graph invocation. The gates the downstream nodes read (`plan_valid`, `pipeline_passed`, `review_approved`) only exist once that execution reports back, so continuing would route on stale defaults, queue phantom executions, and exhaust the retry budget before any agent ran.
+The issue workflow is an event-driven state machine, not a run-to-completion function. Every node that queues an execution (`plan`, `implement`, `pipeline`, `review`, `repair`, `ci_repair`, `push` — `pipeline` runs the project's commands rather than an agent, but suspends the same way) sets `awaiting_execution` and its outgoing edge ends the graph invocation. The gates the downstream nodes read (`plan_valid`, `pipeline_passed`, `review_approved`) only exist once that execution reports back, so continuing would route on stale defaults, queue phantom executions, and exhaust the retry budget before any agent ran.
 
 The runner's terminal event clears `awaiting_execution` (`workflows/runner_events.py`), and `PersistedWorkflowRuntime.run` resumes the graph from the same edge with `aupdate_state` + `ainvoke(None, config)`. One terminal event therefore advances the workflow by at most one queued execution.
 
@@ -81,18 +81,60 @@ No role's exit code is ever read as another role's verdict. Each gate is decided
 
 That strictness is deliberate: the local pipeline is the platform's deterministic completion gate. Inferring it from the developer's exit code, as the orchestrator used to, skipped the deterministic checks in exactly the case they exist for — the agent believing it succeeded — and let a repaired tree inherit the verdict of the pipeline run that preceded the repair.
 
-The pipeline execution does not spend `total_agent_executions`: it runs the project's commands, not an agent. It is bounded instead by the phases that lead into it, since the `pipeline` node is reachable only from `implement` and `repair`, both of which dispatch a counted agent execution first. An exhausted agent budget still blocks at the `pipeline` node rather than paying for a verdict that has nowhere to route.
+The pipeline execution does not spend `total_agent_executions`: it runs the project's commands, not an agent. It is bounded instead by the phases that lead into it, since the `pipeline` node is reachable only from `implement`, `repair` and `ci_repair`, each of which dispatches a counted agent execution first. An exhausted agent budget still blocks at the `pipeline` node rather than paying for a verdict that has nowhere to route.
 
 Two caveats about what the gate is worth today, neither of them in the orchestrator:
 
 - The commands come from `app.project_pipeline_steps` (`required = true`, in `position` order), which nothing in this repository writes yet ([#114](https://github.com/alexandre-leites/moirai/issues/114)). A project with no required steps has an empty gate: the execution reports success without running anything.
 - The runner rebuilds the workspace from the default branch for every execution (`repository.Manager.Prepare` runs `git worktree add -B <agent-branch> … <default-branch>`, which force-resets the branch), so a pipeline execution currently validates the base branch rather than the implementation it follows ([#136](https://github.com/alexandre-leites/moirai/issues/136)).
 
+## Retry budgets
+
+`RetryBudget` (`workflows/policy.py`) is the single source of truth for the bounds, and each counter has exactly one node that increments it. The node a repair is dispatched from is the only record of *why* it was dispatched, so the two repair sources are two nodes rather than one:
+
+| Counter | Default | Incremented by | Dispatched when |
+| --- | --- | --- | --- |
+| `planning_attempts` | 2 | `plan` | the planner has not produced a valid plan yet |
+| `implementation_attempts` | 3 | `implement` | the plan is valid |
+| `review_cycles` | 3 | `review` | the local pipeline passed |
+| `pipeline_repair_attempts` | 3 | `repair` | the local pipeline failed, AI review requested changes, or a human requested changes |
+| `ci_repair_attempts` | 3 | `ci_repair` | the pull request's required GitHub checks failed |
+| `total_agent_executions` | 10 | every dispatch of an agent role | any of the above, plus `push` |
+
+`repair` and `ci_repair` dispatch the same `repairer` role and report the same `repairing` phase — the runner does identical work and `runner_events.py` translates their terminal events identically, back to `local_pipeline` so the repaired tree earns a fresh pipeline verdict. Only the budget differs. A CI repair is a real agent run, so it spends `total_agent_executions` like any other repair.
+
+The counters are independent by construction: a run that exhausted its local repair budget can still *dispatch* a CI repair (it will still block at the `pipeline` node if the repaired tree fails locally), and a CI failure can no longer make a later local-pipeline failure block with a misleading reason.
+
+`ci_repair_attempts` is nonetheless not the bound that stops a CI loop under the shipped defaults, because one CI cycle — `ci_repair` → `pipeline` → `review` → `push` → `create_pull_request` → `wait_for_checks` — costs three agent runs *and* one `review_cycles` unit:
+
+- `review_cycles = 3` allows at most two CI cycles on top of the first review, whatever the other budgets say.
+- `total_agent_executions = 10` allows two CI cycles only for a run that reached its pull request on the cheapest path (4 agent runs); a run that took one local repair reaches the pull request at 7 and affords one.
+
+So `ci_repair_attempts` behaves as a configuration knob that becomes operative when those two budgets are raised, and as a correct attribution of what a workflow spent in either case. `RetryBudget` is not wired to configuration today: `build_persisted_runtime` constructs the graph and the nodes with the defaults. Sizing the budgets so the CI bound can bind is a separate, deliberate decision — it is not made here, because picking numbers that make one gate reachable is how the accounting drifted in the first place.
+
 ## Operations
 
 Logs are JSON and retain structured fields passed with Python logging `extra`. Metrics are served at `LOOP_METRICS_BIND` (default `0.0.0.0:9090`) on `/metrics`.
 
 The gRPC listener stays insecure by default for local development. Set `LOOP_GRPC_TLS_CERT_FILE` and `LOOP_GRPC_TLS_KEY_FILE` to enable TLS. Set `LOOP_GRPC_TLS_CLIENT_CA_FILE` too to require runner mTLS certificates.
+
+## Circuit breakers
+
+`app.project_circuit_state` and `app.provider_circuit_state` hold one row per project and per issue provider. `open` keeps the project (or every project on that provider) out of `schedule()` for the probe cooldown, five minutes by default (`AsyncpgControlPlane(circuit_probe_cooldown=...)`); once it elapses, the next scheduling pass claims a single `half_open` probe by writing the workflow run it just created into `probe_workflow_run_id`. `half_open` keeps everything else out until that probe resolves.
+
+Both circuits are claimed in one savepoint, so a claim that cannot complete leaves neither row changed. Every way a probe can end resolves it:
+
+| Probe outcome | Circuit |
+| --- | --- |
+| delivered (`completed`) | closed, pointer cleared |
+| `blocked` through the workflow transition path | reopened with a fresh cooldown, counted as a failure |
+| `cancelled`, `failed`, an offer nobody answered, or a terminal status written straight to `app.workflow_runs` | reopened with a fresh cooldown, not counted — the probe reported nothing |
+
+Closing or reopening a circuit always clears `probe_workflow_run_id`, so a workflow that outlived its claim cannot decide a circuit twice. As a backstop, each leader-gated scheduler pass reopens any `half_open` row whose probe workflow is missing or already terminal and which has been claimed for longer than the cooldown, and logs `reopened orphaned circuit probes` when it does.
+
+The provider circuit is shared by every project on that provider, so an issue-sync pass decides it once, from the pass as a whole, and only on evidence about the provider: any project that syncs clears it, and a failure is recorded — once — only when every enabled project was attempted and all of them failed. Any other pass, including one that skipped a project because it was backing off, writes nothing. One project failing beside a healthy one is a project fault (a deleted repository, a bad URL, a revoked token) and is handled by that project's own `app.issue_sync_state` backoff rather than by halting scheduling everywhere. A failed `agent:*` label write does not count against the provider at all: the read the pass depends on succeeded, and the labels mirror status onto issues rather than feeding any workflow.
+
+The whole-fleet requirement is deliberate, and it is the reason a project stuck in a long backoff can stop a genuine outage from opening the circuit. Without it, a chronically broken project drops out of later passes and the projects still being attempted become the only evidence, so one of *them* failing reads as a provider outage and halts every project on GitHub. Between those two errors, failing to open only wastes agent executions — which the per-project and per-run breakers still bound — while opening wrongly stops all delivery until someone intervenes. During a real outage every project fails together, so their backoffs stay in step and the first delays (5s, 10s, 20s) are all shorter than the one-minute sync interval: no project is skipped, and the circuit opens on the third pass.
 
 ## Issue label ownership
 

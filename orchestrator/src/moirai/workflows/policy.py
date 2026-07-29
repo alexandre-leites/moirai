@@ -9,7 +9,14 @@ class WorkflowRoute(StrEnum):
     IMPLEMENT = "implement"
     PIPELINE = "pipeline"
     REVIEW = "review"
+    # Two repair routes for one `repairer` role. They exist so the gate that
+    # asked for the repair decides which budget the repair spends: a failing
+    # local pipeline (or AI review, or a human asking for changes) spends
+    # `pipeline_repair_attempts`, a failing GitHub check spends
+    # `ci_repair_attempts`. Collapsing them back into one route would make one
+    # counter dead again and let one failure source drain the other's budget.
     REPAIR = "repair"
+    CI_REPAIR = "ci_repair"
     PUSH = "push"
     CREATE_PULL_REQUEST = "create_pull_request"
     WAIT_FOR_CHECKS = "wait_for_checks"
@@ -79,8 +86,12 @@ def route_after_checks(state: GateState, budget: RetryBudget) -> WorkflowRoute:
         if state.human_approval_required and not state.human_approved:
             return WorkflowRoute.WAIT_FOR_HUMAN
         return WorkflowRoute.MERGE
+    # Failing required checks. CI_REPAIR, not REPAIR: the route is what makes
+    # the dispatched repair count against `ci_repair_attempts`, which is the
+    # counter this branch just gated on. Routing to REPAIR here would spend
+    # `pipeline_repair_attempts` instead, leaving this bound unreachable.
     if state.ci_repair_attempts < budget.ci_repair_attempts:
-        return _agent_budget_route(state, budget, WorkflowRoute.REPAIR)
+        return _agent_budget_route(state, budget, WorkflowRoute.CI_REPAIR)
     return WorkflowRoute.BLOCKED
 
 
@@ -88,6 +99,9 @@ def route_after_human_response(approved: bool, changes_requested: bool) -> Workf
     if approved:
         return WorkflowRoute.MERGE
     if changes_requested:
+        # REPAIR, not CI_REPAIR: a human asking for changes is not a CI
+        # failure, and `RetryBudget` has no third repair counter to give it, so
+        # it keeps spending `pipeline_repair_attempts` as it always has.
         return WorkflowRoute.REPAIR
     return WorkflowRoute.BLOCKED
 

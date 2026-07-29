@@ -33,6 +33,7 @@ from moirai.persistence.authentication import (
     AuthenticatedSession,
     SessionCredentials,
 )
+from moirai.persistence.circuits import reap_orphaned_probes, reopen_probe_circuits
 
 if TYPE_CHECKING:
     # Deferred: grpc/protocol.py imports this module's classes back for a
@@ -102,6 +103,14 @@ _FINGERPRINT_CATEGORIES = (
     "environment",
 )
 _FINGERPRINT_MESSAGE_LINES = 5
+
+
+class _CircuitProbeUnavailable(Exception):
+    """Unwinds a half-open probe claim so no part of it is committed.
+
+    Raised and caught entirely inside `_claim_circuit_probes`; it exists to
+    reach the enclosing savepoint, never to reach a caller.
+    """
 
 
 class AsyncpgControlPlane:
@@ -438,17 +447,31 @@ class AsyncpgControlPlane:
         )
 
     async def record_provider_failure(self, provider: str, reason: str, now: datetime) -> None:
+        """Records a provider failure and drops any probe pointer (issue #92).
+
+        A fresh failure supersedes whatever an in-flight probe was going to
+        report, and a pointer left behind on a non-half-open row is stale by
+        definition. Keeping one used to make the circuit permanently
+        unclaimable. A failure recorded against a half-open circuit is the
+        probe's verdict, so it reopens with a fresh cooldown.
+        """
         if not provider.strip():
             raise ValueError("provider is required")
         await self._pool.execute(
             """
             INSERT INTO app.provider_circuit_state
-                (provider, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
-            VALUES ($1, 'closed', 1, $2, NULL, $3)
+                (provider, state, consecutive_failures, last_failure_reason, opened_at,
+                 probe_workflow_run_id, updated_at)
+            VALUES ($1, 'closed', 1, $2, NULL, NULL, $3)
             ON CONFLICT (provider) DO UPDATE
             SET consecutive_failures = app.provider_circuit_state.consecutive_failures + 1,
-                state = CASE WHEN app.provider_circuit_state.consecutive_failures >= 2 THEN 'open' ELSE 'closed' END,
-                opened_at = CASE WHEN app.provider_circuit_state.consecutive_failures >= 2 THEN EXCLUDED.updated_at ELSE NULL END,
+                state = CASE
+                    WHEN app.provider_circuit_state.state = 'half_open' THEN 'open'
+                    WHEN app.provider_circuit_state.consecutive_failures >= 2 THEN 'open' ELSE 'closed' END,
+                opened_at = CASE
+                    WHEN app.provider_circuit_state.state = 'half_open' THEN EXCLUDED.updated_at
+                    WHEN app.provider_circuit_state.consecutive_failures >= 2 THEN EXCLUDED.updated_at ELSE NULL END,
+                probe_workflow_run_id = NULL,
                 last_failure_reason = EXCLUDED.last_failure_reason,
                 updated_at = EXCLUDED.updated_at
             """,
@@ -458,14 +481,20 @@ class AsyncpgControlPlane:
         )
 
     async def clear_provider_failure(self, provider: str, now: datetime) -> None:
+        """Closes the provider circuit and drops its probe pointer (issue #92).
+
+        Leaving the pointer set let the probe workflow's own terminal event
+        reopen a circuit that had already been closed on real evidence.
+        """
         await self._pool.execute(
             """
             INSERT INTO app.provider_circuit_state
-                (provider, state, consecutive_failures, last_failure_reason, opened_at, updated_at)
-            VALUES ($1, 'closed', 0, NULL, NULL, $2)
+                (provider, state, consecutive_failures, last_failure_reason, opened_at,
+                 probe_workflow_run_id, updated_at)
+            VALUES ($1, 'closed', 0, NULL, NULL, NULL, $2)
             ON CONFLICT (provider) DO UPDATE
             SET state = 'closed', consecutive_failures = 0, last_failure_reason = NULL,
-                opened_at = NULL, updated_at = EXCLUDED.updated_at
+                opened_at = NULL, probe_workflow_run_id = NULL, updated_at = EXCLUDED.updated_at
             """,
             provider,
             now,
@@ -979,40 +1008,71 @@ class AsyncpgControlPlane:
         workflow_id: UUID,
         now: datetime,
     ) -> bool:
+        """Claims the half-open probe on both this issue's circuits, or neither.
+
+        The claim runs in its own savepoint (issue #92). Returning False from
+        inside the caller's transaction used to *commit* whatever had already
+        been claimed, so a project could be left `half_open` pointing at a
+        workflow run the aborted `schedule()` never inserted -- and `schedule()`
+        skips half-open projects, so that project never scheduled again.
+
+        `probe_workflow_run_id` is deliberately not part of the claim
+        predicate: the row is already locked and `state = 'open'` means no probe
+        is outstanding, so any pointer still on it is stale and must not be
+        allowed to block the claim forever.
+        """
         circuits = (
             ("app.project_circuit_state", "project_id", project_id),
             ("app.provider_circuit_state", "provider", provider),
         )
-        locked: list[tuple[str, str, Any, Any]] = []
-        for table, key, value in circuits:
-            record = await connection.fetchrow(
-                f"SELECT state, opened_at FROM {table} WHERE {key} = $1 FOR UPDATE", value
-            )
-            locked.append((table, key, value, record))
-        for _, _, _, record in locked:
-            if record is None or str(record["state"]) == "closed":
-                continue
-            if str(record["state"]) == "half_open":
-                return False
-            opened_at = record["opened_at"]
-            if not isinstance(opened_at, datetime) or opened_at + self._circuit_probe_cooldown > now:
-                return False
-        for table, key, value, record in locked:
-            if record is None or str(record["state"]) == "closed":
-                continue
-            claimed = await connection.execute(
-                f"""
-                UPDATE {table}
-                SET state = 'half_open', probe_workflow_run_id = $2, updated_at = $3
-                WHERE {key} = $1 AND state = 'open' AND probe_workflow_run_id IS NULL
-                """,
-                value,
-                workflow_id,
-                now,
-            )
-            if claimed != "UPDATE 1":
-                return False
+        try:
+            async with connection.transaction():
+                locked: list[tuple[str, str, Any, Any]] = []
+                for table, key, value in circuits:
+                    record = await connection.fetchrow(
+                        f"SELECT state, opened_at FROM {table} WHERE {key} = $1 FOR UPDATE", value
+                    )
+                    locked.append((table, key, value, record))
+                for _, _, _, record in locked:
+                    if record is None or str(record["state"]) == "closed":
+                        continue
+                    if str(record["state"]) == "half_open":
+                        raise _CircuitProbeUnavailable
+                    opened_at = record["opened_at"]
+                    if (
+                        not isinstance(opened_at, datetime)
+                        or opened_at + self._circuit_probe_cooldown > now
+                    ):
+                        raise _CircuitProbeUnavailable
+                for table, key, value, record in locked:
+                    if record is None or str(record["state"]) == "closed":
+                        continue
+                    claimed = await connection.execute(
+                        f"""
+                        UPDATE {table}
+                        SET state = 'half_open', probe_workflow_run_id = $2, updated_at = $3
+                        WHERE {key} = $1 AND state = 'open'
+                        """,
+                        value,
+                        workflow_id,
+                        now,
+                    )
+                    if claimed != "UPDATE 1":
+                        raise _CircuitProbeUnavailable
+        except _CircuitProbeUnavailable:
+            return False
         return True
+
+    async def reap_orphaned_circuit_probes(self, now: datetime) -> dict[str, int]:
+        """Reopens half-open circuits whose probe can no longer resolve them.
+
+        The scheduler's maintenance pass calls this (issue #92). Without it a
+        probe workflow that is deleted, or whose terminal write never reached
+        the circuit, leaves the project or provider unschedulable forever.
+        """
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                return await reap_orphaned_probes(connection, now, self._circuit_probe_cooldown)
 
     async def schedule(self, now: datetime, offer_ttl: timedelta) -> ScheduledJob | None:
         if offer_ttl <= timedelta():
@@ -1449,6 +1509,12 @@ class AsyncpgControlPlane:
                 now,
                 reason,
             )
+            # This run reaches a terminal status without going through
+            # AsyncpgWorkflowPersistence.transition, so its half-open probe (if
+            # any) has to be released here too -- issue #92, wedge 2: the
+            # bootstrap run cancelled by offer expiry is exactly the probe
+            # `schedule()` just claimed.
+            await reopen_probe_circuits(connection, context["workflow_run_id"], now)
         await connection.execute(
             "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
             context["project_id"],
@@ -1487,6 +1553,10 @@ class AsyncpgControlPlane:
             """,
             context["workflow_run_id"],
         )
+        # Terminal without a workflow transition, so release the probe here too
+        # (issue #92). The run never ran, so this is "the probe did not
+        # deliver", not a verdict on the project.
+        await reopen_probe_circuits(connection, context["workflow_run_id"], now)
         await connection.execute(
             "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
             context["project_id"],
