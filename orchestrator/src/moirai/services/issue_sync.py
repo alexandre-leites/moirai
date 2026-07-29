@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Callable
-from datetime import datetime, timedelta
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from moirai.domain.issues import LabelPolicy, reconcile_labels, synchronize_issue
@@ -152,13 +152,15 @@ class IssueSync:
 
     async def reconcile_project_labels(self, project: Project) -> None:
         tracker = self._issue_tracker_factory(project)
-        active_workflows = await _await(
-            self._control_plane.list_active_workflows_for_project(project.id)
+        workflow_runs = await _await(
+            self._control_plane.list_latest_workflow_runs_for_project(project.id)
         )
-        for workflow in active_workflows:
+        for workflow in _latest_run_per_issue(workflow_runs):
             current_labels = await _await(self._control_plane.get_issue_labels(workflow["issue_id"]))
             desired_labels = _desired_labels_for_workflow(workflow, self._label_policy)
-            to_add, to_remove = reconcile_labels(current_labels, desired_labels)
+            to_add, to_remove = reconcile_labels(
+                current_labels, desired_labels, managed_prefix=self._label_policy.managed_prefix
+            )
             if not to_add and not to_remove:
                 continue
             try:
@@ -178,7 +180,8 @@ class IssueSync:
                 raise IssueSyncError(f"label reconciliation failed for project {project.id}") from error
             set_labels = getattr(self._control_plane, "set_issue_labels", None)
             if set_labels is not None:
-                await _await(set_labels(workflow["issue_id"], sorted(set(desired_labels))))
+                reconciled = (set(current_labels) - set(to_remove)) | set(to_add)
+                await _await(set_labels(workflow["issue_id"], sorted(reconciled)))
 
     async def run(
         self,
@@ -208,6 +211,33 @@ def _retry_delay(failures: int) -> timedelta:
     if failures < 1:
         raise ValueError("failure count must be positive")
     return timedelta(seconds=min(300, 5 * 2 ** min(failures - 1, 6)))
+
+
+def _latest_run_per_issue(workflow_runs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep exactly one authoritative workflow run per issue, newest first.
+
+    The control plane already returns one run per issue, but collapsing here as
+    well keeps terminal-label convergence deterministic for any control-plane
+    implementation that hands back several historical runs: without it, whichever
+    row happens to be processed last decides the label, so `agent:blocked` from
+    an old run can overwrite `agent:delivered` from the current one.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    for workflow in workflow_runs:
+        issue_id = str(workflow["issue_id"])
+        incumbent = latest.get(issue_id)
+        if incumbent is None or _run_recency(workflow) > _run_recency(incumbent):
+            latest[issue_id] = workflow
+    return [latest[issue_id] for issue_id in sorted(latest)]
+
+
+def _run_recency(workflow: dict[str, Any]) -> tuple[datetime, str]:
+    created_at = workflow.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = datetime.min.replace(tzinfo=UTC)
+    elif created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return created_at, str(workflow.get("id", ""))
 
 
 def _desired_labels_for_workflow(

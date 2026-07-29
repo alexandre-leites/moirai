@@ -44,9 +44,48 @@ class IssueSynchronizationTests(unittest.TestCase):
         self.assertEqual(synchronized.invalid_priority_labels, ("agent-priority:not-a-number",))
 
     def test_label_reconciliation_is_idempotent_and_sorted(self) -> None:
-        add, remove = reconcile_labels(("ready", "stale"), ("running", "ready"))
-        self.assertEqual(add, ("running",))
-        self.assertEqual(remove, ("stale",))
+        add, remove = reconcile_labels(
+            ("agent:ready", "agent:stale"),
+            ("agent:running", "agent:ready"),
+            managed_prefix="agent:",
+        )
+        self.assertEqual(add, ("agent:running",))
+        self.assertEqual(remove, ("agent:stale",))
+
+    def test_label_reconciliation_rejects_an_empty_managed_prefix(self) -> None:
+        with self.assertRaises(ValueError):
+            reconcile_labels(("bug",), ("agent:running",), managed_prefix="")
+
+    def test_label_reconciliation_only_removes_labels_inside_the_managed_namespace(self) -> None:
+        policy = LabelPolicy()
+        add, remove = reconcile_labels(
+            ("agent:ready", "agent-priority:5", "bug", "enhancement", "needs-design"),
+            (policy.running,),
+            managed_prefix=policy.managed_prefix,
+        )
+        self.assertEqual(add, ("agent:running",))
+        self.assertEqual(remove, ("agent:ready",))
+
+    def test_label_reconciliation_never_removes_the_user_priority_label(self) -> None:
+        policy = LabelPolicy()
+        _, remove = reconcile_labels(
+            (f"{policy.priority_prefix}100",),
+            (policy.delivered,),
+            managed_prefix=policy.managed_prefix,
+        )
+        self.assertEqual(remove, ())
+
+    def test_label_policy_rejects_a_priority_prefix_inside_the_managed_namespace(self) -> None:
+        with self.assertRaises(ValueError):
+            LabelPolicy(priority_prefix="agent:priority:")
+
+    def test_label_policy_rejects_state_labels_outside_the_managed_namespace(self) -> None:
+        with self.assertRaises(ValueError):
+            LabelPolicy(blocked="blocked")
+
+    def test_label_policy_rejects_an_empty_managed_prefix(self) -> None:
+        with self.assertRaises(ValueError):
+            LabelPolicy(managed_prefix="")
 
 
 if __name__ == "__main__":
