@@ -2303,8 +2303,13 @@ class AsyncpgControlPlane:
         rather than skipped; that is safe, and bounded by the same retry
         budgets.
 
-        Returns False when the run disappeared or reached a terminal status
-        between detection and recovery.
+        Either way the run's `updated_at` is bumped, so a run this cannot
+        repair backs off a full stall window instead of reoccupying the
+        maintenance loop's bounded batch on every tick.
+
+        Returns False when nothing was repaired: the run disappeared, reached a
+        terminal status between detection and recovery, or has already had
+        `_LOST_EXECUTION_REQUEUE_LIMIT` executions of the same role lost.
         """
         async with self._pool.acquire() as connection:
             async with connection.transaction():
