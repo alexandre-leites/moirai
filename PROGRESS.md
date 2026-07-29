@@ -1514,6 +1514,97 @@ Issue #96 (finding F9) — make transition replay idempotent. It is the highest-
 
 ---
 
+# Session: F3 follow-up / issue #136 — an execution's workspace is force-reset to the default branch (branch `issue-136`)
+
+- Agent/session identifier: runner-agent-issue-136
+- Last updated: 2026-07-29
+- Branch: `issue-136`
+- Scope: `runner/internal/repository/` and `runner/README.md` only. No orchestrator, API, web, proto, or Compose file was touched, and no file under `runner/internal/dispatch/` or `runner/internal/agents/`.
+
+## Done
+
+- [x] Prepare a workspace from the job's execution branch instead of force-resetting it to the default branch (#136)
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/repository/manager.go`, `runner/internal/repository/manager_test.go`, `runner/internal/repository/delivery_test.go`, `runner/README.md`.
+  - Behavior delivered:
+    - `Prepare` now resolves an explicit base revision before creating the worktree: the execution branch as published on the remote (found with `git ls-remote --heads origin refs/heads/<branch>`, then fetched) if it exists; otherwise the execution branch in this runner's own repository; otherwise the default branch. `git worktree add -B <branch> <workspace> <base>` is still what creates the worktree, but the start point it resets onto is now the branch's own tip whenever that tip exists, so the previous execution's commits survive.
+    - `prepareBaseRevision` names the start point per repository mode: a managed cache is a `--mirror`, so the remote's branches *are* its `refs/heads/*`; an existing checkout keeps them under `refs/remotes/origin/*`, because its own `refs/heads/*` belong to whoever works there. Both modes are covered by real-git tests.
+    - `git worktree prune` moved ahead of every fetch. Git refuses to fetch into a branch a worktree claims — including a *stale* registration whose directory `Prepare` has just removed — so pruning after the fetch would have made every second preparation of a job fail once the execution branch became a fetch target (`fatal: refusing to fetch into branch 'refs/heads/agent/…' checked out at …`, reproduced with real git before the ordering was changed).
+    - The credential environment is validated before the workspace is removed or anything is fetched, so an unusable credential fails the execution instead of first destroying the workspace the previous one left behind.
+    - "The remote branch does not exist" is read from the *output* of a successful `ls-remote`, and "the local branch does not exist" from the output of `for-each-ref`, never from an exit status. An unreachable or unauthenticated remote therefore fails the preparation loudly instead of degrading into "start from the default branch", which is the bug this issue is about.
+  - Validation performed: see `Validation Status` below.
+  - Adversarial review: a reviewer ran against the first version of this change and reproduced a defect in it — the published branch was fetched unconditionally over `refs/heads/<branch>`, which discarded the commit of a *completed* execution whose role may not push (no `refs/moirai-wip` anchor is written for a run that completes). The resolution rule and the fetch were both changed in response; see the second Decision below. Its other findings: the swallowed `worktree prune` error, the stale comments in `dispatch.go`, and the `managed_clone` push defect are recorded under `Known Issues`; its checks of the ls-remote/for-each-ref parsing, the credential handling, the lock coverage and the honesty of the rewritten #100 test found nothing.
+
+- [x] Update #100's work-in-progress anchor test, whose premise this fix removes
+  - Completed: 2026-07-29
+  - Relevant files: `runner/internal/repository/delivery_test.go`.
+  - Behavior delivered: `TestRecordedWorkInProgressSurvivesTheNextPreparation` asserted that *every* preparation rewound the execution branch off the failed run's commit; its author wrote it to self-invalidate if #136 were fixed, and it did — the guard fired on the first run of the new code. It is now `TestRecordedWorkInProgressSurvivesAPreparationThatMovesTheBranch`: another runner publishes the branch, this runner's preparation resets its local branch onto the published tip, and only `refs/moirai-wip/<executionId>` still reaches the failed run's commit. The anchor keeps a real job, narrowed to the case the branch cannot cover; the case it used to cover (a retry on the same runner inheriting the failed work) is now provided by the branch itself and is asserted in `TestPrepareResumesAJobFromThePreviousExecutionsWork`.
+
+## Decisions
+
+- Decision: the execution branch, not the workspace directory, carries a job's work between its executions. Every execution still gets a freshly created workspace; it is created from the branch tip.
+  - Context: step 1 of the issue asks for the lifecycle to be chosen explicitly — one workspace per job kept across executions, or re-creation from the branch tip with a default-branch fallback for the first execution.
+  - Alternatives considered: (1) keep `workspaces/job-<jobId>` across the executions of a job and re-use it; (2) re-create the workspace from the branch tip; (3) re-create from a per-execution ref such as `wip/<executionId>`.
+  - Reason: (1) cannot work as the system is built. `Dispatcher.Execute` removes the workspace when an execution ends unless retention keeps it, retention is bounded by age, count and free disk, and — decisively — the executions of one job are leased independently, so the next one may run on a different runner that has never seen the directory. A directory is local; a branch is not. (3) makes the runner depend on the orchestrator naming the right predecessor execution, which nothing does today (#106), and the branch name is already stable per job. (2) needs nothing new: the orchestrator already gives every execution of a job the same `agent/<issueExternalId>/<jobId>` branch, and `deliver` already pushes it.
+  - Consequences: preparation costs one extra `ls-remote` round trip per execution, and one extra `fetch` when the branch is published. A job's branch accumulates the commits of its executions rather than one commit rewritten repeatedly, so the delivery push is a fast-forward instead of the non-fast-forward #100 had to design around. The workspace directory keeps exactly the meaning it had before: scratch space plus forensics until the next execution of the same job removes it.
+
+- Decision: the published tip decides the branch, except when this runner's own copy already contains it — then the local copy wins.
+  - Context: **this decision was rewritten after the adversarial review, which reproduced a defect in its first form.** The first form was "the published branch always outranks the local copy", justified by "the only way the local branch legitimately leads the remote is work that was never published, and #100 anchors that". That justification is wrong: `retainWorkInProgress` writes a `refs/moirai-wip/<executionId>` anchor only for a run that *failed or blocked*. A `repairer` or any other file-modifying role without `mayPush` can **complete**, committing to the execution branch and publishing nothing, and no anchor is written for it. Force-fetching the published tip over that branch left the commit on no reference at all and the following pipeline execution validating the pre-repair tree — the exact symptom #136 is about, re-created inside its own fix. Reproduced by the review in both repository modes.
+  - Alternatives considered: (1) the published tip always wins (the first form, now known to lose work); (2) the local copy always wins (a job's start point would depend on *where* it last ran, and a runner would ignore work another runner delivered); (3) prefer the local copy only when it already contains the published tip, remote otherwise.
+  - Reason: (3) is the only rule under which no commit is silently dropped. A local copy that contains the published tip is that tip plus work only this runner has, so nothing is lost by keeping it and real work is lost by discarding it. In every other case — this runner behind, or the two diverged — the published tip is what every runner resolves identically, and the local commits it leaves behind came from runs that did not complete, which #100 does anchor. The comparison is `git rev-list --count <local>..<published>` rather than `git merge-base --is-ancestor`, whose answer is an exit status that a genuine Git failure is indistinguishable from.
+  - Consequences: the published tip is fetched into `refs/moirai-remote/<branch>`, never over `refs/heads/<branch>`, and the fetch carries `--refmap=` — without it a mirror's configured `+refs/*:refs/*` force-updates the branch anyway (`+ c49f372...0fe5744 (forced update)`, reproduced), which is what made the first form destructive. The local tip is additionally read *before* the fetch and carried as a revision, so the start point cannot depend on the fetch having left the branch alone. Two tests pin this: `TestPrepareKeepsWorkBuiltOnTopOfThePublishedExecutionBranch` (both modes; fails without the containment check) and `TestPrepareBaseRevisionLeavesTheExecutionBranchWhereItIs` (fails without `--refmap=`). `refs/moirai-remote/*` accumulates one reference per job branch and nothing prunes it, like `refs/moirai-wip/*`. The accepted cost of the rule is its mirror image: a *deliberate* rewind of an execution branch — someone force-pushing it backwards to drop a commit — is ignored by a runner whose own copy still contains the older tip, because that is indistinguishable from "this runner has work nobody published". Execution branches are machine-owned and short-lived, and the alternative loses a completed repairer's work on every job, so the trade is made knowingly; a human who wants the runner to forget work should delete the branch, which resets the job to its first-execution behaviour.
+
+- Decision: a `wip(failed):` commit inherited from a previous execution may reach the delivery branch, and that is accepted rather than filtered.
+  - Context: `retainWorkInProgress` commits what a failed or blocked run produced onto the execution branch. Before this change the next preparation discarded it; now the next execution on the same runner starts from it, and if that execution completes, its delivery push publishes the `wip(failed):` commit as part of the branch's history. `dispatch.go`'s comment still says a work-in-progress commit on the delivery branch "would be rejected as a non-fast-forward push on the following attempt" — that was true only because the branch was reset; it is no longer.
+  - Alternatives considered: (1) squash or drop `wip(*)` commits during preparation; (2) start from the published tip whenever the local tip is only work-in-progress.
+  - Reason: (1) means the runner rewriting an agent's history on a heuristic (a commit-message prefix), and it destroys the very continuity `#100` asked for — its own comment says the commit exists "so a retry can build on it instead of starting from the base branch". (2) is the defect corrected in the decision above, in another disguise. The honest reading is that a `wip(failed):` commit *is* part of how the work reached its final state, and a reviewer seeing it in the branch history is being told the truth.
+  - Consequences: a job's delivered history depends on which runner picked up its retries — the same runner inherits its own failed attempt's commit, another runner does not (it sees only what was published). That asymmetry is inherent to a fleet in which non-`developer` roles cannot push, and it disappears when they can (#106 or a `mayPush` grant). Recorded rather than hidden; a squash, if wanted, belongs to delivery or the orchestrator's pull-request step.
+
+- Decision: the first execution's default-branch start point is stated, not implied.
+  - Context: step 3 of the issue. `git worktree add -B <branch> <path> <defaultBranch>` produced the right result for a first execution and the wrong one for every execution after it, and the two cases were indistinguishable in the code.
+  - Alternatives considered: `git worktree add` without `-B` and let Git decide.
+  - Reason: dropping `-B` fails outright when the branch already exists elsewhere in the repository, and would leave "first execution starts from the default branch" as an accident of Git's checkout rules rather than a decision the runner makes. `prepareBaseRevision` now returns the default branch only after establishing that the execution branch exists neither on the remote nor locally, and says so.
+  - Consequences: the branch resolution is one function with four named outcomes (published tip, local copy containing it, published tip on divergence, default branch), each covered by a test that fails if the outcome changes.
+
+## Validation Status
+
+- Targeted tests: Passed — `cd runner && go test -race ./internal/repository/`. Eight new real-git tests cover the two acceptance criteria in both repository modes (`TestPrepareStartsAJobWithoutAnExecutionBranchFromTheDefaultBranch`, `TestPrepareResumesAJobFromThePreviousExecutionsWork`, `TestPrepareResumesAJobFromTheBranchPublishedByAnotherRunner`, `TestPrepareResumesAnExistingPathJobFromItsExecutionBranch`, `TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch`), `TestPrepareKeepsWorkBuiltOnTopOfThePublishedExecutionBranch` (a sub-test per repository mode) pins the defect the adversarial review reproduced — a completed non-pushing execution's commit on top of a published branch — and fails in both modes when the containment check is removed; `TestPrepareBaseRevisionLeavesTheExecutionBranchWhereItIs` fails when `--refmap=` is dropped from the execution-branch fetch (`resolving the base revision moved the execution branch`); and `TestPrepareResumesAJobWhosePreviousWorkspaceWasNeverCleanedUp` pins the prune-before-fetch ordering — moving the prune back after the branch is resolved makes it fail with `fatal: refusing to fetch into branch 'refs/heads/agent/issue-7/run-1' checked out at …`. Plus stub tests pinning the command sequence and the credential environment of the two networked commands the fix adds. Re-run against the *unmodified* `manager.go` from `09a6c1b` in this worktree, the resume tests fail, each landing on the default-branch tip, while the first-execution test passes — the behaviour the fix had to preserve. The adversarial reviewer independently repeated that check and counted eight failures against `origin/main`'s logic. `TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch` was likewise confirmed to fail when the execution-branch fetch is weakened to `git fetch origin <branch>` (`fatal: invalid reference: refs/remotes/origin/agent/issue-7/run-1`).
+- Service tests: Passed — `make test-runner` (`go test -race ./...`) on the merged tree at `21c985a`, all packages `ok`. This is the *only* validation available for the final commits: GitHub Actions is failing every job in the repository, `main` included (see `Known Issues`). The last CI run that executed normally, at `0d0e9e1`, passed all ten checks.
+- Full repository tests: Not run — the change is Go-only, inside `runner/`. `make test` would additionally build the web and orchestrator suites, which no file here touches.
+- Build: Passed — `cd runner && go build ./...`.
+- Lint: Passed — `gofmt -l .` (no output) and `go vet ./...` in `runner/`.
+- Type checks: Not applicable — Go only.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. The defect and the fix were both reproduced against real Git instead: the issue's plain-git reproduction was run first (`worktree add -B agent/42/abc ../wt2 main` after a commit in `wt1` yields `base`, and `agent/42/abc` equals `main`), and the equivalent through `Manager.Prepare` is now a test.
+
+## Known Issues
+
+- Issue: GitHub Actions is failing every job in this repository, on `main` as well as on this branch.
+  - Severity: P1 for anyone reading CI, P0 for nobody's code — no job runs at all.
+  - Impact: PR #146 cannot be shown green, and neither can `main`. Every job of a run ends `failure` after 1–10 seconds with **zero steps executed** and no log blob (`gh api .../logs` → `BlobNotFound`), which is what GitHub reports when a job is never allocated rather than when it runs and fails.
+  - Evidence: run 30447670464 (this branch, `21c985a`) — all nine jobs `failure`, `steps=0`; re-running the failed jobs reproduced it identically. Run 30446858812 on **`main`** at `5903aa0` — the same nine jobs, `failure`, `steps=0`. The last run that executed normally was 30443831892 on this branch at `0d0e9e1`, where all ten checks passed. Nothing in between touched CI configuration except PR #150, which added one `make test-web` line to an otherwise unchanged `ci.yml` — and that cannot produce a zero-step failure in jobs that do not use it.
+  - Suggested resolution: an account-level Actions problem (quota, billing, or runner availability) for a human to check. Nothing to change in the repository. Until it clears, validation for this branch is the local run recorded above; the branch's own code is identical to `main` outside `runner/` and `PROGRESS.md`, so a green `main` would be a green branch.
+
+- Resolved during the session: two comments in `runner/internal/dispatch/dispatch.go` described behaviour this change removes.
+  - What they said: the doc comment on `retainWorkInProgress` and the comment above its `RecordWorkInProgress` call both justified their design with "the next preparation of that job re-creates the branch from the base revision", and the former added that a work-in-progress commit on the delivery branch "would be rejected as a non-fast-forward push on the following attempt". Neither is true once the branch is continued rather than reset.
+  - How it was handled: `dispatch.go` was owned by the concurrent issue #97 session when this work started, so the finding was first recorded here rather than fixed. #97 has since merged (PR #151) and PR #146 is the only open non-dependabot pull request, so the ownership constraint was re-checked with `gh pr list` and both comments were corrected in this branch. The change is comment-only; no behaviour in `dispatch.go` was touched. The equivalent comment in `runner/internal/repository/delivery.go` was corrected too, and `runner/README.md` documents the real ordering.
+
+- Issue: every `git push` from a `managed_clone` workspace fails, so the execution branch is never published in that mode.
+  - Severity: P1 — it breaks delivery itself, not only this issue's cross-runner half.
+  - Impact: `Manager.Push`, `Manager.PushWorkInProgress` and `Manager.CleanupRemoteBranch` all push with a refspec, and the workspace is a worktree of a `git clone --mirror` cache, whose `remote.origin.mirror=true` makes Git reject any push that names one: `fatal: --mirror can't be combined with refspecs`. A completed developer execution therefore fails at delivery, and no execution branch reaches the code host. `existing_path` mode is unaffected (its source is an ordinary checkout).
+  - Evidence: reproduced at the Go level with a throwaway test that ran `Prepare` → `Commit` → `Push` against a real repository in `managed_clone` mode — `push branch: git -C: exit status 128: fatal: --mirror can't be combined with refspecs` (git 2.43.0). Equivalent plain-git reproduction: `git clone --mirror <origin> cache.git && git --git-dir cache.git worktree add -B agent/42/abc wt main && (cd wt && git push --set-upstream origin agent/42/abc)`.
+  - Suggested resolution: filed as [#147](https://github.com/alexandre-leites/moirai/issues/147). Left unfixed here deliberately: it is a distinct defect in `delivery.go`'s push semantics (the candidate fixes — `-c remote.origin.mirror=false` on each push, or cloning the cache as `--bare` with an explicit fetch refspec — change delivery or cache layout, not workspace preparation), and #136 is complete without it. Within a single runner the first acceptance criterion holds regardless, because preparation falls back to the local execution branch, which is exactly the path that this bug leaves as the only carrier.
+
+- Issue: nothing prunes an execution branch, so a job's branch keeps every execution's commit.
+  - Severity: P3
+  - Impact: the branch now accumulates `developer`, `repairer` and `wip(failed)` commits for a job instead of a single rewritten commit. That is the point of the fix — the history is honest — but a reviewer or a pull request for a long-running job sees more commits than before.
+  - Evidence: `retainWorkInProgress` (`runner/internal/dispatch/dispatch.go`) commits on the execution branch for every non-delivering run, and that commit is now inherited rather than discarded.
+  - Suggested resolution: none needed for correctness. If squashing is wanted it belongs to whoever owns delivery or the orchestrator's pull-request step, not to workspace preparation.
+
+## Next Recommended Implementation
+
+Fix the `managed_clone` push failure recorded above ([#147](https://github.com/alexandre-leites/moirai/issues/147)) — no delivery reaches the code host in that mode today, which makes it strictly more urgent than anything left in this area. Relevant files: `runner/internal/repository/delivery.go` (`Push`, `PushWorkInProgress`, `CleanupRemoteBranch`) and, if the cache layout is chosen as the fix instead, `runner/internal/repository/manager.go`'s `prepareSource`. Expected behavior: a completed developer execution in `managed_clone` mode publishes its branch to the remote, and a failed one publishes `wip/<executionId>`. Targeted validation: a real-git test that prepares a `managed_clone` workspace, commits, pushes, and reads the branch back out of the origin repository — the existing push tests all run against an ordinary checkout, which is why the defect survived.
 # Session: issue #144 — Require `ai-doable` on agent-opened issues; land the open pull requests (branch `issue-144`)
 
 ## Current Status
@@ -1995,6 +2086,226 @@ An adversarial review of the first draft was run before committing. It found ten
   - Impact: the offer is placed on a runner that is going away. No work is lost — the runner rejects it (`control_loop.go:198`, `"runner is draining"`) and `reject_offer` requeues the run.
   - Evidence: the drain report and the candidate query are separate transactions; there is no lock spanning them.
   - Suggested resolution: none needed. This is the ordinary offer-rejection path, and the unanswered-offer bounds already cover the case where the runner dies without answering.
+
+---
+
+# Session: issue #147 — Every git push from a managed_clone workspace fails: `--mirror can't be combined with refspecs` (branch `issue-147`)
+
+## Current Status
+
+- Overall status: Complete for issue #147.
+- Current phase: P0 bug fix. In the default repository mode no runner could deliver anything.
+- Active implementation: issue-147 agent session, 2026-07-29 — mirror-safe pushes from a managed_clone workspace.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-147.
+
+## Done
+
+- [x] Every push from a `managed_clone` workspace now names its refspec without tripping Git's mirror rule
+  - Completed: 2026-07-29.
+  - `runner/internal/repository/delivery.go`: new `pushCommand` helper builds every push as `git -C <workspace> -c remote.origin.mirror=false push …`. Applied to all three refspec-bearing pushes — `Push` (`--set-upstream origin <branch>`), `PushWorkInProgress` (`--force origin HEAD:refs/heads/<branch>`) and `CleanupRemoteBranch` (`origin --delete <branch>`).
+  - `runner/internal/repository/delivery_mirror_test.go` (new): four real-git tests that prepare an actual `managed_clone` workspace through `Manager.Prepare` and read the result back out of the origin repository.
+
+- [x] Reproduced the failure before fixing it
+  - Plain git 2.43.0, exactly as the issue describes:
+
+    ```
+    git init -b main origin && (cd origin && echo base > f && git add -A && git commit -m base)
+    git clone --mirror origin cache.git
+    git --git-dir cache.git worktree add -B agent/42/abc wt main
+    git -C wt push --set-upstream origin agent/42/abc
+    # fatal: --mirror can't be combined with refspecs
+    ```
+
+    `git --git-dir cache.git config --get remote.origin.mirror` → `true`; `remote.origin.fetch` → `+refs/*:refs/*`. The same `fatal:` is produced by `git -C wt push --force origin HEAD:refs/heads/wip/x` and by `git -C wt push origin --delete agent/42/abc`.
+  - The same three failures reproduce through the Go API: with the fix reverted, the three new push tests fail with `push branch: git -C: exit status 128: fatal: --mirror can't be combined with refspecs`, `push work-in-progress branch: … same`, and the delete path never being reached.
+
+- [x] Answered the issue's open question: which other refspec-bearing commands the mirror config breaks
+  - None. `remote.<name>.mirror` is a push-side setting only. Verified with real git from inside a mirror worktree and from the mirror cache itself:
+    - `git fetch --prune origin main` — succeeds from both the cache and the worktree.
+    - `git ls-remote --heads origin refs/heads/<branch>` — succeeds (this is the guard `CleanupRemoteBranch` runs before deleting).
+    - `git update-ref`, `git worktree add|prune|remove` — never contact a remote, so the setting cannot reach them.
+  - `TestManagedCloneMirrorConfigurationDoesNotBreakFetchOrLsRemote` pins that conclusion so a later change does not "fix" commands that were never broken.
+
+## Decisions
+
+- Decision: neutralise the mirror setting per push invocation (`git -c remote.origin.mirror=false push`) rather than stop cloning the cache as a mirror.
+  - Context: the issue offered both. Candidate (2) was `git clone --bare` plus an explicit `remote.origin.fetch`.
+  - Alternatives considered: (a) `git clone --bare` in `Manager.prepareSource`; (b) `git -C <cache> config remote.origin.mirror false` once, after the clone; (c) `git push --no-mirror`.
+  - Reason: (a) and (b) both live in `runner/internal/repository/manager.go`, which open PR #146 (issue #136) owns and is actively editing — and (a) additionally changes the on-disk layout of every cache already cloned as a mirror, so it needs a migration path for caches that exist in the field. (c) does not work at all: `git push --no-mirror origin HEAD:refs/heads/probe` from a mirror worktree still fails with `fatal: --mirror can't be combined with refspecs`, because the configured value is applied regardless. Only a config override clears it. Confirmed empirically with git 2.43.0.
+  - Consequences: the cache keeps `remote.origin.mirror=true` and stays a faithful mirror for fetching; no cache on disk has to be migrated; `existing_path` workspaces, which never carry the setting, are unaffected either way (`git -c remote.origin.mirror=false` on a repository that has no such key simply sets a key nothing reads). The cost is that the override has to be remembered at each push site, which is why all three go through one helper with the reason written next to it.
+
+- Decision: keep the override on the command line rather than writing it into the workspace's config.
+  - Context: `git config remote.origin.mirror false` in the prepared worktree would also have worked, and would not need repeating.
+  - Alternatives considered: write it in `Manager.Prepare`, or in `excludeLoopArtifacts` alongside the other per-worktree setup.
+  - Reason: both are in `manager.go` (not this session's to edit), and a worktree shares its config with the cache — so writing it there silently converts the shared project cache away from a mirror as a side effect of preparing one job. A per-invocation `-c` cannot leak into any other command.
+  - Consequences: three call sites carry it, enforced by one helper. A fourth push added later without the helper would reintroduce the bug; the comment on `pushCommand` says so.
+
+- Decision: disabling the mirror flag is a correctness fix, not only an availability one.
+  - Context: a mirror push publishes *every* local ref and deletes remote refs the local repository lacks.
+  - Reason: `RecordWorkInProgress` writes private anchors under `refs/moirai-wip/<executionId>` in the shared cache. Under mirror semantics a refspec-less push would have published those to the code host and pruned remote branches the cache had not fetched. Verified: `git -C wt push origin` from a mirror worktree succeeds and mirror-pushes everything.
+  - Consequences: the new tests assert the *exact* set of references present in origin after each push, not merely that the expected branch arrived — an assertion that only looked for the expected branch would pass against a mirror push.
+
+## Post-review corrections
+
+The new tests were mutation-tested against four deliberate defects injected into a throwaway copy of the tree, before committing. Two of them initially survived, and both were fixed:
+
+- **A regression to a refspec-less mirror push was not caught** (major). Replacing `push --set-upstream origin <branch>` with a bare `push origin` *succeeds* under `remote.origin.mirror=true` — it mirror-pushes everything — so the delivery branch still arrived in origin and `TestPushFromManagedCloneWorkspacePublishesTheDeliveryBranch` passed. That is the exact "reintroduce the bug and call it fixed" shape. The test now writes a `refs/moirai-wip/execution-earlier` anchor before pushing, as a prior failed execution would, and asserts the *exact* set of references origin holds. The mutation now fails with `origin references = [… refs/moirai-wip/execution-earlier], want exactly [refs/heads/agent/issue-147/run-1 refs/heads/main]`.
+- **Dropping `--force` from `PushWorkInProgress` was not caught** (minor). The redelivery step added a commit on top of the one already published, so the second push was a fast-forward and succeeded without the flag — the test's own comment claimed it proved the opposite. The retry is now built on the base revision (`reset --hard HEAD~1`), making it a genuine non-fast-forward, and the test asserts that shape rather than assuming it. The mutation now fails on the rejected push.
+
+Two further mutations were already caught and needed no change: removing `-c remote.origin.mirror=false` (the original bug — fails with the issue's exact `fatal:`), and making `Push` report `Pushed: true` without running git at all (caught by reading origin rather than trusting the return value).
+
+Two independent adversarial reviews of the committed diff were then run. Both confirmed the fix itself is complete and correct — the three pushes in `delivery.go` are the only `git push` invocations in the repository's production code (the orchestrator moves refs through `gh api repos/.../git/refs/...`, never `git push`), `-c` and the `GIT_CONFIG_*` credential injection provably coexist (one review captured the `AUTHORIZATION: basic …` header on the wire against a local HTTP listener), `pushCommand`'s `append` cannot alias across calls, and the error-message prefix is byte-identical. What they found, and what was done:
+
+- **`TestManagedCloneMirrorConfigurationDoesNotBreakFetchOrLsRemote` asserted only exit status 0** (minor, raised by both). A fetch that updates nothing also exits 0, so the test could not fail for the reason its comment gave. It now advances origin, asserts the cache's `refs/heads/main` really moves to the new tip, and asserts a planted `refs/moirai-wip/*` anchor survives the `--prune`. That last assertion guards a real hazard: a mirror's refspec is `+refs/*:refs/*`, and `git fetch --prune origin '+refs/*:refs/*'` does delete the anchor (`- [deleted] (none) -> refs/moirai-wip/exec-1`), while the `git fetch --prune origin <branch>` the runner actually issues preserves it. `ls-remote` is now asserted to report the branch, not merely to succeed.
+- **`isAncestor` swallowed errors, and `false` was the passing direction** (minor). `git merge-base --is-ancestor` exits 1 for "not an ancestor" but 128 for a bad revision or unusable directory, so any git-level error silently *satisfied* the non-fast-forward guard protecting the `--force` assertion. It now returns false only on exit 1 and is fatal otherwise.
+- **`readGitConfiguration` conflated "key unset" with "git failed"** (minor). Its caller turns `""` into "the cache is no longer a mirror", so an unreadable repository could masquerade as that verdict. Same treatment: exit 1 is an answer, anything else is fatal.
+- **Two comments claimed more than the code did** (minor). The `CleanupRemoteBranch` test said a failed delete "leaves an abandoned branch for every execution"; in fact `CleanupRemoteBranch` has no production caller at all — it is absent from `dispatch.DeliveryManager`. And `pushCommand`'s comment read as "we write nothing to the cache config", when `--set-upstream` does write `branch.<name>.remote`/`.merge` there. Both corrected rather than the code changed.
+- **One review argued the `remote.origin.mirror == "true"` precondition should be *established* rather than asserted**, so that a future `--bare` clone in `manager.go` does not turn four tests red. Kept as an assertion deliberately: if the cache stops being a mirror, these tests genuinely stop covering the bug they were written for, and a loud failure saying so is the correct signal — silently forcing the setting would leave a suite that no longer tests what the runner does. The misleading-diagnosis half of that objection was real and is fixed above.
+- **A dead assertion was noted** (`!push.Pushed` cannot fail, since `Push` returns `Pushed: true` unconditionally on its success path). Kept: the issue's acceptance criterion is worded as "reports `pushed: true`", so the assertion is traceable to the criterion and costs nothing.
+
+Both reviews also surfaced adjacent, pre-existing defects that this change does not cause; see Known Issues.
+
+## Validation Status
+
+- Targeted tests: Passed — the four tests in `runner/internal/repository/delivery_mirror_test.go`. The three push tests were each confirmed failing with the `-c remote.origin.mirror=false` removed from `pushCommand`, with the exact `fatal: --mirror can't be combined with refspecs` from the issue. See Post-review corrections above for the full mutation matrix.
+- Service tests: Passed — `make test-runner` (`cd runner && go test -race ./...`), all packages `ok`.
+- Full repository tests: Not run — the change is confined to `runner/internal/repository`. No proto, orchestrator, API, or web change.
+- Build: Covered by `go test -race ./...`.
+- Lint: Passed — `gofmt -l .` in `runner/` reports nothing.
+- Type checks: Passed — `go vet ./...` in `runner/`.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. The acceptance criteria are covered at the layer the bug lives in: the tests drive `Manager.Prepare` in `managed_clone` mode and then the same `Commit` → `Push` and `Commit` → `RecordWorkInProgress` → `PushWorkInProgress` sequences that `Dispatcher.deliver` and `Dispatcher.retainWorkInProgress` issue, with a resolved `GITHUB_TOKEN` in the environment (#109), and read the published branch out of the origin repository.
+
+## Known Issues
+
+- Issue: the mirror setting still lives in the cache, so any future push added outside `pushCommand` reintroduces this bug.
+  - Severity: P3 — a latent trap, not a live defect.
+  - Impact: a new refspec-bearing push written as `manager.git(ctx, "-C", workspace.Repository, "push", …)` would fail in `managed_clone` mode and pass every test that uses an ordinary checkout, exactly as this bug did.
+  - Evidence: `Manager.prepareSource` (`runner/internal/repository/manager.go`) still clones with `--mirror`; nothing prevents a push from bypassing the helper.
+  - Suggested resolution: the root-cause fix is candidate (2) from the issue — clone the cache with `git clone --bare` and an explicit `remote.origin.fetch = +refs/heads/*:refs/heads/*`. It belongs in `manager.go`, which PR #146 owns, and needs a migration path for caches already on disk (detect `remote.origin.mirror=true` and rewrite the remote, or re-clone). Worth doing once #146 has landed; the per-invocation override above is correct in the meantime and does not conflict with it.
+
+- Issue: the second delivery to a workflow's execution branch is rejected non-fast-forward, so only the first completed execution of a workflow ever reaches the code host.
+  - Severity: P1 — pre-existing and not caused by this change, but it is the next wall in the default repository mode now that pushes work at all.
+  - Impact: every repair-loop iteration and every retry after the first delivery fails in `deliver`. Affects `existing_path` identically; it was simply unreachable in `managed_clone` while every push failed earlier.
+  - Evidence: `Manager.Prepare` force-resets the branch to the base revision (`git worktree add -B <branch> <path> <base>`, `manager.go:103`), while the orchestrator reuses one `branch_name` per workflow run (`orchestrator/src/moirai/workflows/persistence.py:250`). Reproduced in plain git: execution 1 pushes fine, execution 2 gets `! [rejected] agent/x -> agent/x (non-fast-forward)`.
+  - Suggested resolution: tracked as [#156](https://github.com/alexandre-leites/moirai/issues/156). Needs a decision rather than a patch — `--force-with-lease` on the delivery push, or preparing from the published branch (which is what #136 / PR #146 is about, and would make repair loops cumulative). Not attempted here: the fix lives in `manager.go` or the orchestrator, neither of which this session owns.
+
+- Issue: `CleanupRemoteBranch` runs its `ls-remote` and its delete push without the resolved credential environment.
+  - Severity: P3 — unreachable today.
+  - Impact: against a real GitHub remote both would fail on authentication rather than on anything else. It is the one of the three pushes that never reaches the authenticated path added by #109.
+  - Evidence: `delivery.go` uses `manager.gitOutput`/`manager.git` there, not `gitWithEnv`, and the method takes no `environment` argument. It also has no production caller — it is absent from `dispatch.DeliveryManager` — so nothing exercises it yet.
+  - Suggested resolution: give it the same `environment map[string]string` parameter the other two take, at the same time as whatever starts calling it. Deliberately not widened here: changing its signature for no caller is churn, and this session's change is a bug fix.
+
+- Issue: `runner/README.md:118` describes a completed delivery as leaving `origin/<branch>` with upstream set, which is not true in `managed_clone` mode.
+  - Severity: P3 — documentation only.
+  - Impact: a mirror has no `refs/remotes/origin/*` at all, so there is no `origin/<branch>`; `--set-upstream` records `branch.<name>.merge = refs/heads/<name>` in the shared cache config instead. Misleading now that the push actually runs.
+  - Evidence: verified against a real mirror worktree — `git rev-parse --symbolic-full-name @{upstream}` returns `refs/heads/agent/…`, not `refs/remotes/origin/…`.
+  - Suggested resolution: correct that row. Not done here because `runner/README.md` is owned by open PR #146.
+
+- Issue: `runner/README.md` describes the workspace lifecycle but not the mirror constraint on pushes.
+  - Severity: P3 — documentation only.
+  - Impact: the next person to add a git command against `origin` has to read `pushCommand` to learn the rule.
+  - Evidence: `runner/README.md:55` mentions `git clone --mirror` only as the thing a credential authenticates.
+  - Suggested resolution: one sentence in `runner/README.md`. Not written here because that file is owned by open PR #146 and editing it would have conflicted; the reasoning is instead carried in full on `pushCommand` in `delivery.go`.
+
+## Next Recommended Implementation
+
+- Continue with the highest-priority open `ai-doable` issue. If #146 has merged, the follow-up above (clone the cache `--bare` with an explicit fetch refspec, plus a migration for existing mirror caches) is a small, well-understood cleanup that removes this class of surprise at its source.
+
+# Session: issue #148 — A runner never clears its drain flag, so it is stranded after a restart (branch `issue-148`)
+
+## Current Status
+
+- Overall status: Complete for issue #148.
+- Current phase: P2 bug fix; unblocks any change to the runner's shutdown ordering (#102).
+- Active implementation: issue-148 agent session, 2026-07-29 — report the runner's drain state on connect.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-148.
+
+## Done
+
+- [x] The runner reports its actual drain state on every control stream it establishes
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/dispatch/control_loop.go`, `runner/internal/dispatch/control_loop_drain_test.go` (new), `runner/internal/dispatch/control_loop_test.go`, `runner/cmd/runner/main.go`, `runner/cmd/runner/main_stream_test.go` (new), `docs/architecture.md`.
+  - Behavior delivered:
+    - `ControlLoop.Resume()` reports `RunnerDraining{draining: Draining()}` and then flushes buffered events. It is wired as `StreamSupervisor.OnConnected`, replacing the bare `loop.FlushEvents`, so it runs on every stream the runner establishes — including the first one after a restart, where `Draining()` is `false` and the report clears an `app.runners.draining = true` left behind by the previous incarnation of the same runner identity. No orchestrator change was needed: the #111 handler already persists whichever boolean arrives.
+    - It reports `Draining()`, never a bare `false`. A runner that reconnects while genuinely draining — a transport blip mid-drain, or an orchestrator-initiated drain whose report never left the dying stream — re-asserts the drain instead of advertising itself as available.
+    - Reading the state and sending it are one critical section (`ControlLoop.drainReports`), so a `Drain()` landing during a reconnect cannot be overtaken by the reconnect's already-sampled `false`. Deliberately a second mutex rather than `loop.mu`: a report blocks for as long as a gRPC send does, and `loop.mu` also guards the active-execution map that `WaitForIdle` and every terminal execution touch. Nothing acquires `drainReports` while holding `loop.mu`, so the two cannot deadlock, and the ordering argument does not rely on `draining` being monotonic — it survives a future un-drain, because the state write lands under `loop.mu` before the writer queues on `drainReports` and every reporter re-reads inside that lock.
+    - The report precedes the event flush, so the orchestrator stops placing work before the runner spends the fresh stream on a backlog. A failed report fails the resume rather than running a whole connection on a stale view; `StreamSupervisor` then drops the stream and retries when the failure is transient (`ErrNotConnected` and `io.EOF` both classify as `codes.Unknown`, which `isTransientTransportError` treats as transient), and stops the runner when it is not — the same treatment the flush already had.
+    - `Drain()` now reports through the same path. Its failure is still only a warning: the drain holds locally regardless, so no offer is accepted, and the next `Resume()` re-asserts it. That recovery is new — before this change a report lost on a dying stream was lost for good.
+    - `SetDraining(bool) error` moved into the `ControlClient` interface and the optional `drainingClient` type assertion was deleted. A client that could not report its drain state used to be a silent no-op, which is exactly the stranding this issue is about; it is now a compile error.
+    - `run()`'s `StreamSupervisor` literal was extracted into `controlStreamSupervisor(...)` in `runner/cmd/runner/main.go` so the wiring itself is testable. Without that, reverting `OnConnected` to `loop.FlushEvents` — a one-token full reintroduction of this bug — passed the entire runner suite.
+  - Validation performed: five new dispatch tests plus one `package main` wiring test, all confirmed failing against nine separate mutations; `make test-runner`; `gofmt`; `go vet`.
+  - Commands executed:
+    - `make test-runner` → `cd runner && go test -race ./...`, all 10 packages `ok` (`internal/metrics` has no test files).
+    - `cd runner && gofmt -l .` → no output.
+    - `cd runner && go vet ./...` → no output.
+    - `cd runner && go test ./internal/dispatch/ ./cmd/runner/ -race -count=3` → `ok`, `ok`.
+  - Mutation testing (each applied alone, then reverted; every one is killed):
+    - Sample the drain state before taking the report lock → `TestControlLoopResumeCannotReportAStaleDrainState` fails.
+    - Remove the serialization entirely → same test fails.
+    - `Resume` sends a literal `false` → 4 tests fail across both packages.
+    - `Resume` does not report at all (pre-fix behaviour) → 5 tests fail across both packages.
+    - `Resume` flushes events before reporting → the ordering test fails.
+    - `Resume` swallows a failed drain report → the delivery-failure test fails.
+    - `main.go` wired back to `OnConnected: loop.FlushEvents` → the `package main` wiring test fails.
+    - `Resume` swallows the flush error → the ordering test fails.
+    - `Drain` drops its already-draining short circuit → the state test fails.
+  - Notes: `proto/runner_control.proto` already defined `RunnerDraining` in both directions and the orchestrator handler landed in #111, so no contract and no orchestrator code changed.
+
+## Decisions
+
+- **Report `Draining()`, not `false`.** The issue's suggested approach allows either. Sending a bare `false` on connect is the one way to get the second acceptance criterion wrong, and it would have made an orchestrator-initiated drain (`OrchestratorToRunner.drain`, already handled by `control_loop.go`) evaporate on the next transport blip.
+- **A second mutex, not `loop.mu`.** See above: correctness needs the read and the send to be atomic with respect to other reporters, but `loop.mu` is on the hot path of `WaitForIdle`, `finish`, and offer handling, and a gRPC send can block on flow control.
+- **`SetDraining` promoted into `ControlClient`.** The type assertion it replaced degraded silently to "never report", which is the failure mode of this very issue. One test fake needed the method; nothing else implements the interface.
+- **`controlStreamSupervisor` extracted from `run()`.** Adversarial review showed the fix's only production wiring was a line no test could defend. The extraction is the smallest change that makes `OnConnected` observable.
+- **Did not pre-empt #119's column split.** See Known Issues: the two-writers problem is real and this change interacts with it, but resolving it needs a migration and edits to three placement predicates in `orchestrator/src/moirai/persistence/control_plane.py`, which is both out of scope and owned elsewhere.
+
+## Post-review corrections
+
+An adversarial review of the diff found four issues that were fixed before commit:
+
+- **The production wiring was untested** (high). Reverting `OnConnected: loop.Resume` to `loop.FlushEvents` — a complete reintroduction of the bug in the shipped binary — passed `go test -race ./...` in `runner/`. The supervisor test built its own `control.StreamSupervisor` literal, so it proved `Resume` works *as* an `OnConnected`, not that anything used it that way. Fixed by extracting `controlStreamSupervisor` and adding `runner/cmd/runner/main_stream_test.go`.
+- **The concurrency test could degrade into a vacuous pass** (medium). Its first version used a 100 ms sleep to let a goroutine queue on the report lock, and nothing asserted the interleaving happened. With a 300 ms scheduling delay injected in front of that goroutine — a loaded CI box — the "state sampled outside the lock" mutant survived. Replaced with a `runtime.Stack` barrier that waits for a goroutine to actually park inside `reportDrainState`; re-verified that the mutant now dies 3/3 *with* the 300 ms delay applied, and that the unmutated code still passes with it. The `t.Errorf`-from-a-goroutine hazard on the failure path went away with it: the queued resume now returns its error over a channel.
+- **A behaviour regression had no test** (medium-low). `Resume` swallowing the flush error passed everything, even though the hook it replaced (`loop.FlushEvents`) failed the connect on exactly that. The ordering test now drives a resume whose drain report succeeds and whose flush fails, and asserts the error propagates.
+- **Two claims were overstated** (low). "`StreamSupervisor` drops the stream and retries" is only the transient branch — a non-transient status unwinds `Run` and stops the runner. "The last value the orchestrator receives is always the runner's final one" describes ordering of *delivered* reports; a `Drain()` whose report dies with the stream leaves the orchestrator briefly wrong until the next connect. Both the code comments and `docs/architecture.md` now say so.
+
+Two review findings were accepted as-is: the `reportDrainState` nil-client guard is unreachable in production (its comment now says so rather than overselling it), and `StreamSupervisor` resets its backoff on every successful `Connect`, so a hook that always fails pins retries at `ReconnectMin` — pre-existing, identical in shape to the heartbeat path, and unreachable here since nothing makes the drain report fail while the heartbeat succeeds.
+
+## Validation Status
+
+- Targeted tests: Passed — `TestControlLoopResumeReportsTheDrainStateTheRunnerActuallyHas`, `TestControlLoopResumeCannotReportAStaleDrainState`, `TestControlLoopResumeReportsDrainStateBeforeFlushingBufferedEvents`, `TestControlLoopResumeFailsWhenTheDrainReportCannotBeDelivered`, `TestStreamSupervisorReportsTheRunnersDrainStateOnConnect` (`runner/internal/dispatch/control_loop_drain_test.go`) and `TestControlStreamSupervisorReportsTheRunnersDrainStateOnConnect` (`runner/cmd/runner/main_stream_test.go`). All confirmed failing against the mutations listed above.
+- Service tests: Passed — `make test-runner` (race detector on), all packages `ok`.
+- Full repository tests: Not run — no orchestrator, API, web, or proto change. `make test` was deliberately not invoked.
+- Build: Passed — `cd runner && go build ./...`.
+- Lint: Passed — `cd runner && gofmt -l .` produced no output.
+- Type checks: Passed — `cd runner && go vet ./...`.
+- Database migrations: Not applicable — no schema change; `app.runners.draining` already exists.
+- Docker Compose: Not run — no Compose or configuration change.
+- End-to-end workflow: Not run. The orchestrator half is covered by #111's existing tests, including `orchestrator/tests/test_runner_grpc.py::test_connect_drain_report_of_false_clears_the_flag`, which already proves a `draining: false` report clears the column and restores placement.
+
+## Known Issues
+
+- Issue: `app.runners.draining` still has two writers and one bit, and this change makes `draining: false` a *frequent* write where it was previously never sent.
+  - Severity: P2 — no impact today, a constraint on #119 the moment it ships.
+  - Impact: before this change nothing in `runner/` ever sent `false`, so an operator drain written straight to the column would have survived. Now a runner that is not draining writes `false` on every connect, and the control stream reconnects on any transport blip — so an operator drain applied by writing the column alone would be cleared within seconds. An operator drain that also sends `OrchestratorToRunner.drain` stays consistent: the runner mirrors it into its own state via `ControlLoop.Drain()` and re-asserts it on every subsequent stream.
+  - Evidence: `set_runner_state` maps `"drain"` to `(enabled=True, draining=True)` and `"enable"` to `(enabled=True, draining=False)`; `set_runner_draining` writes the same column. Harmless today only because `set_runner_state` has no callers.
+  - Suggested resolution: unchanged from #111 — belongs to #119, which owns the operator side. A separate `runner_reported_draining` column with the three placement predicates gating on `draining OR runner_reported_draining` separates the owners cleanly. Until then, #119 must drive an operator drain through `OrchestratorToRunner.drain` (already handled by the runner) rather than through the column alone. Recorded on #119 as a comment and in `docs/architecture.md`. Deliberately not resolved here: it needs a migration and edits to `schedule()`, `schedule_execution()` and `recover_one()`, none of which are in this session's scope.
+
+- Issue: the SIGTERM path still never delivers its drain report.
+  - Severity: P3 — cosmetic now that the report is self-correcting, but it means a graceful shutdown tells the orchestrator nothing.
+  - Impact: the orchestrator learns the runner is gone from the heartbeat timeout rather than from the drain report, so it may place one more offer that nobody answers. The unanswered-offer bounds already cover that.
+  - Evidence: `StreamSupervisor.Run` calls `s.Client.Disconnect()` on `ctx.Done()` (`runner/internal/control/stream.go:103-106`) before `main` reaches `loop.Drain()` (`runner/cmd/runner/main.go:288`), so `Client.send` hits `c.stream == nil` and returns `ErrNotConnected`.
+  - Suggested resolution: it belongs to #102's shutdown hardening, and this issue was the prerequisite — with the drain state now reported on connect, fixing that ordering no longer strands a runner after its first graceful shutdown.
+
+## Next Recommended Implementation
+
+- #102 (runner lifecycle hardening) is now unblocked on its shutdown-ordering item: delivering the SIGTERM drain report can no longer strand a runner, because the next connect clears it.
+- #119 (operator drain/revoke API) should decide the `draining` column ownership before it ships. See Known Issues above for the constraint this change adds.
+
+---
 
 # Session: issue #141 — `accept_offer` clobbered the workflow phase, so successful developer executions produced no transition (branch `issue-141`)
 

@@ -79,18 +79,55 @@ func (manager Manager) Push(ctx context.Context, workspace Workspace, branch str
 	if err != nil {
 		return PushResult{}, err
 	}
-	if err := manager.gitWithEnv(ctx, extraEnvironment, "-C", workspace.Repository, "push", "--set-upstream", "origin", branch); err != nil {
+	if err := manager.gitWithEnv(ctx, extraEnvironment, pushCommand(workspace, "--set-upstream", "origin", branch)...); err != nil {
 		return PushResult{}, fmt.Errorf("push branch: %w", err)
 	}
 	return PushResult{Branch: branch, Pushed: true}, nil
 }
 
+// pushCommand builds the argument list for a push from a workspace, with the
+// remote's mirror setting neutralised for that one invocation.
+//
+// A managed_clone workspace is a worktree of the project cache, which
+// Manager.prepareSource creates with "git clone --mirror". That sets
+// remote.origin.mirror=true in the cache's config, which the worktree shares,
+// and with it set Git treats every push to origin as a mirror push and refuses
+// any push that names a refspec:
+//
+//	fatal: --mirror can't be combined with refspecs
+//
+// Every push the runner makes names one, so in managed_clone mode — the default
+// repository mode — delivery, work-in-progress publication and remote branch
+// cleanup all failed, and no runner could deliver anything. "git push
+// --no-mirror" does not help: the configured value still wins. Only a config
+// override does.
+//
+// The override is deliberately per invocation rather than a write to the
+// cache's config: remote.origin.mirror keeps its value, so the cache still
+// fetches as a mirror, nothing has to be migrated for caches already on disk,
+// and existing_path workspaces — ordinary checkouts that never carry the
+// setting — are unaffected either way. (The push does still write to the shared
+// config by other means: --set-upstream records branch.<name>.remote and
+// branch.<name>.merge there, as "git worktree add -B" already does.)
+//
+// Disabling it is also what makes these pushes mean what they say. A mirror
+// push publishes every local ref, which would put the runner's private
+// work-in-progress anchors (refs/moirai-wip/*, see RecordWorkInProgress) on the
+// code host and delete any remote ref the cache happens not to have.
+func pushCommand(workspace Workspace, arguments ...string) []string {
+	command := []string{"-C", workspace.Repository, "-c", "remote.origin.mirror=false", "push"}
+	return append(command, arguments...)
+}
+
 // RecordWorkInProgress points a local reference at the workspace's current HEAD.
-// The commit of a failed run lives on the execution branch, and the next
-// preparation of that job re-creates the branch from the base revision, so
-// without an anchor the work becomes unreachable in the runner's own repository.
-// The reference is written outside refs/heads so no preparation can check it out
-// and no push mistakes it for a branch.
+//
+// The commit of a failed run lives on the execution branch, which the next
+// preparation of that job now continues from where it can (#136). The anchor
+// covers the case it cannot: when the branch has been published elsewhere and
+// this runner's copy does not contain that published tip, the preparation
+// re-creates the branch there, and only a reference outside refs/heads still
+// reaches the failed run's commit. Being outside refs/heads is also what keeps
+// it from being checked out by a preparation or mistaken for a branch by a push.
 func (manager Manager) RecordWorkInProgress(ctx context.Context, workspace Workspace, reference string) error {
 	if err := validateWorkspace(workspace); err != nil {
 		return err
@@ -123,7 +160,7 @@ func (manager Manager) PushWorkInProgress(ctx context.Context, workspace Workspa
 	if err != nil {
 		return PushResult{}, err
 	}
-	if err := manager.gitWithEnv(ctx, extraEnvironment, "-C", workspace.Repository, "push", "--force", "origin", "HEAD:refs/heads/"+branch); err != nil {
+	if err := manager.gitWithEnv(ctx, extraEnvironment, pushCommand(workspace, "--force", "origin", "HEAD:refs/heads/"+branch)...); err != nil {
 		return PushResult{}, fmt.Errorf("push work-in-progress branch: %w", err)
 	}
 	return PushResult{Branch: branch, Pushed: true}, nil
@@ -168,7 +205,7 @@ func (manager Manager) CleanupRemoteBranch(ctx context.Context, workspace Worksp
 	if strings.TrimSpace(remote) == "" {
 		return result, nil
 	}
-	if err := manager.git(ctx, "-C", workspace.Repository, "push", "origin", "--delete", branch); err != nil {
+	if err := manager.git(ctx, pushCommand(workspace, "origin", "--delete", branch)...); err != nil {
 		return BranchCleanupResult{}, fmt.Errorf("delete remote branch: %w", err)
 	}
 	result.Deleted = true

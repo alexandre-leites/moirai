@@ -280,23 +280,7 @@ func run(ctx context.Context) error {
 		}
 	}()
 	slog.Info("runner initialized", "runner_id", identity.RunnerID, "orchestrator_endpoint", settings.OrchestratorEndpoint)
-	supervisorErr := control.StreamSupervisor{
-		Client:            client,
-		Labels:            settings.Labels,
-		HeartbeatInterval: settings.HeartbeatInterval,
-		ReconnectMin:      settings.ReconnectMin,
-		ReconnectMax:      settings.ReconnectMax,
-		Busy:              loop.Busy,
-		OnConnected:       loop.FlushEvents,
-		OnHeartbeat: func() error {
-			if err := loop.Reconcile(); err != nil {
-				return err
-			}
-			metricsServer.MarkHeartbeat()
-			return nil
-		},
-		Settings: streamSettings.Get,
-	}.Run(runCtx)
+	supervisorErr := controlStreamSupervisor(client, loop, settings, streamSettings, metricsServer.MarkHeartbeat).Run(runCtx)
 	if stored := dispatchErr.Load(); stored != nil {
 		return fmt.Errorf("runner dispatch loop stopped: %w", stored.(error))
 	}
@@ -307,4 +291,29 @@ func run(ctx context.Context) error {
 		}
 	}
 	return supervisorErr
+}
+
+// controlStreamSupervisor wires the control loop to the stream supervisor. It
+// is a named function rather than a literal inside run() so the wiring is
+// testable — in particular OnConnected, which is what reports the runner's
+// drain state on every stream it establishes and so is the whole of the runner
+// side of issue #148.
+func controlStreamSupervisor(client control.StreamSupervisorClient, loop *dispatch.ControlLoop, settings config.Config, streamSettings *reloadableStreamSettings, markHeartbeat func()) control.StreamSupervisor {
+	return control.StreamSupervisor{
+		Client:            client,
+		Labels:            settings.Labels,
+		HeartbeatInterval: settings.HeartbeatInterval,
+		ReconnectMin:      settings.ReconnectMin,
+		ReconnectMax:      settings.ReconnectMax,
+		Busy:              loop.Busy,
+		OnConnected:       loop.Resume,
+		OnHeartbeat: func() error {
+			if err := loop.Reconcile(); err != nil {
+				return err
+			}
+			markHeartbeat()
+			return nil
+		},
+		Settings: streamSettings.Get,
+	}
 }

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,9 +67,11 @@ func TestPrepareCreatesManagedCloneWorktreeAndTaskDirectory(t *testing.T) {
 	repositoryPath := filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository")
 	want := [][]string{
 		{"clone", "--mirror", "--", "https://github.example/owner/repository.git", cache},
-		{"-C", cache, "fetch", "--prune", "origin", "main"},
 		{"-C", cache, "worktree", "prune"},
-		{"-C", cache, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "main"},
+		{"-C", cache, "fetch", "--prune", "origin", "main"},
+		{"-C", cache, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/agent/1234/run-a1b2c3"},
+		{"-C", cache, "ls-remote", "--heads", "origin", "refs/heads/agent/1234/run-a1b2c3"},
+		{"-C", cache, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "refs/heads/main"},
 		{"-C", repositoryPath, "rev-parse", "--git-common-dir"},
 	}
 	if len(arguments) != len(want) {
@@ -94,14 +98,24 @@ func TestPrepareChecksExistingManagedCacheAndReclonesCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	commands := readGitCommands(t, recorded)
-	if len(commands) != 6 || !strings.Contains(strings.Join(commands[0], "\n"), "fsck\n--no-dangling") || commands[1][0] != "clone" {
-		t.Fatalf("cache recovery commands = %#v", commands)
+	repositoryPath := filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository")
+	want := [][]string{
+		{"-C", cache, "fsck", "--no-dangling"},
+		{"clone", "--mirror", "--", "https://github.example/owner/repository.git", cache},
+		{"-C", cache, "worktree", "prune"},
+		{"-C", cache, "fetch", "--prune", "origin", "main"},
+		{"-C", cache, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/agent/1234/run-a1b2c3"},
+		{"-C", cache, "ls-remote", "--heads", "origin", "refs/heads/agent/1234/run-a1b2c3"},
+		{"-C", cache, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "refs/heads/main"},
+		{"-C", repositoryPath, "rev-parse", "--git-common-dir"},
 	}
-	if commands[3][len(commands[3])-1] != "prune" || commands[4][3] != "add" {
-		t.Fatalf("cache recovery commands = %#v", commands)
+	if len(commands) != len(want) {
+		t.Fatalf("cache recovery command count = %d, want %d: %#v", len(commands), len(want), commands)
 	}
-	if strings.Join(commands[5], "\n") != strings.Join([]string{"-C", filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository"), "rev-parse", "--git-common-dir"}, "\n") {
-		t.Fatalf("cache recovery commands = %#v", commands)
+	for index := range want {
+		if strings.Join(commands[index], "\n") != strings.Join(want[index], "\n") {
+			t.Fatalf("cache recovery command %d = %#v, want %#v", index, commands[index], want[index])
+		}
 	}
 }
 
@@ -138,9 +152,54 @@ func TestPrepareCreatesWorktreeFromExistingLocalPath(t *testing.T) {
 	arguments := readGitCommands(t, recorded)
 	repositoryPath := filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository")
 	want := [][]string{
-		{"-C", localRepository, "fetch", "--prune", "origin", "main"},
 		{"-C", localRepository, "worktree", "prune"},
-		{"-C", localRepository, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "origin/main"},
+		{"-C", localRepository, "fetch", "--prune", "origin", "main"},
+		{"-C", localRepository, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/agent/1234/run-a1b2c3"},
+		{"-C", localRepository, "ls-remote", "--heads", "origin", "refs/heads/agent/1234/run-a1b2c3"},
+		{"-C", localRepository, "worktree", "add", "-B", "agent/1234/run-a1b2c3", repositoryPath, "refs/remotes/origin/main"},
+		{"-C", repositoryPath, "rev-parse", "--git-common-dir"},
+	}
+	if len(arguments) != len(want) {
+		t.Fatalf("git command count = %d, want %d: %#v", len(arguments), len(want), arguments)
+	}
+	for index := range want {
+		if strings.Join(arguments[index], "\n") != strings.Join(want[index], "\n") {
+			t.Fatalf("command %d = %#v, want %#v", index, arguments[index], want[index])
+		}
+	}
+}
+
+// TestPrepareStartsFromThePublishedExecutionBranch pins the shape of the
+// commands that resume a job whose branch another runner already published: the
+// branch is fetched by name and named as the start point, so "worktree add -B"
+// re-creates it where the remote has it rather than on the default branch.
+func TestPrepareStartsFromThePublishedExecutionBranch(t *testing.T) {
+	binary, recorded := fakeGit(t)
+	t.Setenv("LOOP_GIT_REMOTE_BRANCH", "1")
+	dataDirectory := t.TempDir()
+	manager := Manager{DataDirectory: dataDirectory, GitBinary: binary}
+
+	if _, err := manager.Prepare(context.Background(), PrepareRequest{
+		ProjectID:     "project-1",
+		JobID:         "job-2",
+		RepositoryURL: "https://github.example/owner/repository.git",
+		DefaultBranch: "main",
+		Branch:        "agent/issue-7/run-1",
+	}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	arguments := readGitCommands(t, recorded)
+	cache := filepath.Join(dataDirectory, "repositories", "project-project-1", "repo.git")
+	repositoryPath := filepath.Join(dataDirectory, "workspaces", "job-job-2", "repository")
+	want := [][]string{
+		{"clone", "--mirror", "--", "https://github.example/owner/repository.git", cache},
+		{"-C", cache, "worktree", "prune"},
+		{"-C", cache, "fetch", "--prune", "origin", "main"},
+		{"-C", cache, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/agent/issue-7/run-1"},
+		{"-C", cache, "ls-remote", "--heads", "origin", "refs/heads/agent/issue-7/run-1"},
+		{"-C", cache, "fetch", "--refmap=", "origin", "+refs/heads/agent/issue-7/run-1:refs/moirai-remote/agent/issue-7/run-1"},
+		{"-C", cache, "worktree", "add", "-B", "agent/issue-7/run-1", repositoryPath, "refs/moirai-remote/agent/issue-7/run-1"},
 		{"-C", repositoryPath, "rev-parse", "--git-common-dir"},
 	}
 	if len(arguments) != len(want) {
@@ -155,6 +214,9 @@ func TestPrepareCreatesWorktreeFromExistingLocalPath(t *testing.T) {
 
 func TestPrepareAuthenticatesManagedCloneAndFetchWithResolvedEnvironment(t *testing.T) {
 	binary, recorded := fakeGit(t)
+	// The remote holds the execution branch, so every networked command a
+	// resumed job issues — including the two that #136 added — is covered.
+	t.Setenv("LOOP_GIT_REMOTE_BRANCH", "1")
 	dataDirectory := t.TempDir()
 	manager := Manager{DataDirectory: dataDirectory, GitBinary: binary}
 
@@ -163,7 +225,7 @@ func TestPrepareAuthenticatesManagedCloneAndFetchWithResolvedEnvironment(t *test
 		JobID:         "job-2",
 		RepositoryURL: "https://github.com/owner/repository.git",
 		DefaultBranch: "main",
-		Branch:        "agent/1234/run-a1b2c3",
+		Branch:        "agent/issue-7/run-1",
 		Environment:   map[string]string{"GITHUB_TOKEN": "token-value"},
 	}); err != nil {
 		t.Fatalf("Prepare() error = %v", err)
@@ -181,7 +243,7 @@ func TestPrepareAuthenticatesManagedCloneAndFetchWithResolvedEnvironment(t *test
 		if verb == "-C" {
 			verb = command[2]
 		}
-		networked := verb == "clone" || verb == "fetch"
+		networked := verb == "clone" || verb == "fetch" || verb == "ls-remote"
 		hasHeader := gitEnvironmentContains(environments[index], "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader")
 		hasValue := gitEnvironmentContains(environments[index], "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+credential)
 		hasToken := gitEnvironmentContains(environments[index], "GITHUB_TOKEN=token-value")
@@ -192,8 +254,8 @@ func TestPrepareAuthenticatesManagedCloneAndFetchWithResolvedEnvironment(t *test
 			authenticated++
 		}
 	}
-	if authenticated != 2 {
-		t.Fatalf("authenticated git commands = %d, want clone and fetch: %#v", authenticated, commands)
+	if authenticated != 4 {
+		t.Fatalf("authenticated git commands = %d, want clone, default-branch fetch, ls-remote and execution-branch fetch: %#v", authenticated, commands)
 	}
 }
 
@@ -436,6 +498,454 @@ func TestRetainedWorkspaceDoesNotBlockThePreparationOfTheNextExecution(t *testin
 	}
 	if _, err := os.Stat(filepath.Join(workspace.Repository, "partial.go")); err != nil {
 		t.Fatalf("retained workspace lost the agent's files: %v", err)
+	}
+}
+
+// The tests below run against real Git because #136 was a defect in Git's
+// own semantics: "git worktree add -B <branch> <path> <default-branch>" is
+// create-or-*reset*, so it silently rewound the job's branch onto the default
+// branch on every execution. A recording stub agrees with whatever is asserted
+// about the arguments; only Git decides what the workspace then contains.
+
+// TestPrepareStartsAJobWithoutAnExecutionBranchFromTheDefaultBranch is the
+// second acceptance criterion of #136: a first execution has no work to
+// inherit, so it starts from the default branch.
+func TestPrepareStartsAJobWithoutAnExecutionBranchFromTheDefaultBranch(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	// Another job's branch exists on the remote and must not be mistaken for
+	// this job's.
+	runRealGit(t, origin, "branch", "agent/issue-7/other-job")
+
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if got, want := workspaceRevision(t, manager, workspace), realGitRevision(t, origin, "refs/heads/main"); got != want {
+		t.Fatalf("first execution HEAD = %q, want the default branch %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Repository, "README.md")); err != nil {
+		t.Fatalf("first execution workspace is missing the default branch's files: %v", err)
+	}
+}
+
+// TestPrepareResumesAJobFromThePreviousExecutionsWork is the first acceptance
+// criterion of #136: the execution that follows a developer execution — the
+// local pipeline, which decides whether the work is complete — has to run
+// against that developer's tree.
+func TestPrepareResumesAJobFromThePreviousExecutionsWork(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Repository, "feature.go"), []byte("package feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := manager.Commit(context.Background(), workspace, "developer: implement a feature (7)")
+	if err != nil || !commit.Committed {
+		t.Fatalf("Commit() = %#v, %v", commit, err)
+	}
+	// The runner removes the workspace once an execution ends; the branch, not
+	// the directory, is what the next execution of the job inherits. Nothing is
+	// pushed here: the developer role is the only one the orchestrator grants
+	// `mayPush`, and a project may have no writable remote at all.
+	if err := manager.Cleanup(context.Background(), request.ProjectID, request.JobID); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	pipeline, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() for the following execution error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, pipeline); got != commit.Revision {
+		t.Fatalf("following execution HEAD = %q, want the developer's commit %q", got, commit.Revision)
+	}
+	if got := workspaceRevision(t, manager, pipeline); got == realGitRevision(t, origin, "refs/heads/main") {
+		t.Fatal("following execution was reset to the default branch, so its pipeline would validate nothing")
+	}
+	contents, err := os.ReadFile(filepath.Join(pipeline.Repository, "feature.go"))
+	if err != nil || string(contents) != "package feature\n" {
+		t.Fatalf("following execution workspace file = %q, %v", contents, err)
+	}
+}
+
+// TestPrepareResumesAJobFromTheBranchPublishedByAnotherRunner covers the case
+// the local branch cannot: executions of one job are leased independently, so
+// the work of the previous one may only exist on the remote.
+func TestPrepareResumesAJobFromTheBranchPublishedByAnotherRunner(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+
+	if _, err := manager.Prepare(context.Background(), request); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := manager.Cleanup(context.Background(), request.ProjectID, request.JobID); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	// Another runner executed this job and published the branch. This runner's
+	// own copy of it still points at the default branch.
+	runRealGit(t, origin, "checkout", "-q", "-b", request.Branch)
+	if err := os.WriteFile(filepath.Join(origin, "delivered.go"), []byte("package delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "delivered.go")
+	runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+	published := realGitRevision(t, origin, "refs/heads/"+request.Branch)
+	runRealGit(t, origin, "checkout", "-q", "main")
+
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() after publication error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, workspace); got != published {
+		t.Fatalf("resumed HEAD = %q, want the published execution branch %q", got, published)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Repository, "delivered.go")); err != nil {
+		t.Fatalf("resumed workspace is missing the published work: %v", err)
+	}
+}
+
+// TestPrepareResumesAnExistingPathJobFromItsExecutionBranch runs the same two
+// criteria against the existing_path mode, whose source repository is a working
+// checkout rather than a mirror: the branch it starts from is a remote-tracking
+// reference, and its own refs/heads belong to whoever works in that checkout.
+func TestPrepareResumesAnExistingPathJobFromItsExecutionBranch(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	checkout := filepath.Join(root, "checkout")
+	runRealGit(t, root, "clone", "-q", origin, checkout)
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryMode: RepositoryModeExistingPath, LocalRepositoryPath: checkout, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if got, want := workspaceRevision(t, manager, workspace), realGitRevision(t, origin, "refs/heads/main"); got != want {
+		t.Fatalf("first execution HEAD = %q, want the default branch %q", got, want)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Repository, "feature.go"), []byte("package feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commit, err := manager.Commit(context.Background(), workspace, "developer: implement a feature (7)")
+	if err != nil || !commit.Committed {
+		t.Fatalf("Commit() = %#v, %v", commit, err)
+	}
+	if err := manager.CleanupExisting(context.Background(), checkout, request.JobID); err != nil {
+		t.Fatalf("CleanupExisting() error = %v", err)
+	}
+
+	resumed, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() for the following execution error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, resumed); got != commit.Revision {
+		t.Fatalf("following execution HEAD = %q, want the developer's commit %q", got, commit.Revision)
+	}
+	if _, err := os.Stat(filepath.Join(resumed.Repository, "feature.go")); err != nil {
+		t.Fatalf("following execution workspace lost the developer's file: %v", err)
+	}
+
+	// The published branch stays authoritative here too: a checkout's own
+	// refs/heads must not outrank what the remote holds.
+	runRealGit(t, origin, "checkout", "-q", "-b", request.Branch)
+	if err := os.WriteFile(filepath.Join(origin, "delivered.go"), []byte("package delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "delivered.go")
+	runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+	published := realGitRevision(t, origin, "refs/heads/"+request.Branch)
+	runRealGit(t, origin, "checkout", "-q", "main")
+	if err := manager.CleanupExisting(context.Background(), checkout, request.JobID); err != nil {
+		t.Fatalf("CleanupExisting() error = %v", err)
+	}
+
+	republished, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() after publication error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, republished); got != published {
+		t.Fatalf("resumed HEAD = %q, want the published execution branch %q", got, published)
+	}
+}
+
+// TestPrepareKeepsWorkBuiltOnTopOfThePublishedExecutionBranch is the case an
+// unconditional fetch of the published branch destroys, and it destroys it
+// silently. Only `developer` is granted `mayPush`; a `repairer` that *completes*
+// commits to the execution branch, pushes nothing, and writes no
+// refs/moirai-wip anchor either — #100 anchors the work of runs that fail or
+// block. Re-creating the branch from the published tip would therefore leave
+// that commit on no reference at all, and the pipeline execution after it would
+// validate the pre-repair tree.
+func TestPrepareKeepsWorkBuiltOnTopOfThePublishedExecutionBranch(t *testing.T) {
+	for _, mode := range []RepositoryMode{RepositoryModeManagedClone, RepositoryModeExistingPath} {
+		t.Run(string(mode), func(t *testing.T) {
+			root := t.TempDir()
+			origin := newOriginRepository(t, root)
+			// A developer execution delivered and published the branch.
+			branch := "agent/issue-7/run-1"
+			runRealGit(t, origin, "checkout", "-q", "-b", branch)
+			if err := os.WriteFile(filepath.Join(origin, "feature.go"), []byte("package feature\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runRealGit(t, origin, "add", "feature.go")
+			runRealGit(t, origin, "-c", "user.name=Dev", "-c", "user.email=dev@example.invalid", "commit", "-qm", "developer: implement")
+			published := realGitRevision(t, origin, "refs/heads/"+branch)
+			runRealGit(t, origin, "checkout", "-q", "main")
+
+			manager := newRealGitManager(root)
+			request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", DefaultBranch: "main", Branch: branch}
+			cleanup := func() {
+				t.Helper()
+				if err := manager.Cleanup(context.Background(), request.ProjectID, request.JobID); err != nil {
+					t.Fatalf("Cleanup() error = %v", err)
+				}
+			}
+			if mode == RepositoryModeExistingPath {
+				checkout := filepath.Join(root, "checkout")
+				runRealGit(t, root, "clone", "-q", origin, checkout)
+				request.RepositoryMode = mode
+				request.LocalRepositoryPath = checkout
+				cleanup = func() {
+					t.Helper()
+					if err := manager.CleanupExisting(context.Background(), checkout, request.JobID); err != nil {
+						t.Fatalf("CleanupExisting() error = %v", err)
+					}
+				}
+			} else {
+				request.RepositoryURL = origin
+			}
+
+			workspace, err := manager.Prepare(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Prepare() error = %v", err)
+			}
+			if got := workspaceRevision(t, manager, workspace); got != published {
+				t.Fatalf("HEAD = %q, want the published branch %q", got, published)
+			}
+			// A repairer completes: it commits on the execution branch and, with
+			// no mayPush, publishes nothing.
+			if err := os.WriteFile(filepath.Join(workspace.Repository, "repair.go"), []byte("package repair\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			repair, err := manager.Commit(context.Background(), workspace, "repairer: fix the failing check (7)")
+			if err != nil || !repair.Committed {
+				t.Fatalf("Commit() = %#v, %v", repair, err)
+			}
+			cleanup()
+
+			pipeline, err := manager.Prepare(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Prepare() for the following execution error = %v", err)
+			}
+			if got := workspaceRevision(t, manager, pipeline); got != repair.Revision {
+				t.Fatalf("following execution HEAD = %q, want the repairer's commit %q (published tip is %q)", got, repair.Revision, published)
+			}
+			for _, name := range []string{"feature.go", "repair.go"} {
+				if _, err := os.Stat(filepath.Join(pipeline.Repository, name)); err != nil {
+					t.Fatalf("following execution workspace is missing %s: %v", name, err)
+				}
+			}
+
+			// The published branch still wins when it holds work this runner
+			// does not: another runner delivering on top of the same base makes
+			// the two diverge, and the tip every runner agrees on decides.
+			runRealGit(t, origin, "checkout", "-q", branch)
+			if err := os.WriteFile(filepath.Join(origin, "elsewhere.go"), []byte("package elsewhere\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runRealGit(t, origin, "add", "elsewhere.go")
+			runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+			diverged := realGitRevision(t, origin, "refs/heads/"+branch)
+			runRealGit(t, origin, "checkout", "-q", "main")
+			cleanup()
+
+			resumed, err := manager.Prepare(context.Background(), request)
+			if err != nil {
+				t.Fatalf("Prepare() after divergence error = %v", err)
+			}
+			if got := workspaceRevision(t, manager, resumed); got != diverged {
+				t.Fatalf("HEAD after divergence = %q, want the published tip %q", got, diverged)
+			}
+		})
+	}
+}
+
+// TestPrepareBaseRevisionLeavesTheExecutionBranchWhereItIs pins "--refmap=" on
+// the execution-branch fetch. A managed cache is a mirror, and its configured
+// "+refs/*:refs/*" force-updates refs/heads/<branch> on any fetch that names
+// that branch, whatever destination the refspec itself gives. Resolving the
+// base revision must move no branch: a preparation that fails after the fetch
+// would otherwise leave an unpushed commit reachable through the reflog alone.
+func TestPrepareBaseRevisionLeavesTheExecutionBranchWhereItIs(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	branch := "agent/issue-7/run-1"
+	runRealGit(t, origin, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(origin, "feature.go"), []byte("package feature\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "feature.go")
+	runRealGit(t, origin, "-c", "user.name=Dev", "-c", "user.email=dev@example.invalid", "commit", "-qm", "developer: implement")
+	runRealGit(t, origin, "checkout", "-q", "main")
+
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: branch}
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Repository, "repair.go"), []byte("package repair\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repair, err := manager.Commit(context.Background(), workspace, "repairer: fix the failing check (7)")
+	if err != nil || !repair.Committed {
+		t.Fatalf("Commit() = %#v, %v", repair, err)
+	}
+	if err := manager.Cleanup(context.Background(), request.ProjectID, request.JobID); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+
+	cache := filepath.Join(root, "data", "repositories", "project-project-1", "repo.git")
+	baseRevision, err := manager.prepareBaseRevision(context.Background(), cache, request, nil)
+	if err != nil {
+		t.Fatalf("prepareBaseRevision() error = %v", err)
+	}
+	if baseRevision != repair.Revision {
+		t.Fatalf("base revision = %q, want the unpushed commit %q", baseRevision, repair.Revision)
+	}
+	if got := realGitRevision(t, cache, "refs/heads/"+branch); got != repair.Revision {
+		t.Fatalf("resolving the base revision moved the execution branch to %q, want it left at %q", got, repair.Revision)
+	}
+}
+
+// TestPrepareResumesAJobWhosePreviousWorkspaceWasNeverCleanedUp pins the
+// ordering: the workspace of a crashed or retained execution leaves a worktree
+// registration claiming the execution branch, and Git refuses to fetch into a
+// branch a worktree claims — even one whose directory is gone. Pruning has to
+// happen before the branch is resolved, not merely before it is checked out.
+func TestPrepareResumesAJobWhosePreviousWorkspaceWasNeverCleanedUp(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	manager := newRealGitManager(root)
+	request := PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryURL: origin, DefaultBranch: "main", Branch: "agent/issue-7/run-1"}
+
+	if _, err := manager.Prepare(context.Background(), request); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	// No Cleanup: the registration of that worktree survives into the next
+	// preparation, which removes only its directory.
+	runRealGit(t, origin, "checkout", "-q", "-b", request.Branch)
+	if err := os.WriteFile(filepath.Join(origin, "delivered.go"), []byte("package delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "delivered.go")
+	runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+	published := realGitRevision(t, origin, "refs/heads/"+request.Branch)
+	runRealGit(t, origin, "checkout", "-q", "main")
+
+	workspace, err := manager.Prepare(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Prepare() over a stale worktree registration error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, workspace); got != published {
+		t.Fatalf("resumed HEAD = %q, want the published execution branch %q", got, published)
+	}
+}
+
+// TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch is why the
+// execution branch is fetched with an explicit destination: a checkout cloned
+// with --single-branch has no configured refspec that would bring that branch
+// into refs/remotes/origin/*, so a fetch that left the destination to Git would
+// update nothing and the workspace would silently start from the default
+// branch — the defect this issue is about.
+func TestPrepareResumesAnExistingPathJobWhoseCheckoutTracksOneBranch(t *testing.T) {
+	root := t.TempDir()
+	origin := newOriginRepository(t, root)
+	branch := "agent/issue-7/run-1"
+	runRealGit(t, origin, "checkout", "-q", "-b", branch)
+	if err := os.WriteFile(filepath.Join(origin, "delivered.go"), []byte("package delivered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "delivered.go")
+	runRealGit(t, origin, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-qm", "delivered elsewhere")
+	published := realGitRevision(t, origin, "refs/heads/"+branch)
+	runRealGit(t, origin, "checkout", "-q", "main")
+
+	checkout := filepath.Join(root, "checkout")
+	runRealGit(t, root, "clone", "-q", "--single-branch", "--branch", "main", origin, checkout)
+	manager := newRealGitManager(root)
+	workspace, err := manager.Prepare(context.Background(), PrepareRequest{ProjectID: "project-1", JobID: "job-1", RepositoryMode: RepositoryModeExistingPath, LocalRepositoryPath: checkout, DefaultBranch: "main", Branch: branch})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if got := workspaceRevision(t, manager, workspace); got != published {
+		t.Fatalf("resumed HEAD = %q, want the published execution branch %q", got, published)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Repository, "delivered.go")); err != nil {
+		t.Fatalf("resumed workspace is missing the published work: %v", err)
+	}
+}
+
+func newOriginRepository(t *testing.T, root string) string {
+	t.Helper()
+	origin := filepath.Join(root, "origin")
+	runRealGit(t, root, "init", "-q", "-b", "main", origin)
+	if err := os.WriteFile(filepath.Join(origin, "README.md"), []byte("initial\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, origin, "add", "README.md")
+	runRealGit(t, origin, "-c", "user.name=Initial", "-c", "user.email=initial@example.invalid", "commit", "-qm", "initial")
+	return origin
+}
+
+func newRealGitManager(root string) Manager {
+	return Manager{DataDirectory: filepath.Join(root, "data"), GitCommitterName: "Moirai Runner", GitCommitterEmail: "runner@example.invalid"}
+}
+
+func workspaceRevision(t *testing.T, manager Manager, workspace Workspace) string {
+	t.Helper()
+	revision, err := manager.gitOutput(context.Background(), "-C", workspace.Repository, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatalf("read workspace revision: %v", err)
+	}
+	return strings.TrimSpace(statusLine(revision))
+}
+
+func realGitRevision(t *testing.T, repository, reference string) string {
+	t.Helper()
+	command := exec.Command("git", "rev-parse", "--verify", reference)
+	command.Dir = repository
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("read %s in %s: %v", reference, repository, err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// TestWithPruneCauseKeepsBothTheFailureAndItsExplanation covers the diagnostic
+// a swallowed prune error used to cost: Git reports the worktree still claiming
+// the branch, never why the claim outlived the workspace.
+func TestWithPruneCauseKeepsBothTheFailureAndItsExplanation(t *testing.T) {
+	failure := errors.New("create worktree: is already used by worktree")
+	if got := withPruneCause(failure, nil); got != failure {
+		t.Fatalf("withPruneCause() = %v, want the failure unchanged when the prune succeeded", got)
+	}
+	decorated := withPruneCause(failure, errors.New("git worktree: permission denied"))
+	if !errors.Is(decorated, failure) {
+		t.Fatalf("withPruneCause() = %v, want the original failure to stay unwrappable", decorated)
+	}
+	if !strings.Contains(decorated.Error(), "permission denied") || !strings.Contains(decorated.Error(), "is already used by worktree") {
+		t.Fatalf("withPruneCause() = %q, want both the failure and the prune error", decorated)
 	}
 }
 
