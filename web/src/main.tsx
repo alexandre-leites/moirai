@@ -83,19 +83,46 @@ function Layout({ children }: { children: ReactNode }) {
   const { state, logout } = useAuth();
   const isAdmin = useIsAdmin();
   const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => { setMenuOpen(false); }, [location.pathname]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [menuOpen]);
+
   if (location.pathname === "/login") return <>{children}</>;
-  return <div className="app-layout">
-    <aside className="side">
+  return <>
+    <div className="mobile-header">
+      <button type="button" className="mobile-menu-toggle" onClick={() => setMenuOpen(!menuOpen)} aria-label="Toggle navigation" aria-expanded={menuOpen}><span className="ham" /></button>
+      <Link className="wordmark" to="/"><Mark /><span><b>Moirai</b><small>Console</small></span></Link>
+    </div>
+    <div className="app-layout">
+      <aside className="side">
+        <Link className="wordmark" to="/"><Mark /><span><b>Moirai</b><small>Console</small></span></Link>
+        <span className="navlab">Control plane</span>
+        <nav aria-label="Console navigation">
+          {navItems.map(([to, label]) => <NavLink key={to} end={to === "/"} to={to} className="nav-item"><i />{label}</NavLink>)}
+          {isAdmin && <NavLink to="/tokens" className="nav-item"><i />Runner tokens</NavLink>}
+        </nav>
+        <div className="side-foot"><span>{state?.username} · {state?.role}</span><HealthIndicator api={api} /><button className="quiet-button" onClick={() => void logout()}>Sign out</button></div>
+      </aside>
+      <main className="app-content">{children}</main>
+    </div>
+    {menuOpen && <div className="mobile-menu-backdrop" onClick={() => setMenuOpen(false)} />}
+    <aside className={`mobile-menu${menuOpen ? " mobile-menu--open" : ""}`} hidden={!menuOpen} aria-label="Mobile navigation">
       <Link className="wordmark" to="/"><Mark /><span><b>Moirai</b><small>Console</small></span></Link>
       <span className="navlab">Control plane</span>
       <nav aria-label="Console navigation">
-        {navItems.map(([to, label]) => <NavLink key={to} end={to === "/"} to={to} className="nav-item"><i />{label}</NavLink>)}
-        {isAdmin && <NavLink to="/tokens" className="nav-item"><i />Runner tokens</NavLink>}
+        {navItems.map(([to, label]) => <NavLink key={to} end={to === "/"} to={to} className="nav-item" onClick={() => setMenuOpen(false)}><i />{label}</NavLink>)}
+        {isAdmin && <NavLink to="/tokens" className="nav-item" onClick={() => setMenuOpen(false)}><i />Runner tokens</NavLink>}
       </nav>
       <div className="side-foot"><span>{state?.username} · {state?.role}</span><HealthIndicator api={api} /><button className="quiet-button" onClick={() => void logout()}>Sign out</button></div>
     </aside>
-    <main className="app-content">{children}</main>
-  </div>;
+  </>;
 }
 
 function Pill({ status }: { status: string }) {
