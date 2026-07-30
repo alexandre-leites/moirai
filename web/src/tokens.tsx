@@ -59,13 +59,11 @@ export function TokensPage({ api }: { api: ApiClient }) {
           </div>
         )}
       </section>
-      {loading ? <p>Loading tokens...</p> : (
+      {loading ? <p>Loading tokens...</p> : tokens.length === 0 ? <p className="empty-state">No active runner tokens. Generate one when a runner needs to register.</p> : (
         <table>
           <thead><tr><th>ID</th><th>Labels</th><th>Expires</th><th>Used</th><th>Actions</th></tr></thead>
           <tbody>
-            {tokens.length === 0 ? (
-              <tr><td colSpan={5}>No tokens</td></tr>
-            ) : tokens.map((t) => (
+            {tokens.map((t) => (
               <tr key={t.id}>
                 <td className="mono">{t.id.slice(0, 8)}</td>
                 <td>{t.allowedLabels.join(", ") || "-"}</td>

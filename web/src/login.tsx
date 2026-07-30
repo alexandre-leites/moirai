@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "./auth";
 
 export function LoginPage() {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -18,6 +20,7 @@ export function LoginPage() {
     setLoading(true);
     try {
       await login(username, password);
+      navigate("/", { replace: true });
     } catch {
       setError("Login failed. Check your credentials.");
     } finally {
@@ -30,7 +33,7 @@ export function LoginPage() {
       <h1>Moirai</h1>
       <form onSubmit={handleSubmit} className="login-form">
         <h2>Sign in</h2>
-        {error && <p className="error">{error}</p>}
+        {error && <p className="error" role="alert">{error}</p>}
         <label>
           Username
           <input
@@ -51,7 +54,8 @@ export function LoginPage() {
             disabled={loading}
           />
         </label>
-        <button type="submit" disabled={loading}>
+        <button type="submit" disabled={loading} aria-busy={loading}>
+          {loading && <span className="spinner" aria-hidden="true" />}
           {loading ? "Signing in..." : "Sign in"}
         </button>
       </form>

@@ -131,7 +131,7 @@ function Dashboard() {
       <div className="card tile"><span>Needs decision</span><strong>{data ? waiting : "…"}</strong><small>API-backed</small></div>
     </div>
     <div className="grid cols-2 section-gap">
-      <section className="card"><div className="card-h"><h2>Recent workflows</h2><Link to="/workflows">View all</Link></div><div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Status</th><th>Phase</th></tr></thead><tbody>{data?.workflows.slice(0, 5).map((workflow) => <tr key={workflow.id}><td><Link className="mono" to={`/workflows/${workflow.id}`}>{workflow.id.slice(0, 12)}</Link></td><td><Pill status={workflow.status} /></td><td>{workflow.phase}</td></tr>) ?? <tr><td colSpan={3}>Loading workflows...</td></tr>}</tbody></table></div></section>
+      <section className="card"><div className="card-h"><h2>Recent workflows</h2><Link to="/workflows">View all</Link></div><div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Status</th><th>Phase</th></tr></thead><tbody>{data === null ? <tr><td colSpan={3}>Loading workflows...</td></tr> : data.workflows.length === 0 ? <tr><td colSpan={3} className="table-empty">No workflows have started yet.</td></tr> : data.workflows.slice(0, 5).map((workflow) => <tr key={workflow.id}><td><Link className="mono" to={`/workflows/${workflow.id}`}>{workflow.id.slice(0, 12)}</Link></td><td><Pill status={workflow.status} /></td><td>{workflow.phase}</td></tr>)}</tbody></table></div></section>
       <section className="card"><div className="card-h"><h2>Global queue</h2></div><p className="empty-state">[placeholder — eligible issues will appear here]</p></section>
     </div>
   </section>;

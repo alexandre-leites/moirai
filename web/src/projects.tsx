@@ -26,7 +26,7 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
         </button>
       )}
       {isAdmin && showCreate && <CreateProjectForm api={api} onCreated={(p) => { setProjects([...projects, p]); setShowCreate(false); }} />}
-      {projects.length === 0 ? <p>No projects registered</p> : (
+      {projects.length === 0 ? <p className="empty-state">No projects registered yet. Create a project to begin scheduling work.</p> : (
         <table>
           <thead><tr><th>Name</th><th>Status</th>{isAdmin && <th>Actions</th>}</tr></thead>
           <tbody>

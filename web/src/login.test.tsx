@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { ApiError, type ApiClient, type CurrentUser } from "./api";
 import { AuthProvider } from "./auth";
 import { LoginPage } from "./login";
@@ -35,11 +36,18 @@ function authApi(onLogin?: (attempt: Attempt) => Promise<{ userId: string }>) {
   return { api, attempts };
 }
 
+function Location() {
+  return <output data-testid="location">{useLocation().pathname}</output>;
+}
+
 async function mountLogin(api: ApiClient): Promise<HTMLElement> {
   return mount(
-    <AuthProvider api={api}>
-      <LoginPage />
-    </AuthProvider>
+    <MemoryRouter initialEntries={["/login"]}>
+      <AuthProvider api={api}>
+        <LoginPage />
+        <Location />
+      </AuthProvider>
+    </MemoryRouter>
   );
 }
 
@@ -109,6 +117,7 @@ describe("LoginPage", () => {
 
     expect(attempts).toEqual([{ username: "ada", password: "lovelace" }]);
     expect(container.querySelector(".error")).toBeNull();
+    expect(container.querySelector("[data-testid=location]")?.textContent).toBe("/");
   });
 
   it("submits from the Sign in button, not only from a synthetic form event", async () => {
@@ -170,6 +179,8 @@ describe("LoginPage", () => {
     await submitForm(form(container));
 
     expect(signIn(container).textContent).toBe("Signing in...");
+    expect(signIn(container).querySelector(".spinner")).not.toBeNull();
+    expect(signIn(container).getAttribute("aria-busy")).toBe("true");
     expect(signIn(container).disabled).toBe(true);
     expect(field(container, /^Username/).disabled).toBe(true);
     expect(field(container, /^Password/).disabled).toBe(true);

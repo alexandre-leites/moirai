@@ -6,7 +6,7 @@
 - Current phase: Design mockup completion
 - Active implementation: None
 - Last updated: 2026-07-30
-- Agent/session identifier: opencode-web-console-redesign-20260730
+- Agent/session identifier: opencode-empty-states-20260730
 
 ## Done
 
@@ -93,6 +93,22 @@
 - Agent/session identifier: agent/mvp-audit-87
 
 ## In Progress
+
+- [x] Add explicit empty states to every web data view
+  - Completed: 2026-07-30
+  - Agent/session identifier: opencode-empty-states-20260730
+  - Relevant files: `web/src/{main,projects,tokens,workflows}.tsx`, `web/src/styles.css`
+  - Behavior delivered: Recent workflows, projects, runner tokens, and workflows use explicit, styled empty-state guidance; existing runner fleet and event timeline empty states remain clear.
+  - Validation performed: 140 web tests passed; lint completed with 12 pre-existing warnings; typecheck and production build passed; `rtk git diff --check` passed.
+  - Commands executed: `npm test`; `npm run lint`; `npm run typecheck`; `npm run build`; `rtk git diff --check`.
+
+- [x] Fix login redirect, errors, and loading feedback
+  - Completed: 2026-07-30
+  - Agent/session identifier: opencode-login-feedback-20260730
+  - Relevant files: `web/src/login.tsx`, `web/src/styles.css`, `web/src/login.test.tsx`
+  - Behavior delivered: Successful authentication replaces `/login` with overview; failed authentication remains an accessible alert; submit locks fields and button while a CSS spinner renders.
+  - Validation performed: 11 login tests passed; lint completed with 12 pre-existing warnings; typecheck and production build passed; `rtk git diff --check` passed.
+  - Commands executed: `npm test -- login.test.tsx`; `npm run lint`; `npm run typecheck`; `npm run build`; `rtk git diff --check`.
 
 - [x] Rewrite web module to match `docs/design/web-console/mockup.html`
   - Completed: 2026-07-30
