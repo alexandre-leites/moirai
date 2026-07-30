@@ -279,6 +279,30 @@ func (c *Client) SubmitHumanDecision(ctx context.Context, workflowRunID, decisio
 	return resp, nil
 }
 
+func (c *Client) RetryWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.RetryWorkflowResponse, error) {
+	resp, err := c.client.RetryWorkflow(ctx, &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowRunID, Reason: reason})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) CancelWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.CancelWorkflowResponse, error) {
+	resp, err := c.client.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowRunID, Reason: reason})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) BlockWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.BlockWorkflowResponse, error) {
+	resp, err := c.client.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowRunID, Reason: reason})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func mapError(err error) error {
 	return MapStatusError(err)
 }

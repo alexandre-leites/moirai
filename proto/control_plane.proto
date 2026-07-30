@@ -15,6 +15,9 @@ service ControlPlane {
   rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
   rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
   rpc SubmitHumanDecision(SubmitHumanDecisionRequest) returns (SubmitHumanDecisionResponse);
+  rpc RetryWorkflow(RetryWorkflowRequest) returns (RetryWorkflowResponse);
+  rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
+  rpc BlockWorkflow(BlockWorkflowRequest) returns (BlockWorkflowResponse);
 }
 
 message LoginRequest { string username = 1; string password = 2; }
@@ -60,3 +63,9 @@ message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining
 message ListRunnersResponse { repeated Runner runners = 1; }
 message SubmitHumanDecisionRequest { string workflow_run_id = 1; string decision = 2; string comment = 3; }
 message SubmitHumanDecisionResponse { Workflow workflow = 1; }
+message RetryWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
+message RetryWorkflowResponse { Workflow workflow = 1; }
+message CancelWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
+message CancelWorkflowResponse { Workflow workflow = 1; }
+message BlockWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
+message BlockWorkflowResponse { Workflow workflow = 1; }

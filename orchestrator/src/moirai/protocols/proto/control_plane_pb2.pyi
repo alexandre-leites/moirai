@@ -231,3 +231,45 @@ class SubmitHumanDecisionResponse(_message.Message):
     WORKFLOW_FIELD_NUMBER: _ClassVar[int]
     workflow: Workflow
     def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
+
+class RetryWorkflowRequest(_message.Message):
+    __slots__ = ("workflow_run_id", "reason")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    reason: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class RetryWorkflowResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
+
+class CancelWorkflowRequest(_message.Message):
+    __slots__ = ("workflow_run_id", "reason")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    reason: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class CancelWorkflowResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
+
+class BlockWorkflowRequest(_message.Message):
+    __slots__ = ("workflow_run_id", "reason")
+    WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    workflow_run_id: str
+    reason: str
+    def __init__(self, workflow_run_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+
+class BlockWorkflowResponse(_message.Message):
+    __slots__ = ("workflow",)
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    workflow: Workflow
+    def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...

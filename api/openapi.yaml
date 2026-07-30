@@ -360,6 +360,60 @@ paths:
           $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/ValidationError'
+  /api/v1/workflows/{workflow_id}/retry:
+    post:
+      summary: Retry a terminal workflow
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkflowControlRequest' }
+      responses:
+        '200': { description: Workflow resumed, content: { application/json: { schema: { $ref: '#/components/schemas/Workflow' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /api/v1/workflows/{workflow_id}/cancel:
+    post:
+      summary: Cancel an in-flight workflow
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkflowControlRequest' }
+      responses:
+        '200': { description: Workflow cancelled, content: { application/json: { schema: { $ref: '#/components/schemas/Workflow' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+  /api/v1/workflows/{workflow_id}/block:
+    post:
+      summary: Block an in-flight workflow
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkflowControlRequest' }
+      responses:
+        '200': { description: Workflow blocked, content: { application/json: { schema: { $ref: '#/components/schemas/Workflow' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
 components:
   securitySchemes:
     sessionCookie:
@@ -475,6 +529,10 @@ components:
           type: array
           items: { type: string }
         lastSeenAt: { type: string }
+    WorkflowControlRequest:
+      type: object
+      properties:
+        reason: { type: string, maxLength: 1024 }
     Workflow:
       type: object
       required: [id, projectId, status, phase]

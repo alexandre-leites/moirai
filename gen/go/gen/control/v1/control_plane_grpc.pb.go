@@ -31,6 +31,9 @@ const (
 	ControlPlane_ListWorkflows_FullMethodName                 = "/loop.control.v1.ControlPlane/ListWorkflows"
 	ControlPlane_ListRunners_FullMethodName                   = "/loop.control.v1.ControlPlane/ListRunners"
 	ControlPlane_SubmitHumanDecision_FullMethodName           = "/loop.control.v1.ControlPlane/SubmitHumanDecision"
+	ControlPlane_RetryWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/RetryWorkflow"
+	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
+	ControlPlane_BlockWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/BlockWorkflow"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -49,6 +52,9 @@ type ControlPlaneClient interface {
 	ListWorkflows(ctx context.Context, in *ListWorkflowsRequest, opts ...grpc.CallOption) (*ListWorkflowsResponse, error)
 	ListRunners(ctx context.Context, in *ListRunnersRequest, opts ...grpc.CallOption) (*ListRunnersResponse, error)
 	SubmitHumanDecision(ctx context.Context, in *SubmitHumanDecisionRequest, opts ...grpc.CallOption) (*SubmitHumanDecisionResponse, error)
+	RetryWorkflow(ctx context.Context, in *RetryWorkflowRequest, opts ...grpc.CallOption) (*RetryWorkflowResponse, error)
+	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
+	BlockWorkflow(ctx context.Context, in *BlockWorkflowRequest, opts ...grpc.CallOption) (*BlockWorkflowResponse, error)
 }
 
 type controlPlaneClient struct {
@@ -179,6 +185,36 @@ func (c *controlPlaneClient) SubmitHumanDecision(ctx context.Context, in *Submit
 	return out, nil
 }
 
+func (c *controlPlaneClient) RetryWorkflow(ctx context.Context, in *RetryWorkflowRequest, opts ...grpc.CallOption) (*RetryWorkflowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RetryWorkflowResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_RetryWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelWorkflowResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_CancelWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) BlockWorkflow(ctx context.Context, in *BlockWorkflowRequest, opts ...grpc.CallOption) (*BlockWorkflowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BlockWorkflowResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_BlockWorkflow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -195,6 +231,9 @@ type ControlPlaneServer interface {
 	ListWorkflows(context.Context, *ListWorkflowsRequest) (*ListWorkflowsResponse, error)
 	ListRunners(context.Context, *ListRunnersRequest) (*ListRunnersResponse, error)
 	SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error)
+	RetryWorkflow(context.Context, *RetryWorkflowRequest) (*RetryWorkflowResponse, error)
+	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
+	BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -240,6 +279,15 @@ func (UnimplementedControlPlaneServer) ListRunners(context.Context, *ListRunners
 }
 func (UnimplementedControlPlaneServer) SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitHumanDecision not implemented")
+}
+func (UnimplementedControlPlaneServer) RetryWorkflow(context.Context, *RetryWorkflowRequest) (*RetryWorkflowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RetryWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CancelWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method BlockWorkflow not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -478,6 +526,60 @@ func _ControlPlane_SubmitHumanDecision_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_RetryWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RetryWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).RetryWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_RetryWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).RetryWorkflow(ctx, req.(*RetryWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_CancelWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).CancelWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_CancelWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).CancelWorkflow(ctx, req.(*CancelWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_BlockWorkflow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BlockWorkflowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).BlockWorkflow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_BlockWorkflow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).BlockWorkflow(ctx, req.(*BlockWorkflowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -532,6 +634,18 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SubmitHumanDecision",
 			Handler:    _ControlPlane_SubmitHumanDecision_Handler,
+		},
+		{
+			MethodName: "RetryWorkflow",
+			Handler:    _ControlPlane_RetryWorkflow_Handler,
+		},
+		{
+			MethodName: "CancelWorkflow",
+			Handler:    _ControlPlane_CancelWorkflow_Handler,
+		},
+		{
+			MethodName: "BlockWorkflow",
+			Handler:    _ControlPlane_BlockWorkflow_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
