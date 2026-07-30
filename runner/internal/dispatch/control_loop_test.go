@@ -1354,6 +1354,28 @@ func TestTerminalPayloadReportsRetainedWorkSeparatelyFromDelivery(t *testing.T) 
 // TestMinimalTerminalPayloadKeepsRetainedWorkAndDropsTheLogTail keeps the
 // pointer to a failed run's work alive on the fallback path while shedding the
 // unbounded excerpt that fallback exists for.
+func TestTerminalPayloadIncludesBoundedFailedPipelineOutput(t *testing.T) {
+	lines := make([]string, 55)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("line-%d", index)
+	}
+	payload := terminalPayload("failed", Result{PipelineResults: []pipeline.Result{
+		{Command: "go test ./...", ExitCode: 1, Output: strings.Join(lines, "\n")},
+		{Command: "go vet ./...", ExitCode: 0, Output: "ok"},
+	}}, nil)
+	results, ok := payload["pipelineResults"].([]map[string]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("pipeline failures = %#v", payload["pipelineResults"])
+	}
+	if results[0]["command"] != "go test ./..." || results[0]["exitCode"] != 1 {
+		t.Fatalf("pipeline failure = %#v", results[0])
+	}
+	output, ok := results[0]["output"].(string)
+	if !ok || strings.Contains(output, "line-4\n") || !strings.Contains(output, "line-5\n") || !strings.Contains(output, "line-54") {
+		t.Fatalf("pipeline output tail = %q", output)
+	}
+}
+
 func TestMinimalTerminalPayloadKeepsRetainedWorkAndDropsTheLogTail(t *testing.T) {
 	reduced := minimalTerminalPayload(map[string]any{
 		"status":    "failed",

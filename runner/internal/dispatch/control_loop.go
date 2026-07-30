@@ -15,6 +15,7 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
 	"github.com/loop-engineering/runner/internal/metrics"
+	"github.com/loop-engineering/runner/internal/pipeline"
 	"github.com/loop-engineering/runner/internal/taskpacket"
 )
 
@@ -856,6 +857,33 @@ func agentFailureText(result Result) string {
 	return "agent reported no result status"
 }
 
+func pipelineFailurePayload(results []pipeline.Result) []map[string]any {
+	failures := make([]map[string]any, 0, 1)
+	for _, result := range results {
+		if result.ExitCode == 0 && !result.TimedOut {
+			continue
+		}
+		lines := strings.Split(result.Output, "\n")
+		start := len(lines) - 50
+		if start < 0 {
+			start = 0
+		}
+		output := strings.Join(lines[start:], "\n")
+		failure := map[string]any{
+			"command":  boundedAgentText(result.Command, maxTerminalPayloadFieldBytes),
+			"exitCode": result.ExitCode,
+		}
+		if output = boundedLogTail(output); output != "" {
+			failure["output"] = output
+		}
+		if result.TimedOut {
+			failure["timedOut"] = true
+		}
+		return append(failures, failure)
+	}
+	return failures
+}
+
 func terminalPayload(status string, result Result, usage map[string]any) map[string]any {
 	payload := map[string]any{
 		"status":        status,
@@ -881,6 +909,9 @@ func terminalPayload(status string, result Result, usage map[string]any) map[str
 	}
 	if result.LogTail != "" {
 		payload["logTail"] = result.LogTail
+	}
+	if failures := pipelineFailurePayload(result.PipelineResults); len(failures) > 0 {
+		payload["pipelineResults"] = failures
 	}
 	// The goal gate's account of the run. Both fields are runner-derived and
 	// carry no agent prose, so — unlike the agent's own summary below — they
