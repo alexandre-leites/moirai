@@ -861,7 +861,7 @@ class AsyncpgControlPlane:
             async with connection.transaction():
                 workflow = await connection.fetchrow(
                     """
-                    SELECT id, project_id, status
+                    SELECT id, project_id, status, human_resume_phase
                     FROM app.workflow_runs
                     WHERE id = $1 AND status = 'waiting_human'
                     FOR UPDATE
@@ -870,6 +870,14 @@ class AsyncpgControlPlane:
                 )
                 if workflow is None:
                     raise ValueError("workflow run is not awaiting human approval")
+                guidance = (comment or "").strip()
+                if workflow.get("human_resume_phase") is not None and not guidance:
+                    raise ValueError("human guidance is required")
+                if workflow.get("human_resume_phase") is not None:
+                    await connection.execute(
+                        "UPDATE app.workflow_runs SET human_guidance = $2, updated_at = $3 WHERE id = $1",
+                        _uuid(workflow_run_id), guidance, now,
+                    )
                 await connection.execute(
                     """
                     INSERT INTO app.human_approvals
@@ -1052,7 +1060,7 @@ class AsyncpgControlPlane:
             SELECT j.id AS job_id, i.external_id, i.title, i.body, p.id AS project_id,
                     p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
                     w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
-                    w.last_gate_verdict, w.remaining_work,
+                    w.last_gate_verdict, w.remaining_work, w.human_guidance,
                     request.id AS execution_request_id, request.role AS execution_role,
                     EXISTS (
                         SELECT 1 FROM app.workflow_execution_requests AS any_request
@@ -1099,9 +1107,10 @@ class AsyncpgControlPlane:
         blocking_reason = _optional_text(record.get("blocking_reason"))
         last_gate_verdict = _optional_text(record.get("last_gate_verdict"))
         remaining_work = _text_list(record.get("remaining_work"))
+        human_guidance = _optional_text(record.get("human_guidance"))
         acceptance_criteria = (issue_title,)
         previous_failures = tuple(
-            value for value in (prior_failure, blocking_reason, last_gate_verdict, *remaining_work) if value
+            value for value in (prior_failure, blocking_reason, last_gate_verdict, human_guidance, *remaining_work) if value
         )
         request_id = record.get("execution_request_id")
         role = record.get("execution_role")

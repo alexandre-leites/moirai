@@ -919,6 +919,18 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code_host.checked_prs, ["42", "42"])
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_agent_question_parks_then_resumes_same_phase(self) -> None:
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+        question = {**_PLANNER_READY, "status": "human_required", "questions": ["Which API version?"]}
+        state = await workflow.deliver("planner", "plan", result=question)
+        self.assertEqual(state["status"], "waiting_human")
+        self.assertEqual(await workflow.pending_nodes(), ("wait_for_human",))
+        state = await workflow.runtime.run(workflow.store.workflow_run_id, {"human_guidance": "Use v2.", "human_changes_requested": True})
+        self.assertEqual(state["status"], "planning")
+        self.assertEqual(workflow.store.roles, ["planner", "planner"])
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_human_approval_interrupt_pauses_before_merge(self) -> None:
         """With human approval required the graph stops before wait_for_human
         and merges only once the decision resumes it."""

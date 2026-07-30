@@ -442,12 +442,16 @@ class WorkflowTransitionTests(unittest.TestCase):
         self.assertEqual(transition.new_status, "ai_review")
         self.assertFalse(transition.state_updates["review_approved"])
 
-    def test_completed_reviewer_with_human_required_verdict_transitions_to_blocked(self) -> None:
-        summary = self._summary("completed", "job-1-review", result=self._review_result("human_required"))
-        transition = workflow_transition_for_terminal_event(summary, "ai_review", role="reviewer")
+    def test_human_required_parks_with_question_and_resume_phase(self) -> None:
+        result = self._review_result("human_required")
+        result["findings"] = ["Which compatibility target?"]
+        transition = workflow_transition_for_terminal_event(
+            self._summary("completed", "job-1-review", result=result), "ai_review", role="reviewer"
+        )
         assert transition is not None
-        self.assertEqual(transition.new_status, "blocked")
-        self.assertFalse(transition.state_updates.get("review_approved"))
+        self.assertEqual(transition.new_status, "waiting_human")
+        self.assertEqual(transition.state_updates["human_question"], "Which compatibility target?")
+        self.assertEqual(transition.state_updates["human_resume_phase"], "ai_review")
 
     def test_pipeline_result_controls_pipeline_gate_independently_of_developer(self) -> None:
         failed = self._summary("failed", "job-1-pipeline", exit_code=1)

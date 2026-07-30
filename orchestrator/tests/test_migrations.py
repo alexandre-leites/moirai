@@ -74,6 +74,11 @@ class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("operator_draining", contents)
         self.assertIn("DEFAULT FALSE", contents)
 
+    async def test_human_escalation_migration_persists_question_and_guidance(self) -> None:
+        contents = (Path(__file__).parents[1] / "migrations" / "011_human_escalation.sql").read_text(encoding="utf-8")
+        self.assertIn("human_question", contents)
+        self.assertIn("human_guidance", contents)
+
     async def test_discovery_rejects_duplicate_versions(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
