@@ -6,7 +6,7 @@
 - Current phase: Design mockup completion
 - Active implementation: None
 - Last updated: 2026-07-30
-- Agent/session identifier: opencode-web-console-20260730
+- Agent/session identifier: opencode-web-console-redesign-20260730
 
 ## Done
 
@@ -93,6 +93,15 @@
 - Agent/session identifier: agent/mvp-audit-87
 
 ## In Progress
+
+- [x] Rewrite web module to match `docs/design/web-console/mockup.html`
+  - Completed: 2026-07-30
+  - Agent/session identifier: opencode-web-console-redesign-20260730
+  - Relevant files: `web/src/main.tsx`, `web/src/styles.css`, `web/src/{projects,runners,tokens,workflows,workflow-detail}.tsx`
+  - Behavior delivered: Rebuilt console shell around reference sidebar, typography, palette, cards, tables, responsive layout, and dark mode. Overview now consumes projects/runners/workflows APIs; unavailable scheduler queue data is explicitly labelled `[placeholder — eligible issues will appear here]`.
+  - Validation performed: 140 web tests passed; lint completed with 12 pre-existing warnings; typecheck and production build passed; `rtk git diff --check` passed.
+  - Commands executed: `npm ci`; `npm test`; `npm run lint`; `npm run typecheck`; `npm run build`; `rtk git diff --check`.
+  - Next recommended implementation: Expose queue and scheduler metrics through API, then replace overview placeholders with those live values.
 
 - [x] Complete web console mockup interactions
   - Completed: 2026-07-30

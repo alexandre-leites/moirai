@@ -70,7 +70,8 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
 
   return (
     <div>
-      <h2>Workflows</h2>
+      <div className="view-head"><h1>Workflows</h1></div>
+      <p className="view-sub">Durable workflow state, phase progress, and operator controls.</p>
       {error && <p className="error">{error}</p>}
       {workflows.length === 0 ? <p>No active workflows</p> : (
         <table>

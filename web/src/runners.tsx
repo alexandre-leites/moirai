@@ -102,7 +102,7 @@ export function RunnersView({
   return (
     <div>
       <div className="page-header">
-        <h2>Runners</h2>
+        <div><div className="view-head"><h1>Runners</h1></div><p className="view-sub">Connected execution capacity and heartbeat status.</p></div>
         <div className="page-header-aside">
           {runners && runners.length > 0 && (
             <span className="page-hint mono" aria-live="polite">

@@ -18,7 +18,8 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
 
   return (
     <div>
-      <h2>Projects</h2>
+      <div className="view-head"><h1>Projects</h1></div>
+      <p className="view-sub">Repository configuration and scheduling eligibility.</p>
       {isAdmin && (
         <button onClick={() => setShowCreate(!showCreate)}>
           {showCreate ? "Cancel" : "New project"}

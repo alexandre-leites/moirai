@@ -38,7 +38,8 @@ export function TokensPage({ api }: { api: ApiClient }) {
 
   return (
     <div>
-      <h2>Runner Tokens</h2>
+      <div className="view-head"><h1>Runner tokens</h1></div>
+      <p className="view-sub">One-time credentials for registering trusted runners.</p>
       <section className="section">
         <h3>Create token</h3>
         <div className="form-inline">

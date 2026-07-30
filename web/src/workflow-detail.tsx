@@ -82,8 +82,9 @@ export function WorkflowDetailPage({ api }: { api: ApiClient }) {
 
   return (
     <div>
-      <p><Link to="/workflows">← Workflows</Link></p>
-      <h2>{workflow.issueExternalId}: {workflow.issueTitle}</h2>
+      <p className="view-sub"><Link to="/workflows">← Workflows</Link></p>
+      <div className="view-head"><h1>{workflow.issueExternalId}: {workflow.issueTitle}</h1><span className="crumb">{workflow.phase}</span></div>
+      <p className="view-sub">Workflow detail, durable events, and delivery gates.</p>
       <section className="workflow-detail">
         <dl>
           <dt>Status</dt><dd>{workflow.status}</dd>
