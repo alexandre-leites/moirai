@@ -3,7 +3,7 @@
 # lock is universal and carries every platform's wheel hashes.
 FROM --platform=$BUILDPLATFORM ghcr.io/astral-sh/uv:0.11.26@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 AS uv
 
-FROM --platform=$BUILDPLATFORM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS requirements
+FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6 AS requirements
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /build
 COPY pyproject.toml uv.lock ./
@@ -13,7 +13,7 @@ COPY pyproject.toml uv.lock ./
 # still matches pyproject.toml and exits non-zero when it does not.
 RUN uv export --locked --no-dev --no-emit-project --format requirements.txt -o /requirements.txt
 
-FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6
 ARG GH_CLI_VERSION=2.63.2
 WORKDIR /app
 RUN addgroup --system --gid 65532 loop \
