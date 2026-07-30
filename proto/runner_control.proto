@@ -36,6 +36,6 @@ message JobOfferRejected { string job_id = 1; string reason = 2; }
 message LeaseRenewal { string job_id = 1; int64 lease_generation = 2; int64 requested_expires_at_unix_ms = 3; }
 message LeaseAcknowledged { string job_id = 1; int64 lease_generation = 2; int64 expires_at_unix_ms = 3; }
 message CancelExecution { string execution_id = 1; int64 lease_generation = 2; }
-message DrainRunner {}
+message DrainRunner { bool undrain = 1; }
 message RunnerDraining { bool draining = 1; }
 message ExecutionEvent { string job_id = 1; string execution_id = 2; int64 lease_generation = 3; int64 event_sequence = 4; string type = 5; string payload_json = 6; }

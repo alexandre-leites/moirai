@@ -30,6 +30,7 @@ const (
 	ControlPlane_RevokeRunnerRegistrationToken_FullMethodName = "/loop.control.v1.ControlPlane/RevokeRunnerRegistrationToken"
 	ControlPlane_ListWorkflows_FullMethodName                 = "/loop.control.v1.ControlPlane/ListWorkflows"
 	ControlPlane_ListRunners_FullMethodName                   = "/loop.control.v1.ControlPlane/ListRunners"
+	ControlPlane_SetRunnerState_FullMethodName                = "/loop.control.v1.ControlPlane/SetRunnerState"
 	ControlPlane_SubmitHumanDecision_FullMethodName           = "/loop.control.v1.ControlPlane/SubmitHumanDecision"
 	ControlPlane_RetryWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/RetryWorkflow"
 	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
@@ -51,6 +52,7 @@ type ControlPlaneClient interface {
 	RevokeRunnerRegistrationToken(ctx context.Context, in *RevokeRunnerRegistrationTokenRequest, opts ...grpc.CallOption) (*RevokeRunnerRegistrationTokenResponse, error)
 	ListWorkflows(ctx context.Context, in *ListWorkflowsRequest, opts ...grpc.CallOption) (*ListWorkflowsResponse, error)
 	ListRunners(ctx context.Context, in *ListRunnersRequest, opts ...grpc.CallOption) (*ListRunnersResponse, error)
+	SetRunnerState(ctx context.Context, in *SetRunnerStateRequest, opts ...grpc.CallOption) (*SetRunnerStateResponse, error)
 	SubmitHumanDecision(ctx context.Context, in *SubmitHumanDecisionRequest, opts ...grpc.CallOption) (*SubmitHumanDecisionResponse, error)
 	RetryWorkflow(ctx context.Context, in *RetryWorkflowRequest, opts ...grpc.CallOption) (*RetryWorkflowResponse, error)
 	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
@@ -175,6 +177,16 @@ func (c *controlPlaneClient) ListRunners(ctx context.Context, in *ListRunnersReq
 	return out, nil
 }
 
+func (c *controlPlaneClient) SetRunnerState(ctx context.Context, in *SetRunnerStateRequest, opts ...grpc.CallOption) (*SetRunnerStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetRunnerStateResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_SetRunnerState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlPlaneClient) SubmitHumanDecision(ctx context.Context, in *SubmitHumanDecisionRequest, opts ...grpc.CallOption) (*SubmitHumanDecisionResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SubmitHumanDecisionResponse)
@@ -230,6 +242,7 @@ type ControlPlaneServer interface {
 	RevokeRunnerRegistrationToken(context.Context, *RevokeRunnerRegistrationTokenRequest) (*RevokeRunnerRegistrationTokenResponse, error)
 	ListWorkflows(context.Context, *ListWorkflowsRequest) (*ListWorkflowsResponse, error)
 	ListRunners(context.Context, *ListRunnersRequest) (*ListRunnersResponse, error)
+	SetRunnerState(context.Context, *SetRunnerStateRequest) (*SetRunnerStateResponse, error)
 	SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error)
 	RetryWorkflow(context.Context, *RetryWorkflowRequest) (*RetryWorkflowResponse, error)
 	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
@@ -276,6 +289,9 @@ func (UnimplementedControlPlaneServer) ListWorkflows(context.Context, *ListWorkf
 }
 func (UnimplementedControlPlaneServer) ListRunners(context.Context, *ListRunnersRequest) (*ListRunnersResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListRunners not implemented")
+}
+func (UnimplementedControlPlaneServer) SetRunnerState(context.Context, *SetRunnerStateRequest) (*SetRunnerStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetRunnerState not implemented")
 }
 func (UnimplementedControlPlaneServer) SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SubmitHumanDecision not implemented")
@@ -508,6 +524,24 @@ func _ControlPlane_ListRunners_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_SetRunnerState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetRunnerStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).SetRunnerState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_SetRunnerState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).SetRunnerState(ctx, req.(*SetRunnerStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ControlPlane_SubmitHumanDecision_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SubmitHumanDecisionRequest)
 	if err := dec(in); err != nil {
@@ -630,6 +664,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListRunners",
 			Handler:    _ControlPlane_ListRunners_Handler,
+		},
+		{
+			MethodName: "SetRunnerState",
+			Handler:    _ControlPlane_SetRunnerState_Handler,
 		},
 		{
 			MethodName: "SubmitHumanDecision",

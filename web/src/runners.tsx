@@ -20,6 +20,8 @@ export type RunnersViewProps = {
   /** Reference time the heartbeat ages are measured against. */
   now: number;
   onRefresh: () => void;
+  onSetState?: (runner: Runner, state: "drain" | "enable" | "revoke") => void;
+  actioningRunnerID?: string | null;
 };
 
 function LabelList({ labels }: { labels: string[] }) {
@@ -33,7 +35,17 @@ function LabelList({ labels }: { labels: string[] }) {
   );
 }
 
-function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
+function RunnerRows({
+  runners,
+  now,
+  onSetState,
+  actioningRunnerID,
+}: {
+  runners: Runner[];
+  now: number;
+  onSetState?: RunnersViewProps["onSetState"];
+  actioningRunnerID?: string | null;
+}) {
   return (
     <>
       {runners.map((runner) => {
@@ -58,6 +70,19 @@ function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
                 <span className="pill pill--warn stale-badge" title={STALE_HINT}>Stale</span>
               )}
             </td>
+            <td>
+              {onSetState && runner.enabled && (
+                <>
+                  <button
+                    onClick={() => onSetState(runner, runner.draining ? "enable" : "drain")}
+                    disabled={actioningRunnerID === runner.id}
+                  >
+                    {runner.draining ? "Undrain" : "Drain"}
+                  </button>
+                  <button onClick={() => onSetState(runner, "revoke")} disabled={actioningRunnerID === runner.id}>Revoke</button>
+                </>
+              )}
+            </td>
           </tr>
         );
       })}
@@ -65,13 +90,15 @@ function RunnerRows({ runners, now }: { runners: Runner[]; now: number }) {
   );
 }
 
-/**
- * The runner fleet, without any data fetching of its own, so every state it can
- * be in is directly renderable in a test. Read-only: drain, disable and revoke
- * controls need `POST /api/v1/runners/{id}/state`, which does not exist yet
- * (docs/design/web-console/tasks.md B1).
- */
-export function RunnersView({ runners, error, loading, now, onRefresh }: RunnersViewProps) {
+export function RunnersView({
+  runners,
+  error,
+  loading,
+  now,
+  onRefresh,
+  onSetState,
+  actioningRunnerID,
+}: RunnersViewProps) {
   return (
     <div>
       <div className="page-header">
@@ -119,10 +146,11 @@ export function RunnersView({ runners, error, loading, now, onRefresh }: Runners
                     <th>Labels</th>
                     <th>Draining</th>
                     <th>Last heartbeat</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <RunnerRows runners={runners} now={now} />
+                  <RunnerRows runners={runners} now={now} onSetState={onSetState} actioningRunnerID={actioningRunnerID} />
                 </tbody>
               </table>
             </div>
@@ -135,12 +163,23 @@ export function RunnersPage({ api }: { api: ApiClient }) {
   const [runners, setRunners] = useState<Runner[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [actioningRunnerID, setActioningRunnerID] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   // Bumped by the Refresh/Retry button to re-run the effect below, which
   // abandons whatever request is in flight and starts a clean one.
   const [refreshToken, setRefreshToken] = useState(0);
 
   const onRefresh = useCallback(() => setRefreshToken((token) => token + 1), []);
+  const onSetState = useCallback((runner: Runner, state: "drain" | "enable" | "revoke") => {
+    if (state === "revoke" && !window.confirm(`Revoke ${runner.name}? This disconnects it and invalidates its credential.`)) return;
+    setActioningRunnerID(runner.id);
+    void api.setRunnerState(runner.id, state).then((updated) => {
+      setRunners((current) => current?.map((item) => item.id === updated.id ? updated : item) ?? current);
+      setError(null);
+    }).catch((error: unknown) => {
+      setError(error instanceof Error ? error.message : String(error));
+    }).finally(() => setActioningRunnerID(null));
+  }, [api]);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,6 +233,14 @@ export function RunnersPage({ api }: { api: ApiClient }) {
   }, [api, refreshToken]);
 
   return (
-    <RunnersView runners={runners} error={error} loading={loading} now={now} onRefresh={onRefresh} />
+    <RunnersView
+      runners={runners}
+      error={error}
+      loading={loading}
+      now={now}
+      onRefresh={onRefresh}
+      onSetState={onSetState}
+      actioningRunnerID={actioningRunnerID}
+    />
   );
 }

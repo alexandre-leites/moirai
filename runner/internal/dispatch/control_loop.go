@@ -297,8 +297,12 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 		}
 		return nil
 	}
-	if message.GetDrain() != nil {
-		loop.Drain()
+	if drain := message.GetDrain(); drain != nil {
+		if drain.GetUndrain() {
+			loop.Undrain()
+		} else {
+			loop.Drain()
+		}
 		return nil
 	}
 	if cancellation := message.GetCancel(); cancellation != nil {
@@ -350,20 +354,24 @@ func (loop *ControlLoop) Handle(ctx context.Context, message *runnerv1.Orchestra
 }
 
 func (loop *ControlLoop) Drain() {
+	loop.setDraining(true)
+}
+
+func (loop *ControlLoop) Undrain() {
+	loop.setDraining(false)
+}
+
+func (loop *ControlLoop) setDraining(draining bool) {
 	if loop == nil {
 		return
 	}
 	loop.mu.Lock()
-	alreadyDraining := loop.draining
-	loop.draining = true
+	unchanged := loop.draining == draining
+	loop.draining = draining
 	loop.mu.Unlock()
-	if alreadyDraining {
+	if unchanged {
 		return
 	}
-	// A failed report is not fatal here: the drain still holds locally, so no
-	// new offer is accepted, and the next stream Resume re-asserts it. That
-	// recovery is the whole point of reporting the state on connect — before
-	// it existed, a report lost on a dying stream was lost for good.
 	if err := loop.reportDrainState(); err != nil {
 		loop.logger().Warn("report runner draining", "error", err)
 	}

@@ -235,6 +235,29 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             runners=[_runner_message(runner) for runner in runners]
         )
 
+    async def SetRunnerState(
+        self,
+        request: control_plane_pb2.SetRunnerStateRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.SetRunnerStateResponse:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        if not request.runner_id or request.state not in {"enable", "drain", "revoke"}:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "runner state request is invalid")
+        try:
+            runner = await self._control_plane.set_runner_state(
+                request.runner_id, request.state, session.user_id or None, self._now()
+            )
+        except ValueError:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "runner is unknown")
+        if self._runner_control is not None:
+            try:
+                await self._runner_control.set_draining(request.runner_id, request.state != "enable")
+                if request.state == "revoke":
+                    await self._runner_control.revoke_runner(request.runner_id)
+            except Exception:
+                logging.getLogger(__name__).exception("runner state delivery failed")
+        return control_plane_pb2.SetRunnerStateResponse(runner=_runner_message(runner))
+
     async def SubmitHumanDecision(
         self,
         request: control_plane_pb2.SubmitHumanDecisionRequest,

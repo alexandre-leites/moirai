@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 
+from moirai.domain.control_plane import AuthenticationError
 from moirai.persistence.control_plane import AsyncpgControlPlane
 from moirai.persistence.migrations import MigrationRunner
 from moirai.workflows.persistence import AsyncpgWorkflowPersistence
@@ -1910,7 +1911,7 @@ class RunnerDrainIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def _runner_row(self, runner_id: str) -> dict[str, Any]:
         record = await self.pool.fetchrow(
-            "SELECT enabled, draining, status, revoked_at FROM app.runners WHERE id = $1",
+            "SELECT enabled, draining, operator_draining, status, revoked_at FROM app.runners WHERE id = $1",
             UUID(runner_id),
         )
         assert record is not None
@@ -1927,6 +1928,24 @@ class RunnerDrainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         assert scheduled is not None
         self.assertEqual(scheduled.assignment.runner.id, runner_id)
         # Hand the run back so this test leaves no lock or live offer behind.
+        await self.control_plane.reject_offer(scheduled.offer.job_id, runner_id, _NOW)
+
+    async def test_operator_drain_survives_runner_report_until_undrained(self) -> None:
+        runner_id, _ = await self._seed()
+
+        await self.control_plane.set_runner_state(runner_id, "drain", None, _NOW)
+        await self.control_plane.set_runner_draining(runner_id, False)
+        drained = await self._runner_row(runner_id)
+        self.assertTrue(drained["draining"])
+        self.assertTrue(drained["operator_draining"])
+        self.assertIsNone(await self.control_plane.schedule(_NOW, timedelta(minutes=5)))
+
+        await self.control_plane.set_runner_state(runner_id, "enable", None, _NOW)
+        cleared = await self._runner_row(runner_id)
+        self.assertFalse(cleared["draining"])
+        self.assertFalse(cleared["operator_draining"])
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert scheduled is not None
         await self.control_plane.reject_offer(scheduled.offer.job_id, runner_id, _NOW)
 
     async def test_a_drain_report_writes_only_the_draining_column(self) -> None:
@@ -1957,9 +1976,11 @@ class RunnerDrainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cleared["enabled"])
 
     async def test_a_drain_report_is_rejected_for_an_unknown_or_revoked_runner(self) -> None:
-        runner_id, _ = await self._seed()
+        runner_id, credential = await self._seed()
 
         await self.control_plane.set_runner_state(runner_id, "revoke", None, _NOW)
+        with self.assertRaises(AuthenticationError):
+            await self.control_plane.authenticate_runner(runner_id, credential, _NOW)
         with self.assertRaises(ValueError):
             await self.control_plane.set_runner_draining(runner_id, False)
         # Rejected means untouched: `revoke` left the row draining.

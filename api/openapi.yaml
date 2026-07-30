@@ -302,6 +302,45 @@ paths:
                       $ref: '#/components/schemas/Runner'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/runners/{runner_id}/drain:
+    post:
+      summary: Drain a runner after its active job
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/RunnerID'
+      responses:
+        '200': { description: Draining runner, content: { application/json: { schema: { $ref: '#/components/schemas/Runner' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/runners/{runner_id}/undrain:
+    post:
+      summary: Resume a drained runner
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/RunnerID'
+      responses:
+        '200': { description: Available runner, content: { application/json: { schema: { $ref: '#/components/schemas/Runner' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/runners/{runner_id}/revoke:
+    post:
+      summary: Revoke a runner credential
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/RunnerID'
+      responses:
+        '200': { description: Revoked runner, content: { application/json: { schema: { $ref: '#/components/schemas/Runner' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/workflows:
     get:
       summary: List workflows
@@ -432,6 +471,11 @@ components:
       schema: { type: string }
     TokenID:
       name: token_id
+      in: path
+      required: true
+      schema: { type: string }
+    RunnerID:
+      name: runner_id
       in: path
       required: true
       schema: { type: string }

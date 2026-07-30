@@ -101,6 +101,21 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             ),
         )
 
+    async def set_draining(self, runner_id: str, draining: bool) -> bool:
+        if not runner_id:
+            raise ValueError("runner ID is required")
+        return await self._sessions.deliver_message(
+            runner_id,
+            runner_control_pb2.OrchestratorToRunner(
+                drain=runner_control_pb2.DrainRunner(undrain=not draining)
+            ),
+        )
+
+    async def revoke_runner(self, runner_id: str) -> bool:
+        if not runner_id:
+            raise ValueError("runner ID is required")
+        return await self._sessions.disconnect_runner(runner_id)
+
     async def Connect(
         self,
         request_iterator: AsyncIterator[runner_control_pb2.RunnerToOrchestrator],

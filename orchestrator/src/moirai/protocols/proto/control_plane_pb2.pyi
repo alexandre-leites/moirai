@@ -216,6 +216,20 @@ class ListRunnersResponse(_message.Message):
     runners: _containers.RepeatedCompositeFieldContainer[Runner]
     def __init__(self, runners: _Optional[_Iterable[_Union[Runner, _Mapping]]] = ...) -> None: ...
 
+class SetRunnerStateRequest(_message.Message):
+    __slots__ = ("runner_id", "state")
+    RUNNER_ID_FIELD_NUMBER: _ClassVar[int]
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    runner_id: str
+    state: str
+    def __init__(self, runner_id: _Optional[str] = ..., state: _Optional[str] = ...) -> None: ...
+
+class SetRunnerStateResponse(_message.Message):
+    __slots__ = ("runner",)
+    RUNNER_FIELD_NUMBER: _ClassVar[int]
+    runner: Runner
+    def __init__(self, runner: _Optional[_Union[Runner, _Mapping]] = ...) -> None: ...
+
 class SubmitHumanDecisionRequest(_message.Message):
     __slots__ = ("workflow_run_id", "decision", "comment")
     WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]
