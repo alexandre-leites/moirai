@@ -278,8 +278,8 @@ func (manager Manager) prepareBaseRevision(ctx context.Context, source string, r
 		}
 		// The remote holds work this runner does not, or the two have diverged.
 		// The published tip wins, because it is the state every runner agrees
-		// on; a local commit it leaves behind came from a run that did not
-		// complete, which #100 anchors at refs/moirai-wip/<executionId>.
+		// on; a local commit it leaves behind came from a run whose work was
+		// not published, which is anchored at refs/moirai-wip/<executionId>.
 		return staging, nil
 	}
 	if localRevision != "" {
