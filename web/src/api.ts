@@ -107,6 +107,9 @@ export type ApiClient = {
 
   listWorkflows(signal?: AbortSignal): Promise<Workflow[]>;
   submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<Workflow>;
+  retryWorkflow(id: string, reason?: string): Promise<Workflow>;
+  cancelWorkflow(id: string, reason?: string): Promise<Workflow>;
+  blockWorkflow(id: string, reason: string): Promise<Workflow>;
 };
 
 // CSRF_COOKIE_NAME must match auth.CSRFCookieName in api/internal/auth/session.go —
@@ -146,6 +149,15 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       throw new ApiError(res.status, detail ? `${title}: ${detail}` : title, detail);
     }
     return res.json();
+  };
+  const controlWorkflow = async (id: string, action: "retry" | "cancel" | "block", reason?: string): Promise<Workflow> => {
+    const res = await fetchClient(`/api/v1/workflows/${id}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
+      credentials: "include",
+      body: JSON.stringify({ reason: reason ?? "" }),
+    });
+    return json(res);
   };
   return {
     setUnauthorizedHandler(handler: (() => void) | null): void {
@@ -289,6 +301,18 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
         body: JSON.stringify({ decision, comment: comment ?? "" }),
       });
       return json(res);
+    },
+
+    async retryWorkflow(id: string, reason?: string): Promise<Workflow> {
+      return controlWorkflow(id, "retry", reason);
+    },
+
+    async cancelWorkflow(id: string, reason?: string): Promise<Workflow> {
+      return controlWorkflow(id, "cancel", reason);
+    },
+
+    async blockWorkflow(id: string, reason: string): Promise<Workflow> {
+      return controlWorkflow(id, "block", reason);
     },
   };
 }

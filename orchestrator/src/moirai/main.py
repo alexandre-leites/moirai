@@ -268,10 +268,13 @@ def register_services(
     from moirai.grpc.runner_control import RunnerControlService
     from proto import control_plane_pb2_grpc, runner_control_pb2_grpc
 
-    control_plane_pb2_grpc.add_ControlPlaneServicer_to_server(
-        ControlPlaneService(control_plane, now=now, workflow_runtime=workflow_runtime), server
-    )
     runner_service = RunnerControlService(control_plane, now=now, workflow_runtime=workflow_runtime)
+    control_plane_pb2_grpc.add_ControlPlaneServicer_to_server(
+        ControlPlaneService(
+            control_plane, now=now, workflow_runtime=workflow_runtime, runner_control=runner_service
+        ),
+        server,
+    )
     runner_control_pb2_grpc.add_RunnerControlServicer_to_server(runner_service, server)
     return runner_service
 

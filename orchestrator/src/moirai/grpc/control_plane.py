@@ -28,6 +28,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         now: Callable[[], datetime] | None = None,
         registration_token_ttl: timedelta = timedelta(minutes=15),
         workflow_runtime: Any | None = None,
+        runner_control: Any | None = None,
     ) -> None:
         if registration_token_ttl <= timedelta():
             raise ValueError("registration token TTL must be positive")
@@ -35,6 +36,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         self._now = now or (lambda: datetime.now(UTC))
         self._registration_token_ttl = registration_token_ttl
         self._workflow_runtime = workflow_runtime
+        self._runner_control = runner_control
 
     async def Login(
         self,
@@ -278,6 +280,59 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             )
         )
 
+    async def RetryWorkflow(
+        self, request: control_plane_pb2.RetryWorkflowRequest, context: grpc.aio.ServicerContext
+    ) -> control_plane_pb2.RetryWorkflowResponse:
+        result = await self._control_workflow("retry", request, context)
+        if self._workflow_runtime is None:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "workflow resumption is unavailable")
+        try:
+            state = await self._workflow_runtime.run(request.workflow_run_id, {"status": "recovering"})
+        except Exception:
+            logging.getLogger(__name__).exception("workflow retry failed")
+            await context.abort(grpc.StatusCode.INTERNAL, "workflow could not be resumed")
+        return control_plane_pb2.RetryWorkflowResponse(workflow=_workflow_message_from_state(request.workflow_run_id, result, state))
+
+    async def CancelWorkflow(
+        self, request: control_plane_pb2.CancelWorkflowRequest, context: grpc.aio.ServicerContext
+    ) -> control_plane_pb2.CancelWorkflowResponse:
+        result = await self._control_workflow("cancel", request, context)
+        await self._cancel_runner_execution(result)
+        return control_plane_pb2.CancelWorkflowResponse(workflow=_workflow_message_from_result(result))
+
+    async def BlockWorkflow(
+        self, request: control_plane_pb2.BlockWorkflowRequest, context: grpc.aio.ServicerContext
+    ) -> control_plane_pb2.BlockWorkflowResponse:
+        result = await self._control_workflow("block", request, context)
+        await self._cancel_runner_execution(result)
+        return control_plane_pb2.BlockWorkflowResponse(workflow=_workflow_message_from_result(result))
+
+    async def _control_workflow(
+        self, action: str, request: Any, context: grpc.aio.ServicerContext
+    ) -> dict[str, object]:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        if not request.workflow_run_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "workflow run ID is required")
+        try:
+            method = getattr(self._control_plane, f"{action}_workflow")
+            return await method(request.workflow_run_id, request.reason or None, session.user_id or None, self._now())
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+        raise AssertionError("context.abort must not return")
+
+    async def _cancel_runner_execution(self, result: dict[str, object]) -> None:
+        cancellation = result.get("cancellation")
+        if not isinstance(cancellation, dict) or self._runner_control is None:
+            return
+        try:
+            await self._runner_control.cancel_execution(
+                str(cancellation["runner_id"]),
+                str(cancellation["execution_id"]),
+                int(cancellation["lease_generation"]),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("runner cancellation delivery failed")
+
     async def _require_session(
         self,
         context: grpc.aio.ServicerContext,
@@ -363,4 +418,24 @@ def _workflow_message(workflow: WorkflowRecord) -> control_plane_pb2.Workflow:
         project_id=workflow["project_id"],
         status=workflow["status"],
         phase=workflow["phase"],
+    )
+
+
+def _workflow_message_from_result(result: dict[str, object]) -> control_plane_pb2.Workflow:
+    return control_plane_pb2.Workflow(
+        id=_text(result.get("id")),
+        project_id=_text(result.get("project_id")),
+        status=_text(result.get("status")),
+        phase=_text(result.get("phase")),
+    )
+
+
+def _workflow_message_from_state(
+    workflow_run_id: str, result: dict[str, object], state: dict[str, object]
+) -> control_plane_pb2.Workflow:
+    return control_plane_pb2.Workflow(
+        id=workflow_run_id,
+        project_id=_text(state.get("project_id") or result.get("project_id")),
+        status=_text(state.get("status") or result.get("status")),
+        phase=_text(state.get("status") or result.get("phase")),
     )

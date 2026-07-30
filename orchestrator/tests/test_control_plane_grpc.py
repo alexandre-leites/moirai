@@ -133,6 +133,24 @@ class FakeControlPlane:
         self.recorded_decision = (workflow_run_id, decision, comment, actor_user_id)
         return {"id": workflow_run_id, "project_id": "project-1", "status": "waiting_human"}
 
+    async def retry_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        self.workflow_control = ("retry", workflow_run_id, reason, actor_user_id, now)
+        return {"id": workflow_run_id, "project_id": "project-1", "status": "recovering", "phase": "recovering"}
+
+    async def cancel_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        self.workflow_control = ("cancel", workflow_run_id, reason, actor_user_id, now)
+        return {"id": workflow_run_id, "project_id": "project-1", "status": "cancelled", "phase": "cancelled"}
+
+    async def block_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        self.workflow_control = ("block", workflow_run_id, reason, actor_user_id, now)
+        return {"id": workflow_run_id, "project_id": "project-1", "status": "blocked", "phase": "blocked"}
+
     async def list_runners(self) -> list[dict[str, object]]:
         return []
 
@@ -346,6 +364,29 @@ class SubmitHumanDecisionGrpcTests(unittest.IsolatedAsyncioTestCase):
             "human_approved": False, "human_changes_requested": True,
         }))
         self.assertEqual(response.workflow.status, "repairing")
+
+    async def test_operator_controls_require_admin_csrf_and_persist_actor(self) -> None:
+        response = await self.client.BlockWorkflow(
+            control_plane_pb2.BlockWorkflowRequest(workflow_run_id="workflow-other", reason="GitHub unavailable"),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
+        )
+        self.assertEqual(response.workflow.status, "blocked")
+        self.assertEqual(
+            self.control_plane.workflow_control,
+            ("block", "workflow-other", "GitHub unavailable", "00000000-0000-0000-0000-000000000099", NOW),
+        )
+        with self.assertRaises(grpc.aio.AioRpcError) as viewer:
+            await self.client.CancelWorkflow(
+                control_plane_pb2.CancelWorkflowRequest(workflow_run_id="workflow-other"),
+                metadata=(("x-loop-session", "viewer-session"), ("x-loop-csrf", "csrf-token")),
+            )
+        self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+        with self.assertRaises(grpc.aio.AioRpcError) as missing_csrf:
+            await self.client.RetryWorkflow(
+                control_plane_pb2.RetryWorkflowRequest(workflow_run_id="workflow-other"),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(missing_csrf.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
     async def test_rejects_an_invalid_decision_value(self) -> None:
         with self.assertRaises(grpc.aio.AioRpcError) as invalid:

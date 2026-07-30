@@ -116,6 +116,18 @@ class ControlPlane(Protocol):
         now: datetime,
     ) -> dict[str, object]: ...
 
+    async def retry_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]: ...
+
+    async def cancel_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]: ...
+
+    async def block_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]: ...
+
     async def list_runners(self) -> list[RunnerRecord]: ...
 
 

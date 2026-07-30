@@ -30,6 +30,18 @@ func TestSubmitDecisionRejectsUnknownDecisionValue(t *testing.T) {
 	}
 }
 
+func TestBlockRejectsMissingReason(t *testing.T) {
+	h := NewWorkflowHandlers(nil, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workflows/wf-1/block", bytes.NewReader([]byte(`{"reason":""}`)))
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("workflow_id", "wf-1")
+	rec := httptest.NewRecorder()
+	h.block(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("got %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestSubmitDecisionAcceptsApprovedAndChangesRequested(t *testing.T) {
 	for _, decision := range []string{"approved", "changes_requested"} {
 		t.Run(decision, func(t *testing.T) {

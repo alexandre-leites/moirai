@@ -89,6 +89,18 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
     async def clear_delivered_offer(self, runner_id: str, job_id: str) -> bool:
         return await self._sessions.clear_offer(runner_id, job_id)
 
+    async def cancel_execution(self, runner_id: str, execution_id: str, lease_generation: int) -> bool:
+        if not runner_id or not execution_id or lease_generation < 1:
+            raise ValueError("execution cancellation is invalid")
+        return await self._sessions.deliver_message(
+            runner_id,
+            runner_control_pb2.OrchestratorToRunner(
+                cancel=runner_control_pb2.CancelExecution(
+                    execution_id=execution_id, lease_generation=lease_generation
+                )
+            ),
+        )
+
     async def Connect(
         self,
         request_iterator: AsyncIterator[runner_control_pb2.RunnerToOrchestrator],
