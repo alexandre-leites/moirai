@@ -42,6 +42,8 @@ if TYPE_CHECKING:
         ProjectRecord,
         RegistrationTokenRecord,
         RunnerRecord,
+        WorkflowDetailRecord,
+        WorkflowEventRecord,
         WorkflowRecord,
     )
 from moirai.workflows.runner_events import (
@@ -778,6 +780,76 @@ class AsyncpgControlPlane:
                 "review_cycles": int(record["review_cycles"]),
                 "ci_repair_attempts": int(record["ci_repair_attempts"]),
                 "total_agent_executions": int(record["total_agent_executions"]),
+            }
+            for record in records
+        ]
+
+    async def get_workflow(self, workflow_run_id: str) -> WorkflowDetailRecord | None:
+        record = await self._pool.fetchrow(
+            """
+            SELECT wr.id, wr.project_id, wr.status, wr.current_phase, i.external_id AS issue_external_id,
+                   i.title AS issue_title, wr.branch_name,
+                   COALESCE(pr.external_id, wr.pull_request_external_id) AS pull_request_external_id,
+                   COALESCE(pr.url, wr.pull_request_url) AS pull_request_url, pr.state AS pull_request_state,
+                   wr.blocking_reason, wr.planning_attempts, wr.implementation_attempts,
+                   wr.pipeline_repair_attempts, wr.review_cycles, wr.ci_repair_attempts,
+                   wr.total_agent_executions, wr.created_at, wr.updated_at
+            FROM app.workflow_runs AS wr
+            JOIN app.issues AS i ON i.id = wr.issue_id
+            LEFT JOIN app.pull_requests AS pr ON pr.workflow_run_id = wr.id
+            WHERE wr.id = $1
+            """,
+            _uuid(workflow_run_id),
+        )
+        if record is None:
+            return None
+        return {
+            "id": str(record["id"]),
+            "project_id": str(record["project_id"]),
+            "status": str(record["status"]),
+            "phase": str(record["current_phase"]),
+            "issue_external_id": str(record["issue_external_id"]),
+            "issue_title": str(record["issue_title"]),
+            "branch_name": _optional_text(record["branch_name"]),
+            "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
+            "pull_request_url": _optional_text(record["pull_request_url"]),
+            "pull_request_state": _optional_text(record["pull_request_state"]),
+            "blocking_reason": _optional_text(record["blocking_reason"]),
+            "planning_attempts": int(record["planning_attempts"]),
+            "implementation_attempts": int(record["implementation_attempts"]),
+            "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
+            "review_cycles": int(record["review_cycles"]),
+            "ci_repair_attempts": int(record["ci_repair_attempts"]),
+            "total_agent_executions": int(record["total_agent_executions"]),
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+        }
+
+    async def list_workflow_events(
+        self, workflow_run_id: str, after_id: int, limit: int
+    ) -> list[WorkflowEventRecord]:
+        records = await self._pool.fetch(
+            """
+            SELECT id, event_type, payload, created_at
+            FROM app.workflow_events
+            WHERE workflow_run_id = $1 AND ($2 = 0 OR id < $2)
+            ORDER BY id DESC
+            LIMIT $3
+            """,
+            _uuid(workflow_run_id),
+            after_id,
+            limit,
+        )
+        return [
+            {
+                "id": str(record["id"]),
+                "event_type": str(record["event_type"]),
+                "payload_json": (
+                    record["payload"]
+                    if isinstance(record["payload"], str)
+                    else json.dumps(record["payload"], separators=(",", ":"), sort_keys=True)
+                ),
+                "created_at": record["created_at"],
             }
             for record in records
         ]
@@ -2137,9 +2209,10 @@ class AsyncpgControlPlane:
                 await connection.execute(
                     """
                     INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload, created_at)
-                    VALUES ($1, 'runner_execution_event', 'info', $2::jsonb, $3)
+                    VALUES ($1, $2, 'info', $3::jsonb, $4)
                     """,
                     job["workflow_run_id"],
+                    summary.event_type,
                     _json_payload(event),
                     now,
                 )

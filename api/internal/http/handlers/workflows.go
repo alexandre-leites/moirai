@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
@@ -20,6 +22,8 @@ func NewWorkflowHandlers(client *orchestrator.Client, limiter *auth.RateLimiter)
 
 func (h *WorkflowHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/workflows", auth.RequireSession(http.HandlerFunc(h.list)))
+	mux.Handle("GET /api/v1/workflows/{workflow_id}", auth.RequireSession(http.HandlerFunc(h.get)))
+	mux.Handle("GET /api/v1/workflows/{workflow_id}/events", auth.RequireSession(http.HandlerFunc(h.listEvents)))
 	mux.Handle("POST /api/v1/workflows/{workflow_id}/decision", requireMutation(h.limiter, h.submitDecision))
 	mux.Handle("POST /api/v1/workflows/{workflow_id}/retry", requireMutation(h.limiter, h.retry))
 	mux.Handle("POST /api/v1/workflows/{workflow_id}/cancel", requireMutation(h.limiter, h.cancel))
@@ -48,6 +52,64 @@ func (h *WorkflowHandlers) list(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	apiserver.WriteJSON(w, http.StatusOK, map[string]any{"workflows": workflows})
+}
+
+func (h *WorkflowHandlers) get(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.GetWorkflow(requestContext(r), r.PathValue("workflow_id"))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	if resp.Workflow == nil {
+		apiserver.WriteError(w, http.StatusServiceUnavailable, "Service unavailable", "workflow response is missing")
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, workflowDetailPayload(resp.Workflow))
+}
+
+func (h *WorkflowHandlers) listEvents(w http.ResponseWriter, r *http.Request) {
+	cursor, err := queryInt64(r, "cursor", 0, 0)
+	if err != nil {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request", "cursor must be a non-negative integer")
+		return
+	}
+	limit, err := queryInt64(r, "limit", 100, 1)
+	if err != nil || limit > 100 {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request", "limit must be between 1 and 100")
+		return
+	}
+	resp, err := h.client.ListWorkflowEvents(requestContext(r), r.PathValue("workflow_id"), cursor, int32(limit))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	events := make([]map[string]any, len(resp.Events))
+	for i, event := range resp.Events {
+		payload := json.RawMessage(event.PayloadJson)
+		if !json.Valid(payload) {
+			payload = json.RawMessage("null")
+		}
+		events[i] = map[string]any{
+			"id": event.Id, "type": event.EventType, "createdAt": event.CreatedAt, "payload": payload,
+		}
+	}
+	body := map[string]any{"events": events}
+	if resp.NextCursor != "" {
+		body["nextCursor"] = resp.NextCursor
+	}
+	apiserver.WriteJSON(w, http.StatusOK, body)
+}
+
+func queryInt64(r *http.Request, name string, fallback, minimum int64) (int64, error) {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < minimum {
+		return 0, strconv.ErrSyntax
+	}
+	return parsed, nil
 }
 
 func (h *WorkflowHandlers) retry(w http.ResponseWriter, r *http.Request) {
@@ -134,4 +196,26 @@ func workflowPayload(workflow *controlv1.Workflow) map[string]any {
 		"id": workflow.Id, "projectId": workflow.ProjectId,
 		"status": workflow.Status, "phase": workflow.Phase,
 	}
+}
+
+func workflowDetailPayload(workflow *controlv1.Workflow) map[string]any {
+	payload := workflowPayload(workflow)
+	if payload == nil {
+		return nil
+	}
+	payload["issueExternalId"] = workflow.IssueExternalId
+	payload["issueTitle"] = workflow.IssueTitle
+	payload["branchName"] = workflow.BranchName
+	payload["pullRequestExternalId"] = workflow.PullRequestExternalId
+	payload["pullRequestUrl"] = workflow.PullRequestUrl
+	payload["pullRequestState"] = workflow.PullRequestState
+	payload["blockingReason"] = workflow.BlockingReason
+	payload["planningAttempts"] = workflow.PlanningAttempts
+	payload["implementationAttempts"] = workflow.ImplementationAttempts
+	payload["pipelineRepairAttempts"] = workflow.PipelineRepairAttempts
+	payload["ciRepairAttempts"] = workflow.CiRepairAttempts
+	payload["reviewCycles"] = workflow.ReviewCycles
+	payload["createdAt"] = workflow.CreatedAt
+	payload["updatedAt"] = workflow.UpdatedAt
+	return payload
 }

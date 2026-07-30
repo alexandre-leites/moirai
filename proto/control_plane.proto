@@ -13,6 +13,8 @@ service ControlPlane {
   rpc ListRunnerRegistrationTokens(ListRunnerRegistrationTokensRequest) returns (ListRunnerRegistrationTokensResponse);
   rpc RevokeRunnerRegistrationToken(RevokeRunnerRegistrationTokenRequest) returns (RevokeRunnerRegistrationTokenResponse);
   rpc ListWorkflows(ListWorkflowsRequest) returns (ListWorkflowsResponse);
+  rpc GetWorkflow(GetWorkflowRequest) returns (GetWorkflowResponse);
+  rpc ListWorkflowEvents(ListWorkflowEventsRequest) returns (ListWorkflowEventsResponse);
   rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
   rpc SetRunnerState(SetRunnerStateRequest) returns (SetRunnerStateResponse);
   rpc SubmitHumanDecision(SubmitHumanDecisionRequest) returns (SubmitHumanDecisionResponse);
@@ -57,8 +59,37 @@ message ListRunnerRegistrationTokensResponse { repeated RunnerRegistrationToken 
 message RevokeRunnerRegistrationTokenRequest { string token_id = 1; }
 message RevokeRunnerRegistrationTokenResponse { RunnerRegistrationToken token = 1; }
 message ListWorkflowsRequest {}
-message Workflow { string id = 1; string project_id = 2; string status = 3; string phase = 4; }
+message Workflow {
+  string id = 1;
+  string project_id = 2;
+  string status = 3;
+  string phase = 4;
+  string issue_external_id = 5;
+  string issue_title = 6;
+  string branch_name = 7;
+  string pull_request_external_id = 8;
+  string pull_request_url = 9;
+  string pull_request_state = 10;
+  string blocking_reason = 11;
+  int32 planning_attempts = 12;
+  int32 implementation_attempts = 13;
+  int32 pipeline_repair_attempts = 14;
+  int32 ci_repair_attempts = 15;
+  int32 review_cycles = 16;
+  string created_at = 17;
+  string updated_at = 18;
+}
 message ListWorkflowsResponse { repeated Workflow workflows = 1; }
+message GetWorkflowRequest { string workflow_run_id = 1; }
+message GetWorkflowResponse { Workflow workflow = 1; }
+message WorkflowEvent {
+  string id = 1;
+  string event_type = 2;
+  string created_at = 3;
+  string payload_json = 4;
+}
+message ListWorkflowEventsRequest { string workflow_run_id = 1; int64 after_id = 2; int32 limit = 3; }
+message ListWorkflowEventsResponse { repeated WorkflowEvent events = 1; string next_cursor = 2; }
 message ListRunnersRequest {}
 message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; }
 message ListRunnersResponse { repeated Runner runners = 1; }

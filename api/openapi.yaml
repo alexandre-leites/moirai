@@ -361,6 +361,35 @@ paths:
                       $ref: '#/components/schemas/Workflow'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/workflows/{workflow_id}:
+    get:
+      summary: Get workflow details
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+      responses:
+        '200': { description: Workflow details, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowDetail' } } } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/workflows/{workflow_id}/events:
+    get:
+      summary: List workflow events newest first
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/WorkflowID'
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200': { description: Workflow events, content: { application/json: { schema: { $ref: '#/components/schemas/WorkflowEventsPage' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /api/v1/workflows/{workflow_id}/decision:
     post:
       summary: Submit a required human decision
@@ -585,6 +614,42 @@ components:
         projectId: { type: string }
         status: { type: string }
         phase: { type: string }
+    WorkflowDetail:
+      allOf:
+        - $ref: '#/components/schemas/Workflow'
+        - type: object
+          required: [issueExternalId, issueTitle, branchName, planningAttempts, implementationAttempts, pipelineRepairAttempts, ciRepairAttempts, reviewCycles, createdAt, updatedAt]
+          properties:
+            issueExternalId: { type: string }
+            issueTitle: { type: string }
+            branchName: { type: string }
+            pullRequestExternalId: { type: string }
+            pullRequestUrl: { type: string }
+            pullRequestState: { type: string }
+            blockingReason: { type: string }
+            planningAttempts: { type: integer, minimum: 0 }
+            implementationAttempts: { type: integer, minimum: 0 }
+            pipelineRepairAttempts: { type: integer, minimum: 0 }
+            ciRepairAttempts: { type: integer, minimum: 0 }
+            reviewCycles: { type: integer, minimum: 0 }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+    WorkflowEvent:
+      type: object
+      required: [id, type, createdAt, payload]
+      properties:
+        id: { type: string }
+        type: { type: string }
+        createdAt: { type: string, format: date-time }
+        payload: {}
+    WorkflowEventsPage:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/WorkflowEvent' }
+        nextCursor: { type: string }
     Health:
       type: object
       required: [status, orchestrator]

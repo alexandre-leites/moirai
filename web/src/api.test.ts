@@ -94,6 +94,12 @@ describe("createApiClient CSRF handling", () => {
     }
   });
 
+  it("encodes workflow event cursors", async () => {
+    const { calls, fetchClient } = recorder(() => jsonResponse({ events: [] }));
+    await createApiClient(fetchClient).listWorkflowEvents("workflow/a", "42?bad");
+    expect(calls[0].url).toBe("/api/v1/workflows/workflow%2Fa/events?cursor=42%3Fbad");
+  });
+
   it("sends no CSRF header at all when the cookie is absent", async () => {
     const { calls, fetchClient } = recorder(() => jsonResponse({ id: "p1" }));
     await createApiClient(fetchClient).setProjectEnabled("p1", true);
@@ -127,6 +133,8 @@ describe("createApiClient CSRF handling", () => {
       ["me", (api) => api.me()],
       ["listProjects", (api) => api.listProjects()],
       ["listWorkflows", (api) => api.listWorkflows()],
+      ["getWorkflow", (api) => api.getWorkflow("w1")],
+      ["listWorkflowEvents", (api) => api.listWorkflowEvents("w1")],
       ["listTokens", (api) => api.listTokens()],
       ["listRunners", (api) => api.listRunners()],
     ];

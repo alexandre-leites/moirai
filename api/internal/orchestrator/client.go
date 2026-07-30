@@ -276,6 +276,26 @@ func (c *Client) ListWorkflows(ctx context.Context) (*controlv1.ListWorkflowsRes
 	return resp, nil
 }
 
+func (c *Client) GetWorkflow(ctx context.Context, workflowRunID string) (*controlv1.GetWorkflowResponse, error) {
+	resp, err := c.client.GetWorkflow(ctx, &controlv1.GetWorkflowRequest{WorkflowRunId: workflowRunID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) ListWorkflowEvents(ctx context.Context, workflowRunID string, afterID int64, limit int32) (*controlv1.ListWorkflowEventsResponse, error) {
+	resp, err := c.client.ListWorkflowEvents(ctx, &controlv1.ListWorkflowEventsRequest{
+		WorkflowRunId: workflowRunID,
+		AfterId:       afterID,
+		Limit:         limit,
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) SubmitHumanDecision(ctx context.Context, workflowRunID, decision, comment string) (*controlv1.SubmitHumanDecisionResponse, error) {
 	resp, err := c.client.SubmitHumanDecision(ctx, &controlv1.SubmitHumanDecisionRequest{
 		WorkflowRunId: workflowRunID,

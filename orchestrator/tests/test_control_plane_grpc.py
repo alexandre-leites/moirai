@@ -124,6 +124,24 @@ class FakeControlPlane:
             }
         ]
 
+    async def get_workflow(self, workflow_run_id: str) -> dict[str, object] | None:
+        if workflow_run_id != "workflow-1":
+            return None
+        return {
+            "id": "workflow-1", "project_id": "project-1", "status": "blocked", "phase": "blocked",
+            "issue_external_id": "42", "issue_title": "Fix it", "branch_name": "agent/42/fix",
+            "pull_request_external_id": "7", "pull_request_url": "https://example.test/pull/7",
+            "pull_request_state": "open", "blocking_reason": "needs help", "planning_attempts": 1,
+            "implementation_attempts": 2, "pipeline_repair_attempts": 3, "review_cycles": 4,
+            "ci_repair_attempts": 5, "total_agent_executions": 6, "created_at": NOW, "updated_at": NOW,
+        }
+
+    async def list_workflow_events(
+        self, workflow_run_id: str, after_id: int, limit: int
+    ) -> list[dict[str, object]]:
+        self.event_request = (workflow_run_id, after_id, limit)
+        return [{"id": "8", "event_type": "log", "payload_json": '{"message":"agent output"}', "created_at": NOW}]
+
     async def record_human_decision(
         self, workflow_run_id: str, decision: str, comment: str | None, actor_user_id: str | None, now: datetime
     ) -> dict[str, object]:
@@ -289,6 +307,20 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
             control_plane_pb2.ListWorkflowsRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(workflows.workflows[0].phase, "prepare_workspace")
+        workflow = await self.client.GetWorkflow(
+            control_plane_pb2.GetWorkflowRequest(workflow_run_id="workflow-1"),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(workflow.workflow.issue_title, "Fix it")
+        events = await self.client.ListWorkflowEvents(
+            control_plane_pb2.ListWorkflowEventsRequest(workflow_run_id="workflow-1", after_id=9, limit=2),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(events.events[0].event_type, "log")
+        self.assertEqual(self.control_plane.event_request, ("workflow-1", 9, 2))
+        with self.assertRaises(grpc.aio.AioRpcError) as missing:
+            await self.client.GetWorkflow(control_plane_pb2.GetWorkflowRequest(workflow_run_id="missing"))
+        self.assertEqual(missing.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
         with self.assertRaises(grpc.aio.AioRpcError) as invalid:
             await self.client.CreateRunnerRegistrationToken(
                 control_plane_pb2.CreateRunnerRegistrationTokenRequest(allowed_labels=["docker", "docker"]),
