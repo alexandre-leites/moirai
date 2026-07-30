@@ -207,6 +207,33 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             token=_registration_token_message(token)
         )
 
+    async def Logout(
+        self,
+        request: control_plane_pb2.LogoutRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.LogoutResponse:
+        del request
+        now = self._now()
+        metadata = context.invocation_metadata() or ()
+        raw_token = next((value for key, value in metadata if key.lower() == _SESSION_METADATA_KEY), "")
+        token = raw_token if isinstance(raw_token, str) else raw_token.decode("utf-8", errors="replace")
+        if token:
+            try:
+                session = await self._control_plane.validate_session(token, None, now, False)
+            except (NotImplementedError, PermissionError, ValueError):
+                session = None
+            if session is not None:
+                await self._control_plane.revoke_session(token, now)
+                await self._control_plane.append_audit(
+                    actor_user_id=session.user_id,
+                    action="user.logout",
+                    resource_type="user",
+                    resource_id=session.user_id,
+                    outcome="succeeded",
+                    now=now,
+                )
+        return control_plane_pb2.LogoutResponse()
+
     async def ListWorkflows(
         self,
         request: control_plane_pb2.ListWorkflowsRequest,

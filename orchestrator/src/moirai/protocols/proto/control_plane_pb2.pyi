@@ -300,6 +300,14 @@ class SetRunnerStateResponse(_message.Message):
     runner: Runner
     def __init__(self, runner: _Optional[_Union[Runner, _Mapping]] = ...) -> None: ...
 
+class LogoutRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class LogoutResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
 class SubmitHumanDecisionRequest(_message.Message):
     __slots__ = ("workflow_run_id", "decision", "comment")
     WORKFLOW_RUN_ID_FIELD_NUMBER: _ClassVar[int]

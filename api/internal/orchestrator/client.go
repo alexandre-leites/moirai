@@ -170,6 +170,11 @@ func (c *Client) Healthy() bool {
 	return state == connectivity.Ready || state == connectivity.Idle
 }
 
+func (c *Client) Logout(ctx context.Context) error {
+	_, err := c.client.Logout(ctx, &controlv1.LogoutRequest{})
+	return mapError(err)
+}
+
 func (c *Client) Login(ctx context.Context, username, password string) (*controlv1.LoginResponse, error) {
 	resp, err := c.client.Login(ctx, &controlv1.LoginRequest{
 		Username: username,

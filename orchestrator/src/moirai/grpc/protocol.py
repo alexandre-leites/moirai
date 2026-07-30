@@ -152,6 +152,18 @@ class ControlPlane(Protocol):
 
     async def list_runners(self) -> list[RunnerRecord]: ...
 
+    async def revoke_session(self, session_token: str, now: datetime) -> None: ...
+
+    async def append_audit(
+        self,
+        actor_user_id: str | None,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        outcome: str,
+        now: datetime,
+    ) -> None: ...
+
     async def set_runner_state(
         self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
     ) -> RunnerRecord: ...

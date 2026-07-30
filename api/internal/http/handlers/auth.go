@@ -58,7 +58,11 @@ func (h *AuthHandlers) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandlers) logout(w http.ResponseWriter, r *http.Request) {
-	_ = r
+	token, ok := auth.SessionToken(r.Context())
+	if ok && token != "" && h.client != nil {
+		ctx := orchestrator.WithSession(r.Context(), token)
+		_ = h.client.Logout(ctx)
+	}
 	auth.ClearSessionCookies(w, h.cookieSecure)
 	w.WriteHeader(http.StatusNoContent)
 }
