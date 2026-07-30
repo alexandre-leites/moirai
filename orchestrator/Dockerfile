@@ -1,7 +1,7 @@
 # uv only ever runs on the build platform: it turns the committed uv.lock into a
 # hash-pinned requirements file, which is architecture-independent because the
 # lock is universal and carries every platform's wheel hashes.
-FROM --platform=$BUILDPLATFORM ghcr.io/astral-sh/uv:0.11.26@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 AS uv
+FROM --platform=$BUILDPLATFORM ghcr.io/astral-sh/uv:0.12.0@sha256:606e70c71c852d03f611b1e56a195d08648507018a7057fab82c4974c4eae105 AS uv
 
 FROM --platform=$BUILDPLATFORM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6 AS requirements
 COPY --from=uv /uv /usr/local/bin/uv
