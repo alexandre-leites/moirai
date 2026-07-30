@@ -3725,3 +3725,23 @@ Implement backend fallback only after a runner task-packet backend-selection con
 - Validation passed: `make test-web` — TypeScript no-emit, ESLint (10 pre-existing warnings; 0 errors), Vitest (139 passed); `git diff --check`.
 - Adversarial review: checked session credentials and URL encoding on reads, initial/detail and paginated event failures, empty-state distinction, nested runner `payload.message` logs, newest-first ordering across pages, cursor exhaustion, external PR link isolation, and abort protection. No remaining issue-117 finding.
 - Scope check: only `web/` implementation/tests plus append-only `PROGRESS.md`; API, orchestrator, runner, and proto unchanged.
+
+## In Progress — Issue #106 task-packet context
+
+- In progress: 2026-07-30T05:00:00Z
+- Agent/session identifier: issue-106
+- Branch: `issue-106`
+- Scope: orchestrator task-packet workflow persistence/tests and append-only `PROGRESS.md`; API, web, runner, and proto excluded.
+- Current state: tracing planner, review, pipeline, and terminal-result persistence into packet context.
+- Definition of done: packets carry bounded actionable plan, acceptance criteria, failure, review, pipeline, commit, and diff context; targeted and service validation pass.
+- Targeted validation: task-packet/control-plane tests, `make test-orchestrator`, `make lint`, `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-106`, `git diff --check`.
+
+## Done — Issue #106 task-packet context
+
+- Completed: 2026-07-30T05:10:00Z
+- Agent/session identifier: issue-106
+- Behavior delivered: `build_task_packet` now derives checklist acceptance criteria, keeps validated planner criteria and steps, latest review findings, failed pipeline command/exit/output tails, human-readable previous terminal failures, current commit, and changed-file diff summary. Terminal events persist full execution context even if the `started` event was lost, write `current_commit` from `finalRevision`, and retain pipeline result evidence. Runner terminal payloads now send bounded failed pipeline command output.
+- Validation passed: focused task-packet/control-plane suite (92 tests); full orchestrator suite (503 passed, 34 skipped); Ruff; Mypy (48 source files); `gofmt`; `git diff --check`.
+- Adversarial review: checked malformed planner result rejection, terminal-only planner persistence, payload entry limits, checklist fallback and planner criteria merge, failure fingerprint omission, output-tail selection, stale/empty revision rejection, pipeline-result fallback, and terminal payload field limit. No remaining issue #106 finding.
+- Known validation blocker: `PATH=/tmp/opencode/go/bin:$PATH go test ./internal/dispatch -run TestTerminalPayloadIncludesBoundedFailedPipelineOutput` cannot compile the unchanged `runner/internal/control/offer.go:186` (`jobID` declared and unused). Runner source changed only because command-level exit/output evidence cannot be reconstructed in the orchestrator.
+- Next recommended implementation: issue #114 pipeline configuration write path, then validate task-packet pipeline evidence against PostgreSQL.

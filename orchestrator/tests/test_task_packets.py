@@ -156,6 +156,25 @@ class TaskPacketTests(unittest.TestCase):
         self.assertEqual(packet["pipeline"], [{"command": "make test", "timeoutSeconds": 300}])
         self.assertEqual(packet["constraints"], {"mayModifyFiles": False, "mayPush": False, "mayMerge": False})
 
+    def test_factory_rejects_context_entries_larger_than_eight_kib(self) -> None:
+        with self.assertRaisesRegex(ValueError, "context"):
+            build_task_packet(
+                task_execution(
+                    job_id="job-1",
+                    execution_id="request-1-implement",
+                    role="developer",
+                    project_id="project-1",
+                    issue_external_id="42",
+                    issue_title="Title",
+                    issue_body="Body",
+                    repository_mode="managed_clone",
+                    repository_url="https://example.test/repository.git",
+                    local_repository_path=None,
+                    default_branch="main",
+                    plan=("x" * (8 * 1024 + 1),),
+                )
+            )
+
     def test_factory_rejects_invalid_repository_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "repository URL"):
             build_task_packet(
