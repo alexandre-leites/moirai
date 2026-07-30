@@ -3683,6 +3683,8 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 - Validation passed: `go test ./...` and `go vet ./...` in `api`; Web Vitest (131), TypeScript, ESLint (10 existing warnings); orchestrator full suite (488 passed, 33 skipped), targeted gRPC/migration suites, Ruff; Buf lint/generation; `git diff --check`.
 - Validation blocked: runner suite has pre-existing compile failures in `runner/internal/pipeline/pipeline.go:49` and `runner/internal/control/offer.go:186`, plus an unrelated OpenCode continuation assertion. `mypy src` has 107 pre-existing generated/unrelated diagnostics. PostgreSQL integration requires `LOOP_TEST_DATABASE_URL` and was skipped.
 - Adversarial review: found and fixed operator-drain ownership race; separate `operator_draining` prevents runner reports from re-enabling placement. Checked revoke ordering, stream closure, CSRF/admin mapping, nil labels, and legacy drain compatibility. No remaining issue-119 finding.
+- Rebased: 2026-07-30 onto `origin/main` for PR #187. Retained #105's `009_non_delivery_outcomes.sql` test and moved the drain migration to `010_runner_operator_drain.sql`.
+- Rebase validation: focused migration (12), control-plane gRPC (13), and runner gRPC (8) tests passed via `uv`. API tests/vet could not run because `go` is unavailable. Full migration discovery remains blocked by pre-existing duplicate version `008` in `origin/main`.
 
 ## Next Recommended Implementation
 
