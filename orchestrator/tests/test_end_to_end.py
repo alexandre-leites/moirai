@@ -270,6 +270,7 @@ _DURABLE_COUNTERS = (
     "pipeline_repair_attempts",
     "review_cycles",
     "ci_repair_attempts",
+    "github_check_poll_attempts",
     "total_agent_executions",
     "blocking_reason",
     "branch_name",
@@ -312,6 +313,7 @@ class _WorkflowStore:
             "pipeline_repair_attempts": 0,
             "review_cycles": 0,
             "ci_repair_attempts": 0,
+            "github_check_poll_attempts": 0,
             "total_agent_executions": 0,
         }
 
@@ -403,6 +405,7 @@ class _EventDrivenWorkflow:
         human_approval_required: bool = False,
         code_host: Any = None,
         issue_tracker: Any = None,
+        budget: Any = None,
     ) -> None:
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -419,13 +422,17 @@ class _EventDrivenWorkflow:
             self.store,
             code_host_factory=None if code_host is None else (lambda project_id: code_host),
             issue_tracker_factory=None if issue_tracker is None else (lambda project_id: issue_tracker),
+            **({} if budget is None else {"budget": budget}),
             # The merge node pauses between the reads that confirm a merge.
             # These tests spend that budget deliberately, so the clock is not
             # part of the harness.
             sleep=_no_sleep,
         )
         self.graph = build_issue_graph(
-            nodes.build(), checkpointer=InMemorySaver(), interrupt_before=("wait_for_human",)
+            nodes.build(),
+            **({"budget": budget} if budget is not None else {}),
+            checkpointer=InMemorySaver(),
+            interrupt_before=("wait_for_human",),
         )
         self.runtime = PersistedWorkflowRuntime(self.graph, self.store, has_checkpointer=True)
 
@@ -804,6 +811,79 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code_host.merged_prs, [])
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_pending_checks_are_repolled_and_green_checks_merge(self) -> None:
+        code_host = _FakeCodeHost(checks_pending=True)
+        workflow = _EventDrivenWorkflow(code_host=code_host, issue_tracker=_FakeIssueTracker())
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        state = await workflow.deliver("developer", "implement")
+
+        self.assertEqual(state["status"], "waiting_github_checks")
+        self.assertEqual(workflow.store.durable["github_check_poll_attempts"], 1)
+        self.assertEqual(code_host.checked_prs, ["42"])
+
+        code_host.checks_pending = False
+        state = await workflow.runtime.run(
+            workflow.store.workflow_run_id, {"status": "waiting_github_checks", "poll_github_checks": True}
+        )
+
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(workflow.store.durable["github_check_poll_attempts"], 2)
+        self.assertEqual(code_host.checked_prs, ["42", "42"])
+        self.assertEqual(code_host.merged_prs, [("42", "squash")])
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_pending_checks_that_turn_red_reach_ci_repair(self) -> None:
+        code_host = _FakeCodeHost(checks_pending=True)
+        workflow = _EventDrivenWorkflow(code_host=code_host, issue_tracker=_FakeIssueTracker())
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        await workflow.deliver("developer", "implement")
+
+        code_host.checks_pending = False
+        code_host.checks_pass = False
+        state = await workflow.runtime.run(
+            workflow.store.workflow_run_id, {"status": "waiting_github_checks", "poll_github_checks": True}
+        )
+
+        self.assertEqual(state["status"], "repairing")
+        self.assertEqual(workflow.store.roles[-1], "repairer")
+        self.assertEqual(workflow.store.durable["ci_repair_attempts"], 1)
+        self.assertEqual(workflow.store.durable["github_check_poll_attempts"], 2)
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_pending_checks_block_when_poll_limit_is_exhausted(self) -> None:
+        from moirai.workflows.policy import RetryBudget
+
+        code_host = _FakeCodeHost(checks_pending=True)
+        workflow = _EventDrivenWorkflow(
+            code_host=code_host,
+            issue_tracker=_FakeIssueTracker(),
+            budget=RetryBudget(github_check_poll_attempts=2),
+        )
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+        await workflow.deliver("developer", "implement")
+
+        state = await workflow.runtime.run(
+            workflow.store.workflow_run_id, {"status": "waiting_github_checks", "poll_github_checks": True}
+        )
+
+        self.assertEqual(state["status"], "blocked")
+        self.assertEqual(state["blocking_reason"], "GitHub check polling limit exhausted")
+        self.assertEqual(workflow.store.durable["github_check_poll_attempts"], 2)
+        self.assertEqual(code_host.checked_prs, ["42", "42"])
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_human_approval_interrupt_pauses_before_merge(self) -> None:
         """With human approval required the graph stops before wait_for_human
         and merges only once the decision resumes it."""
@@ -955,11 +1035,15 @@ class _FakeCodeHost:
     re-read, and only then complete.
     """
 
-    def __init__(self, checks_pass: bool = True, merges: bool = True, closes: bool = False) -> None:
+    def __init__(
+        self, checks_pass: bool = True, checks_pending: bool = False,
+        merges: bool = True, closes: bool = False,
+    ) -> None:
         self.created_prs: list[tuple[str, str, str, str, str | None]] = []
         self.checked_prs: list[str] = []
         self.merged_prs: list[tuple[str, str]] = []
         self.checks_pass = checks_pass
+        self.checks_pending = checks_pending
         # merges=False models the case the verification exists for: the merge
         # command succeeds and the pull request stays open. closes=True models
         # someone closing it while the run waited.
@@ -989,7 +1073,9 @@ class _FakeCodeHost:
     async def required_checks(self, pull_request_id: str) -> list[Any]:
         self.checked_prs.append(pull_request_id)
         from moirai.code_hosts import CheckStatus, PullRequestCheck
-        status = CheckStatus.PASSING if self.checks_pass else CheckStatus.FAILING
+        status = CheckStatus.PENDING if self.checks_pending else (
+            CheckStatus.PASSING if self.checks_pass else CheckStatus.FAILING
+        )
         return [PullRequestCheck(name="ci", status=status)]
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:

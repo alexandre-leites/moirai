@@ -2430,6 +2430,19 @@ class AsyncpgControlPlane:
         )
         return len(rows)
 
+    async def find_workflow_runs_waiting_for_checks(self, limit: int = 50) -> tuple[str, ...]:
+        rows = await self._pool.fetch(
+            """
+            SELECT id
+            FROM app.workflow_runs
+            WHERE status = 'waiting_github_checks' AND current_phase = 'waiting_github_checks'
+            ORDER BY updated_at, id
+            LIMIT $1
+            """,
+            limit,
+        )
+        return tuple(str(row["id"]) for row in rows)
+
     async def find_stalled_workflow_runs(
         self, now: datetime, stale_after: timedelta, limit: int = 50
     ) -> tuple[str, ...]:

@@ -33,6 +33,7 @@ class RetryBudget:
     pipeline_repair_attempts: int = 3
     review_cycles: int = 3
     ci_repair_attempts: int = 3
+    github_check_poll_attempts: int = 20
     total_agent_executions: int = 10
     # How many times the merge node re-reads a pull request the code host has
     # not yet reported merged before the run blocks. Spent inside one node

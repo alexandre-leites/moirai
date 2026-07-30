@@ -20,9 +20,7 @@ class WorkflowCheckpointStore(Protocol):
 
 
 class WorkflowGraph(Protocol):
-    def ainvoke(
-        self, state: dict[str, object] | None, config: dict[str, object]
-    ) -> Awaitable[dict[str, object]]: ...
+    def ainvoke(self, state: object, config: dict[str, object]) -> Awaitable[dict[str, object]]: ...
 
     def aupdate_state(
         self, config: dict[str, object], values: dict[str, object]
@@ -132,7 +130,12 @@ class PersistedWorkflowRuntime:
                         result = self._graph.ainvoke({**state_updates, "workflow_run_id": workflow_run_id}, config)
                     else:
                         await self._graph.aupdate_state(config, state_updates)
-                        result = self._graph.ainvoke(None, config)
+                        if state_updates.get("poll_github_checks") is True:
+                            from langgraph.types import Command
+
+                            result = self._graph.ainvoke(Command(resume="poll"), config)
+                        else:
+                            result = self._graph.ainvoke(None, config)
             else:
                 checkpoint = await self._checkpoints.latest_checkpoint(workflow_run_id)
                 state = {**(checkpoint[1] if checkpoint is not None else {}), **state_updates}

@@ -23,6 +23,7 @@ _DURABLE_COLUMNS: dict[str, str] = {
     "pipeline_repair_attempts": "pipeline_repair_attempts",
     "review_cycles": "review_cycles",
     "ci_repair_attempts": "ci_repair_attempts",
+    "github_check_poll_attempts": "github_check_poll_attempts",
     "total_agent_executions": "total_agent_executions",
     "blocking_reason": "blocking_reason",
     "branch_name": "branch_name",
@@ -225,7 +226,8 @@ class AsyncpgWorkflowPersistence:
                     """
                     SELECT wr.id, wr.project_id, wr.status, wr.branch_name, wr.planning_attempts,
                            wr.implementation_attempts, wr.pipeline_repair_attempts, wr.review_cycles,
-                           wr.ci_repair_attempts, wr.total_agent_executions, wr.blocking_reason,
+                            wr.ci_repair_attempts, wr.github_check_poll_attempts, wr.total_agent_executions, wr.blocking_reason,
+
                            wr.pull_request_external_id, wr.pull_request_url, i.external_id,
                            i.human_approval_required, p.default_branch, p.configuration,
                            j.id AS job_id
@@ -294,6 +296,7 @@ class AsyncpgWorkflowPersistence:
             "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
             "review_cycles": int(record["review_cycles"]),
             "ci_repair_attempts": int(record["ci_repair_attempts"]),
+            "github_check_poll_attempts": int(record["github_check_poll_attempts"]),
             "total_agent_executions": int(record["total_agent_executions"]),
             "blocking_reason": _optional_text(record["blocking_reason"]),
             "pull_request_id": _optional_text(record["pull_request_external_id"]),

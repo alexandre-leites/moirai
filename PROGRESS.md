@@ -3571,6 +3571,17 @@ An adversarial review of the committed diff (`ae07534`) found three more issues.
 
 Review findings accepted without change: the API's request metrics cannot pre-materialise their label children the way the runner's do (routes are registered by handlers after the server is built, and the RPC-by-status-code cross product is large) — `api/README.md` now explains the asymmetry and says to alert on `absent()` rather than assume a series exists; `orchestratorCalls` stays a package variable because the interceptor that writes it is installed at dial time, before any server exists to hold it; a 405 lands in `route="unmatched"` because the mux answers it from a handler it never registered, which the route-label comment and the README now state.
 
+## Issue #155 GitHub check repolling
+
+- Completed: 2026-07-30
+- Agent/session: issue-155
+- Scope: `orchestrator/` production, tests, and migration only.
+- Behavior delivered: pending GitHub checks suspend at a resumable graph node; workflow maintenance polls up to 20 parked runs every 30 seconds; a resumed node polls GitHub again, then reaches merge or CI repair from its terminal verdict. `github_check_poll_attempts` persists in `app.workflow_runs`; the twentieth pending poll blocks with `GitHub check polling limit exhausted`.
+- Files: `orchestrator/src/moirai/main.py`, `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/workflows/{issue_graph,nodes,persistence,policy,runtime}.py`, `orchestrator/migrations/008_github_check_polling.sql`, and focused orchestrator tests.
+- Validation: `PYTHONPATH=orchestrator/src PYTHONPYCACHEPREFIX=/tmp/moirai-issue-155-pycache /tmp/moirai-issue-155-venv/bin/python -m unittest discover -s orchestrator/tests` passed (463 tests, 33 skipped); Ruff and Mypy passed with `/tmp/moirai-issue-155-*` caches.
+- Review: adversarial diff review found no remaining issue; `git diff --check` passed.
+- Next: no issue #155 work remains; review and merge PR when CI passes.
+
 ---
 
 # Issue #122 — Pipeline environment isolation

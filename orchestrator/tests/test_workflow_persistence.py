@@ -39,7 +39,7 @@ class _Connection:
                 "status": self.status, "branch_name": None,
                 "planning_attempts": 1, "implementation_attempts": 2,
                 "pipeline_repair_attempts": 0, "review_cycles": 1,
-                "ci_repair_attempts": 0, "total_agent_executions": 4,
+                "ci_repair_attempts": 0, "github_check_poll_attempts": 0, "total_agent_executions": 4,
                 "blocking_reason": None, "pull_request_external_id": "42",
                 "pull_request_url": "https://github.com/example/repo/pull/42",
                 "external_id": "42", "human_approval_required": True,
