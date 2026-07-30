@@ -2307,6 +2307,131 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 ---
 
+# Session: Autonomy L1 / issue #104 — runner-side goal gate and session-resume continuation loop (branch `issue-104`)
+
+## Current Status
+
+- Overall status: Implemented and validated locally. Pull request [#164](https://github.com/alexandre-leites/moirai/pull/164) opened against `main` and deliberately left unmerged. `origin/main` was merged into the branch after PR #160 landed; both `PROGRESS.md` session entries were kept.
+- Current phase: Autonomy roadmap L1 from `docs/reviews/2026-07-29-platform-review.md`.
+- Active implementation: complete — agent `issue-104`, 2026-07-29.
+- Last updated: 2026-07-29.
+- Agent/session identifier: `issue-104`.
+
+## Done
+
+- [x] Runner-side goal gate and continuation loop (Autonomy L1, issue #104)
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/dispatch/goalgate.go` (new), `runner/internal/dispatch/goalgate_test.go` (new), `runner/internal/dispatch/dispatch.go`, `runner/internal/dispatch/control_loop.go` (two additive hunks), `runner/internal/dispatch/dispatch_test.go`, `runner/internal/agents/opencode.go`, `runner/internal/agents/cli.go`, `runner/internal/agents/docker.go`, `runner/internal/agents/log.go`, `runner/internal/agents/continuation_test.go` (new), `runner/internal/config/config.go`, `runner/internal/config/config_test.go`, `runner/cmd/runner/main.go`, `runner/README.md`.
+  - Behavior delivered:
+    - **Goal gate.** After the agent returns, `Dispatcher.evaluateGoalGate` decides *delivered* from evidence only: a valid result document (an absent or invalid one already arrives as `agents.ErrNoResultEvidence` from #89, which is merged and confirmed present in `opencode.go`), `status == "completed"`, an empty `remainingWork`, and — for a role with `mayModifyFiles` — a workspace change measured with the existing `RevisionInspector.Snapshot` machinery. The diff check does not apply to read-only roles and is skipped rather than failed when no inspector is configured or the snapshot errors, so an unmeasurable workspace can never manufacture a continuation.
+    - **Continuation loop.** A failed gate with budget left re-invokes the backend through a new `agents.Backend.Continue`, resuming the `sessionId` the result document reported. `sessionId` was previously captured and used for nothing. `OpenCodeBackend.Continue` adds `--session <id>` before the prompt; `CLIBackend` and `DockerCLIBackend` implement the contract's fresh-run fallback, which is also what an execution with no captured session takes.
+    - **Continuation prompt** names the missing evidence in the agent's own terms ("No result document was written at `.loop/result.json`", "You listed work as still remaining: …", "No file in the repository was changed") and then repeats the role's whole original prompt verbatim, because the fallback path starts a fresh agent that must be held to the same role, plan, prior failures, and review findings — and, for a reviewer, the same independence framing. Each prompt is kept as `.loop/continuation-<n>.md`.
+    - **Loop guard.** The verdict is fingerprinted from a closed reason vocabulary, the sorted `remainingWork` list, and the revision plus sorted changed-path set. Two consecutive identical fingerprints end the run. Nothing agent-authored beyond `remainingWork`, and no timestamp, path, exit code, or map iteration, enters the signature.
+    - **Evidence hygiene.** The finished attempt's result document is renamed to `.loop/result-attempt-<n>.json` before each continuation, so a continuation that exits without writing anything is not assessed against its predecessor's document. A document that cannot be moved aside stops the loop instead.
+    - **Never worse than one shot.** An attempt that ended in an executor error — a signal, a timeout, or a clean exit with no result document — never overrides one that did not, so a crashed continuation cannot replace a delivery, or an agent-declared block's stated reason (#97), with an anonymous failure. Outcomes the agent itself reached are not ranked against each other and the later one stands, so an agent that completes and then declares itself blocked keeps its retraction.
+    - **Bounds.** Five independent exits: budget, loop guard, cancelled context, an unclearable result document, and the packet deadline. `timeoutSeconds` bounds the *total* agent wall clock: the deadline is anchored before the first invocation, which still receives exactly the packet timeout, and each continuation receives only what is left. Lease renewal needed no change — `StreamSupervisor`'s heartbeat drives `ControlLoop.Reconcile` → `OfferState.RenewDue` on its own ticker while executions run in their own goroutines, so it never depended on execution duration, and the total wall clock is unchanged.
+    - **Reporting.** `Result` gained `continuations` and `gateVerdict`; `terminalPayload` reports them (count omitted when zero) and both are kept by the reduced-payload retry. The payload stays at 24 keys against the orchestrator's `MAX_PAYLOAD_FIELDS = 32`, and `runner_events.py` ignores keys it does not read, so no orchestrator change was needed.
+    - **Configuration.** `LOOP_RUNNER_MAX_CONTINUATIONS` (default `3`, range `0`–`10`; `0` switches the goal loop off). `Dispatcher.MaxContinuations` defaults to the Go zero value, so a dispatcher assembled field by field — every pre-existing test — keeps exactly its old one-shot behavior, gate included.
+  - Validation performed: see Validation Status.
+  - Commands executed: `make test-runner`; `make test-api`; `make build-runner`; `cd runner && go vet ./...`; `cd runner && gofmt -l .`.
+  - Notes: no migration, no proto change, no orchestrator change, no schema change.
+
+## Decisions
+
+- Decision: the gate never rewrites an outcome into a different one; it decides whether to continue, which attempt is reported, and what travels alongside it.
+  - Context: the issue's five-part design lists reporting, not re-classification, and Autonomy L2 (#105) owns making non-delivery a first-class workflow outcome.
+  - Alternatives considered: failing a run whose gate never passed.
+  - Reason: that would change the orchestrator's contract from the runner side, ahead of the layer that is meant to absorb it, and would turn every `completed`-with-`remainingWork` run into a failure overnight.
+  - Consequences: a run can still report `completed` with `gateVerdict: "not delivered (…)"`. That pairing is the signal #105 will consume.
+
+- Decision: an attempt that ended in an executor error never overrides one that did not; clean outcomes are not ranked against each other.
+  - Context: adversarial review demonstrated that a crashed continuation replaced a `completed` delivery and an agent-declared `blocked` reason with an anonymous failure — a regression the same execution does not have with the loop switched off.
+  - Alternatives considered: reporting the last attempt and accepting the regression; refusing to continue anything that already completed; a full ordering of `completed` > `blocked` > `failed`.
+  - Reason: a continuation exists to improve on the attempt before it, so it must not be able to make it worse — and every destructive case is an executor error, which the terminal event already refuses to trust. A full ordering was written first and then rejected: it inverted the agent's own latest word, so an agent that completed and then declared itself blocked would have had that retraction, and its stated reason, discarded. Refusing to continue a `completed` run would have discarded the issue's central case (completed with `remainingWork`).
+  - Consequences: a reported `completed` can come from an earlier attempt than the last one. The mandatory local pipeline (#90) still validates the delivered tree, so a later attempt that broke it is caught there rather than by the gate.
+
+- Decision: the continuation budget lives on the runner, not in the packet.
+  - Context: the issue calls for a config value, e.g. `MaxContinuations: 3`, per execution.
+  - Alternatives considered: a task-packet field.
+  - Reason: a packet field is a protocol change, which the issue explicitly rules out ("no orchestrator or protocol changes"), and the cost of a continuation is a runner-local resource question.
+  - Consequences: the budget is uniform across a runner's projects. `LOOP_RUNNER_MAX_CONTINUATIONS=0` is the per-runner escape hatch.
+
+- Decision: hash the diff from the revision and the changed-path set rather than from file contents.
+  - Context: the loop guard needs "the same diff hash".
+  - Alternatives considered: hashing changed-file contents; hashing mtimes.
+  - Reason: revision plus paths is the whole of what the existing snapshot machinery reports, which is what the issue said to reuse; mtimes change on every rewrite and would keep the guard from ever tripping.
+  - Consequences: two continuations that rewrite the same files with different content share a diff component and can read as no progress. The guard errs toward stopping, the budget still bounds the case it misjudges, and every reason code and the remaining-work list have to match as well before it trips.
+
+## Cross-ownership note
+
+`runner/internal/dispatch/control_loop.go` and `runner/README.md` were assigned to the concurrent issue #124 (metrics) while this work ran. Acceptance criterion 2 ("terminal payloads report continuation counts") is not satisfiable without `terminalPayload`, which lives in `control_loop.go`, and the runner's configuration reference lives in `runner/README.md`. Both were touched as narrowly as possible — two additive hunks in `terminalPayload` and `minimalTerminalPayloadKeys`, and one table row plus one new section in the README — in regions #124's stated scope does not name (it calls for metric setter calls at the points that already track state, and a metric-name section). At the time of writing, `origin/issue-124` was still at `main`'s HEAD with no changes pushed. Flagged on the pull request and on the issue.
+
+## Post-review corrections
+
+An adversarial review of the diff found five issues; all were fixed before commit.
+
+- **A continuation inherited the previous attempt's result document** (high). The document is written at a fixed path and validated only against the execution ID, which every attempt shares. A continuation that exited without writing anything was assessed against its predecessor's document and could be declared *delivered* on evidence it never produced — the "a clean exit is not a result" hole #89 closed, re-opened inside one execution. Demonstrated end to end with a real `OpenCodeBackend` and a continuation whose whole body was `exit 0`. Fixed by `archiveResultDocument`, covered by `TestPreviousResultDocumentIsSetAsideBeforeAContinuation`.
+- **A failing continuation destroyed a better earlier outcome** (high). `completed` → `failed` and, worse, `blocked` (with its reason) → `failed` were both reproduced with the goal loop at its default budget. Fixed by the best-attempt rule above; covered by `TestAFailingContinuationCannotDestroyACompletedAttempt` and `TestAFailingContinuationCannotDestroyADeclaredBlock`.
+- **The continuation prompt was materially thinner than the original** (medium). It dropped `# ROLE`, the issue body, the plan, failed checks, review findings, previous failures, and a reviewer's entire independence framing. Harmless for a resumed session; not harmless for the fallback path, which every sessionless backend takes and which is also the most common continuation of all — no result document means no captured session. Fixed by prepending the continuation sections to `promptFor(packet)`; covered by `TestContinuationPromptCarriesTheWholeOriginalPrompt`.
+- **The appended agent log cleared its own truncation flag** (medium). `openAgentLog` seeded `written` and the hash but not `truncated`, so an attempt that hit the 4 MiB bound followed by a quiet continuation reported `stdoutTruncated: false`. Fixed by seeding `truncated`, and the doc comment now states plainly that the checksum covers the bytes on disk rather than everything the agent produced.
+- **Four overstated claims in `runner/README.md`** (low): "changes … an execution's wall clock" (only the *bound* is unchanged); "a declared block costs exactly one continuation" (only when the block is re-declared over an unchanged workspace); gate check 4 described as "diff non-empty" when the code also accepts a moved `HEAD`; and the missing `PROGRESS.md` entry, which is this section.
+
+Two further problems were found and fixed while re-checking the fixes themselves:
+
+- **A full outcome ordering inverted the agent's own latest word.** The first version of the best-attempt rule ranked `completed` above `blocked`, which meant an agent that completed and then, asked to continue, declared itself blocked had that retraction and its stated reason discarded. Replaced with "an executor error never overrides an outcome the agent reached, and clean outcomes are not ranked against each other"; covered by `TestALaterCleanRetractionWinsOverAnEarlierClaim`.
+- **The continuation prompt quoted agent text back unbounded.** Nothing bounds a result document, and the whole prompt travels as one argv element, so a verbose `remainingWork` or `summary` could grow it until the exec failed — spending a continuation on a process that never started. Both are now bounded with the same helpers the terminal payload uses; covered by `TestContinuationPromptBoundsWhatItQuotesBackFromTheAgent`.
+
+The review also confirmed, by execution rather than by reading, five things this change claims: the loop is non-recursive and cannot exceed its budget; the guard's signature contains nothing that varies between two evaluations of identical state; total wall clock stays inside `timeoutSeconds`; lease renewal genuinely runs independently of execution duration in this codebase; and `MaxContinuations == 0` is byte-for-byte the previous behavior.
+
+## Validation Status
+
+- Targeted tests: Passed — 20 new tests. `runner/internal/dispatch/goalgate_test.go`: continuation on `remainingWork` with the right prompt and resumed session; continuation on an empty developer diff; read-only roles skipping the diff check; the loop guard tripping before the budget; changing verdicts exhausting the budget; a missing result document being continued and recovering; zero budget staying single-shot; continuations sharing the packet timeout; an exhausted time budget; a cancelled execution not being continued; a declared block continued once; signature stability and set-insensitivity; an unmeasurable and an absent inspector both skipping check (d); continuation prompts recorded in the workspace; the terminal payload and its reduced form; the result document set aside before a continuation; a failing continuation unable to destroy a `completed` or a `blocked` attempt; the continuation prompt carrying the whole original prompt. `runner/internal/agents/continuation_test.go`: `--session` passed on resume, the sessionless fallback, `Execute` never resuming, logs accumulating across attempts with matching metadata, and every configurable backend implementing `Continue`. `runner/internal/config/config_test.go`: the continuation budget's default, its `0` case, and its rejected values.
+- Mutation checks: every fix and every bound was confirmed to be defended by a test that fails without it, run against a scratchpad copy of `runner/` (the worktree itself was not mutated). Each of these turned the suite red, and the suite was green again once reverted:
+  - drop `archiveResultDocument` → `TestPreviousResultDocumentIsSetAsideBeforeAContinuation`.
+  - `best = current` unconditionally (last attempt wins) → `TestAFailingContinuationCannotDestroyACompletedAttempt`, `TestAFailingContinuationCannotDestroyADeclaredBlock`.
+  - continuation prompt stops carrying `promptFor(packet)` → `TestContinuationPromptCarriesTheWholeOriginalPrompt`, `TestAgentThatStopsHalfWayIsContinuedAndFinishesInTheSameExecution`.
+  - `openAgentLog` stops seeding `truncated` → `TestOpenAgentLogSeedsTheBoundAndTruncationFlagFromTheExistingLog`.
+  - loop guard disabled → `TestIdenticalVerdictsStopTheLoopBeforeTheBudget`, `TestDeclaredBlockIsContinuedOnceThenReported`.
+  - a timestamp added to `gateSignature` → the same two, plus `TestGateSignatureIsStableForIdenticalState`.
+  - each continuation re-anchored to the full packet timeout → `TestContinuationsShareThePacketTimeout`.
+  - `Backend.Continue` replaced by `Backend.Execute` → three tests, including the two that pin session resumption.
+  - the diff check applied to read-only roles → `TestReadOnlyRoleSkipsTheDiffCheck`.
+  - `boundedList`/`boundedAgentText` removed from the continuation prompt → `TestContinuationPromptBoundsWhatItQuotesBackFromTheAgent`.
+- Service tests: Passed — `make test-runner` (race detector on), every package `ok`; `make test-api`, every package `ok`.
+- Full repository tests: Not run — no orchestrator, web, or proto change. `make test-orchestrator` and `make test-web` were deliberately not invoked.
+- Build: Passed — `make build-runner`.
+- Lint: Passed — `cd runner && gofmt -l .` produced no output.
+- Type checks: Passed — `cd runner && go vet ./...`.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run — no Compose or configuration-file change (`LOOP_RUNNER_MAX_CONTINUATIONS` has a default and needs no Compose entry).
+- End-to-end workflow: Not run. The gate and loop are exercised at the dispatcher seam, and the backend halves at the process seam with fake `opencode` binaries.
+
+## Known Issues
+
+- Issue: two CI jobs are expected to stay red for a reason unrelated to this change.
+  - Severity: P2 for the repository, none for this change.
+  - Impact: CI had been red repo-wide since `3ba81c2` ("Change CI runner to self-hosted Linux"), with six jobs failing in under ten seconds at `actions/setup-python` ("The version '3.12' with architecture 'x64' was not found for debian 13") — on `main`'s own HEAD as much as on any branch. PR #160 merged during this session and fixed four of the six. Per its own `PROGRESS.md` entry, `compose-smoke` and `test-postgres-integration` remain blocked on Docker group membership for the self-hosted runners, which cannot be changed from this repository.
+  - Evidence: PR #160 (`fix/ci-self-hosted-python`), merged as `fc8f6fe`; its session entry in this file records the remaining two jobs and why.
+  - Suggested resolution: none here. This branch was validated locally with the Makefile targets recorded above, and its own CI run is judged on the jobs that can pass.
+
+- Issue: the loop guard's diff component cannot distinguish two different edits to the same file.
+  - Severity: P3.
+  - Impact: an agent that keeps rewriting the same file, with an unchanged reason set and an unchanged `remainingWork` list, is treated as wedged after one continuation.
+  - Evidence: `diffSignature` in `runner/internal/dispatch/goalgate.go` hashes the revision and the sorted changed-path set, which is the whole of what `repository.RevisionSummary` carries.
+  - Suggested resolution: if it proves to matter, extend `RevisionInspector` with a content digest of the changed paths. Deliberately not done here: it would change `runner/internal/repository`, which this issue does not scope, and the guard's error direction is the safe one.
+
+- Issue: an execution now occupies its runner and project slot for longer, up to the packet's `timeoutSeconds`, where a one-shot run often finished far sooner.
+  - Severity: P3.
+  - Impact: the bound is unchanged and the lease is renewed independently, so nothing breaks; a busy runner is simply busy for longer before it takes the next job.
+  - Evidence: `ProjectConcurrencyGuard.Acquire` and the capacity slot are both held for the whole of `Dispatcher.Execute`.
+  - Suggested resolution: none needed. Operators who want the old profile set `LOOP_RUNNER_MAX_CONTINUATIONS=0`.
+
+## Next Recommended Implementation
+
+Autonomy L2, issue [#105](https://github.com/alexandre-leites/moirai/issues/105) — make non-delivery a first-class workflow outcome. This session produces exactly the signal it needs: every terminal payload from a continuing execution now carries `continuations` and a `gateVerdict` drawn from a closed vocabulary, so `orchestrator/src/moirai/workflows/runner_events.py` can distinguish *delivered* from *returned-without-evidence* from *agent-reported-blocked* without inferring it from an exit code. Relevant files: `orchestrator/src/moirai/workflows/runner_events.py` and its tests. Expected behavior: a returned-without-evidence execution stays in its phase and consumes a continuation counter separate from the retry budget, rather than being routed as a generic failure. Targeted validation: new cases in `orchestrator/tests/test_runner_events.py` asserting the three outcomes are routed differently and that `gateVerdict` is read rather than the exit code.
+
+---
+
 # Session: Docker runnability audit and GHCR release pipeline (agent/docker-ghcr-release, 2026-07-29)
 
 - Overall status: complete; branch `feat/docker-ghcr-release` pushed and PR opened.
