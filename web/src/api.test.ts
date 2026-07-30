@@ -326,6 +326,21 @@ describe("createApiClient request shapes", () => {
     expect(calls[1].url).toBe("/api/v1/projects/p1/disable");
   });
 
+  it("requests workflow detail and event pages with encoded IDs and cursors", async () => {
+    const { calls, fetchClient } = recorder((call) => call.url.includes("/events")
+      ? jsonResponse({ events: [], nextCursor: "next" })
+      : jsonResponse({ id: "w/1" }));
+    const api = createApiClient(fetchClient);
+
+    await api.getWorkflow("w/1");
+    await api.listWorkflowEvents("w/1", "cursor/1");
+
+    expect(calls[0].url).toBe("/api/v1/workflows/w%2F1");
+    expect(calls[1].url).toBe("/api/v1/workflows/w%2F1/events?cursor=cursor%2F1");
+    expect(calls[0].init?.credentials).toBe("include");
+    expect(calls[1].init?.credentials).toBe("include");
+  });
+
   it("unwraps the collection envelopes the API returns", async () => {
     const projects = [{ id: "p1", name: "svc", enabled: true }];
     const workflows = [{ id: "w1", projectId: "p1", status: "running", phase: "implement" }];

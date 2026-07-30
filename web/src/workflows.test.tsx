@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import { ApiError, type ApiClient, type Workflow } from "./api";
 import { WorkflowsPage } from "./workflows";
 import { button, buttons, click, deferred, mount, unmountAll } from "./test-dom";
@@ -23,6 +24,7 @@ function workflow(overrides: Partial<Workflow> = {}): Workflow {
 
 type Stub = {
   listWorkflows?: ApiClient["listWorkflows"];
+  listProjects?: ApiClient["listProjects"];
   submitWorkflowDecision?: ApiClient["submitWorkflowDecision"];
 };
 
@@ -30,6 +32,7 @@ function stubApi(stub: Stub) {
   const decisions: Decision[] = [];
   const api = {
     listWorkflows: stub.listWorkflows ?? (async () => []),
+    listProjects: stub.listProjects ?? (async () => []),
     submitWorkflowDecision:
       stub.submitWorkflowDecision ??
       (async (id: string, decision: "approved" | "changes_requested") => {
@@ -41,6 +44,10 @@ function stubApi(stub: Stub) {
 }
 
 /** The `<tr>` in the table body whose shortened id matches `id`. */
+function page(api: ApiClient) {
+  return <MemoryRouter><WorkflowsPage api={api} /></MemoryRouter>;
+}
+
 function row(container: HTMLElement, id: string): HTMLTableRowElement {
   const found = Array.from(container.querySelectorAll("tbody tr")).find(
     (candidate) => candidate.querySelector("td")?.textContent === id.slice(0, 12)
@@ -53,7 +60,7 @@ describe("WorkflowsPage loading and listing", () => {
   it("shows a loading line before the first response, not an empty table", async () => {
     const pending = deferred<Workflow[]>();
     const { api } = stubApi({ listWorkflows: () => pending.promise });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     expect(container.textContent).toContain("Loading workflows...");
     expect(container.querySelector("table")).toBeNull();
@@ -65,7 +72,7 @@ describe("WorkflowsPage loading and listing", () => {
 
   it("shows an explicit empty state when nothing is running", async () => {
     const { api } = stubApi({ listWorkflows: async () => [] });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     expect(container.textContent).toContain("No active workflows");
     expect(container.querySelector("table")).toBeNull();
@@ -78,7 +85,7 @@ describe("WorkflowsPage loading and listing", () => {
         workflow({ id: RUNNING_ID, projectId: "ledger", status: "running", phase: "implement" }),
       ],
     });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     expect(Array.from(container.querySelectorAll("th")).map((th) => th.textContent)).toEqual([
       "ID",
@@ -96,30 +103,34 @@ describe("WorkflowsPage loading and listing", () => {
 
   it("shortens the workflow id rather than printing the whole UUID", async () => {
     const { api } = stubApi({ listWorkflows: async () => [workflow()] });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     expect(container.querySelector("td.mono")?.textContent).toBe("11111111-222");
     expect(container.textContent).not.toContain(WAITING_ID);
   });
 
-  it("renders the empty state when the load fails", async () => {
-    // Documents today's behaviour, not the behaviour the design package asks
-    // for: `workflows.tsx` swallows the failure with `.catch(() => undefined)`,
-    // so an unreachable orchestrator reads as "nothing is running".
-    // docs/design/web-console/specification.md §6 ("no silent
-    // `.catch(() => undefined)` anywhere") is what will change this; this test
-    // pins the real behaviour instead of asserting an error state that the
-    // page does not have.
+  it("renders a failure instead of an empty state when loading fails", async () => {
     const { api } = stubApi({
       listWorkflows: async () => {
         throw new ApiError(503, "orchestrator unavailable");
       },
     });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
-    expect(container.textContent).toContain("No active workflows");
-    expect(container.textContent).not.toContain("Loading workflows...");
-    expect(container.textContent).not.toContain("orchestrator unavailable");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("orchestrator unavailable");
+    expect(container.textContent).not.toContain("No active workflows");
+  });
+
+  it("links rows to detail pages and uses project names", async () => {
+    const { api } = stubApi({
+      listWorkflows: async () => [workflow({ projectId: "project-id" })],
+      listProjects: async () => [{ id: "project-id", name: "Billing", enabled: true }],
+    });
+    const container = await mount(page(api));
+
+    expect(row(container, WAITING_ID).textContent).toContain("Billing");
+    expect(row(container, WAITING_ID).textContent).not.toContain("project-id");
+    expect(row(container, WAITING_ID).querySelector("a")?.getAttribute("href")).toBe(`/workflows/${WAITING_ID}`);
   });
 });
 
@@ -127,6 +138,7 @@ describe("WorkflowsPage operator controls", () => {
   it("retries terminal runs and requires a reason before blocking an active run", async () => {
     const calls: string[] = [];
     const api = {
+      listProjects: async () => [],
       listWorkflows: async () => [workflow({ status: "blocked" }), workflow({ id: RUNNING_ID, status: "implementing" })],
       retryWorkflow: async (id: string) => {
         calls.push(`retry:${id}`);
@@ -138,7 +150,7 @@ describe("WorkflowsPage operator controls", () => {
       },
       cancelWorkflow: async () => workflow(),
     } as unknown as ApiClient;
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, WAITING_ID), /Retry/));
     expect(calls).toEqual([`retry:${WAITING_ID}`]);
@@ -156,7 +168,7 @@ describe("WorkflowsPage approval controls", () => {
         workflow({ id: "cccccccc-dddd-eeee-ffff-000000000000", status: "completed" }),
       ],
     });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     expect(buttons(row(container, WAITING_ID), /Approve/)).toHaveLength(1);
     expect(buttons(row(container, WAITING_ID), /Request changes/)).toHaveLength(1);
@@ -167,7 +179,7 @@ describe("WorkflowsPage approval controls", () => {
 
   it("approves through the API and re-renders from the workflow the server returned", async () => {
     const { api, decisions } = stubApi({ listWorkflows: async () => [workflow()] });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, WAITING_ID), /Approve/));
 
@@ -180,7 +192,7 @@ describe("WorkflowsPage approval controls", () => {
 
   it("requests changes through the API with the other decision value", async () => {
     const { api, decisions } = stubApi({ listWorkflows: async () => [workflow()] });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, WAITING_ID), /Request changes/));
 
@@ -192,7 +204,7 @@ describe("WorkflowsPage approval controls", () => {
     const { api, decisions } = stubApi({
       listWorkflows: async () => [workflow(), workflow({ id: second, projectId: "ledger" })],
     });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, second), /Approve/));
 
@@ -207,7 +219,7 @@ describe("WorkflowsPage approval controls", () => {
       listWorkflows: async () => [workflow(), workflow({ id: second })],
       submitWorkflowDecision: () => pending.promise,
     });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, WAITING_ID), /Approve/));
 
@@ -226,7 +238,7 @@ describe("WorkflowsPage approval controls", () => {
         throw new ApiError(503, "orchestrator unavailable");
       },
     });
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, WAITING_ID), /Approve/));
 
@@ -241,6 +253,7 @@ describe("WorkflowsPage approval controls", () => {
     let attempt = 0;
     const decisions: Decision[] = [];
     const api = {
+      listProjects: async () => [],
       listWorkflows: async () => [workflow()],
       submitWorkflowDecision: async (id: string, decision: "approved" | "changes_requested") => {
         attempt += 1;
@@ -249,7 +262,7 @@ describe("WorkflowsPage approval controls", () => {
         return workflow({ id, status: "running" });
       },
     } as unknown as ApiClient;
-    const container = await mount(<WorkflowsPage api={api} />);
+    const container = await mount(page(api));
 
     await click(button(row(container, WAITING_ID), /Approve/));
     expect(container.querySelector(".error")).not.toBeNull();
