@@ -88,6 +88,7 @@ _WORKFLOW_STALL_AFTER = timedelta(minutes=2)
 # GitHub), so one tick takes a bounded bite rather than serialising an
 # unbounded backlog behind the loop's own interval.
 _WORKFLOW_STALL_BATCH = 20
+_GITHUB_CHECK_POLL_BATCH = 20
 
 _DEFAULT_SEED_PROJECT_NAME = "demo"
 _DEFAULT_SEED_REPOSITORY_URL = "https://github.com/example/demo.git"
@@ -541,6 +542,7 @@ async def _run_workflow_maintenance_loop(
     try:
         while not stop_event.is_set():
             stalled: tuple[str, ...] = ()
+            waiting_for_checks: tuple[str, ...] = ()
             # The leadership probe is inside the guard on purpose: AsyncpgLeader
             # re-raises whatever the database did, and an unhandled exception
             # here now ends the whole process through the task's done-callback.
@@ -556,11 +558,22 @@ async def _run_workflow_maintenance_loop(
                         _LOGGER.info(
                             "closed orphaned execution requests", extra={"requests": orphaned}
                         )
+                    waiting_for_checks = await control_plane.find_workflow_runs_waiting_for_checks(
+                        _GITHUB_CHECK_POLL_BATCH
+                    )
                     stalled = await control_plane.find_stalled_workflow_runs(
                         current, _WORKFLOW_STALL_AFTER, _WORKFLOW_STALL_BATCH
                     )
             except Exception:
                 _LOGGER.exception("workflow maintenance loop iteration failed")
+            for workflow_run_id in waiting_for_checks:
+                try:
+                    await on_transition(workflow_run_id, "waiting_github_checks", {"poll_github_checks": True})
+                except Exception:
+                    _LOGGER.exception(
+                        "GitHub check polling failed",
+                        extra={"workflow_run_id": workflow_run_id},
+                    )
             for workflow_run_id in stalled:
                 try:
                     recovered = await control_plane.recover_stalled_workflow_run(

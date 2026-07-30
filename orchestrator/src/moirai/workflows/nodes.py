@@ -75,6 +75,7 @@ class PersistedWorkflowNodes:
     dispatcher: ExecutionDispatcher
     code_host_factory: CodeHostFactory | None = None
     issue_tracker_factory: IssueTrackerFactory | None = None
+    budget: RetryBudget = _BUDGET
 
     def build(self) -> IssueWorkflowNodes:
         return IssueWorkflowNodes(
@@ -88,6 +89,7 @@ class PersistedWorkflowNodes:
             push=self.push,
             create_pull_request=self.create_pull_request,
             wait_for_checks=self.wait_for_checks,
+            pause_for_checks=self.pause_for_checks,
             wait_for_human=self.wait_for_human,
             merge=self.merge,
             complete=self.complete,
@@ -195,11 +197,27 @@ class PersistedWorkflowNodes:
             return await self._transition(state, "waiting_github_checks", {"status": "waiting_github_checks"})
         checks = await code_host.required_checks(state["pull_request_id"])
         outcome = checks_result(checks)
-        return await self._transition(state, "waiting_github_checks", {
+        polls = int(state.get("github_check_poll_attempts", 0)) + 1
+        if outcome is ChecksResult.PENDING and polls >= self.budget.github_check_poll_attempts:
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "blocking_reason": "GitHub check polling limit exhausted",
+                "github_check_poll_attempts": polls,
+            })
+        updates: WorkflowUpdate = {
             "status": "waiting_github_checks",
             "checks_passed": outcome is ChecksResult.PASSED,
             "checks_pending": outcome is ChecksResult.PENDING,
-        })
+            "github_check_poll_attempts": polls,
+        }
+        await self._transition(state, "waiting_github_checks", updates)
+        return updates
+
+    async def pause_for_checks(self, state: IssueWorkflowState) -> WorkflowUpdate:
+        from langgraph.types import interrupt
+
+        interrupt(None)
+        return {}
 
     async def wait_for_human(self, state: IssueWorkflowState) -> WorkflowUpdate:
         updates: WorkflowUpdate = {"status": "waiting_human"}

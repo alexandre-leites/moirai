@@ -43,6 +43,7 @@ class IssueWorkflowState(TypedDict, total=False):
     human_approved: bool
     human_changes_requested: bool
     ci_repair_attempts: int
+    github_check_poll_attempts: int
     blocking_reason: str
     branch_name: str
     base_branch: str
@@ -87,6 +88,7 @@ class IssueWorkflowNodes:
     push: WorkflowNode
     create_pull_request: WorkflowNode
     wait_for_checks: WorkflowNode
+    pause_for_checks: WorkflowNode
     wait_for_human: WorkflowNode
     merge: WorkflowNode
     complete: WorkflowNode
@@ -114,6 +116,8 @@ def route_review(
 def route_checks(
     state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
 ) -> Literal["wait_for_checks", "wait_for_human", "merge", "ci_repair", "blocked"]:
+    if state.get("status") == "blocked":
+        return "blocked"
     return cast(
         Literal["wait_for_checks", "wait_for_human", "merge", "ci_repair", "blocked"],
         route_after_checks(_gate_state(state), budget).value,
@@ -186,6 +190,7 @@ def build_issue_graph(
     graph.add_node("push", nodes.push)
     graph.add_node("create_pull_request", nodes.create_pull_request)
     graph.add_node("wait_for_checks", nodes.wait_for_checks)
+    graph.add_node("pause_for_checks", nodes.pause_for_checks)
     graph.add_node("wait_for_human", nodes.wait_for_human)
     graph.add_node("merge", nodes.merge)
     graph.add_node("complete", nodes.complete)
@@ -236,13 +241,14 @@ def build_issue_graph(
         "wait_for_checks",
         lambda state: route_checks(state, budget),
         {
-            "wait_for_checks": END,
+            "wait_for_checks": "pause_for_checks",
             "wait_for_human": "wait_for_human",
             "merge": "merge",
             "ci_repair": "ci_repair",
             "blocked": "blocked",
         },
     )
+    graph.add_edge("pause_for_checks", "wait_for_checks")
     graph.add_conditional_edges(
         "wait_for_human",
         lambda state: route_human(state, budget),

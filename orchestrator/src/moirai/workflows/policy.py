@@ -33,6 +33,7 @@ class RetryBudget:
     pipeline_repair_attempts: int = 3
     review_cycles: int = 3
     ci_repair_attempts: int = 3
+    github_check_poll_attempts: int = 20
     total_agent_executions: int = 10
 
 

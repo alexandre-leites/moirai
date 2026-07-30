@@ -1795,6 +1795,17 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(NOW - reclaim_before, timedelta())
         self.assertLessEqual(NOW - reclaim_before, timedelta(minutes=2))
 
+    async def test_find_workflow_runs_waiting_for_checks_returns_ids(self) -> None:
+        pool = _OutboxPool()
+        pool.stalled_rows = [{"id": "wf-1"}, {"id": "wf-2"}]
+
+        waiting = await AsyncpgControlPlane(pool).find_workflow_runs_waiting_for_checks()
+
+        self.assertEqual(waiting, ("wf-1", "wf-2"))
+        query = next(query for query, _ in pool.calls if "FROM app.workflow_runs" in query)
+        self.assertIn("status = 'waiting_github_checks'", query)
+        self.assertIn("current_phase = 'waiting_github_checks'", query)
+
     async def test_find_stalled_workflow_runs_returns_ids(self) -> None:
         pool = _OutboxPool()
         pool.stalled_rows = [{"id": "wf-1"}, {"id": "wf-2"}]

@@ -127,9 +127,13 @@ class LogUnexpectedCompletionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _RecordingControlPlane:
-    def __init__(self, stalled: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, stalled: tuple[str, ...] = (), waiting_for_checks: tuple[str, ...] = ()
+    ) -> None:
         self.stalled = stalled
+        self.waiting_for_checks = waiting_for_checks
         self.recovered: list[str] = []
+        self.polled: list[str] = []
         self.calls: list[str] = []
 
     async def drain_pending_transitions(self, on_transition: object, now: object) -> int:
@@ -139,6 +143,10 @@ class _RecordingControlPlane:
     async def close_orphaned_execution_requests(self, now: object, stale_after: object) -> int:
         self.calls.append("sweep")
         return 0
+
+    async def find_workflow_runs_waiting_for_checks(self, limit: int) -> tuple[str, ...]:
+        self.calls.append("poll")
+        return self.waiting_for_checks
 
     async def find_stalled_workflow_runs(self, now: object, stale_after: object, limit: int) -> tuple[str, ...]:
         self.calls.append("detect")
@@ -172,18 +180,23 @@ class _Leader:
 
 
 class WorkflowMaintenanceLoopTests(unittest.IsolatedAsyncioTestCase):
-    async def _run_once(self, control_plane: object, leader_error: Exception | None = None) -> _Leader:
+    async def _run_once(
+        self,
+        control_plane: object,
+        leader_error: Exception | None = None,
+        on_transition: object | None = None,
+    ) -> _Leader:
         from datetime import UTC, datetime, timedelta
 
         stop_event = asyncio.Event()
         leader = _Leader(stop_event, leader_error)
 
-        async def on_transition(*_args: object) -> None:
+        async def noop(*_args: object) -> None:
             return None
 
         await asyncio.wait_for(
             _run_workflow_maintenance_loop(
-                control_plane, on_transition, stop_event,
+                control_plane, noop if on_transition is None else on_transition, stop_event,
                 lambda: datetime.now(UTC), timedelta(milliseconds=1), leader,
             ),
             timeout=10,
@@ -207,8 +220,25 @@ class WorkflowMaintenanceLoopTests(unittest.IsolatedAsyncioTestCase):
 
         await self._run_once(control_plane)
 
-        self.assertEqual(control_plane.calls, ["drain", "sweep", "detect"])
+        self.assertEqual(control_plane.calls, ["drain", "sweep", "poll", "detect"])
         self.assertEqual(control_plane.recovered, ["explodes", "recovers"])
+
+    async def test_waiting_checks_resume_through_the_transition_callback(self) -> None:
+        control_plane = _RecordingControlPlane(waiting_for_checks=("checks-1", "checks-2"))
+        transitions: list[tuple[str, str, dict[str, object]]] = []
+
+        async def on_transition(workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
+            transitions.append((workflow_run_id, status, updates))
+
+        await self._run_once(control_plane, on_transition=on_transition)
+
+        self.assertEqual(
+            transitions,
+            [
+                ("checks-1", "waiting_github_checks", {"poll_github_checks": True}),
+                ("checks-2", "waiting_github_checks", {"poll_github_checks": True}),
+            ],
+        )
 
 
 if __name__ == "__main__":
