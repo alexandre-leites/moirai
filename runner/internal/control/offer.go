@@ -183,7 +183,7 @@ func (s *OfferState) RenewDue() ([]string, error) {
 	now := s.now()
 	var due []Lease
 	s.mu.Lock()
-	for jobID, entry := range s.active {
+	for _, entry := range s.active {
 		if entry.renewalRequested || now.Before(entry.lease.ExpiresAt.Add(-s.renewalLead)) {
 			continue
 		}

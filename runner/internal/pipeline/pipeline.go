@@ -46,7 +46,7 @@ func (runner DockerRunner) Run(ctx context.Context, workspace string, environmen
 		arguments, _ := ParseCommandTemplate(command.Command)
 		var output bytes.Buffer
 		started := time.Now()
-		executionResult, err := runner.Executor.Execute(ctx, execution.Request{ExecutionID: fmt.Sprintf("pipeline-%d-%d", time.Now().UnixNano(), index), Workspace: workspace, Command: arguments, Environment: execution.MinimalEnvironment(environment, workspace), Timeout: command.Timeout}, &output, &output)
+		executionResult, err := runner.Executor.Execute(ctx, execution.Request{ExecutionID: fmt.Sprintf("pipeline-%d-%d", time.Now().UnixNano(), index), Workspace: workspace, Command: arguments, Environment: execution.MinimalEnvironmentMap(environment, workspace), Timeout: command.Timeout}, &output, &output)
 		result := Result{Command: command.Command, ExitCode: executionResult.ExitCode, Output: truncateOutput(output.String()), Duration: time.Since(started), TimedOut: errors.Is(err, context.DeadlineExceeded)}
 		results = append(results, result)
 		if result.TimedOut {

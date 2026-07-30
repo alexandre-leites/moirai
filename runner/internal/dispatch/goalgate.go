@@ -202,14 +202,14 @@ func (dispatcher Dispatcher) runAgent(
 	request := agents.Request{
 		JobID:           packet.JobID,
 		LeaseGeneration: generation,
-		ExecutionID:     packet.ExecutionID
-		Role:        agents.Role(packet.Role),
-		Workspace:   workspace.Repository,
-		Prompt:      promptFor(packet),
-		ResultPath:  packet.ExpectedOutput,
-		Timeout:     timeout,
-		Environment: environment,
-		Output:      output,
+		ExecutionID:     packet.ExecutionID,
+		Role:            agents.Role(packet.Role),
+		Workspace:       workspace.Repository,
+		Prompt:          promptFor(packet),
+		ResultPath:      packet.ExpectedOutput,
+		Timeout:         timeout,
+		Environment:     environment,
+		Output:          output,
 	}
 	var current attemptOutcome
 	current.result, current.err = dispatcher.Backend.Execute(ctx, request)

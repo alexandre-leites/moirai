@@ -140,13 +140,22 @@ func (supervisor *Supervisor) untrack(executionID string) {
 }
 
 func MinimalEnvironment(overrides map[string]string, workspace string) []string {
-	environment := []string{
-		"HOME=" + workspace,
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"TMPDIR=" + filepath.Join(workspace, ".loop", "tmp"),
+	values := MinimalEnvironmentMap(overrides, workspace)
+	environment := make([]string, 0, len(values))
+	for key, value := range values {
+		environment = append(environment, key+"="+value)
+	}
+	return environment
+}
+
+func MinimalEnvironmentMap(overrides map[string]string, workspace string) map[string]string {
+	environment := map[string]string{
+		"HOME":   workspace,
+		"PATH":   "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"TMPDIR": filepath.Join(workspace, ".loop", "tmp"),
 	}
 	for key, value := range overrides {
-		environment = append(environment, key+"="+value)
+		environment[key] = value
 	}
 	return environment
 }

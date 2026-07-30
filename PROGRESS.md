@@ -2,13 +2,29 @@
 
 ## Current Status
 
-- Overall status: #109 implemented; branch `issue-109` pushed and PR opened
-- Current phase: Resolve GitHub issue #109 (P0 runner cannot authenticate to GitHub)
+- Overall status: Current `origin/main` plus local boot fixes running on 192.168.31.107
+- Current phase: Latest local Compose manual validation complete
 - Active implementation: None
-- Last updated: 2026-07-29
-- Agent/session identifier: agent/issue-109-runner-credentials
+- Last updated: 2026-07-30
+- Agent/session identifier: agent/local-e2e-20260730
 
 ## Done
+
+- [x] Configure and validate the local external-PostgreSQL Compose stack
+  - Completed: 2026-07-30
+  - Relevant files: `compose.yaml`, `orchestrator/docker-entrypoint.sh`, ignored `.env` and `secrets/`
+  - Behavior delivered: Services connect to the supplied PostgreSQL through a local ignored override, with no embedded database service, no GitHub token required for dashboard-only boot, and all containers healthy. The orchestrator now handles an absent optional GitHub secret; its secret-copy operation has the `FOWNER` capability required by Docker.
+  - Validation performed: effective Compose configuration validation; entrypoint shell syntax validation; all four services healthy; `/ready`, login, authenticated user, projects, runners, and workflows endpoints returned HTTP 200.
+  - Commands executed: `docker compose -f compose.yaml -f secrets/external-db.compose.yaml up --build -d`; `docker compose -f compose.yaml -f secrets/external-db.compose.yaml ps --all`; HTTP login-flow check.
+  - Notes: Chrome MCP manual UI test is blocked because its configured debugger endpoint `192.168.31.21:9222` is unavailable. `make lint typecheck compose` is blocked locally because Python 3.12 lacks `ensurepip` / `python3.12-venv`; no host package was installed.
+
+- [x] Restore current-main Docker Compose boot
+  - Completed: 2026-07-30
+  - Relevant files: `orchestrator/migrations/012_github_check_polling.sql`, `runner/internal/{execution,pipeline,control,dispatch}/`
+  - Behavior delivered: Renumbered duplicate GitHub-check migration to `012`; fixed runner build failures from a missing request-field comma, an unused renewal-loop key, and passing an environment slice to the Docker executor where it requires a map. Local and Docker pipelines retain the same minimal environment.
+  - Validation performed: runner full-package compile; race checks for execution and pipeline packages; all latest Compose images built; all services healthy; authenticated dashboard API flow returned HTTP 200.
+  - Commands executed: Dockerized `go test -run '^$' ./...`; Dockerized `go test -race ./internal/execution ./internal/pipeline`; `docker compose -f compose.yaml -f secrets/external-db.compose.yaml up --build -d`.
+  - Notes: Full runner race suite still has pre-existing failures in continuation expectations, event-outbox persistence, and Git-unavailable test environment; they were not caused by these fixes.
 
 - [x] Populate task-packet `environmentRefs` and thread the credential through the runner's Git path (#109)
   - Completed: 2026-07-29
