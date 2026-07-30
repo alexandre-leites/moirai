@@ -172,12 +172,13 @@ class WorkflowTransitionTests(unittest.TestCase):
         blocked: bool = False,
         summary_text: str | None = None,
         remaining_work: list[str] | None = None,
+        changed_files: list[str] | None = None,
     ) -> RunnerEventSummary:
         return RunnerEventSummary(
             event_type=event_type,
             execution_id=execution_id,
             exit_code=exit_code,
-            changed_files=[],
+            changed_files=list(changed_files or []),
             commands_run=[],
             terminal=event_type in {"completed", "failed", "cancelled"},
             result=result,
@@ -329,11 +330,45 @@ class WorkflowTransitionTests(unittest.TestCase):
         self.assertEqual(transition.new_status, "blocked")
         self.assertFalse(transition.state_updates.get("plan_valid"))
 
-    def test_completed_developer_transitions_to_local_pipeline(self) -> None:
-        summary = self._summary("completed", "job-1-implement")
+    def _agent_result(self, changed_files: list[str], remaining_work: list[str] | None = None) -> dict[str, Any]:
+        return {
+            "protocolVersion": "1.0",
+            "executionId": "job-1-implement",
+            "status": "completed",
+            "summary": "implemented the requested change",
+            "changedFiles": changed_files,
+            "commandsRun": [],
+            "remainingWork": remaining_work or [],
+            "knownLimitations": [],
+        }
+
+    def test_completed_developer_with_delivery_evidence_transitions_to_local_pipeline(self) -> None:
+        summary = self._summary(
+            "completed", "job-1-implement", result=self._agent_result(["a.py"]), changed_files=["a.py"]
+        )
         transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
+        self.assertEqual(transition.state_updates["last_delivery_outcome"], "delivered")
+
+    def test_completed_developer_without_delivery_evidence_requests_continuation(self) -> None:
+        summary = self._summary("completed", "job-1-implement", result=self._agent_result([]))
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "implementing")
+        self.assertTrue(transition.state_updates["continuation_requested"])
+        self.assertEqual(transition.state_updates["last_delivery_outcome"], "returned_without_evidence")
+        self.assertIn("no changed files", str(transition.state_updates["last_gate_verdict"]))
+
+    def test_completed_developer_with_remaining_work_requests_continuation(self) -> None:
+        summary = self._summary(
+            "completed", "job-1-implement", result=self._agent_result(["a.py"], ["finish tests"]),
+            changed_files=["a.py"], remaining_work=["finish tests"],
+        )
+        transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
+        assert transition is not None
+        self.assertEqual(transition.new_status, "implementing")
+        self.assertEqual(transition.state_updates["remaining_work"], ["finish tests"])
 
     def test_developer_exit_code_never_decides_the_pipeline_gate(self) -> None:
         """A clean developer exit is evidence the agent process ended, not that
@@ -341,7 +376,10 @@ class WorkflowTransitionTests(unittest.TestCase):
         local_pipeline phase with the gate untouched, so the pipeline node
         dispatches a real execution instead of short-circuiting into review."""
         for exit_code in (0, 1):
-            summary = self._summary("completed", "job-1-implement", exit_code=exit_code)
+            summary = self._summary(
+                "completed", "job-1-implement", exit_code=exit_code,
+                result=self._agent_result(["a.py"]), changed_files=["a.py"],
+            )
             transition = workflow_transition_for_terminal_event(summary, "implementing", role="developer")
             assert transition is not None
             self.assertEqual(transition.new_status, "local_pipeline")
@@ -423,7 +461,9 @@ class WorkflowTransitionTests(unittest.TestCase):
         self.assertTrue(transition.state_updates["pipeline_passed"])
 
     def test_completed_repairer_transitions_to_local_pipeline(self) -> None:
-        summary = self._summary("completed", "job-1-repair")
+        summary = self._summary(
+            "completed", "job-1-repair", result=self._agent_result(["a.py"]), changed_files=["a.py"]
+        )
         transition = workflow_transition_for_terminal_event(summary, "repairing", role="repairer")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
@@ -438,7 +478,9 @@ class WorkflowTransitionTests(unittest.TestCase):
     def test_role_falls_back_to_suffix_derivation_when_not_supplied(self) -> None:
         """Callers with no authoritative role (e.g. the in-memory control
         plane used only in tests) fall back to suffix parsing."""
-        summary = self._summary("completed", "job-1-repair")
+        summary = self._summary(
+            "completed", "job-1-repair", result=self._agent_result(["a.py"]), changed_files=["a.py"]
+        )
         transition = workflow_transition_for_terminal_event(summary, "repairing")
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")

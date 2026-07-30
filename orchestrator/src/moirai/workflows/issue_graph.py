@@ -32,6 +32,11 @@ class IssueWorkflowState(TypedDict, total=False):
     execution_id: str
     planning_attempts: int
     implementation_attempts: int
+    continuation_attempts: int
+    continuation_requested: bool
+    last_delivery_outcome: str
+    last_gate_verdict: str
+    remaining_work: list[str]
     pipeline_repair_attempts: int
     review_cycles: int
     total_agent_executions: int
@@ -230,8 +235,8 @@ def build_issue_graph(
     )
     graph.add_conditional_edges(
         "implement",
-        suspend_after_dispatch(lambda state: "pipeline"),
-        {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+        suspend_after_dispatch(lambda state: "implement" if state.get("continuation_requested") else "pipeline"),
+        {"implement": "implement", "pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "pipeline",
@@ -245,8 +250,8 @@ def build_issue_graph(
     )
     graph.add_conditional_edges(
         "repair",
-        suspend_after_dispatch(lambda state: "pipeline"),
-        {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+        suspend_after_dispatch(lambda state: "repair" if state.get("continuation_requested") else "pipeline"),
+        {"repair": "repair", "pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
     )
     # A CI repair rejoins the workflow exactly where a local repair does: the
     # repaired tree gets its own local pipeline verdict, then AI review, push
@@ -254,8 +259,8 @@ def build_issue_graph(
     # node only so it spends `ci_repair_attempts`.
     graph.add_conditional_edges(
         "ci_repair",
-        suspend_after_dispatch(lambda state: "pipeline"),
-        {"pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+        suspend_after_dispatch(lambda state: "ci_repair" if state.get("continuation_requested") else "pipeline"),
+        {"ci_repair": "ci_repair", "pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "push",

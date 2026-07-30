@@ -221,9 +221,13 @@ def _agent_block_transition(
     """Routes an agent-reported block to the terminal `blocked` status with the
     agent's own reason recorded, and clears the gate the reporting role owns so
     a resumed graph can never read a stale approval."""
+    reason = _agent_blocking_reason(summary, role)
     state_updates: dict[str, object] = {
         "status": "blocked",
-        "blocking_reason": _agent_blocking_reason(summary, role),
+        "blocking_reason": reason,
+        "last_delivery_outcome": "agent_reported_blocked",
+        "last_gate_verdict": reason,
+        "remaining_work": list(summary.remaining_work),
     }
     if role == "planner":
         state_updates["plan_valid"] = False
@@ -260,6 +264,44 @@ def workflow_transition_for_terminal_event(
     return WorkflowTransition(
         new_status=transition.new_status,
         state_updates={**transition.state_updates, "awaiting_execution": False},
+    )
+
+
+def _non_delivery_verdict(summary: RunnerEventSummary) -> str | None:
+    reasons: list[str] = []
+    if not _valid_agent_result(summary.result):
+        reasons.append("agent result is invalid")
+    if not summary.changed_files:
+        reasons.append("no changed files")
+    remaining = [item.strip() for item in summary.remaining_work if item.strip()]
+    if remaining:
+        reasons.append("remaining work: " + "; ".join(remaining))
+    return None if not reasons else "returned without evidence: " + "; ".join(reasons)
+
+
+def _valid_agent_result(result: dict[str, Any] | None) -> bool:
+    if result is None:
+        return False
+    try:
+        return not validate(result, load_schema("agent-result"))
+    except (SchemaNotFoundError, ValueError):
+        return False
+
+
+def _returned_without_evidence_transition(
+    summary: RunnerEventSummary, current_status: str
+) -> WorkflowTransition:
+    verdict = _non_delivery_verdict(summary)
+    assert verdict is not None
+    return WorkflowTransition(
+        new_status=current_status,
+        state_updates={
+            "status": current_status,
+            "continuation_requested": True,
+            "last_delivery_outcome": "returned_without_evidence",
+            "last_gate_verdict": verdict,
+            "remaining_work": list(summary.remaining_work),
+        },
     )
 
 
@@ -342,6 +384,8 @@ def _terminal_event_transition(
         )
 
     if resolved_role == "developer":
+        if current_status == "implementing" and _non_delivery_verdict(summary) is not None:
+            return _returned_without_evidence_transition(summary, current_status)
         if current_status == "implementing":
             # Hand the run to the local_pipeline phase without touching
             # `pipeline_passed`: the developer's exit code is not evidence that
@@ -350,7 +394,7 @@ def _terminal_event_transition(
             # instead of short-circuiting into AI review.
             return WorkflowTransition(
                 new_status="local_pipeline",
-                state_updates={"status": "local_pipeline"},
+                state_updates={"status": "local_pipeline", "last_delivery_outcome": "delivered"},
             )
         if current_status == "pushing":
             return WorkflowTransition(
@@ -385,12 +429,14 @@ def _terminal_event_transition(
         )
 
     if resolved_role == "repairer":
+        if current_status == "repairing" and _non_delivery_verdict(summary) is not None:
+            return _returned_without_evidence_transition(summary, current_status)
         # Like the developer branch: back to local_pipeline with the gate
         # untouched, so the repaired tree is re-validated by a real pipeline
         # execution before the workflow can advance.
         return WorkflowTransition(
             new_status="local_pipeline",
-            state_updates={"status": "local_pipeline"},
+            state_updates={"status": "local_pipeline", "last_delivery_outcome": "delivered"},
         )
 
     return None

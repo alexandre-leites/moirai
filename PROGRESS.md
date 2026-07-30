@@ -3637,3 +3637,22 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 - Validation passed: `uv run --project orchestrator -- python -m unittest discover -s orchestrator/tests -p test_control_plane_grpc.py` (12 tests); `make test-web` (129 tests); `npx @bufbuild/buf@1.50.0 lint`; generated stub diff check; `git diff --check`.
 - Validation blocked: `make test-orchestrator` cannot create `.venv` because system Python lacks `ensurepip`; `make test-api` cannot run because `go` is unavailable; `make proto-check` cannot run because `docker` is unavailable. Direct replacement checks above passed where possible.
 - Adversarial review: checked terminal-state fencing, project-lock conflict behavior, repeated actions, runner cancellation generation, CSRF/admin route wiring, and generated RPC signatures. No remaining blocker found.
+
+---
+
+# Issue #105 — Autonomy L2 non-delivery outcomes
+
+- In progress: 2026-07-30T02:14:07Z
+- Agent/session identifier: issue-105
+- Branch: `issue-105`
+- Scope: `orchestrator/` and append-only `PROGRESS.md`; runner/API/web excluded.
+- Current state: implementing durable continuation outcomes for developer and repairer events.
+- Definition of done: zero-diff or unfinished completion re-dispatches same phase on a bounded continuation counter without spending its phase budget; delivered events advance; reported blocks and exhausted continuations block with evidence persisted into continuation packets.
+- Targeted validation: workflow event, graph/node, persistence, task-packet, async control-plane, and end-to-end tests; Ruff; Mypy; adversarial review.
+- Validation note: `make test-orchestrator`, `make lint`, and `make typecheck` cannot bootstrap because Python `ensurepip` is absent; `uv` provides test/lint tooling instead.
+- Completed: 2026-07-30
+- Behavior delivered: completed developer and repairer events now distinguish delivered work from returned-without-evidence, preserve gate verdict/remaining work, and re-dispatch the same phase. Continuations use a bounded durable counter and do not consume phase-attempt counters; agent-reported blocks remain terminal with their reason.
+- Persistence: migration `009_non_delivery_outcomes.sql` adds continuation count, outcome, verdict, and remaining-work columns. Continuation task packets receive the verdict and outstanding work in `previousFailures`.
+- Validation passed: `uv run --project orchestrator --extra dev -- python -m unittest discover -s orchestrator/tests` (493 tests, 33 skipped); `uv run --extra dev -- ruff check src tests`; `git diff --check`.
+- Validation blocked: targeted and full `uv` Mypy runs report three pre-existing errors outside this change (`control_plane.py:1054`, `nodes.py:424`, `nodes.py:429`); full `make` targets remain blocked by missing `ensurepip`.
+- Adversarial review: verified terminal outcome precedence, same-phase graph re-entry, implementation-budget isolation, continuation exhaustion, durable load/packet context, and absence of runner/API/web changes. No remaining issue found.

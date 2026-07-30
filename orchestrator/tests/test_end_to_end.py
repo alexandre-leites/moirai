@@ -446,6 +446,7 @@ class _EventDrivenWorkflow:
         result: dict[str, Any] | None = None,
         event_type: str = "completed",
         exit_code: int = 0,
+        changed_files: list[str] | None = None,
     ) -> dict[str, object]:
         from moirai.workflows.runner_events import (
             RunnerEventSummary,
@@ -453,11 +454,25 @@ class _EventDrivenWorkflow:
         )
 
         self.store.claim_queued()
+        execution_id = f"job-1-{execution_suffix}"
+        delivered_files = changed_files or []
+        if event_type == "completed" and role in {"developer", "repairer"} and changed_files is None:
+            delivered_files = ["a.py"]
+            result = result or {
+                "protocolVersion": "1.0",
+                "executionId": execution_id,
+                "status": "completed",
+                "summary": "implemented the requested change",
+                "changedFiles": delivered_files,
+                "commandsRun": [],
+                "remainingWork": [],
+                "knownLimitations": [],
+            }
         summary = RunnerEventSummary(
             event_type=event_type,
-            execution_id=f"job-1-{execution_suffix}",
+            execution_id=execution_id,
             exit_code=exit_code,
-            changed_files=[],
+            changed_files=delivered_files,
             commands_run=[],
             terminal=True,
             result=result,
@@ -492,6 +507,26 @@ class _EventDrivenWorkflow:
 
 
 class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_zero_diff_developer_completion_re_dispatches_without_spending_implementation_budget(self) -> None:
+        workflow = _EventDrivenWorkflow()
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        zero_diff = {
+            "protocolVersion": "1.0", "executionId": "job-1-implement", "status": "completed",
+            "summary": "nothing changed", "changedFiles": [], "commandsRun": [],
+            "remainingWork": [], "knownLimitations": [],
+        }
+
+        state = await workflow.deliver(
+            "developer", "implement", result=zero_diff, changed_files=[]
+        )
+
+        self.assertEqual(state["status"], "implementing")
+        self.assertEqual(state["continuation_attempts"], 1)
+        self.assertEqual(state["implementation_attempts"], 1)
+        self.assertEqual(workflow.store.roles, ["planner", "developer", "developer"])
+
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_sequential_runner_events_drive_the_workflow_to_completed(self) -> None:
         """The full phase sequence, driven only by simulated runner events: no

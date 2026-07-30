@@ -30,6 +30,7 @@ class WorkflowRoute(StrEnum):
 class RetryBudget:
     planning_attempts: int = 2
     implementation_attempts: int = 3
+    continuation_attempts: int = 3
     pipeline_repair_attempts: int = 3
     review_cycles: int = 3
     ci_repair_attempts: int = 3

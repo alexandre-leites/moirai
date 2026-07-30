@@ -52,9 +52,14 @@ class IssueGraphRouteTests(unittest.TestCase):
         self.assertEqual(route_checks({**delivered, "ci_repair_attempts": 2}, budget), "blocked")
         self.assertEqual(route_checks({**delivered, "pipeline_repair_attempts": 3}, budget), "ci_repair")
 
-    def test_dispatching_edge_ends_the_invocation_while_an_execution_is_pending(self) -> None:
-        route = suspend_after_dispatch(lambda state: "pipeline")
+    def test_dispatching_edge_reenters_the_same_phase_for_a_continuation(self) -> None:
+        route = suspend_after_dispatch(
+            lambda state: "implement" if state.get("continuation_requested") else "pipeline"
+        )
         self.assertEqual(route({"status": "implementing"}), "pipeline")
+        self.assertEqual(
+            route({"status": "implementing", "continuation_requested": True}), "implement"
+        )
         self.assertNotEqual(route({"status": "implementing", "awaiting_execution": True}), "pipeline")
 
     def test_dispatching_edge_sends_an_exhausted_budget_straight_to_blocked(self) -> None:
