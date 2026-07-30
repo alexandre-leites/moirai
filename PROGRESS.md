@@ -2,11 +2,11 @@
 
 ## Current Status
 
-- Overall status: Current `origin/main` plus local boot fixes running on 192.168.31.107
-- Current phase: Latest local Compose manual validation complete
+- Overall status: Web console mockup interaction coverage complete
+- Current phase: Design mockup completion
 - Active implementation: None
 - Last updated: 2026-07-30
-- Agent/session identifier: agent/local-e2e-20260730
+- Agent/session identifier: opencode-web-console-20260730
 
 ## Done
 
@@ -93,6 +93,14 @@
 - Agent/session identifier: agent/mvp-audit-87
 
 ## In Progress
+
+- [x] Complete web console mockup interactions
+  - Completed: 2026-07-30
+  - Agent/session identifier: opencode-web-console-20260730
+  - Relevant files: `docs/design/web-console/mockup.html`, `PROGRESS.md`
+  - Behavior delivered: Shared table headers sort rows and page at five rows; queue has a top-right project dropdown where checkboxes compose a multi-project filter and clicking a project name selects it alone; workflow detail has compact thread, live-looking AI console, and an agent-answer form with title, description, single- or multi-select options, free-text instruction, and submit; runner token and project forms open dialogs; state-changing/destructive controls require confirmation; main content uses all space beside the fixed sidebar; runner registration tokens appear before runner cards; view subtitles expand to 124 characters; workflow detail thread omits redundant legend and uses a compact SVG viewport.
+  - Validation performed: Inline JavaScript parsed with Node `vm.Script`; all dropdown hooks found; `git diff --check` passed. Browser smoke test blocked because configured Chrome DevTools endpoint `192.168.31.21:9222` is unreachable.
+  - Commands executed: Node inline-script syntax checks; `rtk git diff --check`; `rtk git diff --stat`; `rtk git status --short`.
 
 ## MVP audit (issue #87, 2026-07-29)
 

@@ -180,7 +180,7 @@
   .side .foot .who { color: var(--ink-2); }
 
   /* ---------- Main ---------- */
-  .main { flex: 1; min-width: 0; padding: 26px 32px 64px; max-width: 1240px; }
+  .main { flex: 1; min-width: 0; width: 100%; padding: 26px 32px 64px; }
   .view-head { margin: 0 0 4px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   .view-head h1 {
     font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
@@ -188,7 +188,7 @@
     text-wrap: balance;
   }
   .view-head .crumb { color: var(--ink-3); font-size: 13px; }
-  .view-sub { color: var(--ink-2); margin: 0 0 22px; max-width: 62ch; }
+  .view-sub { color: var(--ink-2); margin: 0 0 22px; max-width: 124ch; }
 
   .grid { display: grid; gap: 14px; }
   .cards-4 { grid-template-columns: repeat(4, 1fr); }
@@ -411,6 +411,27 @@
     margin-top: 40px; padding: 14px 18px; border-radius: 10px;
     border: 1px dashed var(--border); color: var(--ink-3); font-size: 12.5px; max-width: 72ch;
   }
+  th button { appearance:none; border:0; background:none; color:inherit; cursor:pointer; font:inherit; font-weight:inherit; letter-spacing:inherit; text-transform:inherit; padding:0; }
+  th button::after { content:" ↕"; color:var(--ink-3); }
+  th button[aria-sort="ascending"]::after { content:" ↑"; color:var(--ink); }
+  th button[aria-sort="descending"]::after { content:" ↓"; color:var(--ink); }
+  .table-foot { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:10px 12px; border-top:1px solid var(--border-soft); color:var(--ink-3); font-size:12px; }
+  .table-foot .btn { min-width:30px; }
+  .thread-card .card-b { padding-top:4px; padding-bottom:8px; }
+  .agent-console { background:#171922; border-radius:7px; color:#d7d9e4; font:12px/1.65 ui-monospace, "SF Mono", Menlo, monospace; max-height:260px; overflow:auto; padding:12px; white-space:pre-wrap; }
+  .agent-console .dim { color:#9298af; } .agent-console .cmd { color:#d4a752; } .agent-console .ok { color:#75c98c; }
+  .modal-backdrop { position:fixed; inset:0; z-index:60; display:grid; place-items:center; padding:18px; background:rgba(20,22,31,.58); }
+  .modal { width:min(560px,100%); max-height:calc(100vh - 36px); overflow:auto; background:var(--raised); border:1px solid var(--border); box-shadow:0 16px 52px rgba(0,0,0,.35); border-radius:10px; padding:20px; }
+  .modal h2 { margin:0 0 6px; font-size:18px; } .modal p { color:var(--ink-2); margin:0 0 14px; }
+  .form-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:14px 0; } .form-grid label { display:grid; gap:4px; color:var(--ink-2); font-size:12px; }
+  .form-grid input, .form-grid select, .form-grid textarea { min-width:0; border:1px solid var(--border); border-radius:7px; background:var(--surface); color:var(--ink); padding:7px 9px; font:inherit; }
+  .form-grid .wide { grid-column:1/-1; } .token-value { display:flex; gap:8px; align-items:center; padding:10px; border:1px solid var(--border); background:var(--ground); border-radius:7px; overflow-wrap:anywhere; }
+  .project-filter { position:relative; margin-left:auto; } .project-filter summary { list-style:none; } .project-filter summary::-webkit-details-marker { display:none; }
+  .project-filter-menu { position:absolute; right:0; z-index:10; width:220px; margin-top:6px; padding:6px; border:1px solid var(--border); border-radius:8px; background:var(--raised); box-shadow:0 6px 20px rgba(0,0,0,.16); }
+  .project-filter-menu label { display:flex; align-items:center; gap:8px; padding:7px 8px; cursor:pointer; border-radius:5px; color:var(--ink-2); } .project-filter-menu label:hover { background:var(--idle-soft); color:var(--ink); }
+  .project-filter-menu input { accent-color:var(--thread); } .project-filter-menu .all { border-bottom:1px solid var(--border-soft); color:var(--ink); font-weight:600; }
+  .answer-options { display:grid; gap:6px; margin:12px 0; padding:0; border:0; } .answer-options label { display:flex; align-items:center; gap:8px; padding:7px 9px; border:1px solid var(--border); border-radius:7px; background:var(--surface); cursor:pointer; }
+  .runners-page { display:flex; flex-direction:column; } .runners-page > .card { order:-1; margin-bottom:16px; }
 </style>
 
 <div class="app">
@@ -439,6 +460,7 @@
 
 <div id="toast" role="status" aria-live="polite"></div>
 <div class="chart-tip" id="chart-tip"></div>
+<div id="modal-root"></div>
 
 <script>
 "use strict";
@@ -494,6 +516,7 @@ const workflows = [
 12:04:16  [developer] reading orchestrator/src/moirai/workflows/persistence.py
 12:04:12  [runner]    agent process started (opencode, attempt 2)
 12:01:47  [runner]    attempt 1 terminal: exit 0, pipeline verdict FAILED (pytest: 2 failed)`,
+    question:{ title:"Need a product decision", description:"Issue #103 says terminal requests must close. Should a cancelled request retain its diagnostic payload, or must all payload fields be cleared?", multiple:false, choices:["Retain diagnostics", "Clear payload"] },
   },
   { id:"wf-b7d3", project:"helios", issue:58, title:"Fix flaky auth token refresh under concurrent requests",
     status:"waiting_human", runner:"loom-02", started:"08:15", updated:"1h 12m ago",
@@ -614,6 +637,38 @@ const auditRows = [
 const $ = (sel, el=document) => el.querySelector(sel);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const projName = id => (projects.find(p => p.id===id)||{}).name || id;
+let queueProjects = new Set(projects.map(p => p.id));
+
+function modal(html) { $("#modal-root").innerHTML = `<div class="modal-backdrop" role="presentation"><section class="modal" role="dialog" aria-modal="true">${html}</section></div>`; }
+function closeModal() { $("#modal-root").innerHTML = ""; }
+function projectForm(project) {
+  const p = project || { name:"", repo:"", branch:"main", mode:"managed_clone", merge:"squash", labels:[] };
+  modal(`<h2>${project ? "Configure project" : "Add project"}</h2><p>Repository, scheduling constraints, and delivery policy.</p><form data-form="project"><div class="form-grid">
+    <label>Name<input required value="${esc(p.name)}" placeholder="payments-api"></label><label>Mode<select><option ${p.mode==="managed_clone"?"selected":""}>managed_clone</option><option ${p.mode==="existing_path"?"selected":""}>existing_path</option></select></label>
+    <label class="wide">Repository or path<input required value="${esc(p.repo)}" placeholder="github.com/org/repository"></label><label>Base branch<input required value="${esc(p.branch)}"></label><label>Merge method<select><option ${p.merge==="squash"?"selected":""}>squash</option><option ${p.merge==="merge"?"selected":""}>merge</option><option ${p.merge==="rebase"?"selected":""}>rebase</option></select></label>
+    <label class="wide">Runner labels<input value="${esc(p.labels.join(", "))}" placeholder="go, docker"></label>
+  </div><div class="btnrow"><button class="btn primary">${project ? "Save changes" : "Add project"}</button><button type="button" class="btn" data-act="close-modal">Cancel</button></div></form>`);
+}
+function confirmAction(action, label, id) {
+  modal(`<h2>Confirm ${esc(label)}</h2><p>This action changes control-plane state. Continue?</p><div class="btnrow"><button class="btn danger" data-confirm="${esc(action)}" data-id="${esc(id||"")}">Confirm ${esc(label)}</button><button class="btn" data-act="close-modal">Cancel</button></div>`);
+}
+function wireTables() {
+  document.querySelectorAll("table").forEach(table => {
+    const rows = [...table.tBodies[0]?.rows || []]; if (!rows.length) return;
+    const head = table.tHead?.rows[0]; if (!head) return;
+    [...head.cells].forEach((th, i) => { const text = th.textContent.trim(); if (!text) return; th.innerHTML = `<button aria-sort="none">${esc(text)}</button>`; th.querySelector("button").onclick = () => {
+      const asc = th.querySelector("button").getAttribute("aria-sort") !== "ascending";
+      [...head.cells].forEach(cell => cell.querySelector("button")?.setAttribute("aria-sort", "none"));
+      th.querySelector("button").setAttribute("aria-sort", asc ? "ascending" : "descending");
+      rows.sort((a,b) => a.cells[i].innerText.localeCompare(b.cells[i].innerText, undefined, {numeric:true}) * (asc ? 1 : -1)).forEach(row => table.tBodies[0].append(row));
+      page(0);
+    }; });
+    let current = 0, perPage = 5;
+    const foot = document.createElement("div"); foot.className = "table-foot"; table.closest(".tbl-wrap").after(foot);
+    const page = index => { current = Math.max(0, Math.min(index, Math.ceil(rows.length/perPage)-1)); rows.forEach((row,i) => row.hidden = i < current*perPage || i >= (current+1)*perPage); foot.innerHTML = `<span>${rows.length ? `${current*perPage+1}–${Math.min(rows.length,(current+1)*perPage)} of ${rows.length}` : "0 rows"}</span><button class="btn sm" ${current===0?"disabled":""}>Previous</button><button class="btn sm" ${current>=Math.ceil(rows.length/perPage)-1?"disabled":""}>Next</button>`; foot.children[1].onclick=()=>page(current-1); foot.children[2].onclick=()=>page(current+1); };
+    page(0);
+  });
+}
 
 function toast(msg) {
   const t = $("#toast");
@@ -649,7 +704,7 @@ function threadSvg(wf, opts={}) {
   }
   const x0 = mini ? 2 : 16, x1 = W - (mini ? 2 : 16);
   const step = (x1-x0)/(PHASES.length-1);
-  const y = mini ? H/2 : 34;
+   const y = mini ? H/2 : Math.min(34, H-26);
   const xs = PHASES.map((_,i)=> x0 + step*i);
   const reach = isTerminalBad ? cutAt : (cur ?? 0);
 
@@ -901,14 +956,20 @@ function viewOverview() {
 }
 
 function viewQueue() {
+  const visibleQueue = queue.filter(q => queueProjects.has(q.project));
+  const filterLabel = queueProjects.size===projects.length ? "All projects" : queueProjects.size===1 ? projName([...queueProjects][0]) : `${queueProjects.size} projects`;
   return `
   <div class="view-head"><h1>Queue</h1></div>
   <p class="view-sub">One global queue across all enabled projects. Highest <span class="num">agent-priority</span> wins; one workflow per project at a time.</p>
   <div class="card">
+    <div class="card-h"><h2>Eligible issues</h2><details class="project-filter"><summary class="btn sm">${esc(filterLabel)} ▾</summary><div class="project-filter-menu" role="group" aria-label="Filter queue by project">
+      <label class="all"><input type="checkbox" data-queue-all ${queueProjects.size===projects.length?"checked":""}> All projects</label>
+      ${projects.map(p=>`<label><input type="checkbox" data-queue-project="${p.id}" ${queueProjects.has(p.id)?"checked":""}> <span data-queue-only="${p.id}">${esc(p.name)}</span></label>`).join("")}
+    </div></details></div>
     <div class="tbl-wrap"><table>
       <thead><tr><th>#</th><th>Priority</th><th>Issue</th><th>Labels</th><th>Waiting</th><th>Why it hasn't started</th></tr></thead>
       <tbody>
-        ${queue.map((q,i)=>`<tr>
+        ${visibleQueue.map((q,i)=>`<tr>
           <td class="num" style="color:var(--ink-3)">${i+1}</td>
           <td><span class="pill ${q.pri>=6?'p-bad':q.pri>=3?'p-warn':'p-idle'}">P${q.pri}</span></td>
           <td><b>${projName(q.project)} #${q.issue}</b><div class="t2">${esc(q.title)}</div></td>
@@ -996,15 +1057,10 @@ function viewWorkflowDetail(id) {
   ${w.status==="failed" ? `<div class="banner"><span class="tx"><b>Failed.</b> ${esc(w.terminal_reason)}</span>
       <span class="act btnrow"><button class="btn sm" data-act="retry" data-w="${w.id}">Retry workflow</button></span></div>` : ""}
 
-  <div class="card" style="margin-bottom:14px">
+  <div class="card thread-card" style="margin-bottom:14px">
     <div class="card-h"><h2>The thread</h2><span class="hint">phase ${m.phase ? PHASE_LABEL[m.phase] : "terminal"} · updated ${w.updated}</span></div>
     <div class="card-b">
-      ${threadSvg(w,{w:980,h:70})}
-      <div class="phase-legend">
-        <span class="k"><span class="sw" style="background:var(--thread-mark)"></span>spun</span>
-        <span class="k"><span class="sw" style="background:var(--border)"></span>ahead</span>
-        ${(w.status==="blocked"||w.status==="failed") ? '<span class="k"><span class="sw" style="background:var(--crit)"></span>cut</span>' : ''}
-      </div>
+      ${threadSvg(w,{w:980,h:56})}
     </div>
   </div>
 
@@ -1019,6 +1075,8 @@ function viewWorkflowDetail(id) {
     </div>
   </div>` : ""}
 
+  ${w.question ? `<div class="decision" style="margin-bottom:14px"><h3>${esc(w.question.title)}</h3><p>${esc(w.question.description)}</p><form data-form="agent-answer" data-w="${w.id}"><fieldset class="answer-options"><legend class="t2">Options${w.question.multiple ? " — select all that apply" : " — select one"}</legend>${w.question.choices.map(choice=>`<label><input type="${w.question.multiple ? "checkbox" : "radio"}" name="agent-answer-${w.id}" value="${esc(choice)}"> ${esc(choice)}</label>`).join("")}</fieldset><textarea placeholder="Provide a different instruction" aria-label="Instruction for agent"></textarea><div class="btnrow"><button class="btn primary">Submit answer</button></div></form></div>` : ""}
+
   <div class="detail-grid">
     <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
       <div class="card">
@@ -1028,8 +1086,8 @@ function viewWorkflowDetail(id) {
         </div>
       </div>
       <div class="card">
-        <div class="card-h"><h2>Agent log tail</h2><span class="hint">streamed from ${w.runner} · redacted</span></div>
-        <div class="card-b"><div class="logline">${esc(w.log)}</div></div>
+        <div class="card-h"><h2>AI agent console</h2><span class="hint">live stream from ${w.runner} · redacted</span></div>
+        <div class="card-b"><div class="agent-console"><span class="dim">opencode · execution ${w.id} · ${esc(w.runner)}</span>\n<span class="cmd">$</span> ${esc(w.log)}\n<span class="ok">● agent process connected</span></div></div>
       </div>
     </div>
 
@@ -1080,6 +1138,7 @@ function viewRunners() {
   return `
   <div class="view-head"><h1>Runners</h1></div>
   <p class="view-sub">The fleet that executes what the orchestrator schedules. Capacity shows real reservations — a slot held by a pending offer counts as busy.</p>
+  <div class="runners-page">
   <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(320px,1fr));margin-bottom:16px">
     ${runners.map(r=>`
     <div class="card">
@@ -1124,6 +1183,7 @@ function viewRunners() {
         </tr>`).join("")}
       </tbody>
     </table></div>
+  </div>
   </div>`;
 }
 
@@ -1250,42 +1310,64 @@ function render() {
   else if (route==="system") main.innerHTML = viewSystem();
   else if (route.startsWith("wf:")) main.innerHTML = viewWorkflowDetail(route.slice(3));
   if (route==="overview") wireOutcomesTip();
+  wireTables();
   main.insertAdjacentHTML("beforeend",
     `<div class="proposal-note"><b>Design proposal.</b> This is a static mockup with sample data — every field shown maps to an existing column in the orchestrator's Postgres schema or to a control the platform review calls for (circuit reset, runner drain, retry, workflow events). Actions show a toast instead of calling the API.</div>`);
   window.scrollTo(0,0);
 }
 
 const ACT_MSG = {
-  "approve":       "Approved — merging PR and closing the issue",
-  "changes":       "Changes requested — task packet updated, developer re-engaged",
-  "retry":         "Workflow requeued with prior-failure context",
-  "cancel":        "Workflow cancelled — issue label reset to agent:ready",
-  "block":         "Workflow blocked — issue held with agent:blocked",
-  "drain":         "Draining — finishes current work, then accepts no offers",
-  "undrain":       "Drain cancelled — runner accepting offers again",
-  "disable":       "Runner disabled — no new offers",
-  "revoke":        "Runner revoked — credential invalidated",
-  "reset-circuit": "Circuit closed — project schedulable again",
-  "new-token":     "Token created — copy it now, it is shown only once",
-  "revoke-token":  "Token revoked",
-  "new-project":   "Would open the project form (name, source, branch, labels, merge policy)",
-  "edit-project":  "Would open project configuration",
-  "toggle-project":"Scheduling toggled for this project",
+  approve:"Approved — merging PR and closing the issue", changes:"Changes requested — task packet updated, developer re-engaged",
+  retry:"Workflow requeued with prior-failure context", cancel:"Workflow cancelled — issue label reset to agent:ready", block:"Workflow blocked — issue held with agent:blocked",
+  drain:"Draining — finishes current work, then accepts no offers", undrain:"Drain cancelled — runner accepting offers again", disable:"Runner disabled — no new offers",
+  revoke:"Runner revoked — credential invalidated", "reset-circuit":"Circuit closed — project schedulable again",   "revoke-token":"Token revoked", "toggle-project":"Scheduling toggled for this project",
 };
+const DESTRUCTIVE = new Set(["approve","cancel","block","disable","revoke","reset-circuit","revoke-token","toggle-project"]);
+
+function newTokenModal() {
+  const token = `moi_${crypto.getRandomValues(new Uint32Array(2)).join("").slice(0,20)}`;
+  modal(`<h2>Runner registration token</h2><p>Copy now. This token is shown once, expires in 15 minutes, and registers one runner.</p><div class="token-value mono"><span>${token}</span><button class="btn sm" data-copy="${token}">Copy</button></div><div class="logline" style="margin:14px 0">docker run --rm moirai/runner \\
+  --orchestrator-address orchestrator:50051 \\
+  --registration-token ${token}</div><p>Use labels when creating token in production; runner receives a persistent credential after registration.</p><div class="btnrow"><button class="btn primary" data-act="close-modal">Done</button></div>`);
+}
 
 document.addEventListener("click", e => {
   const go = e.target.closest("[data-go]");
   if (go) { e.preventDefault(); route = go.dataset.go; render(); return; }
   const f = e.target.closest("[data-wf-filter]");
   if (f) { wfFilter = f.dataset.wfFilter; render(); return; }
+  const queueOnly = e.target.closest("[data-queue-only]");
+  if (queueOnly) { e.preventDefault(); queueProjects = new Set([queueOnly.dataset.queueOnly]); render(); return; }
+  const copy = e.target.closest("[data-copy]");
+  if (copy) { navigator.clipboard?.writeText(copy.dataset.copy); toast("Token copied"); return; }
+  const confirm = e.target.closest("[data-confirm]");
+  if (confirm) { closeModal(); toast(ACT_MSG[confirm.dataset.confirm] || "Done"); render(); return; }
   const act = e.target.closest("[data-act]");
-  if (act) { toast(ACT_MSG[act.dataset.act] || "Done"); }
+  if (!act) return;
+  const action = act.dataset.act;
+  if (action==="close-modal") { closeModal(); return; }
+  if (action==="new-token") { newTokenModal(); return; }
+  if (action==="new-project") { projectForm(); return; }
+  if (action==="edit-project") { projectForm(projects.find(p=>p.id===act.dataset.p)); return; }
+  if (DESTRUCTIVE.has(action)) { confirmAction(action, act.textContent.trim(), act.dataset.w || act.dataset.r || act.dataset.p || act.dataset.t); return; }
+  toast(ACT_MSG[action] || "Done");
+});
+document.addEventListener("change", e => {
+  if (e.target.matches("[data-queue-all]")) queueProjects = e.target.checked ? new Set(projects.map(p => p.id)) : new Set();
+  else if (e.target.matches("[data-queue-project]")) {
+    if (e.target.checked) queueProjects.add(e.target.dataset.queueProject);
+    else queueProjects.delete(e.target.dataset.queueProject);
+  } else return;
+  render();
+});
+document.addEventListener("submit", e => {
+  if (e.target.matches("[data-form='agent-answer']")) { e.preventDefault(); toast("Answer sent — agent resumed with your instruction"); return; }
+  if (!e.target.matches("[data-form='project']")) return;
+  e.preventDefault(); closeModal(); toast("Project configuration saved"); render();
 });
 document.addEventListener("keydown", e => {
-  if (e.key==="Enter") {
-    const row = e.target.closest("tr[data-go]");
-    if (row) { route = row.dataset.go; render(); }
-  }
+  if (e.key==="Escape") { closeModal(); return; }
+  if (e.key==="Enter") { const row = e.target.closest("tr[data-go]"); if (row) { route = row.dataset.go; render(); } }
 });
 
 render();
