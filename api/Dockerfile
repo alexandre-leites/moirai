@@ -1,16 +1,36 @@
-FROM golang:1.25-alpine AS build
-ENV GOTOOLCHAIN=local
+# Build context is the repository root: the API module resolves the generated
+# contracts through `replace github.com/loop-engineering/contracts => ../gen/go`.
+#
+# The builder always runs on the native build platform and cross-compiles to the
+# requested target, so a linux/arm64 image costs no QEMU emulation.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine@sha256:56961d79ea8129efddcc0b8643fd8a5416b4e6228cfd477e3fd61deb2672c587 AS build
+# GOTOOLCHAIN=local keeps the build from fetching another toolchain. CGO_ENABLED=0
+# is already the effective default here (the image ships no C toolchain); stating
+# it means a base image that gains one cannot silently start producing a
+# dynamically linked binary that the scratch-thin runtime could not run.
+ENV GOTOOLCHAIN=local \
+    CGO_ENABLED=0
 WORKDIR /build
-COPY api/go.mod api/go.sum ./api/
+# Module metadata and the replaced local module first: this layer and the module
+# download it feeds are reused by every build that changes only service source.
 COPY gen/go/ ./gen/go/
-COPY api/ ./api/
+COPY api/go.mod api/go.sum ./api/
 WORKDIR /build/api
-RUN go build -o /api ./cmd/api
+RUN go mod download
+COPY api/ ./
+ARG TARGETOS
+ARG TARGETARCH
+RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    go build -trimpath -ldflags='-s -w' -o /api ./cmd/api
 
-FROM alpine:3.20
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN addgroup -S -g 65532 loop \
     && adduser -S -u 65532 -G loop loop
 COPY --from=build /api /api
 EXPOSE 8080
 USER 65532:65532
+# Compose overrides this with its own probe. It exists so that `docker run` of a
+# published image reports health without the caller restating the check.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/ready || exit 1
 ENTRYPOINT ["/api"]

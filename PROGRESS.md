@@ -2307,6 +2307,467 @@ Two review findings were accepted as-is: the `reportDrainState` nil-client guard
 
 ---
 
+# Session: Autonomy L1 / issue #104 — runner-side goal gate and session-resume continuation loop (branch `issue-104`)
+
+## Current Status
+
+- Overall status: Implemented and validated locally. Pull request [#164](https://github.com/alexandre-leites/moirai/pull/164) opened against `main` and deliberately left unmerged. `origin/main` was merged into the branch after PR #160 landed; both `PROGRESS.md` session entries were kept.
+- Current phase: Autonomy roadmap L1 from `docs/reviews/2026-07-29-platform-review.md`.
+- Active implementation: complete — agent `issue-104`, 2026-07-29.
+- Last updated: 2026-07-29.
+- Agent/session identifier: `issue-104`.
+
+## Done
+
+- [x] Runner-side goal gate and continuation loop (Autonomy L1, issue #104)
+  - Completed: 2026-07-29.
+  - Relevant files: `runner/internal/dispatch/goalgate.go` (new), `runner/internal/dispatch/goalgate_test.go` (new), `runner/internal/dispatch/dispatch.go`, `runner/internal/dispatch/control_loop.go` (two additive hunks), `runner/internal/dispatch/dispatch_test.go`, `runner/internal/agents/opencode.go`, `runner/internal/agents/cli.go`, `runner/internal/agents/docker.go`, `runner/internal/agents/log.go`, `runner/internal/agents/continuation_test.go` (new), `runner/internal/config/config.go`, `runner/internal/config/config_test.go`, `runner/cmd/runner/main.go`, `runner/README.md`.
+  - Behavior delivered:
+    - **Goal gate.** After the agent returns, `Dispatcher.evaluateGoalGate` decides *delivered* from evidence only: a valid result document (an absent or invalid one already arrives as `agents.ErrNoResultEvidence` from #89, which is merged and confirmed present in `opencode.go`), `status == "completed"`, an empty `remainingWork`, and — for a role with `mayModifyFiles` — a workspace change measured with the existing `RevisionInspector.Snapshot` machinery. The diff check does not apply to read-only roles and is skipped rather than failed when no inspector is configured or the snapshot errors, so an unmeasurable workspace can never manufacture a continuation.
+    - **Continuation loop.** A failed gate with budget left re-invokes the backend through a new `agents.Backend.Continue`, resuming the `sessionId` the result document reported. `sessionId` was previously captured and used for nothing. `OpenCodeBackend.Continue` adds `--session <id>` before the prompt; `CLIBackend` and `DockerCLIBackend` implement the contract's fresh-run fallback, which is also what an execution with no captured session takes.
+    - **Continuation prompt** names the missing evidence in the agent's own terms ("No result document was written at `.loop/result.json`", "You listed work as still remaining: …", "No file in the repository was changed") and then repeats the role's whole original prompt verbatim, because the fallback path starts a fresh agent that must be held to the same role, plan, prior failures, and review findings — and, for a reviewer, the same independence framing. Each prompt is kept as `.loop/continuation-<n>.md`.
+    - **Loop guard.** The verdict is fingerprinted from a closed reason vocabulary, the sorted `remainingWork` list, and the revision plus sorted changed-path set. Two consecutive identical fingerprints end the run. Nothing agent-authored beyond `remainingWork`, and no timestamp, path, exit code, or map iteration, enters the signature.
+    - **Evidence hygiene.** The finished attempt's result document is renamed to `.loop/result-attempt-<n>.json` before each continuation, so a continuation that exits without writing anything is not assessed against its predecessor's document. A document that cannot be moved aside stops the loop instead.
+    - **Never worse than one shot.** An attempt that ended in an executor error — a signal, a timeout, or a clean exit with no result document — never overrides one that did not, so a crashed continuation cannot replace a delivery, or an agent-declared block's stated reason (#97), with an anonymous failure. Outcomes the agent itself reached are not ranked against each other and the later one stands, so an agent that completes and then declares itself blocked keeps its retraction.
+    - **Bounds.** Five independent exits: budget, loop guard, cancelled context, an unclearable result document, and the packet deadline. `timeoutSeconds` bounds the *total* agent wall clock: the deadline is anchored before the first invocation, which still receives exactly the packet timeout, and each continuation receives only what is left. Lease renewal needed no change — `StreamSupervisor`'s heartbeat drives `ControlLoop.Reconcile` → `OfferState.RenewDue` on its own ticker while executions run in their own goroutines, so it never depended on execution duration, and the total wall clock is unchanged.
+    - **Reporting.** `Result` gained `continuations` and `gateVerdict`; `terminalPayload` reports them (count omitted when zero) and both are kept by the reduced-payload retry. The payload stays at 24 keys against the orchestrator's `MAX_PAYLOAD_FIELDS = 32`, and `runner_events.py` ignores keys it does not read, so no orchestrator change was needed.
+    - **Configuration.** `LOOP_RUNNER_MAX_CONTINUATIONS` (default `3`, range `0`–`10`; `0` switches the goal loop off). `Dispatcher.MaxContinuations` defaults to the Go zero value, so a dispatcher assembled field by field — every pre-existing test — keeps exactly its old one-shot behavior, gate included.
+  - Validation performed: see Validation Status.
+  - Commands executed: `make test-runner`; `make test-api`; `make build-runner`; `cd runner && go vet ./...`; `cd runner && gofmt -l .`.
+  - Notes: no migration, no proto change, no orchestrator change, no schema change.
+
+## Decisions
+
+- Decision: the gate never rewrites an outcome into a different one; it decides whether to continue, which attempt is reported, and what travels alongside it.
+  - Context: the issue's five-part design lists reporting, not re-classification, and Autonomy L2 (#105) owns making non-delivery a first-class workflow outcome.
+  - Alternatives considered: failing a run whose gate never passed.
+  - Reason: that would change the orchestrator's contract from the runner side, ahead of the layer that is meant to absorb it, and would turn every `completed`-with-`remainingWork` run into a failure overnight.
+  - Consequences: a run can still report `completed` with `gateVerdict: "not delivered (…)"`. That pairing is the signal #105 will consume.
+
+- Decision: an attempt that ended in an executor error never overrides one that did not; clean outcomes are not ranked against each other.
+  - Context: adversarial review demonstrated that a crashed continuation replaced a `completed` delivery and an agent-declared `blocked` reason with an anonymous failure — a regression the same execution does not have with the loop switched off.
+  - Alternatives considered: reporting the last attempt and accepting the regression; refusing to continue anything that already completed; a full ordering of `completed` > `blocked` > `failed`.
+  - Reason: a continuation exists to improve on the attempt before it, so it must not be able to make it worse — and every destructive case is an executor error, which the terminal event already refuses to trust. A full ordering was written first and then rejected: it inverted the agent's own latest word, so an agent that completed and then declared itself blocked would have had that retraction, and its stated reason, discarded. Refusing to continue a `completed` run would have discarded the issue's central case (completed with `remainingWork`).
+  - Consequences: a reported `completed` can come from an earlier attempt than the last one. The mandatory local pipeline (#90) still validates the delivered tree, so a later attempt that broke it is caught there rather than by the gate.
+
+- Decision: the continuation budget lives on the runner, not in the packet.
+  - Context: the issue calls for a config value, e.g. `MaxContinuations: 3`, per execution.
+  - Alternatives considered: a task-packet field.
+  - Reason: a packet field is a protocol change, which the issue explicitly rules out ("no orchestrator or protocol changes"), and the cost of a continuation is a runner-local resource question.
+  - Consequences: the budget is uniform across a runner's projects. `LOOP_RUNNER_MAX_CONTINUATIONS=0` is the per-runner escape hatch.
+
+- Decision: hash the diff from the revision and the changed-path set rather than from file contents.
+  - Context: the loop guard needs "the same diff hash".
+  - Alternatives considered: hashing changed-file contents; hashing mtimes.
+  - Reason: revision plus paths is the whole of what the existing snapshot machinery reports, which is what the issue said to reuse; mtimes change on every rewrite and would keep the guard from ever tripping.
+  - Consequences: two continuations that rewrite the same files with different content share a diff component and can read as no progress. The guard errs toward stopping, the budget still bounds the case it misjudges, and every reason code and the remaining-work list have to match as well before it trips.
+
+## Cross-ownership note
+
+`runner/internal/dispatch/control_loop.go` and `runner/README.md` were assigned to the concurrent issue #124 (metrics) while this work ran. Acceptance criterion 2 ("terminal payloads report continuation counts") is not satisfiable without `terminalPayload`, which lives in `control_loop.go`, and the runner's configuration reference lives in `runner/README.md`. Both were touched as narrowly as possible — two additive hunks in `terminalPayload` and `minimalTerminalPayloadKeys`, and one table row plus one new section in the README — in regions #124's stated scope does not name (it calls for metric setter calls at the points that already track state, and a metric-name section). At the time of writing, `origin/issue-124` was still at `main`'s HEAD with no changes pushed. Flagged on the pull request and on the issue.
+
+## Post-review corrections
+
+An adversarial review of the diff found five issues; all were fixed before commit.
+
+- **A continuation inherited the previous attempt's result document** (high). The document is written at a fixed path and validated only against the execution ID, which every attempt shares. A continuation that exited without writing anything was assessed against its predecessor's document and could be declared *delivered* on evidence it never produced — the "a clean exit is not a result" hole #89 closed, re-opened inside one execution. Demonstrated end to end with a real `OpenCodeBackend` and a continuation whose whole body was `exit 0`. Fixed by `archiveResultDocument`, covered by `TestPreviousResultDocumentIsSetAsideBeforeAContinuation`.
+- **A failing continuation destroyed a better earlier outcome** (high). `completed` → `failed` and, worse, `blocked` (with its reason) → `failed` were both reproduced with the goal loop at its default budget. Fixed by the best-attempt rule above; covered by `TestAFailingContinuationCannotDestroyACompletedAttempt` and `TestAFailingContinuationCannotDestroyADeclaredBlock`.
+- **The continuation prompt was materially thinner than the original** (medium). It dropped `# ROLE`, the issue body, the plan, failed checks, review findings, previous failures, and a reviewer's entire independence framing. Harmless for a resumed session; not harmless for the fallback path, which every sessionless backend takes and which is also the most common continuation of all — no result document means no captured session. Fixed by prepending the continuation sections to `promptFor(packet)`; covered by `TestContinuationPromptCarriesTheWholeOriginalPrompt`.
+- **The appended agent log cleared its own truncation flag** (medium). `openAgentLog` seeded `written` and the hash but not `truncated`, so an attempt that hit the 4 MiB bound followed by a quiet continuation reported `stdoutTruncated: false`. Fixed by seeding `truncated`, and the doc comment now states plainly that the checksum covers the bytes on disk rather than everything the agent produced.
+- **Four overstated claims in `runner/README.md`** (low): "changes … an execution's wall clock" (only the *bound* is unchanged); "a declared block costs exactly one continuation" (only when the block is re-declared over an unchanged workspace); gate check 4 described as "diff non-empty" when the code also accepts a moved `HEAD`; and the missing `PROGRESS.md` entry, which is this section.
+
+Two further problems were found and fixed while re-checking the fixes themselves:
+
+- **A full outcome ordering inverted the agent's own latest word.** The first version of the best-attempt rule ranked `completed` above `blocked`, which meant an agent that completed and then, asked to continue, declared itself blocked had that retraction and its stated reason discarded. Replaced with "an executor error never overrides an outcome the agent reached, and clean outcomes are not ranked against each other"; covered by `TestALaterCleanRetractionWinsOverAnEarlierClaim`.
+- **The continuation prompt quoted agent text back unbounded.** Nothing bounds a result document, and the whole prompt travels as one argv element, so a verbose `remainingWork` or `summary` could grow it until the exec failed — spending a continuation on a process that never started. Both are now bounded with the same helpers the terminal payload uses; covered by `TestContinuationPromptBoundsWhatItQuotesBackFromTheAgent`.
+
+The review also confirmed, by execution rather than by reading, five things this change claims: the loop is non-recursive and cannot exceed its budget; the guard's signature contains nothing that varies between two evaluations of identical state; total wall clock stays inside `timeoutSeconds`; lease renewal genuinely runs independently of execution duration in this codebase; and `MaxContinuations == 0` is byte-for-byte the previous behavior.
+
+## Validation Status
+
+- Targeted tests: Passed — 20 new tests. `runner/internal/dispatch/goalgate_test.go`: continuation on `remainingWork` with the right prompt and resumed session; continuation on an empty developer diff; read-only roles skipping the diff check; the loop guard tripping before the budget; changing verdicts exhausting the budget; a missing result document being continued and recovering; zero budget staying single-shot; continuations sharing the packet timeout; an exhausted time budget; a cancelled execution not being continued; a declared block continued once; signature stability and set-insensitivity; an unmeasurable and an absent inspector both skipping check (d); continuation prompts recorded in the workspace; the terminal payload and its reduced form; the result document set aside before a continuation; a failing continuation unable to destroy a `completed` or a `blocked` attempt; the continuation prompt carrying the whole original prompt. `runner/internal/agents/continuation_test.go`: `--session` passed on resume, the sessionless fallback, `Execute` never resuming, logs accumulating across attempts with matching metadata, and every configurable backend implementing `Continue`. `runner/internal/config/config_test.go`: the continuation budget's default, its `0` case, and its rejected values.
+- Mutation checks: every fix and every bound was confirmed to be defended by a test that fails without it, run against a scratchpad copy of `runner/` (the worktree itself was not mutated). Each of these turned the suite red, and the suite was green again once reverted:
+  - drop `archiveResultDocument` → `TestPreviousResultDocumentIsSetAsideBeforeAContinuation`.
+  - `best = current` unconditionally (last attempt wins) → `TestAFailingContinuationCannotDestroyACompletedAttempt`, `TestAFailingContinuationCannotDestroyADeclaredBlock`.
+  - continuation prompt stops carrying `promptFor(packet)` → `TestContinuationPromptCarriesTheWholeOriginalPrompt`, `TestAgentThatStopsHalfWayIsContinuedAndFinishesInTheSameExecution`.
+  - `openAgentLog` stops seeding `truncated` → `TestOpenAgentLogSeedsTheBoundAndTruncationFlagFromTheExistingLog`.
+  - loop guard disabled → `TestIdenticalVerdictsStopTheLoopBeforeTheBudget`, `TestDeclaredBlockIsContinuedOnceThenReported`.
+  - a timestamp added to `gateSignature` → the same two, plus `TestGateSignatureIsStableForIdenticalState`.
+  - each continuation re-anchored to the full packet timeout → `TestContinuationsShareThePacketTimeout`.
+  - `Backend.Continue` replaced by `Backend.Execute` → three tests, including the two that pin session resumption.
+  - the diff check applied to read-only roles → `TestReadOnlyRoleSkipsTheDiffCheck`.
+  - `boundedList`/`boundedAgentText` removed from the continuation prompt → `TestContinuationPromptBoundsWhatItQuotesBackFromTheAgent`.
+- Service tests: Passed — `make test-runner` (race detector on), every package `ok`; `make test-api`, every package `ok`.
+- Full repository tests: Not run — no orchestrator, web, or proto change. `make test-orchestrator` and `make test-web` were deliberately not invoked.
+- Build: Passed — `make build-runner`.
+- Lint: Passed — `cd runner && gofmt -l .` produced no output.
+- Type checks: Passed — `cd runner && go vet ./...`.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run — no Compose or configuration-file change (`LOOP_RUNNER_MAX_CONTINUATIONS` has a default and needs no Compose entry).
+- End-to-end workflow: Not run. The gate and loop are exercised at the dispatcher seam, and the backend halves at the process seam with fake `opencode` binaries.
+
+## Known Issues
+
+- Issue: two CI jobs are expected to stay red for a reason unrelated to this change.
+  - Severity: P2 for the repository, none for this change.
+  - Impact: CI had been red repo-wide since `3ba81c2` ("Change CI runner to self-hosted Linux"), with six jobs failing in under ten seconds at `actions/setup-python` ("The version '3.12' with architecture 'x64' was not found for debian 13") — on `main`'s own HEAD as much as on any branch. PR #160 merged during this session and fixed four of the six. Per its own `PROGRESS.md` entry, `compose-smoke` and `test-postgres-integration` remain blocked on Docker group membership for the self-hosted runners, which cannot be changed from this repository.
+  - Evidence: PR #160 (`fix/ci-self-hosted-python`), merged as `fc8f6fe`; its session entry in this file records the remaining two jobs and why.
+  - Suggested resolution: none here. This branch was validated locally with the Makefile targets recorded above, and its own CI run is judged on the jobs that can pass.
+
+- Issue: the loop guard's diff component cannot distinguish two different edits to the same file.
+  - Severity: P3.
+  - Impact: an agent that keeps rewriting the same file, with an unchanged reason set and an unchanged `remainingWork` list, is treated as wedged after one continuation.
+  - Evidence: `diffSignature` in `runner/internal/dispatch/goalgate.go` hashes the revision and the sorted changed-path set, which is the whole of what `repository.RevisionSummary` carries.
+  - Suggested resolution: if it proves to matter, extend `RevisionInspector` with a content digest of the changed paths. Deliberately not done here: it would change `runner/internal/repository`, which this issue does not scope, and the guard's error direction is the safe one.
+
+- Issue: an execution now occupies its runner and project slot for longer, up to the packet's `timeoutSeconds`, where a one-shot run often finished far sooner.
+  - Severity: P3.
+  - Impact: the bound is unchanged and the lease is renewed independently, so nothing breaks; a busy runner is simply busy for longer before it takes the next job.
+  - Evidence: `ProjectConcurrencyGuard.Acquire` and the capacity slot are both held for the whole of `Dispatcher.Execute`.
+  - Suggested resolution: none needed. Operators who want the old profile set `LOOP_RUNNER_MAX_CONTINUATIONS=0`.
+
+## Next Recommended Implementation
+
+Autonomy L2, issue [#105](https://github.com/alexandre-leites/moirai/issues/105) — make non-delivery a first-class workflow outcome. This session produces exactly the signal it needs: every terminal payload from a continuing execution now carries `continuations` and a `gateVerdict` drawn from a closed vocabulary, so `orchestrator/src/moirai/workflows/runner_events.py` can distinguish *delivered* from *returned-without-evidence* from *agent-reported-blocked* without inferring it from an exit code. Relevant files: `orchestrator/src/moirai/workflows/runner_events.py` and its tests. Expected behavior: a returned-without-evidence execution stays in its phase and consumes a continuation counter separate from the retry budget, rather than being routed as a generic failure. Targeted validation: new cases in `orchestrator/tests/test_runner_events.py` asserting the three outcomes are routed differently and that `gateVerdict` is read rather than the exit code.
+
+---
+
+# Session: Docker runnability audit and GHCR release pipeline (agent/docker-ghcr-release, 2026-07-29)
+
+- Overall status: complete; branch `feat/docker-ghcr-release` pushed and PR opened.
+- Current phase: packaging and delivery. No product behaviour changed; no service source file was edited.
+- Active implementation: None.
+- Last updated: 2026-07-29
+- Agent/session identifier: agent/docker-ghcr-release
+- Files deliberately not touched: `.github/workflows/ci.yml` and `compose.yaml`, both owned by
+  `fix/ci-self-hosted-python` (PR #160, still open at the time of writing). The published-image
+  path is a separate overlay, `compose.ghcr.yaml`, precisely so `compose.yaml` did not have to move.
+
+## Audit result: what was already correct
+
+Established by building and running, not by reading. Baseline `docker build` of all four
+services from `c67a881` succeeded, and `docker compose up --build --wait` brought
+postgres + orchestrator + api + web + runner to `healthy` in ~22 s. A real end-to-end request
+closed the loop: `POST /api/v1/auth/login` through the web container's nginx proxy returned
+`200` with a user id, which means web -> api -> orchestrator gRPC -> PostgreSQL all worked, the
+migrations applied, and the bootstrap admin was seeded. The runner registered and opened its
+control stream. So the honest headline is that Docker already worked; nothing here was a repair
+of a broken build.
+
+Already correct before this session, and left alone: three-network isolation, secrets delivered
+as files under `/run/secrets/` rather than environment variables, per-service healthchecks,
+`no-new-privileges`, `cap_drop: [ALL]` with narrow re-grants, `read_only` plus tmpfs on the
+runner, non-root runtime users (65532 for api/orchestrator/runner, `nginx` for web), the
+root-then-`gosu`/`su-exec` entrypoints that exist so secrets can be re-owned before dropping
+privileges, multi-stage builds for api/runner/web, `GOTOOLCHAIN=local`, `npm ci` against a
+committed lockfile, and the `compose-smoke` CI job that already boots the stack on every PR.
+
+## Done
+
+- [x] Make the container images reproducible, cache-friendly, multi-architecture, and smaller
+  - Completed: 2026-07-29
+  - Relevant files: `api/Dockerfile`, `runner/Dockerfile`, `web/Dockerfile`,
+    `orchestrator/Dockerfile`, `orchestrator/.dockerignore`, `.dockerignore`
+  - Behavior delivered:
+    - Every base image is pinned to its manifest-list digest (`golang:1.25-alpine`,
+      `alpine:3.22`, `node:22-alpine`, `nginx:1.27-alpine`, `python:3.12-slim`,
+      `ghcr.io/astral-sh/uv:0.11.26`). `.github/dependabot.yml` gained a `docker` ecosystem for
+      all four directories so the pins are moved forward weekly instead of rotting.
+    - `alpine:3.20` -> `alpine:3.22` for the api runtime. 3.20 is past its supported window, so
+      it no longer receives Alpine security updates.
+    - The orchestrator installs its dependency closure from the committed `uv.lock`
+      (`uv export --frozen --no-dev` -> `pip install --require-hashes`) instead of resolving the
+      `>=` ranges in `pyproject.toml` at build time. Two consequences: rebuilding an old commit
+      reproduces its dependency set, and the closure CI audits with `pip-audit` (which reads
+      `uv.lock`) is now the closure that actually ships. `uv.lock` had to be un-ignored in
+      `orchestrator/.dockerignore`.
+    - Go builders and the web bundle build run on `$BUILDPLATFORM` and cross-compile
+      (`GOOS/GOARCH=$TARGETOS/$TARGETARCH`, `CGO_ENABLED=0`, `-trimpath -ldflags='-s -w'`), so a
+      linux/arm64 image pays QEMU emulation only for the runtime stages that run `apk`,
+      `apt-get`, `pip`, and `npm`.
+    - Dependency installs are their own layers: `go mod download` before the service source,
+      `npm ci` before the web source, `pip install -r requirements` before `src/`. Editing a
+      source file no longer reinstalls dependencies.
+    - `HEALTHCHECK` in each image, mirroring what `compose.yaml` already declares, so a plain
+      `docker run` of a published image reports health without the caller restating the probe.
+      Compose still overrides them; nothing about the existing probes changed.
+    - The runner image dropped from **1.99 GB to 525 MB**. `npm install --global opencode-ai`
+      keeps all four x64 platform packages (~520 MB) plus a ~425 MB npm cache, even though its
+      postinstall has already hardlinked the one binary it needs into `bin/opencode.exe`.
+      Both are now removed, and `opencode --version` runs *after* the deletion so a future
+      opencode layout that stops hardlinking fails the build instead of shipping a runner with
+      no agent binary. api dropped 40.6 MB -> 30.8 MB.
+    - Root `.dockerignore` now excludes `.env`, `.env.*`, `.claude/`, `docs/`, `scripts/`,
+      `proto/`, `schemas/`, and the tool caches. Nothing copied them, but `.claude/` in
+      particular can contain entire git worktrees, and a build context is not the place to find
+      out that a credential file is in scope.
+  - Validation performed: see Validation Status.
+
+- [x] Publish the four images to GitHub Container Registry from a dedicated release workflow
+  - Completed: 2026-07-29
+  - Relevant files: `.github/workflows/release.yml`, `scripts/release-version.sh`,
+    `scripts/release-version_test.sh`, `compose.ghcr.yaml`, `docs/release.md`, `README.md`,
+    `.env.example`, `Makefile`, `.github/dependabot.yml`
+  - Behavior delivered:
+    - Images are `ghcr.io/<owner>/<repo>/<service>`, derived from `github.repository`, so a fork
+      publishes under its own owner with no edit.
+    - Authentication is the built-in `GITHUB_TOKEN` with job-scoped `packages: write`. No new
+      secret was invented, and the token never reaches a build argument, a build context, or an
+      image layer.
+    - Every tag is a `linux/amd64` + `linux/arm64` manifest list, built with buildx + QEMU,
+      `mode=max` provenance, an SBOM, and OCI labels and index annotations for title,
+      description, source, url, revision, version and created.
+    - Layer cache is GitHub Actions cache scoped per service (`type=gha,scope=release-<service>`).
+    - A `verify` job re-reads every published tag from the registry and fails the run if either
+      architecture is missing. A multi-arch build that silently degrades to one architecture
+      still pushes successfully, so the manifest lists are checked rather than trusted.
+    - `compose.ghcr.yaml` runs the stack from published images. It uses `build: !reset null`
+      rather than only setting `image:`, because an overlay that only sets `image:` still lets
+      `up` build from local source whenever the tag is not already in the image store.
+  - Validation performed: see Validation Status.
+
+## Decisions
+
+- Decision: image names are `ghcr.io/<owner>/<repo>/<service>`, not `ghcr.io/<owner>/moirai-<service>`.
+  - Context: both forms work with `GITHUB_TOKEN` and `packages: write`.
+  - Alternatives considered: the flat `moirai-<service>` prefix.
+  - Reason: this is a monorepo of co-released services. Nesting under the repository path groups
+    all four packages under the repository they come from and leaves the owner's top-level
+    package namespace free for unrelated projects.
+  - Consequences: package names read as `moirai/api` in the GitHub UI. Pull references are one
+    path segment longer.
+
+- Decision: publishing requires a *published GitHub Release*; pushing a git tag publishes nothing.
+  - Context: the workflow could have triggered on `push: tags: v*`, on `release: published`, or both.
+  - Alternatives considered: triggering on both, which double-fires whenever a release is created
+    from a new tag and needs a de-duplication rule to stay unambiguous.
+  - Reason: one trigger per outcome keeps the mapping from trigger to tags a function rather than
+    a race. It also makes releasing an intentional act: a tag can be created, inspected, and
+    deleted without touching the registry.
+  - Consequences: `git push --tags` alone does nothing. `docs/release.md` and `README.md` both
+    state this outright because it is the surprising half of the contract.
+
+- Decision: the trigger -> tag derivation lives in `scripts/release-version.sh`, not in workflow YAML.
+  - Context: the mapping is the part of a release pipeline that cannot be proven without cutting a
+    real release.
+  - Alternatives considered: `docker/metadata-action` with `type=semver` rules, which is less code
+    but encodes the contract in action inputs that cannot be executed locally.
+  - Reason: a shell script with a table-driven test is executable specification. The `plan` job
+    runs `scripts/release-version_test.sh` before it derives anything, so a change that breaks the
+    mapping fails the release instead of publishing images under the wrong tags.
+  - Consequences: 20 mapping cases are verified on every release run and by `make test-release-tags`.
+
+- Decision: `latest` is only claimed when GitHub reports this release as the newest one.
+  - Context: publishing a patch for an older line (`v1.3.5` after `v1.4.0`) would otherwise drag
+    `latest` backwards.
+  - Alternatives considered: always tagging `latest` on any non-prerelease release.
+  - Reason: `latest` moving backwards silently downgrades every deployment that tracks it.
+  - Consequences: the `plan` job makes one authenticated call to `repos/:owner/:repo/releases/latest`.
+    A non-200/404 response fails the job rather than guessing, because both guesses are wrong in a
+    way nobody would notice.
+
+- Decision: the release workflow runs on the existing `[self-hosted, linux]` pool.
+  - Context: multi-arch needs QEMU, which self-hosted runners may not have registered.
+  - Alternatives considered: GitHub-hosted `ubuntu-latest` with `docker/setup-qemu-action`, or a
+    native `ubuntu-24.04-arm` matrix with a digest-merge job.
+  - Reason: the repository is **private**, so GitHub-hosted minutes are billable and hosted arm64
+    runners are not free either. CI already builds and boots the entire Compose stack on the
+    self-hosted box, so Docker is known to work there. The workflow also uses no `actions/setup-*`
+    step at all, which keeps it clear of the `setup-python`-on-Debian-13 failure PR #160 is fixing.
+  - Consequences: the runner must be able to run privileged containers, because
+    `docker/setup-qemu-action` registers the aarch64 emulator by running `tonistiigi/binfmt` with
+    `--privileged`. If it cannot, the workflow fails at that step rather than publishing an
+    amd64-only image. `docker/setup-buildx-action` downloads buildx itself, so the buildx plugin
+    does not need to be preinstalled. This prerequisite is stated in `docs/release.md`; it is the
+    one thing this session could not verify or install.
+
+- Decision: the release matrix uses `fail-fast: false`.
+  - Context: four services publish independently, so a failure can leave a partial release.
+  - Alternatives considered: `fail-fast: true`, and a two-phase build-by-digest then
+    `imagetools create` merge, which is the only genuinely atomic option.
+  - Reason: `fail-fast: true` cancels siblings that may be mid-push, which is worse than a partial
+    publish. The tag set is a pure function of the trigger, so re-running the workflow republishes
+    the same tags and converges. The `verify` job is what makes an incomplete release visible.
+  - Consequences: a failed release must be re-run, not patched by hand.
+
+## Validation Status
+
+Every command below was run in the worktree at
+`.claude/worktrees/docker-release` on 2026-07-29. Host ports were bound to 39301/39302 and the
+local registry to 39399 to avoid colliding with concurrent agents; all of it was torn down.
+
+- Targeted tests: Passed — `make test-release-tags` (20/20 trigger -> tag mapping cases, covering
+  stable releases, `MAKE_LATEST=false`, prereleases by flag and by tag identifier, release
+  branches with and without a leading `v`, dispatch dry runs, and 10 rejected inputs). Also run
+  under `dash` to confirm the script is POSIX, not bash.
+- Service tests: Not run — no service source file was changed. `make test` was deliberately not
+  invoked.
+- Full repository tests: Not run, same reason.
+- Build: Passed — baseline `docker build` of all four services from `c67a881`, then again after
+  the changes:
+  `docker build -t moirai-audit-web:new ./web`;
+  `docker build -f api/Dockerfile -t moirai-audit-api:new .`;
+  `docker build -t moirai-audit-orchestrator:new ./orchestrator`;
+  `docker build -f runner/Dockerfile -t moirai-audit-runner:new .`
+  Sizes: runner 1.99 GB -> 525 MB, api 40.6 MB -> 30.8 MB, orchestrator 565 MB (unchanged), web
+  73.9 MB (unchanged).
+- Multi-architecture build: Passed — arm64 emulation installed with
+  `docker run --privileged --rm tonistiigi/binfmt --install arm64`, a `docker-container` builder
+  created, and all four images built for `linux/amd64,linux/arm64` with `--provenance=mode=max
+  --sbom=true` and pushed to a throwaway registry on `127.0.0.1:39399`. Inspected with the exact
+  template the `verify` job uses:
+  `docker buildx imagetools inspect <ref> --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}'`
+  -> `linux/amd64 linux/arm64 unknown/unknown unknown/unknown` for all four (the two
+  `unknown/unknown` entries are the provenance and SBOM attestation manifests).
+  The arm64 images were then run under emulation: api reports `aarch64` and starts, runner reports
+  `aarch64` with `opencode 1.18.7` and `/runner live` -> `{"status":"live"}`, orchestrator reports
+  `aarch64` with `gh 2.63.2` and imports `moirai`/`asyncpg`/`grpc`, web reports `aarch64` with
+  nginx 1.27.5 and the built assets present.
+  The `workflow_dispatch` dry-run shape (multi-arch, no output, no attestations) was also run and
+  exits 0.
+- Lint: Passed — `actionlint v1.7.12` on `.github/workflows/release.yml`, exit 0.
+- Type checks: Not applicable — no Python or Go source changed.
+- Database migrations: Not applicable.
+- Docker Compose: Passed — `docker compose config --quiet` on the unmodified `compose.yaml`;
+  `make compose-ghcr`, which renders `compose.yaml` + `compose.ghcr.yaml` and asserts no `build:`
+  section survives.
+  `docker compose up --build --detach --wait --wait-timeout 300` reached `healthy` on all five
+  services with the new Dockerfiles.
+- End-to-end workflow: Passed, twice.
+  1. From local builds: `curl http://127.0.0.1:39301/` -> 200, `/ready` -> 200, and
+     `POST /api/v1/auth/login` through the web nginx proxy -> 200 with a user id.
+  2. **From published images**: the same stack started with
+     `docker compose -f compose.yaml -f compose.ghcr.yaml pull && ... up --detach --wait`, with
+     `MOIRAI_IMAGE_PREFIX=127.0.0.1:39399/moirai` and `MOIRAI_IMAGE_TAG=multiarch-test` pointing at
+     the registry-pushed multi-arch images. All five services reached `healthy` and the same login
+     returned 200. This is the `compose.ghcr.yaml` path exercised for real, differing from a GHCR
+     release only in registry hostname and authentication.
+- Orchestrator dependency closure: Passed — `pip freeze` inside the built image is byte-identical
+  to `uv export --frozen --no-dev --no-emit-project --no-hashes` from `orchestrator/uv.lock`, with
+  the single expected difference of `tzdata`, whose marker is `sys_platform == 'win32'`.
+- Teardown: `docker compose down --volumes --remove-orphans` for both projects, registry container
+  and buildx builder removed, all test images deleted, and
+  `docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-aarch64` run to restore the
+  host's binfmt registrations to their prior state. No moirai container, image, volume, or network
+  remained.
+
+## Known Issues
+
+- Issue: the release workflow itself has never fired.
+  - Severity: P2 — everything downstream of the trigger is verified; the trigger is not.
+  - Impact: `on: push: branches: ['release/**']` and `on: release: types: [published]` firing,
+    `GITHUB_TOKEN` being accepted by `ghcr.io` for this owner, the GHA layer cache working from a
+    self-hosted runner, and `docker/setup-qemu-action` succeeding on the Debian 13 box are all
+    unproven. They cannot be proven without cutting a real release, and `workflow_dispatch` only
+    becomes dispatchable once the workflow is on `main`.
+  - Evidence: no tags and no releases exist in this repository yet (`git tag` and
+    `gh release list` are both empty), so nothing has ever exercised the path.
+  - Suggested resolution: after merge, run the workflow once from the Actions tab. That is the
+    dry-run path: it builds all four images for both architectures and publishes nothing. Then cut
+    `release/0.1.0` and check that `0.1.0-rc.<n>` and `0.1.0-rc` appear in the package list.
+
+- Issue: CI does not run on release branches.
+  - Severity: P2.
+  - Impact: `.github/workflows/ci.yml` triggers on `push` to `main` and on `pull_request` only, so
+    a push to `release/1.4.0` publishes release-candidate images without the test suite having run
+    on that commit.
+  - Evidence: `on: push: branches: [main]` in `.github/workflows/ci.yml`.
+  - Suggested resolution: add `release/**` to that workflow's push branches. Deliberately not done
+    here: `ci.yml` is owned by PR #160 for the duration of that fix, and a one-line trigger change
+    is not worth a conflict in a file another agent is actively repairing.
+
+- Issue: `compose.yaml` binds the web service on all interfaces while the API is loopback-only.
+  - Severity: P3.
+  - Impact: `ports: ["3000:8080"]` publishes the dashboard on every host interface, whereas the
+    API uses `127.0.0.1:8080:8080`. On a machine with a public interface the dev dashboard is
+    reachable from the network.
+  - Evidence: `compose.yaml`, `web.ports`.
+  - Suggested resolution: `127.0.0.1:3000:8080`, which keeps `curl localhost:3000` working in the
+    `compose-smoke` job. Deliberately not done here: `compose.yaml` is contested by PR #160.
+
+## Re-validation after the review fixes
+
+Six of the seven fixes are workflow and script changes, re-verified directly: `actionlint` clean,
+`make test-release-tags` 21/21 under both `sh` and `dash` (two new cases pin the major-pointer
+gating and the `MAKE_LATEST` default), the tag-expansion step simulated to prove it now emits all
+five references per service instead of four, and the verify job simulated against a stub `docker`
+that reports amd64-only for one tag -- it checks 20 references (4 services x 5 tags), emits
+`::error::` for the degraded one, and exits 1.
+
+The seventh, `uv export --frozen` -> `--locked`, changes an image, so it was re-validated as an
+image: `docker build ./orchestrator` succeeds, and the resulting image was run standalone against
+`postgres:16-alpine` on a throwaway network -- it reached `healthy` **on the Dockerfile's own new
+HEALTHCHECK, with no Compose involved**, applied all seven migrations, created the initial admin
+and the seed project, and started the gRPC server on `0.0.0.0:50051`. Torn down afterwards.
+
+The full five-service `docker compose up --build --wait` was **not** re-run after that one-word
+change: this workstation hit Docker Hub's unauthenticated pull rate limit (HTTP 429 resolving
+`golang:1.25-alpine`) from the multi-architecture builds earlier in the session, and it had not
+cleared. That is an environmental limit, not a defect -- the identical stack, built from these
+Dockerfiles with the single difference of the `uv` flag, reached healthy and served a real login
+twice earlier in the session (once from local builds, once from registry-published images), and
+the flag change alters only whether `uv` asserts the lock is current, not the exported closure.
+
+## Adversarial review of this diff
+
+A hostile review of the commit was run before the PR was opened. It found seven real defects,
+all fixed and re-verified; three of them would have shipped.
+
+- **Every `sha-<short sha>` tag would have been silently dropped** (high). Both the tag-expansion
+  step and the verify job used `printf '%s' "$TAGS" | tr ',' '\n' | while read`. `printf '%s'`
+  emits no trailing newline, so `read` returns non-zero on the final field and the loop body never
+  runs for it. The `sha-` tag is always last, so no trigger would ever have published it -- and on
+  `workflow_dispatch`, where it is the *only* tag, `build-push-action` would have received an empty
+  tag list. The verify job inherited the same bug, so it would not have noticed. Fixed with
+  `printf '%s\n'`; proven by simulating both steps, which now emit 5 references per service and 20
+  in total for a stable release.
+- **`uv export --frozen` does not detect a stale lock** (high). `--frozen` only means "do not
+  re-lock"; it exports a stale lock happily. Demonstrated: adding `cachetools>=5` to
+  `pyproject.toml` without re-locking, `--frozen` exits 0 and silently omits it, while `--locked`
+  exits 2 with "The lockfile at `uv.lock` needs to be updated". Combined with
+  `pip install --no-deps .`, a dependency added without `uv lock` would have shipped missing from
+  the image. Switched to `--locked`, and confirmed `--locked` works in the builder stage, which
+  has only `pyproject.toml` and `uv.lock` and no `src/`.
+- **The bare major pointer was not protected the way `latest` was** (medium). `tags` unconditionally
+  contained `$major`, so publishing `v1.3.5` after `v1.4.0` would have repointed `1` at `1.3.5` --
+  exactly the backwards move `MAKE_LATEST` exists to prevent. `X` is now gated with `latest`;
+  `X.Y` deliberately is not, because a minor pointer is supposed to follow the newest patch of its
+  own line. Documented in `docs/release.md` and covered by two new test cases.
+- **`github.ref` was interpolated into a `run:` body** (medium). The plan summary step expanded
+  `${{ github.ref }}` directly into shell. `git check-ref-format --branch 'release/$(id)'` accepts
+  that name, and the `workflow_dispatch` branch of the derivation never validates `REF`, so a
+  crafted branch name would execute on the self-hosted runner. Now passed through `env:` like every
+  other untrusted value in the file.
+- **Fixed `/tmp` paths on a shared runner host** (medium). The plan job wrote
+  `/tmp/latest-release.json` and `/tmp/release-plan.env`. Concurrency is per ref, so a
+  `release/1.4.0` push and a `v1.3.9` release can run at the same time; on a host with two runners
+  the second would truncate the first's plan file. Both moved to `$RUNNER_TEMP`.
+- **`MAKE_LATEST` failed open** (low/medium). Both the workflow fallback and the script default
+  were `true`, so any path that lost the value would *claim* `latest`. For a flag whose only
+  purpose is to stop a pointer moving, the safe default is `false`; both were flipped and a test
+  now pins the default.
+- **`org.opencontainers.image.created` was wall-clock time** (low), which contradicted the
+  reproducibility claim: the same commit released twice produced different metadata. Now taken from
+  the commit timestamp in UTC.
+
+Findings accepted without a code change, with reasons:
+
+- The reviewer flagged `opencode --version` running under QEMU on the arm64 leg as an unverified
+  risk. It is verified: the arm64 runner image built successfully (that check runs inside the
+  build) and the pushed arm64 image reports `aarch64` with `opencode 1.18.7`.
+- Promoting an existing pre-release to a full release fires `released`, not `published`, so it does
+  not republish. Adding `released` to the trigger would make every ordinary release build twice.
+  The gap and its workaround are documented in `docs/release.md` instead.
+- `.github/dependabot.yml` does not manage `postgres:16-alpine` in `compose.yaml`; that needs a
+  `docker-compose` ecosystem entry, and `compose.yaml` is owned by PR #160 for now.
+
+## Next Recommended Implementation
+
+- Run the release workflow once via `workflow_dispatch` after merge (dry run, publishes nothing),
+  then cut `release/0.1.0` to exercise the release-candidate path end to end. Only after those two
+  runs is the pipeline genuinely proven.
+- Whoever lands PR #160 should add `release/**` to `ci.yml`'s push branches, so release-candidate
+  images are only built from commits the test suite has passed.
 # Session: issue #141 — `accept_offer` clobbered the workflow phase, so successful developer executions produced no transition (branch `issue-141`)
 
 ## Current Status
@@ -2785,6 +3246,231 @@ test fail").
   regression would not block the aggregate check. Now that the runners' Docker group membership is
   fixed and that job can actually run, adding it to `validate`'s `needs:` is a one-line change with
   real value. Carried over from the previous session; not done here to keep this diff to the issue.
+# Session: issue #156 — Second delivery to a workflow's execution branch is rejected non-fast-forward (branch `issue-156`)
+
+## Current Status
+
+- Overall status: Complete for issue #156. The reported behaviour no longer occurs; this session pins it, and pins the design that was deliberately *not* chosen.
+- Current phase: P0 bug verification and regression coverage. Only the first completed execution of a workflow reached the code host, so every repair iteration and retry was lost.
+- Active implementation: issue-156 agent session, 2026-07-29 — consecutive deliveries to one execution branch.
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-156.
+
+## Done
+
+- [x] Reproduced the reported failure before changing anything
+  - Plain git 2.43.0, the script from the issue body, mirroring `Prepare` → `Commit` → `Push` across two executions of one workflow:
+
+    ```
+    git init -q --bare -b main origin.git   # seeded with one commit on main
+    git clone -q --mirror origin.git cache.git
+    # execution 1
+    git --git-dir cache.git worktree add -q -B agent/x wt1 main
+    (cd wt1 && echo one > a && git add -A && git commit -qm one \
+       && git -c remote.origin.mirror=false push --set-upstream origin agent/x)   # OK, new branch
+    git --git-dir cache.git worktree remove --force wt1
+    # execution 2 — the pre-#146 Prepare force-resets agent/x back to main
+    git --git-dir cache.git worktree add -q -B agent/x wt2 main
+    (cd wt2 && echo two > b && git add -A && git commit -qm two \
+       && git -c remote.origin.mirror=false push --set-upstream origin agent/x)
+    #  ! [rejected]  agent/x -> agent/x (non-fast-forward)   (exit 1)
+    ```
+
+- [x] Established that the runner-side fix had already landed, and proved it rather than assuming it
+  - The issue was filed at 2026-07-29T11:41:54Z citing `manager.go:103` (`git worktree add -B <branch> <path> <base>`). PR #146 (issue #136) merged at 13:11:02Z — **after** the issue was filed — and replaced that unconditional reset with `Manager.prepareBaseRevision`, which starts each workspace from the execution branch's published or local tip and falls back to the default branch only for a job whose branch exists nowhere. The issue's own "How to tackle" names this as option (2) and calls it "probably the right long-term answer".
+  - Consequence: every workspace now starts from a revision that already contains the published tip, so a delivery push is an ordinary fast-forward by construction. The line number in the issue is stale; the failure is not reachable through the `Manager` API on `c4dbe94`.
+  - Verified by driving the real `Prepare` → `Commit` → `Push` → `Cleanup` cycle three times over one branch in both repository modes, plus the branch deleted between executions, the default branch moving between executions, a human commit landing on the execution branch, and a second delivery from a different runner with a cold cache. All pass unchanged.
+
+- [x] Added the regression coverage the issue's acceptance criteria ask for, which did not exist
+  - `runner/internal/repository/delivery_sequence_test.go` (new). The guarantee is a property of the *pair* `Prepare` and `Push`, and neither half's tests observed it: the preparation tests stop at the workspace revision and never push, and the delivery tests push exactly once.
+  - `TestConsecutiveDeliveriesToOneExecutionBranchAllReachTheCodeHost` — both repository modes, real Git. Three deliveries, not two, with a *failed* repair iteration in between that commits to the execution branch and publishes only to `wip/execution-2`. Asserts the final tip and every file read back out of the origin repository, the ancestry chain `first → second → third`, that the failed run's commit was inherited by the delivery after it, and that the delivery branch advancing left `wip/execution-2` alone.
+  - `TestDeliveryKeepsACommitTheRunnerDidNotMake` — both modes. Someone outside the runner pushes to the execution branch between two executions; the next delivery must carry that commit forward.
+  - `TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt` — both modes. The branch moves *after* the workspace is prepared. The push must fail and leave the other publisher's commit intact, and the execution that follows must resume from the published tip and deliver, preserving it. This pins that the remaining rejection is correct behaviour rather than a residual bug, and that it does not livelock.
+  - `TestPushNamesNoForcingFlag` — a recorded-arguments guard. The real-git tests above cannot fail fast on a forced push, because adding `--force-with-lease` leaves a fast-forward a fast-forward and they would all keep passing while the guarantee was gone.
+
+- [x] Documented the decision where it is load-bearing
+  - `runner/internal/repository/delivery.go`: `Push` had no doc comment. It now records why the delivery push is deliberately not forced, why `PushWorkInProgress` may force (its ref is named after a single execution), and why `--force-with-lease` is no safer here.
+
+## Decisions
+
+- Decision: keep option (2) — preparation continues from the published branch — and do **not** force the delivery push, in any form.
+  - Context: the issue offers three shapes: (1) `--force-with-lease` on the delivery push, (2) prepare from the published branch, (3) a branch name per execution.
+  - Reason: (2) is already in effect and makes forcing buy nothing. With the workspace starting from the published tip, the only pushes a plain push rejects are those whose branch moved *after* the workspace was prepared — precisely the ones that must not be forced, because the runner has not seen that work and cannot merge it unattended.
+  - Evidence that (1) is not a safe interim, and that the two repository modes break `--force-with-lease` in opposite directions (plain git 2.43.0, both reproduced):
+    - `managed_clone` — **unusable, not merely unsafe.** A mirror cache keeps the remote's branches as its own `refs/heads/*`, so there is no remote-tracking ref for the lease to read and *every* push is refused, including a job's **first** delivery: `! [rejected] agent/z -> agent/z (stale info)`, with the origin left holding only `refs/heads/main`. Option (1) would not have fixed the symptom in the **default** repository mode at all.
+    - `existing_path` — satisfied by construction in exactly the wrong case. The lease reads `refs/remotes/origin/<branch>`, which only the runner's **own previous push** ever writes: `Prepare` deliberately fetches the published tip to `refs/moirai-remote/<branch>` instead (`--refmap=`, `manager.go`). So the lease *does* reject a third party's push — but when the runner's own base is stale it matches, the force goes through (` + 4cee993...a83c25e agent/x -> agent/x (forced update)`), and `git cat-file -e refs/heads/agent/x:a.txt` then fails: the first delivery is gone. It guards the case a plain push already guards, and not the case this defect was.
+  - The same holds through the Go API: with `Prepare` reverted to its pre-#146 form and `--force-with-lease` added to `Push`, the second delivery succeeds in `existing_path` and **deletes the first delivery's file from the code host** — `git show refs/heads/agent/issue-156/run-1:first.txt` exits 128. That is the fourth acceptance criterion violated, demonstrated rather than argued.
+  - (3) was rejected as the issue frames it: one branch per attempt litters the repository and breaks "one PR per workflow".
+
+- Decision: this session changes no runner behaviour, and says so plainly rather than manufacturing a diff.
+  - The behaviour required by the acceptance criteria already holds. What was missing was the proof and the guard, both of which are now present and both of which fail against the pre-fix code.
+
+- Decision: the orchestrator's one-branch-per-workflow-run naming (`orchestrator/src/moirai/workflows/persistence.py`) is left exactly as it is.
+  - It is not the defect. Reusing one branch across executions is what makes a repair loop cumulative and keeps "one PR per workflow" true; the defect was the runner discarding that branch on every preparation. The file is also owned by concurrent work on issue #121, so changing it here would collide.
+
+## Validation Status
+
+- Targeted tests: Passed — `cd runner && go test ./internal/repository/ -run 'TestConsecutiveDeliveries|TestDeliveryKeeps|TestDeliveryIsRejected|TestPushNamesNoForcingFlag' -v` → all pass, both repository-mode subtests included.
+- Service tests: Passed — `make test-runner` (`go test -race ./...`) → every package `ok`, including `internal/repository` and `internal/dispatch`.
+- Evidence the new tests bite: with `Prepare`'s resolved base revision temporarily overwritten by `defaultBranchRevision(request)` — the pre-#146 behaviour — all three real-git tests fail with the exact symptom the issue reports, in **both** modes:
+
+  ```
+  Push() error = push branch: git -C: exit status 1:
+   ! [rejected]  agent/issue-156/run-1 -> agent/issue-156/run-1 (non-fast-forward)
+  ```
+
+  With `--force-with-lease` added on top of that revert, they still fail — one of them because the forced push silently destroyed the first delivery. `TestPushNamesNoForcingFlag` fails immediately on the flag itself. The temporary patches were reverted; `git status` confirms the only source change is the `Push` doc comment.
+- Lint / formatting: Passed — `gofmt -l runner` empty, `cd runner && go vet ./...` clean.
+- Orchestrator tests, lint, typecheck: Not run — no Python changed in this branch.
+- Full repository tests: Not run — a runner-package change does not warrant it.
+- Database migrations: Not applicable.
+- Docker Compose: Not run — unaffected, and `compose-smoke` cannot execute on the self-hosted runners (see the CI session above).
+
+## Known Issues
+
+- Issue: `runner/README.md` line 121 is now stale. It states "Until [#147] is fixed, no push from a `managed_clone` workspace succeeds, so in that mode nothing is ever published: step 1 does not fire … and a job resumed on a *different* runner still starts from the default branch." #147 was fixed by PR #154, so `managed_clone` does publish and step 1 does fire.
+  - Severity: P3 — documentation only; the code is correct.
+  - Impact: a reader of the runner README will believe cross-runner resumption is broken in the default repository mode when it is not.
+  - Evidence: `TestPushFromManagedCloneWorkspacePublishesTheDeliveryBranch` and this session's `second-delivery-from-a-different-runner` check both publish and resume in `managed_clone`.
+  - Suggested resolution: delete that sentence. **Deliberately not done here:** `runner/README.md` is owned by open PR #164 (issue #104), so editing it would collide. It should be dropped by whoever lands #164, or in a follow-up once #164 merges.
+
+- Issue: two concurrent executions of the *same* job publishing to the same branch is still resolved by one of them failing.
+  - Severity: P3 — correct behaviour, not a defect, but worth naming so it is not re-reported as #156.
+  - Impact: the losing execution's push is rejected; its work stays on `refs/moirai-wip/<executionId>` and on the local branch, and the next execution of the job resumes from the published tip.
+  - Evidence: `TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt`, which also asserts the retry after it delivers, so the state is not a livelock.
+  - This is **reachable, not hypothetical**, and an earlier draft of this section wrongly hedged it as conditional: `ControlPlane.expire_leases` re-offers a job whose lease expired, nothing gates the runner's push on the lease generation, and a slow-but-alive runner and its replacement can therefore both push. The adversarial review reproduced the resulting rejection with two `Manager`s against one origin.
+  - Suggested resolution: none at the runner — the rejection is the correct outcome and it self-heals. If the losing execution's work should survive rather than be re-derived, that is a lease-fencing question for the orchestrator.
+
+- Issue: **a completed execution that may not push can have its commit destroyed with no anchor.** Filed as [#167](https://github.com/alexandre-leites/moirai/issues/167).
+  - Severity: P2 — silent loss of work that was reported as completed. Pre-existing, introduced with #136's fix, not by this branch.
+  - Impact: `prepareBaseRevision` resets the execution branch onto the published tip whenever this runner's copy does not contain it, and justifies that by saying the local commit it leaves behind "came from a run that did not complete, which #100 anchors". A `repairer` **completes** without `mayPush`, so `retainWorkInProgress` never runs and no `refs/moirai-wip/<executionId>` is written. The local branch is the only reference to that commit, and the preparation moves it.
+  - Evidence, reproduced independently through the `Manager` API in `managed_clone` (deliver `C1` → repairer commits `R2` and completes → the published branch advances elsewhere → next `Prepare`): `git for-each-ref --contains <R2>` in the cache returns **empty**, and the next workspace has no `repair.txt`. `runner/README.md` contradicts itself about this — its step 2 states the correct caveat, its step 3 asserts the opposite.
+  - Suggested resolution: see #167. Deliberately **not** fixed here: it is a distinct defect from #156 (no push is rejected), it needs a decision about *where* the anchor is written rather than a patch, and #156's fourth acceptance criterion is about commits the runner did **not** make, which still holds.
+
+- Issue: **`existing_path` jobs are stuck forever if a human checks the execution branch out** in the shared checkout. Filed as [#168](https://github.com/alexandre-leites/moirai/issues/168).
+  - Severity: P2 — permanent, not transient: every execution of a workflow shares one branch name, so the job cannot progress again without human intervention. Pre-existing.
+  - Impact: `Prepare` fails with `create worktree: fatal: '<branch>' is already used by worktree at '<checkout>'`. `worktree prune` cannot clear it — the human's main worktree is not stale — and `ReleaseBranch` only covers the runner's own retained workspace.
+  - Evidence: reproduced by the adversarial review against a real checkout.
+  - Suggested resolution: see #168. Out of scope here for the same reason as #167.
+
+## Post-review corrections
+
+An adversarial review of this branch's own diff was run before it was proposed, and it found two prose defects in the deliverable plus two real defects outside it.
+
+- **The `Push` doc comment's `--force-with-lease` justification was wrong, twice.** The first version claimed the lease "would be taken against a cache that Prepare has just fetched" — `Prepare` deliberately does *not* fetch into `refs/remotes/origin/<branch>`; `--refmap=` exists precisely so it writes only `refs/moirai-remote/<branch>`. The second version corrected the mechanism but still understated `managed_clone`: the review measured that a mirror has no remote-tracking refs at all, so `--force-with-lease` fails a job's **first** delivery, which makes it unusable in the default repository mode rather than merely no safer. Both re-verified here (`! [rejected] agent/z -> agent/z (stale info)`, origin left holding only `refs/heads/main`) and the comment now says so.
+- **`TestPushNamesNoForcingFlag`'s stated reason for existing was false.** It claimed the real-git tests "would let every one of them keep passing" under `--force-with-lease`. Measured, with `Prepare` intact: `--force-with-lease` fails three real-git subtests, and plain `--force` fails `TestDeliveryIsRejectedRatherThanForcedWhenTheBranchMovedUnderIt` in **both** modes. Neither variant would slip past. The test is kept — it names the reason at the flag itself, in milliseconds and without Git, which is where someone reaching for `--force` after the next non-fast-forward report will be looking — but its comment now states the redundancy as measured instead of inventing a blind spot.
+- **Two genuine defects outside this issue were filed rather than folded in:** [#167](https://github.com/alexandre-leites/moirai/issues/167) (a completed execution without `mayPush` loses its commit with no anchor) and [#168](https://github.com/alexandre-leites/moirai/issues/168) (`existing_path` stuck forever when a human holds the branch). #167 was reproduced independently here before filing. Both are recorded under Known Issues above.
+- Findings accepted without change: the "only deliveries a plain push rejects" sentence now names the real race window (Prepare's `ls-remote`, not the push) and acknowledges that protected branches and pre-receive hooks reject too; the concurrent-execution note is no longer hedged as conditional, since an expired lease is re-offered while its runner may still be alive.
+- The review separately confirmed by experiment what this session had *not* found: no deterministic interleaving rejects a 2nd/3rd/Nth delivery; a mirror's `fetch --prune origin main` does not prune the local execution branch (git 2.43 restricts pruning to the command-line refspec); a wiped data directory, a deleted remote branch and a cold second runner all deliver; and none of the new tests is vacuous — `isAncestor` fatals on any exit status other than 1, and every delivery is read back out of origin, so a lying `PushResult` cannot pass.
+
+## Next Recommended Implementation
+
+- Fix [#167](https://github.com/alexandre-leites/moirai/issues/167) — it is the remaining silent-work-loss hole in the preparation ordering, and the runner README currently contradicts itself about it.
+- Land the `runner/README.md` corrections above (the stale #147 sentence, and the step 3 claim #167 disproves) once PR #164 is merged.
+- Consider whether the orchestrator should surface a rejected delivery distinctly from other push failures, so a branch that moved under an execution is visible as such in the workflow's history rather than as a generic `push repository changes` error.
+# Session: issue #121 — Merge is never verified: the issue is closed on an unconfirmed `gh pr merge` and `merged_at` is never written (branch `issue-121`)
+
+## Current Status
+
+- Overall status: Complete for issue #121.
+- Current phase: P1 bug fix in the workflow's final deterministic gate.
+- Active implementation: issue-121 agent session, 2026-07-29 — verify the merge before the workflow may complete. (Interrupted once by a session usage limit and resumed; the interruption left a `WIP: interrupted mid-implementation` commit on this branch, superseded by the commits that follow.)
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-121.
+
+## Done
+
+- [x] The merge is confirmed with the code host before the issue is closed, and the merge is recorded durably
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/policy.py`, `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/persistence.py`, `orchestrator/src/moirai/code_hosts/github_cli.py`, `orchestrator/migrations/008_pull_request_merge_commit.sql` (new), `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_github_code_host.py`, `orchestrator/tests/test_workflow_policy.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_persistence.py`, `orchestrator/tests/test_end_to_end.py`.
+  - Behavior delivered:
+    - **The merge node re-reads the pull request and decides on what the code host reports.** `merge` used to call `merge_pull_request` and transition to `merging`, whose edge ran unconditionally into `complete` — so a merge GitHub queued rather than completed, a branch-protection race, or a pull request closed by a human while the run waited all closed the issue and applied `agent:delivered`. The node now reads the pull request, merges only if it is neither merged nor closed, and then re-reads until the code host settles it.
+    - **`complete` is reachable only from a verified merge.** `route_after_merge` (`policy.py`) returns `COMPLETE` on `pull_request_merged` alone and `BLOCKED` on everything else; `route_merge` (`issue_graph.py`) short-circuits a node that reported `blocked` so its specific reason survives instead of being re-judged on gates it never set. The old `graph.add_edge("merge", "complete")` is gone.
+    - **Every non-merge outcome is terminal, with its own reason.** A pull request closed without merging, a merge the code host refused, a merge that never landed, an unreadable pull request, a project with no code host and a run with no pull request each block with a distinct message. See Decisions for why terminal rather than parked — this is the one place the implementation deliberately departs from the issue text.
+    - **The verification budget is spent inside one node entry.** `RetryBudget.merge_verification_attempts` (5) bounds the confirming re-reads, with a 2-second pause between them (injectable, so tests spend the budget without spending the clock). A merge that becomes visible on a later read still completes; one that never does blocks with the last thing the code host actually said. A failed read costs a check rather than the merge — it is the absence of a verdict, not a verdict.
+    - **`app.pull_requests.merged_at` finally has a writer, and the merge commit has a column.** The upsert writes the real `state`, `merged_at` and the new `merge_commit`, with the two merge fields `COALESCE`d against the existing row so a later transition carrying no merge cannot erase the record. `merged_at` is non-NULL only when `pull_request_merged` is True — one authority for "this merged", not two — and a merge confirmed without a usable timestamp is stamped with the transition clock and logged, because a merged pull request with a NULL `merged_at` is exactly the hole the column exists to close.
+    - **The adapter reports the merge, not just the word.** `get_pull_request` and `find_pull_request` request `mergedAt` and `mergeCommit`; `merged` is true on any of the three signals and `closed` means closed *and* not merged, so evidence of a merge can never be overruled by a state string. `state` is normalised in `__post_init__` — an invariant rather than a convention, so a `PullRequest` built anywhere (another `CodeHost`, a test double passing GitHub's own `MERGED`) cannot land on the wrong side of an exact comparison. `gh`'s Go zero-time and an empty commit oid normalise to absent; a `mergeCommit` reported as a bare SHA string is accepted as well as the `{"oid": …}` wrapper; a present-but-unexpected type is logged rather than silently dropped.
+    - **`create_pull_request` now emits the whole pull request record.** It used to hand-pick four fields, so a pull request a human merged while the run was still cycling through repairs — `create_or_find` lists with `--state all` — lost its real merge timestamp and got the orchestrator's clock instead.
+    - **The merge is never issued twice.** The state is read before anything is attempted, so a pull request already merged — by a previous entry, or by someone else while the run waited — is confirmed rather than re-merged.
+  - Validation performed: 470 orchestrator unit tests (21 new), 30 Postgres integration tests against a real database, two end-to-end tests driving the real compiled LangGraph through the unconfirmed-merge and closed-without-merge paths, and direct Postgres probes of the migration and the upsert.
+  - Commands executed:
+    - `make test-orchestrator` → `Ran 470 tests`, `OK (skipped=30)`.
+    - `make lint` → `All checks passed!`.
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-121` → `Success: no issues found in 48 source files`. (Namespaced cache: the default `/tmp/moirai-mypy-cache` is shared across worktrees and the target deletes it.)
+    - `docker run -d --name moirai-pg-issue-121 -p 55121:5432 postgres:16-alpine …` then `LOOP_TEST_DATABASE_URL="postgresql://moirai:moirai@127.0.0.1:55121/moirai" make test-postgres-integration` → `Ran 30 tests`, `OK`. Container removed afterwards (`docker rm -f moirai-pg-issue-121`).
+    - Migration probe (ad-hoc script, not committed): applied migrations 001–007, planted a legacy `app.pull_requests` row with `state = 'MERGED'`, then ran 008's SQL three times. Output: `legacy row state: MERGED`, `after run 1/2/3: state= merged`, `columns: ['merge_commit', 'merged_at']`. Idempotent, and it normalises the rows the adapter change would otherwise have stranded in mixed case.
+    - Upsert probe (ad-hoc script, not committed): a verified-merge transition wrote `state='merged'`, `merged_at=2026-01-02 03:04:05+00`, `merge_commit='def456'`; a subsequent transition carrying no merge left both intact.
+  - Notes: `grep -rn "merged_at" orchestrator/src` returned only the migration before this change, exactly as the issue reported. One of the issue's claims is stale: `merge_pull_request`'s return value was indeed discarded, but the node already read the pull request *before* merging (an earlier partial fix), so the "already merged" case did not re-merge; what was missing was the read *after*, which is what the decision depends on.
+
+## Decisions
+
+- **An unconfirmed merge blocks; it does not park.** This is a deliberate departure from the issue's Scope ("remain in a waiting status that the maintenance loop re-enters") and it was not the first implementation. The first one parked in `merging`, and an adversarial review of the diff killed it with evidence:
+  - *Nothing re-enters a parked node.* `find_stalled_workflow_runs` (`persistence/control_plane.py`) is an allow-list that deliberately excludes `pr_created`, `waiting_github_checks`, `waiting_human` and `merging`; the outbox only carries rows written by `accept_event`, and the merge node dispatches no execution, so no runner event will ever arrive. Resuming a graph that finished at END re-evaluates the outgoing *edge*, not the node. Measured against the real compiled LangGraph: with `aupdate_state(..., as_node=...)` the node is re-entered and the counter advances 1 → 2; with the production form (`aupdate_state(config, updates)` + `ainvoke(None, config)`, `runtime.py:134-135`) `aget_state(config).next` is `()` before and after, and nothing runs. The issue's premise that `main.py:452-480` "already re-enters runs with no in-flight work" does not hold for these statuses.
+  - *A parked run stops the whole project.* `app.project_locks` rows are deleted only for terminal statuses (`workflows/persistence.py`), and the scheduler's candidate query refuses any project holding one (`control_plane.py:1145-1148`: `AND NOT EXISTS (SELECT 1 FROM app.project_locks AS lock WHERE lock.project_id = p.id)`). There is no TTL reaper for that table. So one unconfirmed merge would have made *every* future workflow on that project unschedulable, silently, with the issue still wearing `agent:running` and no `blocking_reason` anywhere.
+  - Building the re-entry owner is not available to this change: it lives in `persistence/control_plane.py` (owned by open PR #158) and `workflows/runtime.py` / `main.py`, which issue #155 already scopes for exactly this purpose. Blocking with a specific reason releases the lock, labels the issue `agent:blocked`, and puts the run in front of a human — strictly more useful than a silent stall. When #155 lands a re-entry owner, the last branch of `merge` is one line from parking again.
+- **The bound moved inside the node.** A budget spent across node entries is not a budget when nothing re-enters the node: the counter could only ever reach 1. The confirming re-reads now happen in one entry, so the limit is genuinely reachable and `PROJECT.md`'s "bounded loops" is satisfied by something that actually runs.
+- **No new `merged` workflow status.** The issue's scope suggests transitioning to a `merged` status. It was not added. The status would be transient — written and then immediately replaced by `completed` — so no consumer would ever meaningfully see it, while four modules outside this session's ownership (`domain/models.py`'s `WorkflowStatus`, `services/issue_sync.py`'s label policy, `persistence/control_plane.py`'s stall predicate, and the console's status rendering) would each have to learn a status that parks nothing; and a crash in that one-statement window would leave a run in a status nothing recovers. The durable distinction the issue asks for ("nothing distinguishes *the merge was attempted* from *the pull request is merged*") is carried by `app.pull_requests.state` + `merged_at` + `merge_commit`, which is queryable and survives the run. None of the five acceptance criteria name a status.
+- **A refused merge blocks immediately; a failed read costs a check.** The asymmetry is deliberate. `merge_pull_request` raising is the code host stating a verdict, and re-reading cannot improve it. A read failing is the *absence* of a verdict, and treating it as "not merged" is how a genuinely merged pull request would get stranded.
+- **`merged` consults the evidence, not only the state string.** The change fetches `mergedAt` and `mergeCommit` precisely because one signal is not enough; deciding on `state` alone would have kept the single-signal trust the issue is about. The direction of the remaining doubt matters: reporting a merged pull request as unmerged blocks a delivered change, while the reverse cannot happen — GitHub populates neither field until a merge exists.
+
+## Post-review corrections
+
+Two independent adversarial reviews of the diff were run before the work was claimed done. Both independently identified the parked-run defect; between them they found eleven issues, of which these were fixed:
+
+- **The waiting state was a permanent, silent, project-wide stall** (critical, both reviews). See Decisions — the design changed from parking to a bounded in-node confirmation with a terminal outcome.
+- **Re-entry would have re-issued `gh pr merge` for a still-open pull request, and the second entry would have blocked rather than waited.** `merge_pull_request` re-runs `required_checks` first and raises on anything pending, which the node turned into `blocked` — so in the exact scenario the waiting state was built for (a queued auto-merge behind a pending check), the *second* entry failed rather than spending the budget. Resolved by construction: there is no second entry.
+- **`_merged_at` read the reported timestamp before testing whether anything had merged, and accepted the `pull_request_state` string as a second authority.** A stray `pull_request_merged_at` would have been written for an unmerged pull request, and `create_pull_request` — which dropped the merge fields — stamped the local clock over a merge timestamp GitHub had already supplied. Gated on the boolean alone; `create_pull_request` now emits the whole record.
+- **The confirming-read failure path wrote the stale pre-merge reading back.** The branch whose justification is "the merge may well have landed" was stamping `state = 'open'` on a pull request that had probably just merged. It now writes nothing, leaving the last known-good row intact.
+- **State normalisation was a convention, not an invariant.** Moved into `PullRequest.__post_init__`, so no construction site can produce an unnormalised state that silently fails an exact `== "merged"`.
+- **`merged` trusted one signal.** A payload with `state: "CLOSED"` and a non-null `mergedAt` would have taken the worst branch — permanent `blocked`, "closed without being merged" — while the persistence layer wrote the real `merged_at` into the same row. `merged` now wins over `closed`.
+- **Migration 008 left legacy rows in mixed case**, producing exactly the split the normalisation exists to prevent. It now normalises them, still idempotently.
+- **The parsing helpers discarded malformed evidence silently**, and the zero-timestamp rule was being applied to a commit SHA. Split into `_optional_timestamp` and `_optional_text`, both logging an unexpected type; `_commit_oid` accepts a bare SHA string as well as the `{"oid": …}` wrapper.
+- **The merge path emitted no log line on any failure.** Every non-merge outcome now logs with the workflow run ID, the pull request, and the reason; a confirmed merge logs its merge commit.
+- **One message covered six causes**, and was simply false for one of them (a missing `pull_request_id` is not a missing code host). Split.
+- **`_FakeCodeHost.merges` was dead in `test_end_to_end.py`** — the exact knob that would have exercised the parked path end to end, which is why the suite could not see the deadlock. Two end-to-end tests now drive the real graph through the unconfirmed-merge and closed-without-merge paths.
+
+Not fixed, deliberately — see Known Issues: transient-versus-permanent classification of `GitHubCliError` from the merge command itself (pre-existing, unchanged by this diff), and `str(None)` coercion in `_pull_request_from_json` (pre-existing).
+
+## Known Issues
+
+- Issue: nothing re-enters a run parked on an external event (`waiting_github_checks`, and formerly the merge node's waiting state). **Pre-existing, tracked as #155**, whose own "Out of scope" names merge verification (#121) as separate.
+  - Severity: P1, not introduced here. It is why this change blocks rather than parks.
+  - Impact: `wait_for_checks` still parks forever today; #155 documents that as the normal case. The merge node no longer adds to it.
+  - Evidence: measured against the real compiled LangGraph, both by this session and independently by two reviewers. See Decisions.
+  - Suggested resolution: #155. When it lands, the merge node's final branch can park again in one line, and the in-node confirmation becomes the fast path rather than the whole budget.
+
+- Issue: a `GitHubCliError` from `merge_pull_request` itself is always treated as permanent, including the transient cases — a required check that flipped back to pending between `wait_for_checks` and `merge`, a `gh` timeout, a rate limit, a 502.
+  - Severity: P2. Each such blip blocks a run and feeds `_update_project_circuit`, so a run of them can open the project's circuit.
+  - Impact: a workflow blocks on something that would have succeeded on a retry.
+  - Evidence: `issue_trackers/github_cli.py` converts timeouts into `GitHubCliError`, and `GitHubCliUnavailableError` subclasses it, so the node's single `except GitHubCliError` cannot tell them apart.
+  - Suggested resolution: classify before blocking — route pending-check refusals and timeouts through the confirmation loop, reserve `blocked` for refusals GitHub states are terminal. **Deliberately not changed here:** this is `main`'s behaviour, unchanged by this diff, and widening the merge node's error taxonomy is a separate decision from verifying the merge. It is the same class of problem as #116.
+
+- Issue: `merged_at` and `merge_commit` are now written but read by nothing — no query, API field or console surface.
+  - Severity: P3. The durable proof exists but is unobservable.
+  - Impact: an operator cannot yet see when or as what a pull request merged without querying Postgres directly.
+  - Suggested resolution: surface them on the workflow detail response. `api/` is owned by open PR #161, so this is a follow-up.
+
+- Issue: `orchestrator/README.md:85` describes `merging` as one of the "transient statuses on unconditional edges". The edge is no longer unconditional.
+  - Severity: P3 — a stale sentence in prose, no behavioural impact. (`merging` *is* still transient after this change, so the sentence is only half wrong.)
+  - Suggested resolution: **not fixed here on purpose.** `orchestrator/README.md` is owned by open PR #158, re-checked as `OPEN` with the README in its file list while this branch was being finished.
+
+## Validation Status
+
+- Targeted tests: Passed — 21 new tests. `test_workflow_nodes.py`: the verified merge writes the commit and timestamp and only then routes to `complete`; no second `gh pr merge` on re-entry; no merge at all for an already-merged pull request; an unconfirmed merge leaves the issue tracker untouched and ends terminal; the budget is spent inside one entry (read and pause counts asserted); a merge confirmed on a later check still completes; a failed confirming read costs a check rather than the merge; a merge no read ever confirms blocks without guessing the record; closed-without-merge blocks with its own reason; no code host and no pull request block with distinct reasons. `test_github_code_host.py`: merge commit and timestamp parsed; closed reported distinctly from merged; nulls and `gh`'s zero-time treated as absent; every pull request read asks for the merge fields. Plus `test_workflow_policy.py`, `test_issue_graph.py`, `test_workflow_persistence.py` and two `test_end_to_end.py` tests through the real graph.
+- Service tests: Passed — `make test-orchestrator`, `Ran 470 tests`, `OK (skipped=30)`.
+- Full repository tests: Not run — `make test` also builds `web/` and `runner/`, neither of which this change touches.
+- Build: Not applicable — no Go or web change.
+- Lint: Passed — `make lint`, `All checks passed!`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-121`, `Success: no issues found in 48 source files`.
+- Database migrations: Passed — `008_pull_request_merge_commit.sql` applied by `MigrationRunner` against a real PostgreSQL 16; its SQL re-executed three times over a planted legacy `MERGED` row with no error and a stable `merged` result; `make test-postgres-integration` green (`Ran 30 tests`, `OK`), including `test_migrations_are_recorded_and_idempotent`.
+- Docker Compose: Not run — no Compose change, and the CI runner cannot reach the Docker daemon (see the previous session's Known Issues).
+- End-to-end workflow: Passed at the graph level — `test_end_to_end.py` now exercises the real read/merge/re-read sequence, including the two paths that must not deliver. Against the live GitHub CLI: not run.
+
+## Next Recommended Implementation
+
+- #155 — re-enter a parked run *at the node*. It unblocks `wait_for_checks`, and it is what would let an unconfirmed merge wait and retry instead of blocking.
+- Surface `app.pull_requests.merged_at` / `merge_commit` on the workflow detail API and the console, once #161 lands.
+- Once #158 lands, correct the one stale clause at `orchestrator/README.md:85`.
 # Session: issue #124 — API and runner Prometheus gauges are hardcoded to zero
 
 ## Current Status
@@ -2884,3 +3570,30 @@ An adversarial review of the committed diff (`ae07534`) found three more issues.
 - **The advertised metrics seam had no production caller** (medium-low). `loop.Metrics` and `Reporter.Metrics` were nil in production and fell back to `metrics.Default()`, which `metrics.New(bind)` happens to serve — correct today, but the `ControlLoop.Metrics` doc comment described wiring through `UseMetrics` that nothing performed, and building the server with a recorder of its own would have silently sent every runner metric except the heartbeat age to an unscraped registry. `runner/cmd/runner/main.go` now calls `loop.UseMetrics(metricsServer.Recorder())`. `UseMetrics` also republishes the queue depth, so a depth recovered from the outbox before the recorder was assigned is carried across rather than stranded on the default recorder.
 
 Review findings accepted without change: the API's request metrics cannot pre-materialise their label children the way the runner's do (routes are registered by handlers after the server is built, and the RPC-by-status-code cross product is large) — `api/README.md` now explains the asymmetry and says to alert on `absent()` rather than assume a series exists; `orchestratorCalls` stays a package variable because the interceptor that writes it is installed at dial time, before any server exists to hold it; a 405 lands in `route="unmatched"` because the mux answers it from a handler it never registered, which the route-label comment and the README now state.
+
+---
+
+# Issue #122 — Pipeline environment isolation
+
+- Completed: 2026-07-30
+- Agent/session identifier: issue-122
+- Branch: `issue-122`
+- Scope: `runner/` production and tests only.
+
+## Done
+
+- [x] Isolate local and Docker pipeline command environments
+  - Relevant files: `runner/internal/execution/local.go`, `runner/internal/pipeline/pipeline.go`, `runner/internal/pipeline/pipeline_test.go`, `runner/internal/dispatch/dispatch.go`, `runner/internal/dispatch/dispatch_test.go`, `runner/internal/dispatch/control_loop_test.go`.
+  - Behavior delivered: pipeline runners receive the resolved task environment, construct the same minimal `PATH`, `HOME`, and `TMPDIR` base used by local agent execution, and do not inherit runner-process variables. Both dedicated pipeline and post-agent pipeline paths receive the resolved declared environment.
+  - Tests added: parent sentinel exclusion, declared variable availability, required base variables, local/Docker environment parity, and both dispatcher pipeline paths.
+  - Adversarial review: checked execution paths, Docker env-file input, both dispatcher call sites, interface fakes, and environment parity. No remaining finding.
+
+## Validation Status
+
+- Targeted validation attempted: `GOCACHE=/tmp/moirai-issue-122-gocache GOMODCACHE=/tmp/moirai-issue-122-gomodcache go test -race ./internal/pipeline ./internal/dispatch ./internal/execution`.
+- Blocker: host has no `go` or `gofmt` executable, so targeted tests, formatter, vet, build, and `make test-runner` cannot run locally. `git diff --check` passed.
+- Full repository tests: not run; scope is runner only.
+
+## Next Recommended Implementation
+
+Run `make test-runner` in a Go-enabled environment, then merge this issue after review.

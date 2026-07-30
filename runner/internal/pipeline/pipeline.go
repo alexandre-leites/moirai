@@ -28,7 +28,7 @@ type Result struct {
 }
 
 type Runner interface {
-	Run(context.Context, string, []Command) ([]Result, error)
+	Run(context.Context, string, map[string]string, []Command) ([]Result, error)
 }
 
 type LocalRunner struct{}
@@ -37,7 +37,7 @@ type DockerRunner struct {
 	Executor execution.DockerExecutor
 }
 
-func (runner DockerRunner) Run(ctx context.Context, workspace string, commands []Command) ([]Result, error) {
+func (runner DockerRunner) Run(ctx context.Context, workspace string, environment map[string]string, commands []Command) ([]Result, error) {
 	results := make([]Result, 0, len(commands))
 	for index, command := range commands {
 		if err := validate(command); err != nil {
@@ -46,7 +46,7 @@ func (runner DockerRunner) Run(ctx context.Context, workspace string, commands [
 		arguments, _ := ParseCommandTemplate(command.Command)
 		var output bytes.Buffer
 		started := time.Now()
-		executionResult, err := runner.Executor.Execute(ctx, execution.Request{ExecutionID: fmt.Sprintf("pipeline-%d-%d", time.Now().UnixNano(), index), Workspace: workspace, Command: arguments, Timeout: command.Timeout}, &output, &output)
+		executionResult, err := runner.Executor.Execute(ctx, execution.Request{ExecutionID: fmt.Sprintf("pipeline-%d-%d", time.Now().UnixNano(), index), Workspace: workspace, Command: arguments, Environment: execution.MinimalEnvironment(environment, workspace), Timeout: command.Timeout}, &output, &output)
 		result := Result{Command: command.Command, ExitCode: executionResult.ExitCode, Output: truncateOutput(output.String()), Duration: time.Since(started), TimedOut: errors.Is(err, context.DeadlineExceeded)}
 		results = append(results, result)
 		if result.TimedOut {
@@ -59,13 +59,13 @@ func (runner DockerRunner) Run(ctx context.Context, workspace string, commands [
 	return results, nil
 }
 
-func (LocalRunner) Run(ctx context.Context, workspace string, commands []Command) ([]Result, error) {
+func (LocalRunner) Run(ctx context.Context, workspace string, environment map[string]string, commands []Command) ([]Result, error) {
 	results := make([]Result, 0, len(commands))
 	for _, command := range commands {
 		if err := validate(command); err != nil {
 			return results, err
 		}
-		result := run(ctx, workspace, command)
+		result := run(ctx, workspace, environment, command)
 		results = append(results, result)
 		if result.TimedOut {
 			return results, fmt.Errorf("pipeline command timed out: %s", command.Command)
@@ -103,7 +103,7 @@ func ParseCommandTemplate(value string) ([]string, error) {
 	return arguments, nil
 }
 
-func run(parent context.Context, workspace string, command Command) Result {
+func run(parent context.Context, workspace string, environment map[string]string, command Command) Result {
 	ctx, cancel := context.WithTimeout(parent, command.Timeout)
 	defer cancel()
 	started := time.Now()
@@ -113,6 +113,7 @@ func run(parent context.Context, workspace string, command Command) Result {
 	}
 	process := exec.CommandContext(ctx, arguments[0], arguments[1:]...)
 	process.Dir = workspace
+	process.Env = execution.MinimalEnvironment(environment, workspace)
 	output, err := process.CombinedOutput()
 	result := Result{Command: command.Command, ExitCode: 0, Output: truncateOutput(string(output)), Duration: time.Since(started)}
 	if ctx.Err() == context.DeadlineExceeded {

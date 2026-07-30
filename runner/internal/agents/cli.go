@@ -46,19 +46,17 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o750); err != nil {
 		return Result{}, fmt.Errorf("create result directory: %w", err)
 	}
-	stdout, err := os.Create(filepath.Join(filepath.Dir(resultPath), backend.NameValue+".stdout.log"))
+	stdout, stdoutLog, err := openAgentLog(filepath.Dir(resultPath), backend.NameValue+".stdout.log")
 	if err != nil {
-		return Result{}, fmt.Errorf("create CLI stdout log: %w", err)
+		return Result{}, err
 	}
 	defer stdout.Close()
-	stderr, err := os.Create(filepath.Join(filepath.Dir(resultPath), backend.NameValue+".stderr.log"))
+	stderr, stderrLog, err := openAgentLog(filepath.Dir(resultPath), backend.NameValue+".stderr.log")
 	if err != nil {
-		return Result{}, fmt.Errorf("create CLI stderr log: %w", err)
+		return Result{}, err
 	}
 	defer stderr.Close()
 	command := append(append([]string(nil), backend.Arguments...), request.Prompt)
-	stdoutLog := newBoundedLogWriter(stdout)
-	stderrLog := newBoundedLogWriter(stderr)
 	defer writeLogMetadata(filepath.Dir(resultPath), backend.NameValue, stdoutLog, stderrLog)
 	executionResult, err := backend.supervisor().Execute(parent, execution.Request{
 		ExecutionID: request.ExecutionID,
@@ -78,6 +76,16 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 		return Result{ExitCode: executionResult.ExitCode}, err
 	}
 	return Result{Status: document.Status, ExitCode: executionResult.ExitCode, Summary: document.Summary, ChangedFiles: document.ChangedFiles, CommandsRun: document.CommandsRun, RemainingWork: document.RemainingWork, SessionID: document.SessionID}, nil
+}
+
+// Continue re-engages the agent with the continuation prompt. A generic CLI
+// backend exposes no session-resume selector — the command line is whatever the
+// operator configured — so this is the fresh-run fallback the Backend contract
+// allows. The continuation still carries the objective and the missing evidence
+// in its prompt, so the agent is re-engaged toward the goal; only the previous
+// run's reasoning context is lost.
+func (backend CLIBackend) Continue(ctx context.Context, request Request) (Result, error) {
+	return backend.Execute(ctx, request)
 }
 
 func (backend CLIBackend) Cancel(executionID string) error {

@@ -389,6 +389,10 @@ class _WorkflowStore:
             request["status"] = event_type
 
 
+async def _no_sleep(seconds: float) -> None:
+    """The merge node's confirmation pause, without the wall clock."""
+
+
 class _EventDrivenWorkflow:
     """Drives the real issue graph the way production does: one runner terminal
     event at a time, through the same translation and resume path as
@@ -415,6 +419,10 @@ class _EventDrivenWorkflow:
             self.store,
             code_host_factory=None if code_host is None else (lambda project_id: code_host),
             issue_tracker_factory=None if issue_tracker is None else (lambda project_id: issue_tracker),
+            # The merge node pauses between the reads that confirm a merge.
+            # These tests spend that budget deliberately, so the clock is not
+            # part of the harness.
+            sleep=_no_sleep,
         )
         self.graph = build_issue_graph(
             nodes.build(), checkpointer=InMemorySaver(), interrupt_before=("wait_for_human",)
@@ -824,6 +832,52 @@ class EndToEndWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow.issue_tracker.closed_issues, ["42"])
 
     @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_a_merge_the_code_host_never_confirms_delivers_nothing(self) -> None:
+        """Issue #121, through the whole graph: `gh pr merge` returns cleanly
+        but the pull request never becomes merged.
+
+        The issue must not be closed and must not be labelled delivered, and
+        the run must reach a terminal status -- a run left non-terminal keeps
+        its `app.project_locks` row and makes every other workflow on the
+        project unschedulable, and nothing in the orchestrator re-enters a
+        parked graph to release it."""
+        workflow = _EventDrivenWorkflow(
+            code_host=_FakeCodeHost(merges=False), issue_tracker=_FakeIssueTracker()
+        )
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+
+        state = await workflow.deliver("developer", "implement")
+
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("was not confirmed", str(state["blocking_reason"]))
+        self.assertEqual(workflow.code_host.merged_prs, [("42", "squash")])
+        self.assertEqual(workflow.issue_tracker.closed_issues, [])
+        self.assertEqual(workflow.issue_tracker.added_labels, [])
+        self.assertEqual(await workflow.pending_nodes(), ())
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
+    async def test_a_pull_request_closed_while_the_run_waited_is_never_delivered(self) -> None:
+        workflow = _EventDrivenWorkflow(
+            code_host=_FakeCodeHost(closes=True), issue_tracker=_FakeIssueTracker()
+        )
+        await workflow.start()
+        await workflow.deliver("planner", "plan", result=_PLANNER_READY)
+        await workflow.deliver("developer", "implement")
+        await workflow.deliver("pipeline", "pipeline")
+        await workflow.deliver("reviewer", "review", result=_REVIEW_APPROVED)
+
+        state = await workflow.deliver("developer", "implement")
+
+        self.assertEqual(state["status"], "blocked")
+        self.assertIn("closed without being merged", str(state["blocking_reason"]))
+        self.assertEqual(workflow.code_host.merged_prs, [])
+        self.assertEqual(workflow.issue_tracker.closed_issues, [])
+
+    @unittest.skipIf(not _HAS_LANGGRAPH, "langgraph is not installed")
     async def test_runner_event_entry_point_resumes_the_graph_and_completes_delivery(self) -> None:
         """The gRPC entry point is wired end to end: a runner terminal event
         arriving on the stream resumes the suspended graph and finishes the
@@ -892,15 +946,38 @@ class _EntryPointControlPlane:
 
 
 class _FakeCodeHost:
-    def __init__(self, checks_pass: bool = True) -> None:
+    """A code host whose pull request really becomes merged when it is merged.
+
+    The merge node verifies the merge by re-reading the pull request, so a fake
+    that always answers `open` is a fake that never delivers (issue #121). The
+    state is flipped by `merge_pull_request` rather than being fixed at
+    construction so these tests exercise the real sequence: read, merge,
+    re-read, and only then complete.
+    """
+
+    def __init__(self, checks_pass: bool = True, merges: bool = True, closes: bool = False) -> None:
         self.created_prs: list[tuple[str, str, str, str, str | None]] = []
         self.checked_prs: list[str] = []
         self.merged_prs: list[tuple[str, str]] = []
         self.checks_pass = checks_pass
+        # merges=False models the case the verification exists for: the merge
+        # command succeeds and the pull request stays open. closes=True models
+        # someone closing it while the run waited.
+        self.merges = merges
+        self.state = "closed" if closes else "open"
 
     async def get_pull_request(self, pull_request_id: str) -> Any:
         from moirai.code_hosts import PullRequest
-        return PullRequest(external_id=pull_request_id, url="https://example.test/pr/42", state="open", head_branch="agent/42/run-1", head_commit="abc123")
+        merged = self.state == "merged"
+        return PullRequest(
+            external_id=pull_request_id,
+            url="https://example.test/pr/42",
+            state=self.state,
+            head_branch="agent/42/run-1",
+            head_commit="abc123",
+            merged_at="2026-01-01T00:00:00+00:00" if merged else None,
+            merge_commit="def456" if merged else None,
+        )
 
     async def create_or_find_pull_request(
         self, workflow_id: str, branch: str, base_branch: str, title: str, issue_number: str | None = None,
@@ -917,6 +994,8 @@ class _FakeCodeHost:
 
     async def merge_pull_request(self, pull_request_id: str, method: str) -> None:
         self.merged_prs.append((pull_request_id, method))
+        if self.merges:
+            self.state = "merged"
 
 
 class _FakeIssueTracker:
