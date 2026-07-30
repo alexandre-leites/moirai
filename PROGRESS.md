@@ -2970,6 +2970,282 @@ Final per-job status on run `30471380437`, read from `gh api repos/alexandre-lei
 
 ---
 
+# Session: issue #123 — Web app has no tests and eslint never runs in CI (branch `issue-123`)
+
+## Current Status
+
+Complete. The genuine gap — no coverage for `web/src/api.ts`, `login.tsx`, `projects.tsx` or
+`workflows.tsx`, and no CI job that reports the web suite under its own name — is closed. 75 new
+tests, and a `test-web` job that `validate` blocks on.
+
+**Two of the issue's five scope items were already satisfied when this branch was cut, and a third
+was partly so. They were verified against the tree, not assumed, and deliberately not re-done:**
+
+| scope item | state on `c4dbe94` | action |
+| --- | --- | --- |
+| 1. vitest + jsdom + a `test` script | **already done.** `web/package.json` has `"test": "vitest run"`; `jsdom` and `vitest` are devDependencies; `web/vitest.config.ts` exists | none — no dependency added, `package.json` and `package-lock.json` are untouched |
+| 2. `web/src/api.test.ts` | missing | **added** (25 tests) |
+| 3. `login`/`projects`/`workflows` tests | missing | **added** (11 + 20 + 12 tests), plus `auth.test.tsx` (7) for the session backbone both pages depend on |
+| 4. `Makefile` — `test-web` also runs `npm test` | **already done.** `Makefile:37` is `cd web && npm ci && npm run typecheck && npm run lint && npm test` | none — `Makefile` not edited |
+| 5. a CI job running `make test-web`, in `validate`'s `needs` | **partly done.** `make test-web` already ran in CI as a *step of `build-web`* (added by #150, `2f07822`), and `validate` already needed `build-web` | **split into its own `test-web` job** and added to `validate`'s `needs` |
+
+So the issue title is half stale: the web app was not testless (53 tests already existed for the
+runners page and the runner-status module), and eslint was not dark in CI. What was true is that
+four of the five source modules had no coverage at all, and that a web-test failure surfaced as
+"the web build broke".
+
+The issue's own bounds were respected: no e2e or browser automation, no snapshot testing, no
+coverage threshold, and none of the pre-existing lint warnings in the Quality Backlog were touched
+(they are warnings — `eslint .` exits 0 — so they do not block the new job).
+
+## Done
+
+- [x] Covered the API client (`web/src/api.test.ts`, 25 tests)
+  - Relevant files: `web/src/api.test.ts` (new). `web/src/api.ts` unchanged.
+  - Behavior delivered: the CSRF contract (the `loop_csrf` cookie reaches `x-csrf-token` on all
+    seven mutating calls and on none of the reads; the cookie regex is anchored so `xloop_csrf`
+    cannot impersonate it; percent-encoded values are decoded); the 401 path (the unauthorized
+    handler fires on 401, not on 403/500, stops firing once unregistered, and a 401 with no handler
+    registered does not crash); problem+json mapping to `ApiError` carrying `status`, `title` and
+    `detail`, with fallbacks for a non-JSON body, an empty body, a non-string `title`/`detail` and
+    an empty-string `detail`; and request shapes (login body, `comment: ""` default on a decision,
+    `allowedLabels: []` default on a token, enable/disable endpoint split, envelope unwrapping,
+    `health` reporting `unhealthy` instead of throwing, abort-signal forwarding).
+  - Notes: runs under jsdom because the CSRF token is read from `document.cookie`. Cookies set by a
+    test are expired in an `afterEach` so they cannot leak into the next one.
+
+- [x] Covered the three MVP pages (`login`, `projects`, `workflows`; 40 tests)
+  - Relevant files: `web/src/login.test.tsx`, `web/src/projects.test.tsx`,
+    `web/src/workflows.test.tsx` (all new). No page source was modified.
+  - Behavior delivered:
+    - **Login** — the form renders with a masked password field and the right `autocomplete`
+      values; an empty, whitespace-only-username, or password-less submission is refused *without
+      an API call*; the typed credentials are sent verbatim; a stale validation error clears; a
+      rejected sign-in shows the generic message without leaking the server's text and leaves the
+      form usable; the form locks during the request and unlocks on both success and failure.
+    - **Projects** — loading / empty / populated states; a viewer gets no buttons at all while an
+      admin gets the create control, the `Actions` column and a per-row toggle; the toggle sends
+      `(id, !enabled)` and re-renders from the project the *server* returned; a failed toggle leaves
+      the row alone; the create form opens and closes from one control, refuses a nameless project
+      without calling the API, trims the name, honours the repository-mode switch (path vs URL),
+      splits and de-blanks the comma-separated runner labels, falls back to `main` for an empty
+      default branch, appends the created project and closes, and surfaces a 409 in the form while
+      keeping the operator's input.
+    - **Workflows** — loading / empty / populated states; the full column set; the UUID is
+      shortened to 12 chars and the full id never reaches the DOM; **Approve and Request changes
+      render only for `waiting_human`** and for no other status; each button sends its own decision
+      value for the row that was clicked (not the first waiting row); the row re-renders from the
+      server's workflow so the spent controls disappear; only the acting row locks while its
+      decision is in flight; a failed decision shows the error and leaves the workflow decidable;
+      a later success clears the error.
+  - Notes: `LoginPage` is mounted inside a real `AuthProvider` rather than a hand-built context, so
+    the test exercises the actual chain `LoginPage -> AuthProvider.login -> api.login -> api.me`.
+    `ProjectsPage`'s admin tests do the same to get a genuine `role: "admin"` session; its
+    viewer tests mount the page bare, which is what the default context yields.
+
+- [x] Covered `AuthProvider`, the session backbone both pages depend on (`web/src/auth.test.tsx`, 7 tests)
+  - Relevant files: `web/src/auth.test.tsx` (new). `web/src/auth.tsx` unchanged.
+  - Behavior delivered: the initial `GET /auth/me` is adopted as the session; `loading` is held
+    until it answers, so a page refresh carrying a valid cookie does not read as signed out; a
+    rejected `me` yields a signed-out state; a successful sign-in runs the follow-up `me()` and
+    establishes the session (not merely posts the credentials); the unauthorized handler the
+    provider registers clears the session on a 401; the handler is unregistered on unmount; an
+    explicit sign-out clears the session.
+  - Notes: added in response to the adversarial review, which showed `auth.tsx` was entirely
+    uncovered and that both page tests stubbed `setUnauthorizedHandler` to a no-op — making the
+    wiring look tested when nothing exercised it. Uses a small `SessionProbe` component to render
+    the context state; that adds no lint problem (verified).
+
+- [x] Added `web/src/test-dom.ts`, the mounting helpers the page tests share
+  - Relevant files: `web/src/test-dom.ts` (new).
+  - Behavior delivered: `mount`/`unmountAll`, `button`/`buttons`, `field`/`selectField`/`form`,
+    `click`/`typeInto`/`chooseOption`/`submitForm`, and `deferred()` for in-flight states. Follows
+    the convention `runners-page.test.tsx` already established — `react-dom/client` plus React's
+    `act` — instead of pulling in `@testing-library/react` as the issue suggested, because the
+    house pattern already exists and works and a new dependency would need a lockfile change for
+    no behavioural gain.
+  - Notes: deliberately not named `*.test.ts`, or vitest's `include` would collect it and fail it
+    for containing no tests. `typeInto`/`chooseOption` assign through
+    `HTMLInputElement.prototype`'s own `value` setter: React installs a per-node value tracker
+    whose setter swallows a plain `node.value = …`, so the change would update the DOM but never
+    reach `onChange`.
+
+- [x] Gave the web suite its own CI job
+  - Relevant files: `.github/workflows/ci.yml`.
+  - Behavior delivered: a `test-web` job (`runs-on: [self-hosted, linux]`, the same SHA-pinned
+    `actions/checkout` and `actions/setup-node` with the same npm cache keyed on
+    `web/package-lock.json` that `build-web` uses) running `make test-web`, added to `validate`'s
+    `needs:`. `build-web` loses the duplicate `make test-web` step and now runs `make build-web`
+    only, so the two run in parallel and a vitest or eslint failure is reported under its own name.
+  - Notes: `validate`'s `needs:` list is otherwise unchanged from `c4dbe94` — `test-web` was
+    inserted, nothing was removed. The `Makefile` was **not** edited (it is owned by PR #163, and
+    its `test-web` target already runs `npm test`).
+
+## Decisions
+
+- **No new npm dependency.** The issue asked for `@testing-library/react`, but `#150` had already
+  established `react-dom/server` for pure views and `react-dom/client` + `act` for pages, and both
+  cover everything these tests need. `web/package.json` and `web/package-lock.json` are byte-identical
+  to `main`, which keeps the change reviewable and the `vulnerability-scan` surface unchanged.
+- **`test-web` as its own job rather than more steps on `build-web`.** The issue's acceptance
+  criterion asks for a job. It also buys a truthful check name and parallelism. The duplicate
+  `make test-web` step was removed from `build-web` rather than left in place: leaving it would
+  have run `npm ci` twice per PR on a runner pool that is already the repository's bottleneck,
+  and would have reddened two checks for one defect.
+- **Pinned today's silent-failure behaviour instead of fixing it.** `projects.tsx:13` and
+  `workflows.tsx:14` both swallow a failed load with `.catch(() => undefined)`, so an unreachable
+  orchestrator is indistinguishable from "nothing registered". Two tests assert that — the real
+  behaviour — with a comment naming it as a gap against
+  `docs/design/web-console/specification.md` §6 ("no silent `.catch(() => undefined)` anywhere").
+  Fixing it means adding an error state to two pages, which is a UI change this issue explicitly
+  bounds out ("no e2e", "tests, not a redesign") and which the approved design package already
+  owns. Recorded under Known Issues below rather than smuggled into a test-coverage PR.
+- **Left the pre-existing lint warnings alone.** All ten are warnings, `eslint .` exits 0, and they
+  therefore do not block the new job. The issue only permits fixing them if they block it.
+
+## Post-review corrections
+
+An adversarial review of the full diff was run before the PR was opened, targeted at the four
+failure modes this repository has actually hit: a CI job that passes on a non-zero exit, tests that
+would pass against a deleted implementation, wall-clock/ordering flakes on a loaded shared runner,
+and comments that state something false about the code.
+
+It cleared the CI job (verified end to end: `vitest` exit 1 → `npm test` exit 1 → `make` exit 2; no
+`continue-on-error` anywhere in the file; `validate` has no `if:`, so it inherits `success()` and is
+skipped rather than green if `test-web` fails; `validate.needs` byte-identical to `main`'s with
+`test-web` inserted; all action pins real 40-hex SHAs matching their other uses) and cleared the
+flake question (zero clock/timer/randomness usage in the new files; 8× shuffled runs green;
+vitest 3.2.7's default forks pool with `isolate: true` keeps `test-dom.ts`'s module state per file).
+
+**It also ran 14 mutations of production code and found four that the suite did not catch.** All
+four were real, all four are now fixed, and each fix was re-verified by re-running the mutation:
+
+| surviving mutant | why it survived | fix |
+| --- | --- | --- |
+| `useIsAdmin` (`auth.tsx:32`) weakened from `state?.role === "admin"` to `state !== null` — **every logged-in user becomes an admin**, gaining the create form and the enable/disable toggles | `projects.test.tsx` only ever mounted with *no* session or with `role: "admin"`. A signed-out user and a signed-in non-admin are observably different, and only the former was covered — the helper's own comment claimed otherwise | `stubApi` takes a `role`; new test *"offers a signed-in non-admin no create or toggle control at all"* mounts a real `role: "viewer"` session. Helpers renamed `mountWithoutSession` / `mountWithSession` and the false comment corrected |
+| `<button type="submit">` → `type="button"` in **both** `login.tsx:54` and `projects.tsx:103` — leaves each form with no way to submit at all | every test dispatched a synthetic `submit` at the `<form>`, bypassing the control. (`requestSubmit()` does not fix this: it submits regardless of whether a submit button exists) | one test per form now clicks the real control — *"submits from the Sign in button…"* and *"creates from the Create button…"* |
+| `credentials: "include"` dropped from `me` (`api.ts:178`) and `listProjects` (`api.ts:183`) — the session cookie stops being sent on **every read** | the `credentials` loop covered the seven *mutating* calls only | the reads test now asserts `credentials === "include"` (and no CSRF header, and no method) across `me`, `listProjects`, `listWorkflows`, `listTokens`, `listRunners` |
+| `AuthProvider` (`auth.tsx:39-42`, `:63-65`) never registering the 401 handler, and `login` never calling `me()`/`setState` — a successful sign-in establishes no session | nothing covered `auth.tsx`; both page tests stubbed `setUnauthorizedHandler` to a no-op, which made the wiring *look* covered, and `login.test.tsx`'s docblock claimed `api.me` coverage it did not have | new `web/src/auth.test.tsx` (7 tests): initial `me` adoption, `loading` held until it answers, rejection → signed out, sign-in establishing the session, the 401 handler clearing it, unregistration on unmount, explicit sign-out. `login.test.tsx`'s docblock corrected to claim only what it tests |
+
+Four smaller findings were also fixed: `unmountAll` drained its registry before the loop, so one
+throwing unmount orphaned every remaining root (now one at a time, with `finally`);
+`deferred().reject` could raise an unhandled rejection that vitest blames on an unrelated test (the
+original promise is now marked handled); `api.test.ts`'s `header()` did a case-sensitive property
+lookup, so an over-the-wire-identical refactor to `new Headers()` would have reddened four tests
+(now goes through `Headers`); and three `expect(button(...)).toBeDefined()` assertions could never
+fail — the real check was `button()`'s own throw — and now assert the button's text.
+
+Findings accepted without change: `eslint .` has no `--max-warnings`, so the new job gates eslint
+*errors* only (pre-existing; the issue forbids fixing the ten warnings unless they block the job,
+and they do not — now stated explicitly in the `ci.yml` comment rather than left implied);
+`validate.needs` still omits `test-postgres-integration` (pre-existing, carried in the backlog
+below); and `test-web`/`build-web` sharing an npm cache key will make one post-job save log "Cache
+already exists" on concurrent runs, which is a warning, not a failure. Two comments in the new
+`ci.yml` block were softened where the review showed them to be overstated.
+
+The review confirmed the two load-bearing claims published in the PR body: `make test-web` really
+did already run in CI on `c4dbe94` as a step of `build-web` (so the "eslint never runs in CI" half
+of the title is stale — for errors; it has never gated warnings), and the diff really does touch
+neither `web/package.json` nor `web/package-lock.json`.
+
+## Validation Status
+
+All commands were run in the worktree `.claude/worktrees/issue-123` at `aa4e0ba`.
+
+- Targeted tests: **Passed** — `cd web && npx vitest run` → `Test Files 7 passed (7)`,
+  `Tests 128 passed (128)`. Baseline on `c4dbe94` was `3 passed (3)` / `53 passed (53)`, so this
+  branch adds 5 files and 75 tests and breaks none of the existing ones. Also run 6× with
+  `--sequence.shuffle` (shuffles files *and* tests): 6/6 × 128 passed, so nothing depends on order.
+- Service tests: **Passed** — `make test-web` → exit 0 (`npm ci`, `tsc --noEmit`, `eslint .`,
+  `vitest run` all clean).
+- Full repository tests: **Not run** — nothing outside `web/src/**` and `.github/workflows/ci.yml`
+  changed, and no production source was modified at all. CI covers the rest.
+- Build: **Not re-run locally** — `web/src/*.test.*` and `test-dom.ts` are not reachable from
+  `main.tsx`, so `vite build` output is unchanged; `tsc` (which `npm run build` also runs) is
+  covered by the typecheck below. `build-web` in CI is the check that matters.
+- Lint: **Passed, unchanged** — `cd web && npm run lint` → `✖ 10 problems (0 errors, 10 warnings)`,
+  byte-identical to the baseline on `c4dbe94`. The five new files contribute **zero** new problems.
+- Type checks: **Passed** — `cd web && npm run typecheck` (`tsc --noEmit`) → clean. `make typecheck`
+  (mypy) not run: no Python changed.
+- Workflow validation: **Passed** — `actionlint v1.7.12 .github/workflows/ci.yml` → exit 0. The
+  parsed YAML was also checked directly: `validate.needs` resolves to real jobs, and both actions
+  in `test-web` carry the same 40-hex SHA pins the rest of the file uses.
+- Database migrations: Not applicable — no schema change.
+- Docker Compose: Not run — no image or Compose file changed.
+- End-to-end workflow: Not run — out of scope for a test-coverage and CI change.
+
+### Evidence that the new gate is real, not decorative
+
+`make test-web` is `cd web && npm ci && npm run typecheck && npm run lint && npm test`; a non-zero
+exit anywhere in that `&&` chain fails the target, and a failed `make` fails the GitHub step.
+Verified by deliberately breaking each of the three checks in turn:
+
+| injected fault | `make test-web` exit |
+| --- | --- |
+| none (baseline) | **0** — 128 passed |
+| a vitest case asserting `expect(1).toBe(2)` | **2** — `make: *** [Makefile:37: test-web] Error 1` |
+| an eslint error (`@typescript-eslint/no-unused-vars`) | **2** — `✖ 11 problems (1 error, 10 warnings)` |
+| a `tsc` type error (`TS2322`) | **2** — `make: *** [Makefile:37: test-web] Error 2` |
+
+### Evidence that the new tests assert behaviour, not their own stubs
+
+Every mutation below was applied to *production* source, the relevant suite was run, and the file
+was restored. **All eleven are caught**, and `vitest` exits 1 on each. The last four are the ones
+the adversarial review found surviving; they are listed here in their post-fix state, re-verified
+after the fixes landed.
+
+| mutation | file | caught by |
+| --- | --- | --- |
+| `CSRF_COOKIE_NAME` → `"moirai_csrf"` | `api.ts:115` | 4 tests in `api.test.ts` |
+| dropped the `(?:^\|;\s*)` anchor from the cookie regex | `api.ts:119` | *ignores a cookie whose name merely ends with the CSRF cookie name* |
+| deleted `if (res.status === 401) unauthorizedHandler?.();` | `api.ts:134` | 2 tests in `api.test.ts` |
+| `w.status === AWAITING_APPROVAL_STATUS` → `true` | `workflows.tsx:48` | 2 tests in `workflows.test.tsx` |
+| `!username.trim()` → `!username` | `login.tsx:14` | *treats a whitespace-only username as missing* |
+| `mode === "managed_clone" ? url.trim() : undefined` → `url.trim()` | `projects.tsx:71` | *sends a local path instead of a URL once the mode is switched* |
+| `state?.role === "admin"` → `state !== null` (every logged-in user is an admin) | `auth.tsx:32` | *offers a signed-in non-admin no create or toggle control at all* |
+| `<button type="submit">` → `type="button"` (form becomes unsubmittable) | `login.tsx:54` | *submits from the Sign in button, not only from a synthetic form event* |
+| `<button type="submit">` → `type="button"` (form becomes unsubmittable) | `projects.tsx:103` | *creates from the Create button, not only from a synthetic form event* |
+| dropped `credentials: "include"` from a read | `api.ts:178`, `:183` | *sends the session cookie but no CSRF header on every read* |
+| `login` no longer calls `me()`/`setState`, and the 401 handler is never registered | `auth.tsx:39-42`, `:63-65` | 3 tests in `auth.test.tsx` |
+
+Row 1 is the issue's own acceptance criterion ("deliberately breaking `CSRF_COOKIE_NAME` makes a
+test fail").
+
+## Known Issues
+
+- Issue: `ProjectsPage` and `WorkflowsPage` swallow a failed load with `.catch(() => undefined)`, so
+  an unreachable orchestrator renders as "No projects registered" / "No active workflows".
+  **Pre-existing; deliberately not fixed here.**
+  - Severity: P2 — a silent failure on two of the three MVP operator pages. The runners page
+    (added by #150) already does the right thing, which is what makes the gap visible.
+  - Impact: an operator cannot distinguish "the orchestrator is down" from "there is nothing to
+    show". `projects.tsx:13` and `workflows.tsx:14`.
+  - Evidence: pinned by two tests that assert exactly this behaviour —
+    `projects.test.tsx` *"renders the empty state when the load fails"* and `workflows.test.tsx`
+    *"renders the empty state when the load fails"*. Both carry a comment pointing at the contract
+    they violate.
+  - Suggested resolution: `docs/design/web-console/specification.md` §6 already requires "no silent
+    `.catch(() => undefined)` anywhere ... every fetch surfaces problem+json `title/detail` in the
+    view or a toast". Implement it with the design package's error banner, mirroring
+    `runners.tsx`'s `RunnersView` error handling, and flip the two tests above to assert the banner.
+
+- Issue: the WIP commit `4bb5708` ("WIP: interrupted mid-implementation") is on this branch.
+  - Severity: nit — history noise only; the tree at the branch head is correct.
+  - Impact: the branch has three commits where two would do. The agent working this issue was
+    killed by a transport error mid-run and its uncommitted test files were committed verbatim to
+    preserve them.
+  - Suggested resolution: none available on the branch — it is already pushed, and this repository
+    forbids force-pushing and rebasing. Squash on merge if the history matters.
+
+## Next Recommended Implementation
+
+- Implement the design package's error handling for `ProjectsPage` and `WorkflowsPage` (Known
+  Issues above). It is the last silent-failure path left in the operator UI and it now has tests
+  standing by that document exactly what has to change.
+- `validate` still does not gate on `test-postgres-integration`, so a Postgres integration
+  regression would not block the aggregate check. Now that the runners' Docker group membership is
+  fixed and that job can actually run, adding it to `validate`'s `needs:` is a one-line change with
+  real value. Carried over from the previous session; not done here to keep this diff to the issue.
 # Session: issue #156 — Second delivery to a workflow's execution branch is rejected non-fast-forward (branch `issue-156`)
 
 ## Current Status

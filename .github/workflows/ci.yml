@@ -148,7 +148,15 @@ jobs:
       - run: cd api && go test -race ./...
       - run: cd api && go vet ./...
 
-  build-web:
+  # Own job rather than a step of build-web, so a failing vitest suite or an
+  # eslint error is reported as itself instead of as "the web build broke", and
+  # so the two can run concurrently when the self-hosted pool has the capacity.
+  # `make test-web` is `cd web && npm ci && npm run typecheck && npm run lint &&
+  # npm test`: any one of those exiting non-zero fails the chain, and therefore
+  # this job. Note `npm run lint` is `eslint .` with no `--max-warnings`, so it
+  # gates eslint *errors* only; the ten warnings in the quality backlog do not
+  # fail this job today.
+  test-web:
     runs-on: [self-hosted, linux]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -158,6 +166,16 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: make test-web
+
+  build-web:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - run: make build-web
 
   compose-smoke:
@@ -243,7 +261,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [test-orchestrator, lint, typecheck, runner, api, build-web, compose-smoke, vulnerability-scan]
+    needs: [test-orchestrator, lint, typecheck, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
     runs-on: [self-hosted, linux]
     steps:
       - run: true
