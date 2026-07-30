@@ -86,6 +86,7 @@ describe("WorkflowsPage loading and listing", () => {
       "Status",
       "Phase",
       "Approval",
+      "Controls",
     ]);
     expect(container.querySelectorAll("tbody tr")).toHaveLength(2);
     expect(row(container, RUNNING_ID).textContent).toContain("ledger");
@@ -122,6 +123,30 @@ describe("WorkflowsPage loading and listing", () => {
   });
 });
 
+describe("WorkflowsPage operator controls", () => {
+  it("retries terminal runs and requires a reason before blocking an active run", async () => {
+    const calls: string[] = [];
+    const api = {
+      listWorkflows: async () => [workflow({ status: "blocked" }), workflow({ id: RUNNING_ID, status: "implementing" })],
+      retryWorkflow: async (id: string) => {
+        calls.push(`retry:${id}`);
+        return workflow({ id, status: "recovering" });
+      },
+      blockWorkflow: async (id: string, reason: string) => {
+        calls.push(`block:${id}:${reason}`);
+        return workflow({ id, status: "blocked" });
+      },
+      cancelWorkflow: async () => workflow(),
+    } as unknown as ApiClient;
+    const container = await mount(<WorkflowsPage api={api} />);
+
+    await click(button(row(container, WAITING_ID), /Retry/));
+    expect(calls).toEqual([`retry:${WAITING_ID}`]);
+    await click(button(row(container, RUNNING_ID), /Block/));
+    expect(container.querySelector(".error")?.textContent).toBe("A blocking reason is required.");
+  });
+});
+
 describe("WorkflowsPage approval controls", () => {
   it("offers approve and request-changes only for a workflow waiting on a human", async () => {
     const { api } = stubApi({
@@ -135,10 +160,9 @@ describe("WorkflowsPage approval controls", () => {
 
     expect(buttons(row(container, WAITING_ID), /Approve/)).toHaveLength(1);
     expect(buttons(row(container, WAITING_ID), /Request changes/)).toHaveLength(1);
-    expect(buttons(row(container, RUNNING_ID), /./)).toHaveLength(0);
+    expect(buttons(row(container, RUNNING_ID), /./)).toHaveLength(2);
     expect(buttons(row(container, "cccccccc-dddd-eeee-ffff-000000000000"), /./)).toHaveLength(0);
-    // Two controls in total: the one waiting row's pair, and nothing else.
-    expect(container.querySelectorAll("button")).toHaveLength(2);
+    expect(container.querySelectorAll("button")).toHaveLength(6);
   });
 
   it("approves through the API and re-renders from the workflow the server returned", async () => {

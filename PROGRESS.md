@@ -3623,3 +3623,17 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 - Recovery: manifests now persist job ID, lease generation, execution ID, and Linux process start time. Startup verifies process identity before terminating its process group, then persists a fenced failed event at the terminal sequence so it cannot be rejected after earlier events. Completed executions remove their manifests.
 - Validation: `git diff --check` passed. Targeted runner Go tests, formatter, and targeted orchestrator Python tests could not run because host has no `go`, `gofmt`, `python`, or Docker executable.
 - Adversarial review: recovery terminal events preserve fencing and advance beyond prior event sequences; log chunk probes account for JSON escaping and chunk metadata.
+## Issue #120 — Operator workflow retry, cancel, and block controls
+
+- In progress: 2026-07-30
+- Agent/session identifier: issue-120
+- Branch: `issue-120`
+- Scope: control-plane proto, orchestrator persistence/gRPC/tests, API/OpenAPI/tests, web workflow controls/tests, generated stubs, append-only progress only; runner files excluded (#102 ownership).
+- Current state: #110/#117 detail surface is absent on this branch, so implementation includes minimal workflow detail route/page required to expose #120 controls.
+- Targeted validation: `make proto-check`, `make test-orchestrator`, `make test-api`, `make test-web`, plus adversarial diff review.
+- Completed: 2026-07-30
+- Behavior delivered: admin+CSRF gRPC/REST controls retry terminal runs through persisted checkpoints, cancel/block non-terminal runs with transactional terminal state, lock release/reacquisition, audit rows, idempotent outcomes, runner execution fencing, and `CancelExecution` delivery through the existing runner stream. Workflow console exposes retry/cancel/block controls and operator reason entry.
+- Generated stubs: regenerated with `npx @bufbuild/buf@1.50.0 generate`; direct Buf lint and generated-stub diff check passed.
+- Validation passed: `uv run --project orchestrator -- python -m unittest discover -s orchestrator/tests -p test_control_plane_grpc.py` (12 tests); `make test-web` (129 tests); `npx @bufbuild/buf@1.50.0 lint`; generated stub diff check; `git diff --check`.
+- Validation blocked: `make test-orchestrator` cannot create `.venv` because system Python lacks `ensurepip`; `make test-api` cannot run because `go` is unavailable; `make proto-check` cannot run because `docker` is unavailable. Direct replacement checks above passed where possible.
+- Adversarial review: checked terminal-state fencing, project-lock conflict behavior, repeated actions, runner cancellation generation, CSRF/admin route wiring, and generated RPC signatures. No remaining blocker found.

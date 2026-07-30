@@ -914,6 +914,142 @@ class AsyncpgControlPlane:
             "status": str(workflow["status"]),
         }
 
+    async def retry_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        return await self._control_workflow("retry", workflow_run_id, reason, actor_user_id, now)
+
+    async def cancel_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        return await self._control_workflow("cancel", workflow_run_id, reason, actor_user_id, now)
+
+    async def block_workflow(
+        self, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        return await self._control_workflow("block", workflow_run_id, reason, actor_user_id, now)
+
+    async def _control_workflow(
+        self, action: str, workflow_run_id: str, reason: str | None, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        if action not in {"retry", "cancel", "block"} or actor_user_id is None:
+            raise ValueError("workflow control request is invalid")
+        reason = (reason or "").strip()
+        if len(reason) > 1024 or (action == "block" and not reason):
+            raise ValueError("workflow control reason is invalid")
+        if not reason:
+            reason = f"operator {action}"
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                workflow = await connection.fetchrow(
+                    """
+                    SELECT id, project_id, status, current_phase, blocking_reason
+                    FROM app.workflow_runs WHERE id = $1 FOR UPDATE
+                    """,
+                    _uuid(workflow_run_id),
+                )
+                if workflow is None:
+                    raise ValueError("workflow run is unknown")
+                status = str(workflow["status"])
+                idempotent = (action == "retry" and status == "recovering") or (
+                    action == "cancel" and status == "cancelled"
+                ) or (action == "block" and status == "blocked")
+                if not idempotent:
+                    if action == "retry":
+                        if status not in {"blocked", "failed", "cancelled"}:
+                            raise ValueError("workflow run is not retryable")
+                        acquired = await connection.fetchrow(
+                            """
+                            INSERT INTO app.project_locks (project_id, workflow_run_id, acquired_at, updated_at)
+                            VALUES ($1, $2, $3, $3)
+                            ON CONFLICT (project_id) DO NOTHING
+                            RETURNING workflow_run_id
+                            """,
+                            workflow["project_id"], workflow["id"], now,
+                        )
+                        if acquired is None:
+                            raise ValueError("project already has an active workflow")
+                        await connection.execute(
+                            """
+                            UPDATE app.workflow_runs
+                            SET status = 'recovering', current_phase = 'recovering', completed_at = NULL,
+                                updated_at = $2
+                            WHERE id = $1
+                            """,
+                            workflow["id"], now,
+                        )
+                        status = "recovering"
+                    else:
+                        if status in _TERMINAL_WORKFLOW_STATUSES:
+                            raise ValueError("workflow run is already terminal")
+                        terminal_status = "cancelled" if action == "cancel" else "blocked"
+                        await connection.execute(
+                            """
+                            UPDATE app.workflow_runs
+                            SET status = $2, current_phase = $2, blocking_reason = CASE WHEN $2 = 'blocked' THEN $3 ELSE blocking_reason END,
+                                terminal_reason = $3, completed_at = COALESCE(completed_at, $4), updated_at = $4
+                            WHERE id = $1
+                            """,
+                            workflow["id"], terminal_status, reason, now,
+                        )
+                        await connection.execute(
+                            """
+                            UPDATE app.jobs SET status = 'cancelled', finished_at = $2, recovery_reason = $3,
+                                lease_generation = lease_generation + 1
+                            WHERE workflow_run_id = $1 AND status IN ('offered', 'preparing', 'running', 'recovering')
+                            """,
+                            workflow["id"], now, reason,
+                        )
+                        await connection.execute(
+                            """
+                            UPDATE app.workflow_execution_requests SET status = 'cancelled'
+                            WHERE workflow_run_id = $1 AND status IN ('queued', 'dispatched')
+                            """,
+                            workflow["id"],
+                        )
+                        await connection.execute(
+                            "DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2",
+                            workflow["project_id"], workflow["id"],
+                        )
+                        await reopen_probe_circuits(connection, workflow["id"], now)
+                        status = terminal_status
+                await AsyncpgAuthentication._append_audit(
+                    connection,
+                    actor_user_id=_uuid(actor_user_id),
+                    action=f"workflow.{action}",
+                    resource_type="workflow_run",
+                    resource_id=workflow_run_id,
+                    outcome="idempotent" if idempotent else "succeeded",
+                    now=now,
+                )
+                cancellation = None
+                if action in {"cancel", "block"} and not idempotent:
+                    active = await connection.fetchrow(
+                        """
+                        SELECT j.runner_id, j.lease_generation - 1 AS lease_generation, request.id AS request_id, request.role
+                        FROM app.jobs AS j
+                        LEFT JOIN LATERAL (
+                            SELECT id, role FROM app.workflow_execution_requests
+                            WHERE workflow_run_id = j.workflow_run_id AND status = 'cancelled'
+                            ORDER BY dispatched_at DESC NULLS LAST, id DESC LIMIT 1
+                        ) AS request ON true
+                        WHERE j.workflow_run_id = $1
+                        ORDER BY j.finished_at DESC NULLS LAST, j.id DESC LIMIT 1
+                        """,
+                        workflow["id"],
+                    )
+                    if active is not None and active["runner_id"] is not None and active["request_id"] is not None:
+                        cancellation = {
+                            "runner_id": str(active["runner_id"]),
+                            "lease_generation": int(active["lease_generation"]),
+                            "execution_id": f"{active['request_id']}-{role_to_suffix(str(active['role']))}",
+                        }
+                return {
+                    "id": str(workflow["id"]), "project_id": str(workflow["project_id"]),
+                    "status": status, "phase": "recovering" if status == "recovering" else status,
+                    "cancellation": cancellation,
+                }
+
     async def get_queued_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
         return await self._pool.fetchrow(
             """
