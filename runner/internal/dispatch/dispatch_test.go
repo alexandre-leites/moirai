@@ -106,6 +106,9 @@ func (backend *backend) Execute(_ context.Context, request agents.Request) (agen
 	backend.request = request
 	return backend.result, backend.err
 }
+func (backend *backend) Continue(ctx context.Context, request agents.Request) (agents.Result, error) {
+	return backend.Execute(ctx, request)
+}
 
 func TestDispatcherReturnsPreparationFailureWithoutExecuting(t *testing.T) {
 	manager := &workspaceManager{prepareErr: errors.New("repository unavailable")}
@@ -775,6 +778,9 @@ func (backend *streamingBackend) Execute(_ context.Context, request agents.Reque
 	}
 	return agents.Result{Status: "completed"}, nil
 }
+func (backend *streamingBackend) Continue(ctx context.Context, request agents.Request) (agents.Result, error) {
+	return backend.Execute(ctx, request)
+}
 
 func TestDispatcherStreamsAgentOutputAsLogEvents(t *testing.T) {
 	manager := &workspaceManager{workspace: testWorkspace(t)}
@@ -830,4 +836,7 @@ func (agent *callbackBackend) Execute(context.Context, agents.Request) (agents.R
 		agent.onExecute()
 	}
 	return agents.Result{Status: "completed"}, nil
+}
+func (agent *callbackBackend) Continue(ctx context.Context, request agents.Request) (agents.Result, error) {
+	return agent.Execute(ctx, request)
 }

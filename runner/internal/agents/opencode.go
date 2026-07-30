@@ -34,6 +34,10 @@ type Request struct {
 	// Output, when set, receives a live copy of the agent's stdout and
 	// stderr as it is produced, in addition to the on-disk log files.
 	Output io.Writer
+	// SessionID names the agent session a continuation resumes. It carries the
+	// `sessionId` the previous run's result document reported and is read only
+	// by Continue; Execute always starts a fresh session.
+	SessionID string
 }
 
 type Result struct {
@@ -51,6 +55,17 @@ type Backend interface {
 	Name() string
 	HealthCheck(context.Context) error
 	Execute(context.Context, Request) (Result, error)
+	// Continue re-engages the agent for the same execution after the runner's
+	// goal gate found the objective unmet, resuming request.SessionID where the
+	// backend keeps sessions. Backends without a session concept — and a
+	// session that was never captured — fall back to a fresh run carrying the
+	// continuation prompt, which still names the missing evidence, so the
+	// contract holds for every backend rather than only for opencode.
+	//
+	// It is a distinct method rather than a flag on Execute so that a backend
+	// which cannot resume has to say so in code, instead of silently ignoring a
+	// session ID and reporting a fresh run as a continuation.
+	Continue(context.Context, Request) (Result, error)
 	Cancel(string) error
 }
 
@@ -95,6 +110,20 @@ func (backend OpenCodeBackend) HealthCheck(context.Context) error {
 }
 
 func (backend OpenCodeBackend) Execute(parent context.Context, request Request) (Result, error) {
+	return backend.run(parent, request, false)
+}
+
+// Continue resumes the opencode session the previous run's result document
+// reported, so the agent keeps its own reasoning context across a goal-gate
+// continuation instead of re-deriving it from the prompt. An execution whose
+// agent never reported a session ID — most often because it wrote no result
+// document at all — falls back to a fresh run, which is still driven by a
+// continuation prompt naming the missing evidence.
+func (backend OpenCodeBackend) Continue(parent context.Context, request Request) (Result, error) {
+	return backend.run(parent, request, true)
+}
+
+func (backend OpenCodeBackend) run(parent context.Context, request Request, resume bool) (Result, error) {
 	if request.Prompt == "" {
 		return Result{}, errors.New("prompt is required")
 	}
@@ -112,25 +141,23 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o750); err != nil {
 		return Result{}, fmt.Errorf("create result directory: %w", err)
 	}
-	stdout, err := os.Create(filepath.Join(filepath.Dir(resultPath), "opencode.stdout.log"))
+	stdout, stdoutLog, err := openAgentLog(filepath.Dir(resultPath), "opencode.stdout.log")
 	if err != nil {
-		return Result{}, fmt.Errorf("create stdout log: %w", err)
+		return Result{}, err
 	}
 	defer stdout.Close()
-	stderr, err := os.Create(filepath.Join(filepath.Dir(resultPath), "opencode.stderr.log"))
+	stderr, stderrLog, err := openAgentLog(filepath.Dir(resultPath), "opencode.stderr.log")
 	if err != nil {
-		return Result{}, fmt.Errorf("create stderr log: %w", err)
+		return Result{}, err
 	}
 	defer stderr.Close()
 
-	stdoutLog := newBoundedLogWriter(stdout)
-	stderrLog := newBoundedLogWriter(stderr)
 	defer writeLogMetadata(filepath.Dir(resultPath), "opencode", stdoutLog, stderrLog)
 	supervisor := backend.supervisor()
 	executionResult, err := supervisor.Execute(parent, execution.Request{
 		ExecutionID: request.ExecutionID,
 		Workspace:   request.Workspace,
-		Command:     append(append(append([]string{backend.binary(), "run"}, backend.Arguments...), "--dir", request.Workspace), request.Prompt),
+		Command:     backend.command(request, resume),
 		Environment: request.Environment,
 		Timeout:     request.Timeout,
 		OnStarted: func(pid int) {
@@ -175,6 +202,20 @@ func (backend OpenCodeBackend) Execute(parent context.Context, request Request) 
 
 func (backend OpenCodeBackend) Cancel(executionID string) error {
 	return backend.supervisor().Cancel(executionID)
+}
+
+// command builds the opencode invocation. A continuation adds `--session
+// <id>`, opencode's own session-resume selector, immediately before the prompt;
+// everything else — the configured arguments and the workspace directory — is
+// identical to a first run, so a resumed run cannot drift from the contract the
+// first one ran under.
+func (backend OpenCodeBackend) command(request Request, resume bool) []string {
+	command := append([]string{backend.binary(), "run"}, backend.Arguments...)
+	command = append(command, "--dir", request.Workspace)
+	if resume && request.SessionID != "" {
+		command = append(command, "--session", request.SessionID)
+	}
+	return append(command, request.Prompt)
 }
 
 func (backend OpenCodeBackend) binary() string {

@@ -704,7 +704,7 @@ func minimalTerminalPayload(payload map[string]any) map[string]any {
 // dropping its explanation would leave the orchestrator with nothing but a
 // fingerprint. They are safe to keep because terminalPayload bounds them; the
 // raw result document is dropped because nothing bounds it.
-var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch", "wipBranch", "wipCommit", "wipPushed", "blocked", "summary", "remainingWork"}
+var minimalTerminalPayloadKeys = []string{"status", "exitCode", "error", "failureFingerprint", "durationMs", "branch", "wipBranch", "wipCommit", "wipPushed", "blocked", "summary", "remainingWork", "continuations", "gateVerdict"}
 
 // boundedAgentText renders agent-written text as a payload-safe string: it
 // drops terminal escape sequences and other control characters, replaces
@@ -835,6 +835,18 @@ func terminalPayload(status string, result Result, usage map[string]any) map[str
 	}
 	if result.LogTail != "" {
 		payload["logTail"] = result.LogTail
+	}
+	// The goal gate's account of the run. Both fields are runner-derived and
+	// carry no agent prose, so — unlike the agent's own summary below — they
+	// are reported for every outcome including a cancelled one, and they cannot
+	// destabilise a failure fingerprint. Without them a run delivered after two
+	// continuations and one that gave up after three are indistinguishable:
+	// they share a terminal status and differ only here.
+	if result.Continuations > 0 {
+		payload["continuations"] = result.Continuations
+	}
+	if result.GateVerdict != "" {
+		payload["gateVerdict"] = result.GateVerdict
 	}
 	// The agent's own account of the run travels with every outcome the agent
 	// itself reached. Withholding it from anything but a success is what made an
