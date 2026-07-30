@@ -2115,6 +2115,13 @@ class OutboxAndReconcilerTests(unittest.IsolatedAsyncioTestCase):
 
 class _ListWorkflowsPool:
     async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        if "FROM app.workflow_events" in query:
+            assert arguments[1] == 12
+            assert arguments[2] == 2
+            return [
+                {"id": 11, "event_type": "log", "payload": '{"message":"agent output"}', "created_at": NOW},
+                {"id": 10, "event_type": "started", "payload": {}, "created_at": NOW},
+            ]
         assert "FROM app.workflow_runs" in query
         return [
             {
@@ -2134,6 +2141,21 @@ class _ListWorkflowsPool:
             }
         ]
 
+    async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        assert "JOIN app.issues" in query
+        assert arguments[0] == UUID("00000000-0000-0000-0000-000000000001")
+        return {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "project_id": "00000000-0000-0000-0000-000000000002",
+            "status": "blocked", "current_phase": "blocked", "issue_external_id": "42",
+            "issue_title": "Fix workflow visibility", "branch_name": "agent/42/fix",
+            "pull_request_external_id": "42", "pull_request_url": "https://github.com/example/repo/pull/42",
+            "pull_request_state": "open", "blocking_reason": "workflow retry budget exhausted",
+            "planning_attempts": 1, "implementation_attempts": 2, "pipeline_repair_attempts": 0,
+            "review_cycles": 3, "ci_repair_attempts": 0, "total_agent_executions": 6,
+            "created_at": NOW, "updated_at": NOW,
+        }
+
 
 class ListWorkflowsTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_workflows_surfaces_durable_columns(self) -> None:
@@ -2146,6 +2168,17 @@ class ListWorkflowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow["blocking_reason"], "workflow retry budget exhausted")
         self.assertEqual(workflow["review_cycles"], 3)
         self.assertEqual(workflow["total_agent_executions"], 6)
+
+    async def test_reads_workflow_detail_and_cursor_page(self) -> None:
+        control_plane = AsyncpgControlPlane(_ListWorkflowsPool())
+        workflow = await control_plane.get_workflow("00000000-0000-0000-0000-000000000001")
+        events = await control_plane.list_workflow_events("00000000-0000-0000-0000-000000000001", 12, 2)
+        self.assertIsNotNone(workflow)
+        assert workflow is not None
+        self.assertEqual(workflow["issue_title"], "Fix workflow visibility")
+        self.assertEqual(workflow["pull_request_state"], "open")
+        self.assertEqual([event["id"] for event in events], ["11", "10"])
+        self.assertEqual(events[0]["payload_json"], '{"message":"agent output"}')
 
 
 _PROGRESS_JOB_ID = "00000000-0000-0000-0000-0000000000b2"
@@ -2196,6 +2229,13 @@ class _ProgressConnection:
             self.pool.apply_progress_update(query, arguments)
         elif "UPDATE app.workflow_runs" in query and "SET status = $2, current_phase = $2" in query:
             self.pool.workflow_phase = str(arguments[1])
+        elif "INSERT INTO app.workflow_events" in query:
+            self.pool.events.append({
+                "id": len(self.pool.events) + 1,
+                "event_type": arguments[1],
+                "payload": json.loads(str(arguments[2])),
+                "created_at": arguments[3],
+            })
         return "INSERT 0 1"
 
 
@@ -2216,6 +2256,7 @@ class _ProgressPool:
         self.last_diff_hash: str | None = None
         self.last_failure_fingerprint: str | None = None
         self.non_progress_attempts = 0
+        self.events: list[dict[str, object]] = []
 
     def acquire(self) -> _ProgressConnection:
         return _ProgressConnection(self)
@@ -2227,6 +2268,12 @@ class _ProgressPool:
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
         self.calls.append((query, arguments))
         return {"id": arguments[0]}
+
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        self.calls.append((query, arguments))
+        if "FROM app.workflow_events" not in query:
+            raise AssertionError(query)
+        return list(reversed(self.events))[: int(arguments[2])]
 
     def apply_progress_update(self, query: str, arguments: tuple[object, ...]) -> None:
         diff_hash = arguments[1]
@@ -2299,6 +2346,12 @@ class NonProgressEvidenceTests(unittest.IsolatedAsyncioTestCase):
             "failureFingerprint": fingerprint,
             "error": "pipeline failed: ruff check exited 1",
         }
+
+    async def test_log_event_written_by_accept_event_is_readable(self) -> None:
+        await self._emit("developer", "log", {"message": "agent output"})
+        events = await self.control_plane.list_workflow_events(_PROGRESS_WORKFLOW_ID, 0, 100)
+        self.assertEqual(events[0]["event_type"], "log")
+        self.assertEqual(json.loads(events[0]["payload_json"])["payload"]["message"], "agent output")
 
     async def test_zero_diff_successes_from_different_phases_do_not_collide(self) -> None:
         """Defect 1: the success hash covered only the sorted changed-file list,

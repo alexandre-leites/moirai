@@ -3726,6 +3726,23 @@ Implement backend fallback only after a runner task-packet backend-selection con
 - Adversarial review: checked session credentials and URL encoding on reads, initial/detail and paginated event failures, empty-state distinction, nested runner `payload.message` logs, newest-first ordering across pages, cursor exhaustion, external PR link isolation, and abort protection. No remaining issue-117 finding.
 - Scope check: only `web/` implementation/tests plus append-only `PROGRESS.md`; API, orchestrator, runner, and proto unchanged.
 
+---
+
+# Issue #110 — Workflow detail and event read path
+
+- Completed: 2026-07-30
+- Agent/session identifier: issue-110
+- Branch: `issue-110`
+- Scope: workflow read path across persistence, gRPC, API/OpenAPI, existing workflow UI client, generated protocol stubs, tests, and append-only progress. Did not modify task-packet files owned by #106.
+- Behavior delivered: authenticated `GET /api/v1/workflows/{workflow_id}` returns issue, branch, pull request, status/phase, block reason, counters, and timestamps; authenticated `GET /api/v1/workflows/{workflow_id}/events` returns newest-first JSON payloads with bounded stable ID cursors. Unknown runs return 404. Runner event storage now retains its real event type, including `log`, rather than a constant wrapper type.
+- Tests added: persistence detail/cursor and `accept_event` log-read coverage; gRPC detail/event/session coverage; API session guard and invalid cursor/limit coverage; web client cursor encoding coverage.
+- Validation passed: `PYTHONPATH=orchestrator/src python3 -m unittest orchestrator.tests.test_asyncpg_control_plane` (80); `make test-api`; `go vet ./...` in `api`; focused web Vitest (34), TypeScript, ESLint (0 errors, 10 pre-existing warnings); `npx @bufbuild/buf@1.50.0 lint` and `generate`; Python syntax compile; `git diff --check`.
+- Validation blocked: `make test-orchestrator` cannot create `.venv` because system Python lacks `ensurepip`; gRPC test module requires unavailable `grpcio`; `make proto-check` requires unavailable Docker. Focused replacement validation passed.
+- Adversarial review: checked auth, 404 handling, bounded cursor parsing, stable ordering, nil gRPC detail responses, real log event types, JSONB raw-text decoding, generated stub wiring, and OpenAPI alignment. Fixed JSONB double-encoding and nil detail handling. No remaining issue-110 finding.
+
+## Next Recommended Implementation
+
+- Re-run full orchestrator and proto checks in CI or an environment with Python venv support, grpcio, and Docker; then implement #118 SSE against this read path.
 ## In Progress — Issue #106 task-packet context
 
 - In progress: 2026-07-30T05:00:00Z

@@ -12,6 +12,8 @@ from moirai.grpc.protocol import (
     ProjectRecord,
     RegistrationTokenRecord,
     RunnerRecord,
+    WorkflowDetailRecord,
+    WorkflowEventRecord,
     WorkflowRecord,
 )
 from moirai.persistence.authentication import AuthenticatedSession
@@ -218,6 +220,44 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, "workflows are unavailable")
         return control_plane_pb2.ListWorkflowsResponse(
             workflows=[_workflow_message(workflow) for workflow in workflows]
+        )
+
+    async def GetWorkflow(
+        self,
+        request: control_plane_pb2.GetWorkflowRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.GetWorkflowResponse:
+        await self._require_session(context)
+        if not request.workflow_run_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "workflow run ID is required")
+        try:
+            workflow = await self._control_plane.get_workflow(request.workflow_run_id)
+        except ValueError:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "workflow run is unknown")
+        if workflow is None:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "workflow run is unknown")
+        return control_plane_pb2.GetWorkflowResponse(workflow=_workflow_detail_message(workflow))
+
+    async def ListWorkflowEvents(
+        self,
+        request: control_plane_pb2.ListWorkflowEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.ListWorkflowEventsResponse:
+        await self._require_session(context)
+        if not request.workflow_run_id or request.after_id < 0 or request.limit < 0 or request.limit > 100:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "workflow event request is invalid")
+        try:
+            workflow = await self._control_plane.get_workflow(request.workflow_run_id)
+        except ValueError:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "workflow run is unknown")
+        if workflow is None:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "workflow run is unknown")
+        events = await self._control_plane.list_workflow_events(
+            request.workflow_run_id, request.after_id, request.limit or 100
+        )
+        return control_plane_pb2.ListWorkflowEventsResponse(
+            events=[_workflow_event_message(event) for event in events],
+            next_cursor=events[-1]["id"] if len(events) == (request.limit or 100) else "",
         )
 
     async def ListRunners(
@@ -441,6 +481,38 @@ def _workflow_message(workflow: WorkflowRecord) -> control_plane_pb2.Workflow:
         project_id=workflow["project_id"],
         status=workflow["status"],
         phase=workflow["phase"],
+    )
+
+
+def _workflow_detail_message(workflow: WorkflowDetailRecord) -> control_plane_pb2.Workflow:
+    return control_plane_pb2.Workflow(
+        id=workflow["id"],
+        project_id=workflow["project_id"],
+        status=workflow["status"],
+        phase=workflow["phase"],
+        issue_external_id=workflow["issue_external_id"],
+        issue_title=workflow["issue_title"],
+        branch_name=workflow["branch_name"] or "",
+        pull_request_external_id=workflow["pull_request_external_id"] or "",
+        pull_request_url=workflow["pull_request_url"] or "",
+        pull_request_state=workflow["pull_request_state"] or "",
+        blocking_reason=workflow["blocking_reason"] or "",
+        planning_attempts=workflow["planning_attempts"],
+        implementation_attempts=workflow["implementation_attempts"],
+        pipeline_repair_attempts=workflow["pipeline_repair_attempts"],
+        ci_repair_attempts=workflow["ci_repair_attempts"],
+        review_cycles=workflow["review_cycles"],
+        created_at=workflow["created_at"].isoformat(),
+        updated_at=workflow["updated_at"].isoformat(),
+    )
+
+
+def _workflow_event_message(event: WorkflowEventRecord) -> control_plane_pb2.WorkflowEvent:
+    return control_plane_pb2.WorkflowEvent(
+        id=event["id"],
+        event_type=event["event_type"],
+        created_at=event["created_at"].isoformat(),
+        payload_json=event["payload_json"],
     )
 
 

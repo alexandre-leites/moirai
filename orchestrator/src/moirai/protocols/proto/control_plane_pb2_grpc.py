@@ -64,6 +64,16 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.ListWorkflowsRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.ListWorkflowsResponse.FromString,
                 _registered_method=True)
+        self.GetWorkflow = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/GetWorkflow',
+                request_serializer=proto_dot_control__plane__pb2.GetWorkflowRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.GetWorkflowResponse.FromString,
+                _registered_method=True)
+        self.ListWorkflowEvents = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/ListWorkflowEvents',
+                request_serializer=proto_dot_control__plane__pb2.ListWorkflowEventsRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ListWorkflowEventsResponse.FromString,
+                _registered_method=True)
         self.ListRunners = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/ListRunners',
                 request_serializer=proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
@@ -159,6 +169,18 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetWorkflow(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListWorkflowEvents(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ListRunners(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -247,6 +269,16 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.ListWorkflows,
                     request_deserializer=proto_dot_control__plane__pb2.ListWorkflowsRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.ListWorkflowsResponse.SerializeToString,
+            ),
+            'GetWorkflow': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetWorkflow,
+                    request_deserializer=proto_dot_control__plane__pb2.GetWorkflowRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.GetWorkflowResponse.SerializeToString,
+            ),
+            'ListWorkflowEvents': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListWorkflowEvents,
+                    request_deserializer=proto_dot_control__plane__pb2.ListWorkflowEventsRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ListWorkflowEventsResponse.SerializeToString,
             ),
             'ListRunners': grpc.unary_unary_rpc_method_handler(
                     servicer.ListRunners,
@@ -549,6 +581,60 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/ListWorkflows',
             proto_dot_control__plane__pb2.ListWorkflowsRequest.SerializeToString,
             proto_dot_control__plane__pb2.ListWorkflowsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetWorkflow(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/GetWorkflow',
+            proto_dot_control__plane__pb2.GetWorkflowRequest.SerializeToString,
+            proto_dot_control__plane__pb2.GetWorkflowResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListWorkflowEvents(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/ListWorkflowEvents',
+            proto_dot_control__plane__pb2.ListWorkflowEventsRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ListWorkflowEventsResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -40,6 +40,22 @@ class WorkflowRecord(TypedDict):
     total_agent_executions: int
 
 
+class WorkflowDetailRecord(WorkflowRecord):
+    issue_external_id: str
+    issue_title: str
+    branch_name: str | None
+    pull_request_state: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowEventRecord(TypedDict):
+    id: str
+    event_type: str
+    payload_json: str
+    created_at: datetime
+
+
 class RunnerRecord(TypedDict):
     id: str
     name: str
@@ -106,6 +122,12 @@ class ControlPlane(Protocol):
     ) -> RegistrationTokenRecord: ...
 
     async def list_workflows(self) -> list[WorkflowRecord]: ...
+
+    async def get_workflow(self, workflow_run_id: str) -> WorkflowDetailRecord | None: ...
+
+    async def list_workflow_events(
+        self, workflow_run_id: str, after_id: int, limit: int
+    ) -> list[WorkflowEventRecord]: ...
 
     async def record_human_decision(
         self,

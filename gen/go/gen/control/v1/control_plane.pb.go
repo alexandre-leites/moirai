@@ -1118,13 +1118,27 @@ func (*ListWorkflowsRequest) Descriptor() ([]byte, []int) {
 }
 
 type Workflow struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	ProjectId     string                 `protobuf:"bytes,2,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
-	Phase         string                 `protobuf:"bytes,4,opt,name=phase,proto3" json:"phase,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	Id                     string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	ProjectId              string                 `protobuf:"bytes,2,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
+	Status                 string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	Phase                  string                 `protobuf:"bytes,4,opt,name=phase,proto3" json:"phase,omitempty"`
+	IssueExternalId        string                 `protobuf:"bytes,5,opt,name=issue_external_id,json=issueExternalId,proto3" json:"issue_external_id,omitempty"`
+	IssueTitle             string                 `protobuf:"bytes,6,opt,name=issue_title,json=issueTitle,proto3" json:"issue_title,omitempty"`
+	BranchName             string                 `protobuf:"bytes,7,opt,name=branch_name,json=branchName,proto3" json:"branch_name,omitempty"`
+	PullRequestExternalId  string                 `protobuf:"bytes,8,opt,name=pull_request_external_id,json=pullRequestExternalId,proto3" json:"pull_request_external_id,omitempty"`
+	PullRequestUrl         string                 `protobuf:"bytes,9,opt,name=pull_request_url,json=pullRequestUrl,proto3" json:"pull_request_url,omitempty"`
+	PullRequestState       string                 `protobuf:"bytes,10,opt,name=pull_request_state,json=pullRequestState,proto3" json:"pull_request_state,omitempty"`
+	BlockingReason         string                 `protobuf:"bytes,11,opt,name=blocking_reason,json=blockingReason,proto3" json:"blocking_reason,omitempty"`
+	PlanningAttempts       int32                  `protobuf:"varint,12,opt,name=planning_attempts,json=planningAttempts,proto3" json:"planning_attempts,omitempty"`
+	ImplementationAttempts int32                  `protobuf:"varint,13,opt,name=implementation_attempts,json=implementationAttempts,proto3" json:"implementation_attempts,omitempty"`
+	PipelineRepairAttempts int32                  `protobuf:"varint,14,opt,name=pipeline_repair_attempts,json=pipelineRepairAttempts,proto3" json:"pipeline_repair_attempts,omitempty"`
+	CiRepairAttempts       int32                  `protobuf:"varint,15,opt,name=ci_repair_attempts,json=ciRepairAttempts,proto3" json:"ci_repair_attempts,omitempty"`
+	ReviewCycles           int32                  `protobuf:"varint,16,opt,name=review_cycles,json=reviewCycles,proto3" json:"review_cycles,omitempty"`
+	CreatedAt              string                 `protobuf:"bytes,17,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt              string                 `protobuf:"bytes,18,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *Workflow) Reset() {
@@ -1185,6 +1199,104 @@ func (x *Workflow) GetPhase() string {
 	return ""
 }
 
+func (x *Workflow) GetIssueExternalId() string {
+	if x != nil {
+		return x.IssueExternalId
+	}
+	return ""
+}
+
+func (x *Workflow) GetIssueTitle() string {
+	if x != nil {
+		return x.IssueTitle
+	}
+	return ""
+}
+
+func (x *Workflow) GetBranchName() string {
+	if x != nil {
+		return x.BranchName
+	}
+	return ""
+}
+
+func (x *Workflow) GetPullRequestExternalId() string {
+	if x != nil {
+		return x.PullRequestExternalId
+	}
+	return ""
+}
+
+func (x *Workflow) GetPullRequestUrl() string {
+	if x != nil {
+		return x.PullRequestUrl
+	}
+	return ""
+}
+
+func (x *Workflow) GetPullRequestState() string {
+	if x != nil {
+		return x.PullRequestState
+	}
+	return ""
+}
+
+func (x *Workflow) GetBlockingReason() string {
+	if x != nil {
+		return x.BlockingReason
+	}
+	return ""
+}
+
+func (x *Workflow) GetPlanningAttempts() int32 {
+	if x != nil {
+		return x.PlanningAttempts
+	}
+	return 0
+}
+
+func (x *Workflow) GetImplementationAttempts() int32 {
+	if x != nil {
+		return x.ImplementationAttempts
+	}
+	return 0
+}
+
+func (x *Workflow) GetPipelineRepairAttempts() int32 {
+	if x != nil {
+		return x.PipelineRepairAttempts
+	}
+	return 0
+}
+
+func (x *Workflow) GetCiRepairAttempts() int32 {
+	if x != nil {
+		return x.CiRepairAttempts
+	}
+	return 0
+}
+
+func (x *Workflow) GetReviewCycles() int32 {
+	if x != nil {
+		return x.ReviewCycles
+	}
+	return 0
+}
+
+func (x *Workflow) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *Workflow) GetUpdatedAt() string {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return ""
+}
+
 type ListWorkflowsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Workflows     []*Workflow            `protobuf:"bytes,1,rep,name=workflows,proto3" json:"workflows,omitempty"`
@@ -1229,6 +1341,274 @@ func (x *ListWorkflowsResponse) GetWorkflows() []*Workflow {
 	return nil
 }
 
+type GetWorkflowRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowRunId string                 `protobuf:"bytes,1,opt,name=workflow_run_id,json=workflowRunId,proto3" json:"workflow_run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWorkflowRequest) Reset() {
+	*x = GetWorkflowRequest{}
+	mi := &file_proto_control_plane_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWorkflowRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWorkflowRequest) ProtoMessage() {}
+
+func (x *GetWorkflowRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWorkflowRequest.ProtoReflect.Descriptor instead.
+func (*GetWorkflowRequest) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *GetWorkflowRequest) GetWorkflowRunId() string {
+	if x != nil {
+		return x.WorkflowRunId
+	}
+	return ""
+}
+
+type GetWorkflowResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Workflow      *Workflow              `protobuf:"bytes,1,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetWorkflowResponse) Reset() {
+	*x = GetWorkflowResponse{}
+	mi := &file_proto_control_plane_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetWorkflowResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetWorkflowResponse) ProtoMessage() {}
+
+func (x *GetWorkflowResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetWorkflowResponse.ProtoReflect.Descriptor instead.
+func (*GetWorkflowResponse) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *GetWorkflowResponse) GetWorkflow() *Workflow {
+	if x != nil {
+		return x.Workflow
+	}
+	return nil
+}
+
+type WorkflowEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	EventType     string                 `protobuf:"bytes,2,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	CreatedAt     string                 `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	PayloadJson   string                 `protobuf:"bytes,4,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkflowEvent) Reset() {
+	*x = WorkflowEvent{}
+	mi := &file_proto_control_plane_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkflowEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkflowEvent) ProtoMessage() {}
+
+func (x *WorkflowEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkflowEvent.ProtoReflect.Descriptor instead.
+func (*WorkflowEvent) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *WorkflowEvent) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *WorkflowEvent) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *WorkflowEvent) GetCreatedAt() string {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return ""
+}
+
+func (x *WorkflowEvent) GetPayloadJson() string {
+	if x != nil {
+		return x.PayloadJson
+	}
+	return ""
+}
+
+type ListWorkflowEventsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowRunId string                 `protobuf:"bytes,1,opt,name=workflow_run_id,json=workflowRunId,proto3" json:"workflow_run_id,omitempty"`
+	AfterId       int64                  `protobuf:"varint,2,opt,name=after_id,json=afterId,proto3" json:"after_id,omitempty"`
+	Limit         int32                  `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkflowEventsRequest) Reset() {
+	*x = ListWorkflowEventsRequest{}
+	mi := &file_proto_control_plane_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkflowEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkflowEventsRequest) ProtoMessage() {}
+
+func (x *ListWorkflowEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkflowEventsRequest.ProtoReflect.Descriptor instead.
+func (*ListWorkflowEventsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ListWorkflowEventsRequest) GetWorkflowRunId() string {
+	if x != nil {
+		return x.WorkflowRunId
+	}
+	return ""
+}
+
+func (x *ListWorkflowEventsRequest) GetAfterId() int64 {
+	if x != nil {
+		return x.AfterId
+	}
+	return 0
+}
+
+func (x *ListWorkflowEventsRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+type ListWorkflowEventsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Events        []*WorkflowEvent       `protobuf:"bytes,1,rep,name=events,proto3" json:"events,omitempty"`
+	NextCursor    string                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListWorkflowEventsResponse) Reset() {
+	*x = ListWorkflowEventsResponse{}
+	mi := &file_proto_control_plane_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListWorkflowEventsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListWorkflowEventsResponse) ProtoMessage() {}
+
+func (x *ListWorkflowEventsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListWorkflowEventsResponse.ProtoReflect.Descriptor instead.
+func (*ListWorkflowEventsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ListWorkflowEventsResponse) GetEvents() []*WorkflowEvent {
+	if x != nil {
+		return x.Events
+	}
+	return nil
+}
+
+func (x *ListWorkflowEventsResponse) GetNextCursor() string {
+	if x != nil {
+		return x.NextCursor
+	}
+	return ""
+}
+
 type ListRunnersRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1237,7 +1617,7 @@ type ListRunnersRequest struct {
 
 func (x *ListRunnersRequest) Reset() {
 	*x = ListRunnersRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[24]
+	mi := &file_proto_control_plane_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1249,7 +1629,7 @@ func (x *ListRunnersRequest) String() string {
 func (*ListRunnersRequest) ProtoMessage() {}
 
 func (x *ListRunnersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[24]
+	mi := &file_proto_control_plane_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1262,7 +1642,7 @@ func (x *ListRunnersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunnersRequest.ProtoReflect.Descriptor instead.
 func (*ListRunnersRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{24}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{29}
 }
 
 type Runner struct {
@@ -1280,7 +1660,7 @@ type Runner struct {
 
 func (x *Runner) Reset() {
 	*x = Runner{}
-	mi := &file_proto_control_plane_proto_msgTypes[25]
+	mi := &file_proto_control_plane_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1292,7 +1672,7 @@ func (x *Runner) String() string {
 func (*Runner) ProtoMessage() {}
 
 func (x *Runner) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[25]
+	mi := &file_proto_control_plane_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1305,7 +1685,7 @@ func (x *Runner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Runner.ProtoReflect.Descriptor instead.
 func (*Runner) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{25}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Runner) GetId() string {
@@ -1366,7 +1746,7 @@ type ListRunnersResponse struct {
 
 func (x *ListRunnersResponse) Reset() {
 	*x = ListRunnersResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[26]
+	mi := &file_proto_control_plane_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1378,7 +1758,7 @@ func (x *ListRunnersResponse) String() string {
 func (*ListRunnersResponse) ProtoMessage() {}
 
 func (x *ListRunnersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[26]
+	mi := &file_proto_control_plane_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1391,7 +1771,7 @@ func (x *ListRunnersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunnersResponse.ProtoReflect.Descriptor instead.
 func (*ListRunnersResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{26}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ListRunnersResponse) GetRunners() []*Runner {
@@ -1411,7 +1791,7 @@ type SetRunnerStateRequest struct {
 
 func (x *SetRunnerStateRequest) Reset() {
 	*x = SetRunnerStateRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[27]
+	mi := &file_proto_control_plane_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1423,7 +1803,7 @@ func (x *SetRunnerStateRequest) String() string {
 func (*SetRunnerStateRequest) ProtoMessage() {}
 
 func (x *SetRunnerStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[27]
+	mi := &file_proto_control_plane_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1436,7 +1816,7 @@ func (x *SetRunnerStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRunnerStateRequest.ProtoReflect.Descriptor instead.
 func (*SetRunnerStateRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{27}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *SetRunnerStateRequest) GetRunnerId() string {
@@ -1462,7 +1842,7 @@ type SetRunnerStateResponse struct {
 
 func (x *SetRunnerStateResponse) Reset() {
 	*x = SetRunnerStateResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[28]
+	mi := &file_proto_control_plane_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1474,7 +1854,7 @@ func (x *SetRunnerStateResponse) String() string {
 func (*SetRunnerStateResponse) ProtoMessage() {}
 
 func (x *SetRunnerStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[28]
+	mi := &file_proto_control_plane_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1487,7 +1867,7 @@ func (x *SetRunnerStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetRunnerStateResponse.ProtoReflect.Descriptor instead.
 func (*SetRunnerStateResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{28}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *SetRunnerStateResponse) GetRunner() *Runner {
@@ -1508,7 +1888,7 @@ type SubmitHumanDecisionRequest struct {
 
 func (x *SubmitHumanDecisionRequest) Reset() {
 	*x = SubmitHumanDecisionRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[29]
+	mi := &file_proto_control_plane_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1520,7 +1900,7 @@ func (x *SubmitHumanDecisionRequest) String() string {
 func (*SubmitHumanDecisionRequest) ProtoMessage() {}
 
 func (x *SubmitHumanDecisionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[29]
+	mi := &file_proto_control_plane_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1533,7 +1913,7 @@ func (x *SubmitHumanDecisionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitHumanDecisionRequest.ProtoReflect.Descriptor instead.
 func (*SubmitHumanDecisionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{29}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *SubmitHumanDecisionRequest) GetWorkflowRunId() string {
@@ -1566,7 +1946,7 @@ type SubmitHumanDecisionResponse struct {
 
 func (x *SubmitHumanDecisionResponse) Reset() {
 	*x = SubmitHumanDecisionResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[30]
+	mi := &file_proto_control_plane_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1578,7 +1958,7 @@ func (x *SubmitHumanDecisionResponse) String() string {
 func (*SubmitHumanDecisionResponse) ProtoMessage() {}
 
 func (x *SubmitHumanDecisionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[30]
+	mi := &file_proto_control_plane_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1591,7 +1971,7 @@ func (x *SubmitHumanDecisionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitHumanDecisionResponse.ProtoReflect.Descriptor instead.
 func (*SubmitHumanDecisionResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{30}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *SubmitHumanDecisionResponse) GetWorkflow() *Workflow {
@@ -1611,7 +1991,7 @@ type RetryWorkflowRequest struct {
 
 func (x *RetryWorkflowRequest) Reset() {
 	*x = RetryWorkflowRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[31]
+	mi := &file_proto_control_plane_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1623,7 +2003,7 @@ func (x *RetryWorkflowRequest) String() string {
 func (*RetryWorkflowRequest) ProtoMessage() {}
 
 func (x *RetryWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[31]
+	mi := &file_proto_control_plane_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1636,7 +2016,7 @@ func (x *RetryWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*RetryWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{31}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *RetryWorkflowRequest) GetWorkflowRunId() string {
@@ -1662,7 +2042,7 @@ type RetryWorkflowResponse struct {
 
 func (x *RetryWorkflowResponse) Reset() {
 	*x = RetryWorkflowResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[32]
+	mi := &file_proto_control_plane_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1674,7 +2054,7 @@ func (x *RetryWorkflowResponse) String() string {
 func (*RetryWorkflowResponse) ProtoMessage() {}
 
 func (x *RetryWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[32]
+	mi := &file_proto_control_plane_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1687,7 +2067,7 @@ func (x *RetryWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*RetryWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{32}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *RetryWorkflowResponse) GetWorkflow() *Workflow {
@@ -1707,7 +2087,7 @@ type CancelWorkflowRequest struct {
 
 func (x *CancelWorkflowRequest) Reset() {
 	*x = CancelWorkflowRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[33]
+	mi := &file_proto_control_plane_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1719,7 +2099,7 @@ func (x *CancelWorkflowRequest) String() string {
 func (*CancelWorkflowRequest) ProtoMessage() {}
 
 func (x *CancelWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[33]
+	mi := &file_proto_control_plane_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1732,7 +2112,7 @@ func (x *CancelWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*CancelWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{33}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *CancelWorkflowRequest) GetWorkflowRunId() string {
@@ -1758,7 +2138,7 @@ type CancelWorkflowResponse struct {
 
 func (x *CancelWorkflowResponse) Reset() {
 	*x = CancelWorkflowResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[34]
+	mi := &file_proto_control_plane_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1770,7 +2150,7 @@ func (x *CancelWorkflowResponse) String() string {
 func (*CancelWorkflowResponse) ProtoMessage() {}
 
 func (x *CancelWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[34]
+	mi := &file_proto_control_plane_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1783,7 +2163,7 @@ func (x *CancelWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*CancelWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{34}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *CancelWorkflowResponse) GetWorkflow() *Workflow {
@@ -1803,7 +2183,7 @@ type BlockWorkflowRequest struct {
 
 func (x *BlockWorkflowRequest) Reset() {
 	*x = BlockWorkflowRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[35]
+	mi := &file_proto_control_plane_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1815,7 +2195,7 @@ func (x *BlockWorkflowRequest) String() string {
 func (*BlockWorkflowRequest) ProtoMessage() {}
 
 func (x *BlockWorkflowRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[35]
+	mi := &file_proto_control_plane_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1828,7 +2208,7 @@ func (x *BlockWorkflowRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockWorkflowRequest.ProtoReflect.Descriptor instead.
 func (*BlockWorkflowRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{35}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *BlockWorkflowRequest) GetWorkflowRunId() string {
@@ -1854,7 +2234,7 @@ type BlockWorkflowResponse struct {
 
 func (x *BlockWorkflowResponse) Reset() {
 	*x = BlockWorkflowResponse{}
-	mi := &file_proto_control_plane_proto_msgTypes[36]
+	mi := &file_proto_control_plane_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1866,7 +2246,7 @@ func (x *BlockWorkflowResponse) String() string {
 func (*BlockWorkflowResponse) ProtoMessage() {}
 
 func (x *BlockWorkflowResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[36]
+	mi := &file_proto_control_plane_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1879,7 +2259,7 @@ func (x *BlockWorkflowResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockWorkflowResponse.ProtoReflect.Descriptor instead.
 func (*BlockWorkflowResponse) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{36}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *BlockWorkflowResponse) GetWorkflow() *Workflow {
@@ -1960,15 +2340,53 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\btoken_id\x18\x01 \x01(\tR\atokenId\"g\n" +
 	"%RevokeRunnerRegistrationTokenResponse\x12>\n" +
 	"\x05token\x18\x01 \x01(\v2(.loop.control.v1.RunnerRegistrationTokenR\x05token\"\x16\n" +
-	"\x14ListWorkflowsRequest\"g\n" +
+	"\x14ListWorkflowsRequest\"\xc0\x05\n" +
 	"\bWorkflow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
 	"project_id\x18\x02 \x01(\tR\tprojectId\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x14\n" +
-	"\x05phase\x18\x04 \x01(\tR\x05phase\"P\n" +
+	"\x05phase\x18\x04 \x01(\tR\x05phase\x12*\n" +
+	"\x11issue_external_id\x18\x05 \x01(\tR\x0fissueExternalId\x12\x1f\n" +
+	"\vissue_title\x18\x06 \x01(\tR\n" +
+	"issueTitle\x12\x1f\n" +
+	"\vbranch_name\x18\a \x01(\tR\n" +
+	"branchName\x127\n" +
+	"\x18pull_request_external_id\x18\b \x01(\tR\x15pullRequestExternalId\x12(\n" +
+	"\x10pull_request_url\x18\t \x01(\tR\x0epullRequestUrl\x12,\n" +
+	"\x12pull_request_state\x18\n" +
+	" \x01(\tR\x10pullRequestState\x12'\n" +
+	"\x0fblocking_reason\x18\v \x01(\tR\x0eblockingReason\x12+\n" +
+	"\x11planning_attempts\x18\f \x01(\x05R\x10planningAttempts\x127\n" +
+	"\x17implementation_attempts\x18\r \x01(\x05R\x16implementationAttempts\x128\n" +
+	"\x18pipeline_repair_attempts\x18\x0e \x01(\x05R\x16pipelineRepairAttempts\x12,\n" +
+	"\x12ci_repair_attempts\x18\x0f \x01(\x05R\x10ciRepairAttempts\x12#\n" +
+	"\rreview_cycles\x18\x10 \x01(\x05R\freviewCycles\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x11 \x01(\tR\tcreatedAt\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\x12 \x01(\tR\tupdatedAt\"P\n" +
 	"\x15ListWorkflowsResponse\x127\n" +
-	"\tworkflows\x18\x01 \x03(\v2\x19.loop.control.v1.WorkflowR\tworkflows\"\x14\n" +
+	"\tworkflows\x18\x01 \x03(\v2\x19.loop.control.v1.WorkflowR\tworkflows\"<\n" +
+	"\x12GetWorkflowRequest\x12&\n" +
+	"\x0fworkflow_run_id\x18\x01 \x01(\tR\rworkflowRunId\"L\n" +
+	"\x13GetWorkflowResponse\x125\n" +
+	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow\"\x80\x01\n" +
+	"\rWorkflowEvent\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x02 \x01(\tR\teventType\x12\x1d\n" +
+	"\n" +
+	"created_at\x18\x03 \x01(\tR\tcreatedAt\x12!\n" +
+	"\fpayload_json\x18\x04 \x01(\tR\vpayloadJson\"t\n" +
+	"\x19ListWorkflowEventsRequest\x12&\n" +
+	"\x0fworkflow_run_id\x18\x01 \x01(\tR\rworkflowRunId\x12\x19\n" +
+	"\bafter_id\x18\x02 \x01(\x03R\aafterId\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\"u\n" +
+	"\x1aListWorkflowEventsResponse\x126\n" +
+	"\x06events\x18\x01 \x03(\v2\x1e.loop.control.v1.WorkflowEventR\x06events\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\tR\n" +
+	"nextCursor\"\x14\n" +
 	"\x12ListRunnersRequest\"\xb4\x01\n" +
 	"\x06Runner\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -2006,7 +2424,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x0fworkflow_run_id\x18\x01 \x01(\tR\rworkflowRunId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"N\n" +
 	"\x15BlockWorkflowResponse\x125\n" +
-	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow2\x8c\r\n" +
+	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow2\xd5\x0e\n" +
 	"\fControlPlane\x12F\n" +
 	"\x05Login\x12\x1d.loop.control.v1.LoginRequest\x1a\x1e.loop.control.v1.LoginResponse\x12I\n" +
 	"\x06WhoAmI\x12\x1e.loop.control.v1.WhoAmIRequest\x1a\x1f.loop.control.v1.WhoAmIResponse\x12[\n" +
@@ -2018,6 +2436,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x1cListRunnerRegistrationTokens\x124.loop.control.v1.ListRunnerRegistrationTokensRequest\x1a5.loop.control.v1.ListRunnerRegistrationTokensResponse\x12\x8e\x01\n" +
 	"\x1dRevokeRunnerRegistrationToken\x125.loop.control.v1.RevokeRunnerRegistrationTokenRequest\x1a6.loop.control.v1.RevokeRunnerRegistrationTokenResponse\x12^\n" +
 	"\rListWorkflows\x12%.loop.control.v1.ListWorkflowsRequest\x1a&.loop.control.v1.ListWorkflowsResponse\x12X\n" +
+	"\vGetWorkflow\x12#.loop.control.v1.GetWorkflowRequest\x1a$.loop.control.v1.GetWorkflowResponse\x12m\n" +
+	"\x12ListWorkflowEvents\x12*.loop.control.v1.ListWorkflowEventsRequest\x1a+.loop.control.v1.ListWorkflowEventsResponse\x12X\n" +
 	"\vListRunners\x12#.loop.control.v1.ListRunnersRequest\x1a$.loop.control.v1.ListRunnersResponse\x12a\n" +
 	"\x0eSetRunnerState\x12&.loop.control.v1.SetRunnerStateRequest\x1a'.loop.control.v1.SetRunnerStateResponse\x12p\n" +
 	"\x13SubmitHumanDecision\x12+.loop.control.v1.SubmitHumanDecisionRequest\x1a,.loop.control.v1.SubmitHumanDecisionResponse\x12^\n" +
@@ -2037,7 +2457,7 @@ func file_proto_control_plane_proto_rawDescGZIP() []byte {
 	return file_proto_control_plane_proto_rawDescData
 }
 
-var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_proto_control_plane_proto_goTypes = []any{
 	(*LoginRequest)(nil),                          // 0: loop.control.v1.LoginRequest
 	(*LoginResponse)(nil),                         // 1: loop.control.v1.LoginResponse
@@ -2063,19 +2483,24 @@ var file_proto_control_plane_proto_goTypes = []any{
 	(*ListWorkflowsRequest)(nil),                  // 21: loop.control.v1.ListWorkflowsRequest
 	(*Workflow)(nil),                              // 22: loop.control.v1.Workflow
 	(*ListWorkflowsResponse)(nil),                 // 23: loop.control.v1.ListWorkflowsResponse
-	(*ListRunnersRequest)(nil),                    // 24: loop.control.v1.ListRunnersRequest
-	(*Runner)(nil),                                // 25: loop.control.v1.Runner
-	(*ListRunnersResponse)(nil),                   // 26: loop.control.v1.ListRunnersResponse
-	(*SetRunnerStateRequest)(nil),                 // 27: loop.control.v1.SetRunnerStateRequest
-	(*SetRunnerStateResponse)(nil),                // 28: loop.control.v1.SetRunnerStateResponse
-	(*SubmitHumanDecisionRequest)(nil),            // 29: loop.control.v1.SubmitHumanDecisionRequest
-	(*SubmitHumanDecisionResponse)(nil),           // 30: loop.control.v1.SubmitHumanDecisionResponse
-	(*RetryWorkflowRequest)(nil),                  // 31: loop.control.v1.RetryWorkflowRequest
-	(*RetryWorkflowResponse)(nil),                 // 32: loop.control.v1.RetryWorkflowResponse
-	(*CancelWorkflowRequest)(nil),                 // 33: loop.control.v1.CancelWorkflowRequest
-	(*CancelWorkflowResponse)(nil),                // 34: loop.control.v1.CancelWorkflowResponse
-	(*BlockWorkflowRequest)(nil),                  // 35: loop.control.v1.BlockWorkflowRequest
-	(*BlockWorkflowResponse)(nil),                 // 36: loop.control.v1.BlockWorkflowResponse
+	(*GetWorkflowRequest)(nil),                    // 24: loop.control.v1.GetWorkflowRequest
+	(*GetWorkflowResponse)(nil),                   // 25: loop.control.v1.GetWorkflowResponse
+	(*WorkflowEvent)(nil),                         // 26: loop.control.v1.WorkflowEvent
+	(*ListWorkflowEventsRequest)(nil),             // 27: loop.control.v1.ListWorkflowEventsRequest
+	(*ListWorkflowEventsResponse)(nil),            // 28: loop.control.v1.ListWorkflowEventsResponse
+	(*ListRunnersRequest)(nil),                    // 29: loop.control.v1.ListRunnersRequest
+	(*Runner)(nil),                                // 30: loop.control.v1.Runner
+	(*ListRunnersResponse)(nil),                   // 31: loop.control.v1.ListRunnersResponse
+	(*SetRunnerStateRequest)(nil),                 // 32: loop.control.v1.SetRunnerStateRequest
+	(*SetRunnerStateResponse)(nil),                // 33: loop.control.v1.SetRunnerStateResponse
+	(*SubmitHumanDecisionRequest)(nil),            // 34: loop.control.v1.SubmitHumanDecisionRequest
+	(*SubmitHumanDecisionResponse)(nil),           // 35: loop.control.v1.SubmitHumanDecisionResponse
+	(*RetryWorkflowRequest)(nil),                  // 36: loop.control.v1.RetryWorkflowRequest
+	(*RetryWorkflowResponse)(nil),                 // 37: loop.control.v1.RetryWorkflowResponse
+	(*CancelWorkflowRequest)(nil),                 // 38: loop.control.v1.CancelWorkflowRequest
+	(*CancelWorkflowResponse)(nil),                // 39: loop.control.v1.CancelWorkflowResponse
+	(*BlockWorkflowRequest)(nil),                  // 40: loop.control.v1.BlockWorkflowRequest
+	(*BlockWorkflowResponse)(nil),                 // 41: loop.control.v1.BlockWorkflowResponse
 }
 var file_proto_control_plane_proto_depIdxs = []int32{
 	5,  // 0: loop.control.v1.ListProjectsResponse.projects:type_name -> loop.control.v1.Project
@@ -2087,49 +2512,55 @@ var file_proto_control_plane_proto_depIdxs = []int32{
 	16, // 6: loop.control.v1.ListRunnerRegistrationTokensResponse.tokens:type_name -> loop.control.v1.RunnerRegistrationToken
 	16, // 7: loop.control.v1.RevokeRunnerRegistrationTokenResponse.token:type_name -> loop.control.v1.RunnerRegistrationToken
 	22, // 8: loop.control.v1.ListWorkflowsResponse.workflows:type_name -> loop.control.v1.Workflow
-	25, // 9: loop.control.v1.ListRunnersResponse.runners:type_name -> loop.control.v1.Runner
-	25, // 10: loop.control.v1.SetRunnerStateResponse.runner:type_name -> loop.control.v1.Runner
-	22, // 11: loop.control.v1.SubmitHumanDecisionResponse.workflow:type_name -> loop.control.v1.Workflow
-	22, // 12: loop.control.v1.RetryWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
-	22, // 13: loop.control.v1.CancelWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
-	22, // 14: loop.control.v1.BlockWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
-	0,  // 15: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
-	2,  // 16: loop.control.v1.ControlPlane.WhoAmI:input_type -> loop.control.v1.WhoAmIRequest
-	4,  // 17: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
-	8,  // 18: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
-	10, // 19: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
-	12, // 20: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
-	14, // 21: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
-	17, // 22: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
-	19, // 23: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
-	21, // 24: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
-	24, // 25: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
-	27, // 26: loop.control.v1.ControlPlane.SetRunnerState:input_type -> loop.control.v1.SetRunnerStateRequest
-	29, // 27: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
-	31, // 28: loop.control.v1.ControlPlane.RetryWorkflow:input_type -> loop.control.v1.RetryWorkflowRequest
-	33, // 29: loop.control.v1.ControlPlane.CancelWorkflow:input_type -> loop.control.v1.CancelWorkflowRequest
-	35, // 30: loop.control.v1.ControlPlane.BlockWorkflow:input_type -> loop.control.v1.BlockWorkflowRequest
-	1,  // 31: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
-	3,  // 32: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
-	6,  // 33: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
-	9,  // 34: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
-	11, // 35: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
-	13, // 36: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
-	15, // 37: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
-	18, // 38: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
-	20, // 39: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
-	23, // 40: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
-	26, // 41: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
-	28, // 42: loop.control.v1.ControlPlane.SetRunnerState:output_type -> loop.control.v1.SetRunnerStateResponse
-	30, // 43: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
-	32, // 44: loop.control.v1.ControlPlane.RetryWorkflow:output_type -> loop.control.v1.RetryWorkflowResponse
-	34, // 45: loop.control.v1.ControlPlane.CancelWorkflow:output_type -> loop.control.v1.CancelWorkflowResponse
-	36, // 46: loop.control.v1.ControlPlane.BlockWorkflow:output_type -> loop.control.v1.BlockWorkflowResponse
-	31, // [31:47] is the sub-list for method output_type
-	15, // [15:31] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	22, // 9: loop.control.v1.GetWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
+	26, // 10: loop.control.v1.ListWorkflowEventsResponse.events:type_name -> loop.control.v1.WorkflowEvent
+	30, // 11: loop.control.v1.ListRunnersResponse.runners:type_name -> loop.control.v1.Runner
+	30, // 12: loop.control.v1.SetRunnerStateResponse.runner:type_name -> loop.control.v1.Runner
+	22, // 13: loop.control.v1.SubmitHumanDecisionResponse.workflow:type_name -> loop.control.v1.Workflow
+	22, // 14: loop.control.v1.RetryWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
+	22, // 15: loop.control.v1.CancelWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
+	22, // 16: loop.control.v1.BlockWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
+	0,  // 17: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
+	2,  // 18: loop.control.v1.ControlPlane.WhoAmI:input_type -> loop.control.v1.WhoAmIRequest
+	4,  // 19: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
+	8,  // 20: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
+	10, // 21: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
+	12, // 22: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
+	14, // 23: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
+	17, // 24: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
+	19, // 25: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
+	21, // 26: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
+	24, // 27: loop.control.v1.ControlPlane.GetWorkflow:input_type -> loop.control.v1.GetWorkflowRequest
+	27, // 28: loop.control.v1.ControlPlane.ListWorkflowEvents:input_type -> loop.control.v1.ListWorkflowEventsRequest
+	29, // 29: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
+	32, // 30: loop.control.v1.ControlPlane.SetRunnerState:input_type -> loop.control.v1.SetRunnerStateRequest
+	34, // 31: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
+	36, // 32: loop.control.v1.ControlPlane.RetryWorkflow:input_type -> loop.control.v1.RetryWorkflowRequest
+	38, // 33: loop.control.v1.ControlPlane.CancelWorkflow:input_type -> loop.control.v1.CancelWorkflowRequest
+	40, // 34: loop.control.v1.ControlPlane.BlockWorkflow:input_type -> loop.control.v1.BlockWorkflowRequest
+	1,  // 35: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
+	3,  // 36: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
+	6,  // 37: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
+	9,  // 38: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
+	11, // 39: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
+	13, // 40: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
+	15, // 41: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
+	18, // 42: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
+	20, // 43: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
+	23, // 44: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
+	25, // 45: loop.control.v1.ControlPlane.GetWorkflow:output_type -> loop.control.v1.GetWorkflowResponse
+	28, // 46: loop.control.v1.ControlPlane.ListWorkflowEvents:output_type -> loop.control.v1.ListWorkflowEventsResponse
+	31, // 47: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
+	33, // 48: loop.control.v1.ControlPlane.SetRunnerState:output_type -> loop.control.v1.SetRunnerStateResponse
+	35, // 49: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
+	37, // 50: loop.control.v1.ControlPlane.RetryWorkflow:output_type -> loop.control.v1.RetryWorkflowResponse
+	39, // 51: loop.control.v1.ControlPlane.CancelWorkflow:output_type -> loop.control.v1.CancelWorkflowResponse
+	41, // 52: loop.control.v1.ControlPlane.BlockWorkflow:output_type -> loop.control.v1.BlockWorkflowResponse
+	35, // [35:53] is the sub-list for method output_type
+	17, // [17:35] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_proto_control_plane_proto_init() }
@@ -2143,7 +2574,7 @@ func file_proto_control_plane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_control_plane_proto_rawDesc), len(file_proto_control_plane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   37,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
