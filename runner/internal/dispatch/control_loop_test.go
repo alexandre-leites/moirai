@@ -1091,6 +1091,59 @@ func waitForOutboxEvent(t *testing.T, path, eventType string) {
 	t.Fatalf("event outbox %s never contained a %q event", path, eventType)
 }
 
+func TestControlLoopQueuesFencedRecoveredTerminalEvent(t *testing.T) {
+	client := &loopClient{sendErr: control.ErrNotConnected}
+	loop, err := NewControlLoop(client, &blockingDispatcher{}, time.Now, time.Minute, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.ReportRecoveredFailure("job-1", 2, "execution-1"); err != nil {
+		t.Fatal(err)
+	}
+	if loop.Reporter.Pending() != 1 {
+		t.Fatalf("pending events = %d", loop.Reporter.Pending())
+	}
+	client.mu.Lock()
+	client.sendErr = nil
+	client.mu.Unlock()
+	if err := loop.FlushEvents(); err != nil {
+		t.Fatal(err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.events) != 1 || client.events[0].GetType() != "failed" || client.events[0].GetJobId() != "job-1" || client.events[0].GetLeaseGeneration() != 2 || client.events[0].GetExecutionId() != "execution-1" || client.events[0].GetEventSequence() != int64(^uint64(0)>>1) {
+		t.Fatalf("events = %#v", client.events)
+	}
+}
+
+func TestControlLoopCancelAllCancelsEveryActiveExecution(t *testing.T) {
+	now := time.Now()
+	client := &loopClient{}
+	dispatcher := &blockingDispatcher{started: make(chan struct{}), cancelled: make(chan control.Lease, 1)}
+	loop, err := NewControlLoop(client, dispatcher, func() time.Time { return now }, time.Minute, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offer := loopOffer(t)
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: offer}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_LeaseAcknowledged{LeaseAcknowledged: &runnerv1.LeaseAcknowledged{JobId: offer.GetJobId(), LeaseGeneration: offer.GetLeaseGeneration(), ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-dispatcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not start")
+	}
+	loop.CancelAll()
+	select {
+	case <-dispatcher.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("CancelAll() did not cancel execution")
+	}
+}
+
 func TestControlLoopLogsTerminalEventLoss(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}

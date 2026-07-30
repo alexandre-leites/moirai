@@ -12,6 +12,7 @@ import (
 type fakeService struct {
 	registration *runnerv1.RegisterRunnerRequest
 	stream       *fakeStream
+	context      context.Context
 }
 
 func (s *fakeService) RegisterRunner(_ context.Context, request *runnerv1.RegisterRunnerRequest) (*runnerv1.RegisterRunnerResponse, error) {
@@ -19,7 +20,8 @@ func (s *fakeService) RegisterRunner(_ context.Context, request *runnerv1.Regist
 	return &runnerv1.RegisterRunnerResponse{RunnerId: "runner-1", Credential: "credential-1"}, nil
 }
 
-func (s *fakeService) Connect(context.Context) (Stream, error) {
+func (s *fakeService) Connect(ctx context.Context) (Stream, error) {
+	s.context = ctx
 	return s.stream, nil
 }
 
@@ -97,6 +99,23 @@ func TestRegisterAndConnectSendsAuthenticatedLeaseMessages(t *testing.T) {
 	}
 	if response.GetLeaseAcknowledged().GetJobId() != "job-1" {
 		t.Fatalf("acknowledged job = %q", response.GetLeaseAcknowledged().GetJobId())
+	}
+}
+
+func TestClientDisconnectCancelsStreamContext(t *testing.T) {
+	service := &fakeService{stream: &fakeStream{}}
+	client, err := NewClient(service, Identity{RunnerID: "runner-1", Credential: "credential-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	client.Disconnect()
+	select {
+	case <-service.context.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Disconnect() did not cancel the stream context")
 	}
 }
 

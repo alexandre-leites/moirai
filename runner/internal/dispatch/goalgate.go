@@ -185,6 +185,7 @@ func (run agentRun) verdictText() string {
 // per execution.
 func (dispatcher Dispatcher) runAgent(
 	ctx context.Context,
+	generation int64,
 	packet taskpacket.Packet,
 	workspace repository.Workspace,
 	initial repository.RevisionSummary,
@@ -199,7 +200,9 @@ func (dispatcher Dispatcher) runAgent(
 	timeout := time.Duration(packet.TimeoutSeconds) * time.Second
 	deadline := time.Now().Add(timeout)
 	request := agents.Request{
-		ExecutionID: packet.ExecutionID,
+		JobID:           packet.JobID,
+		LeaseGeneration: generation,
+		ExecutionID:     packet.ExecutionID
 		Role:        agents.Role(packet.Role),
 		Workspace:   workspace.Repository,
 		Prompt:      promptFor(packet),

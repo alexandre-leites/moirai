@@ -50,6 +50,14 @@ func TestSupervisorDoesNotInheritRunnerEnvironment(t *testing.T) {
 	}
 }
 
+func TestSupervisorCreatesWorkspaceTemporaryDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	_, err := NewSupervisor().Execute(context.Background(), Request{ExecutionID: "execution-tmpdir", Workspace: workspace, Command: []string{"/bin/sh", "-c", "test -d \"$TMPDIR\""}, Timeout: time.Second}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSupervisorReportsStartedProcessID(t *testing.T) {
 	pid := 0
 	_, err := NewSupervisor().Execute(context.Background(), Request{ExecutionID: "execution-pid", Workspace: t.TempDir(), Command: []string{"true"}, Timeout: time.Second, OnStarted: func(value int) { pid = value }}, nil, nil)

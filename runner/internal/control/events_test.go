@@ -383,13 +383,16 @@ func TestEventReporterPersistsTerminalEventsForStartupReplay(t *testing.T) {
 	}
 }
 
-func TestEventReporterRejectsCorruptPersistentOutbox(t *testing.T) {
+func TestEventReporterQuarantinesCorruptPersistentOutbox(t *testing.T) {
 	outboxPath := filepath.Join(t.TempDir(), "events.json")
 	if err := os.WriteFile(outboxPath, []byte("invalid"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewEventReporter(&eventClient{}, 4, nil, outboxPath); err == nil {
-		t.Fatal("NewEventReporter() accepted corrupt outbox")
+	if _, err := NewEventReporter(&eventClient{}, 4, nil, outboxPath); err != nil {
+		t.Fatalf("NewEventReporter() error = %v", err)
+	}
+	if _, err := os.Stat(outboxPath + ".corrupt"); err != nil {
+		t.Fatalf("quarantined outbox = %v", err)
 	}
 }
 
@@ -594,6 +597,29 @@ func TestEventReporterRestoresEvictedEventWhenPersistFails(t *testing.T) {
 	}
 	if pending := reporter.Pending(); pending != 2 {
 		t.Fatalf("pending events = %d, want the evicted log restored after the failed emit", pending)
+	}
+}
+
+func TestEventReporterChunksLogsByEncodedPayloadLimit(t *testing.T) {
+	client := &eventClient{}
+	reporter, err := NewEventReporterWithLimits(client, 32, nil, "", 128, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reporter.EmitLog(lease.JobID, lease.Generation, strings.Repeat("<", 300)); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.events) < 2 {
+		t.Fatalf("events = %d, want chunks", len(client.events))
+	}
+	for _, event := range client.events {
+		if len(event.GetPayloadJson()) > 128 {
+			t.Fatalf("payload = %d bytes", len(event.GetPayloadJson()))
+		}
 	}
 }
 

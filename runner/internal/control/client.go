@@ -46,8 +46,9 @@ func (s grpcService) Connect(ctx context.Context) (Stream, error) {
 type Client struct {
 	service  ControlService
 	identity Identity
-	mu       sync.Mutex
-	stream   Stream
+	mu           sync.Mutex
+	stream       Stream
+	streamCancel context.CancelFunc
 }
 
 func NewClient(service ControlService, identity Identity) (*Client, error) {
@@ -105,20 +106,32 @@ func RegisterWithGRPC(ctx context.Context, service runnerv1.RunnerControlClient,
 }
 
 func (c *Client) Connect(ctx context.Context) error {
-	stream, err := c.service.Connect(ctx)
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream, err := c.service.Connect(streamCtx)
 	if err != nil {
+		cancel()
 		return err
 	}
 	c.mu.Lock()
+	previousCancel := c.streamCancel
 	c.stream = stream
+	c.streamCancel = cancel
 	c.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+	}
 	return nil
 }
 
 func (c *Client) Disconnect() {
 	c.mu.Lock()
+	cancel := c.streamCancel
 	c.stream = nil
+	c.streamCancel = nil
 	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (c *Client) Heartbeat(labels []string, busy bool) error {

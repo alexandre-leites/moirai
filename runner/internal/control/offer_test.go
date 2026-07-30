@@ -170,6 +170,24 @@ func TestOfferStateRenewsOncePerAcknowledgementAndExpires(t *testing.T) {
 	}
 }
 
+func TestOfferStateRenewDueLeavesExpiredLeaseForExpiryHandling(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	state := newOfferState(t, &offerClient{}, &now)
+	if admitted, err := state.Admit(validOffer(t, "job-1", 1)); err != nil || !admitted {
+		t.Fatalf("Admit() = (%v, %v)", admitted, err)
+	}
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 1, ExpiresAtUnixMs: now.Add(time.Minute).UnixMilli()}) {
+		t.Fatal("ApplyAcknowledgement() rejected lease")
+	}
+	now = now.Add(time.Minute)
+	if renewed, err := state.RenewDue(); err != nil || len(renewed) != 0 {
+		t.Fatalf("RenewDue() = (%v, %v)", renewed, err)
+	}
+	if _, active := state.ActiveLease("job-1"); !active {
+		t.Fatal("RenewDue() removed expired lease before expiry handling")
+	}
+}
+
 func TestOfferStatePropagatesControlFailures(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	client := &offerClient{err: errors.New("disconnected")}

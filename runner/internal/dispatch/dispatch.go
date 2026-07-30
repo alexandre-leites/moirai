@@ -247,7 +247,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// decides whether the objective was met and, while it was not and budget
 	// remains, the agent is continued in the same session (see goalgate.go).
 	// With MaxContinuations at zero this is exactly one Execute, as before.
-	run := dispatcher.runAgent(ctx, packet, workspace, initial, environment, output)
+	run := dispatcher.runAgent(ctx, lease.Generation, packet, workspace, initial, environment, output)
 	if forwarder, ok := output.(*logForwarder); ok {
 		forwarder.Close()
 	}

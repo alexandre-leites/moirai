@@ -105,7 +105,7 @@ printf '%s' '{"protocolVersion":"1.0","executionId":"execution-1","status":"comp
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(filepath.Join(workspace, "arguments"))
-	if err != nil || string(contents) != "run\n--auto\n--model\nprovider/model\n--dir\n"+workspace+"\nimplement the task\n" {
+	if err != nil || string(contents) != "run\n--auto\n--model\nprovider/model\n--dir\n"+workspace+"\nRead .loop/prompt.md and follow its instructions.\n" {
 		t.Fatalf("arguments = %q, %v", contents, err)
 	}
 }

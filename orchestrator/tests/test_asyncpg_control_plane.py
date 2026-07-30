@@ -833,7 +833,7 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         expired = await AsyncpgControlPlane(pool).expire_leases(NOW)
         self.assertEqual(expired, (pool.job_id,))
         self.assertEqual(pool.job_status, "recovering")
-        self.assertTrue(any("SET status = 'offline'" in query for query in pool.queries))
+        self.assertFalse(any("SET status = 'offline'" in query for query in pool.queries))
         self.assertFalse(any("DELETE FROM app.project_locks" in query for query in pool.queries))
 
     async def test_expire_leases_preserves_the_phase_of_the_run_it_fences(self) -> None:

@@ -58,6 +58,7 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 	defer stderr.Close()
 	command := append(append([]string(nil), backend.Arguments...), request.Prompt)
 	defer writeLogMetadata(filepath.Dir(resultPath), backend.NameValue, stdoutLog, stderrLog)
+	defer os.Remove(filepath.Join(filepath.Dir(resultPath), "execution-manifest.json"))
 	executionResult, err := backend.supervisor().Execute(parent, execution.Request{
 		ExecutionID: request.ExecutionID,
 		Workspace:   request.Workspace,
@@ -65,7 +66,7 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 		Environment: request.Environment,
 		Timeout:     request.Timeout,
 		OnStarted: func(pid int) {
-			writeExecutionManifest(filepath.Dir(resultPath), backend.NameValue, request.ExecutionID, pid)
+			writeExecutionManifest(filepath.Dir(resultPath), backend.NameValue, request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 		},
 	}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 	if err != nil {

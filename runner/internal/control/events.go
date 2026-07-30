@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 
@@ -83,6 +84,8 @@ type EventReporter struct {
 	maxPending        int
 	redactionPrefixes []string
 	outbox            *eventOutbox
+	maxPayloadBytes   int
+	logChunkBytes     int
 
 	// Logger reports discarded events. Assign before the reporter is shared
 	// with other goroutines; nil falls back to slog.Default().
@@ -115,7 +118,11 @@ type expiredLeaseKey struct {
 }
 
 func NewEventReporter(client EventClient, maxPending int, prefixes []string, outboxPath string) (*EventReporter, error) {
-	if client == nil || maxPending < 1 || !validRedactionPrefixes(prefixes) {
+	return NewEventReporterWithLimits(client, maxPending, prefixes, outboxPath, maxExecutionEventPayloadBytes, maxLogChunkBytes)
+}
+
+func NewEventReporterWithLimits(client EventClient, maxPending int, prefixes []string, outboxPath string, maxPayloadBytes, logChunkBytes int) (*EventReporter, error) {
+	if client == nil || maxPending < 1 || maxPayloadBytes < 1 || logChunkBytes < 1 || !validRedactionPrefixes(prefixes) {
 		return nil, ErrEventReporterConfiguration
 	}
 	reporter := &EventReporter{
@@ -124,6 +131,11 @@ func NewEventReporter(client EventClient, maxPending int, prefixes []string, out
 		redactionPrefixes: append([]string(nil), prefixes...),
 		leases:            map[string]*leaseState{},
 		expired:           map[expiredLeaseKey]*leaseState{},
+		maxPayloadBytes:   maxPayloadBytes,
+		logChunkBytes:     logChunkBytes,
+	}
+	if _, err := marshalEventPayloadWithLimit(map[string]any{"message": "", "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, prefixes, maxPayloadBytes); err != nil {
+		return nil, ErrEventReporterConfiguration
 	}
 	if outboxPath == "" {
 		return reporter, nil
@@ -134,7 +146,11 @@ func NewEventReporter(client EventClient, maxPending int, prefixes []string, out
 	}
 	pending, err := outbox.Load()
 	if err != nil {
-		return nil, err
+		quarantine := outbox.path + ".corrupt"
+		if renameErr := os.Rename(outbox.path, quarantine); renameErr != nil {
+			return nil, fmt.Errorf("quarantine corrupt event outbox: %w", renameErr)
+		}
+		slog.Warn("quarantined corrupt execution event outbox", "path", quarantine, "error", err)
 	}
 	if len(pending) > maxPending {
 		return nil, errors.New("event outbox exceeds pending event limit")
@@ -217,6 +233,18 @@ func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 	return true
 }
 
+func (r *EventReporter) RecoverTerminal(lease Lease, eventType string, payload map[string]any) (int64, error) {
+	if err := r.Begin(lease); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	r.leases[lease.JobID].next = int64(^uint64(0)>>1) - 1
+	r.mu.Unlock()
+	sequence, err := r.Emit(lease.JobID, lease.Generation, eventType, payload)
+	r.Finish(lease.JobID, lease.Generation)
+	return sequence, err
+}
+
 func (r *EventReporter) Finish(jobID string, generation int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -242,7 +270,7 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	if !validEventType(eventType) {
 		return 0, fmt.Errorf("%w: type %q", ErrInvalidExecutionEvent, eventType)
 	}
-	contents, err := marshalEventPayloadWithPrefixes(payload, r.redactionPrefixes)
+	contents, err := marshalEventPayloadWithLimit(payload, r.redactionPrefixes, r.maxPayloadBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -418,7 +446,7 @@ func (r *EventReporter) logger() *slog.Logger {
 // four chunks and reporting one drop would understate the loss precisely when a
 // chatty agent is the thing overrunning the buffer.
 func (r *EventReporter) EmitLog(jobID string, generation int64, message string) ([]int64, error) {
-	chunks := splitUTF8Chunks(message, maxLogChunkBytes)
+	chunks := r.logChunks(message)
 	sequences := make([]int64, 0, len(chunks))
 	for index, chunk := range chunks {
 		sequence, err := r.Emit(jobID, generation, "log", map[string]any{
@@ -511,7 +539,49 @@ func validEventType(eventType string) bool {
 	}
 }
 
+func (r *EventReporter) logChunks(message string) []string {
+	chunks := make([]string, 0, len(message)/r.logChunkBytes+1)
+	for len(message) > 0 {
+		end := r.logChunkBytes
+		if end > len(message) {
+			end = len(message)
+		}
+		for end > 0 && end < len(message) && (message[end]&0xc0) == 0x80 {
+			end--
+		}
+		if end == 0 {
+			end = 1
+			for end < len(message) && (message[end]&0xc0) == 0x80 {
+				end++
+			}
+		}
+		for end > 0 {
+			chunk := message[:end]
+			if _, err := marshalEventPayloadWithLimit(map[string]any{"message": chunk, "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, r.redactionPrefixes, r.maxPayloadBytes); err == nil {
+				chunks = append(chunks, chunk)
+				message = message[end:]
+				break
+			}
+			end--
+			for end > 0 && end < len(message) && (message[end]&0xc0) == 0x80 {
+				end--
+			}
+		}
+		if end == 0 {
+			return append(chunks, "")
+		}
+	}
+	if len(chunks) == 0 {
+		return []string{""}
+	}
+	return chunks
+}
+
 func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) ([]byte, error) {
+	return marshalEventPayloadWithLimit(payload, prefixes, maxExecutionEventPayloadBytes)
+}
+
+func marshalEventPayloadWithLimit(payload map[string]any, prefixes []string, maxPayloadBytes int) ([]byte, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
@@ -519,8 +589,8 @@ func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) 
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode payload: %w", ErrInvalidExecutionEvent, err)
 	}
-	if len(contents) > maxExecutionEventPayloadBytes {
-		return nil, fmt.Errorf("%w: payload is %d bytes, over the %d byte limit", ErrInvalidExecutionEvent, len(contents), maxExecutionEventPayloadBytes)
+	if len(contents) > maxPayloadBytes {
+		return nil, fmt.Errorf("%w: payload is %d bytes, over the %d byte limit", ErrInvalidExecutionEvent, len(contents), maxPayloadBytes)
 	}
 	return contents, nil
 }
