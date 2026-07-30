@@ -91,6 +91,14 @@ describe("RunnersView", () => {
     expect(cell(row(html, "steady"), DRAINING_CELL)).toContain("No");
   });
 
+  it("renders drain, undrain, and revoke controls when actions are available", () => {
+    const drain = render({ runners: [runner()], onSetState: () => undefined });
+    expect(row(drain, "runner-a")).toContain(">Drain<");
+    expect(row(drain, "runner-a")).toContain(">Revoke<");
+    const undrain = render({ runners: [runner({ draining: true })], onSetState: () => undefined });
+    expect(row(undrain, "runner-a")).toContain(">Undrain<");
+  });
+
   it("carries the absolute heartbeat time in the cell's title attribute", () => {
     const seenAt = new Date(NOW - 8_000);
     const html = render({ runners: [runner({ lastSeenAt: seenAt.toISOString() })] });

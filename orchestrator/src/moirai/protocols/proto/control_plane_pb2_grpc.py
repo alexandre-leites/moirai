@@ -69,6 +69,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.ListRunnersResponse.FromString,
                 _registered_method=True)
+        self.SetRunnerState = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/SetRunnerState',
+                request_serializer=proto_dot_control__plane__pb2.SetRunnerStateRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.SetRunnerStateResponse.FromString,
+                _registered_method=True)
         self.SubmitHumanDecision = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/SubmitHumanDecision',
                 request_serializer=proto_dot_control__plane__pb2.SubmitHumanDecisionRequest.SerializeToString,
@@ -160,6 +165,12 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SetRunnerState(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SubmitHumanDecision(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -241,6 +252,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.ListRunners,
                     request_deserializer=proto_dot_control__plane__pb2.ListRunnersRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.ListRunnersResponse.SerializeToString,
+            ),
+            'SetRunnerState': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetRunnerState,
+                    request_deserializer=proto_dot_control__plane__pb2.SetRunnerStateRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.SetRunnerStateResponse.SerializeToString,
             ),
             'SubmitHumanDecision': grpc.unary_unary_rpc_method_handler(
                     servicer.SubmitHumanDecision,
@@ -560,6 +576,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/ListRunners',
             proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
             proto_dot_control__plane__pb2.ListRunnersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetRunnerState(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/SetRunnerState',
+            proto_dot_control__plane__pb2.SetRunnerStateRequest.SerializeToString,
+            proto_dot_control__plane__pb2.SetRunnerStateResponse.FromString,
             options,
             channel_credentials,
             insecure,

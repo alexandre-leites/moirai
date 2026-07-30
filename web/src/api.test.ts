@@ -84,9 +84,10 @@ describe("createApiClient CSRF handling", () => {
     await api.setProjectEnabled("p1", false);
     await api.createToken(["linux"]);
     await api.revokeToken("t1");
+    await api.setRunnerState("r1", "drain");
     await api.submitWorkflowDecision("w1", "approved");
 
-    expect(calls).toHaveLength(7);
+    expect(calls).toHaveLength(8);
     for (const call of calls) {
       expect(header(call, "x-csrf-token"), `${call.url} sent no CSRF header`).toBe("token-abc");
       expect(call.init?.credentials).toBe("include");
@@ -147,6 +148,21 @@ describe("createApiClient CSRF handling", () => {
     await createApiClient(fetchClient).login("ada", "lovelace");
     expect(header(calls[0], "x-csrf-token")).toBeUndefined();
     expect(header(calls[0], "Content-Type")).toBe("application/json");
+  });
+});
+
+describe("createApiClient runner controls", () => {
+  it("uses state routes and normalizes runner labels", async () => {
+    setCookie("loop_csrf", "token-abc");
+    const { calls, fetchClient } = recorder(() => jsonResponse({
+      id: "r1", name: "runner", enabled: true, draining: true,
+      status: "online", labels: null, lastSeenAt: "",
+    }));
+    const runner = await createApiClient(fetchClient).setRunnerState("r1", "enable");
+    expect(calls[0].url).toBe("/api/v1/runners/r1/undrain");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(header(calls[0], "x-csrf-token")).toBe("token-abc");
+    expect(runner.labels).toEqual([]);
   });
 });
 

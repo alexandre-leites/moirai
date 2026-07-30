@@ -796,9 +796,10 @@ class AsyncpgControlPlane:
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 record = await connection.fetchrow(
-                    """UPDATE app.runners SET enabled = $2, draining = $3,
+                    """UPDATE app.runners SET enabled = $2, operator_draining = $3, draining = $3,
                        revoked_at = COALESCE(revoked_at, $4), status = CASE WHEN $1 = 'revoke' THEN 'offline' ELSE status END
-                       WHERE id = $5 RETURNING id, name, enabled, draining, status, labels, last_seen_at""",
+                       WHERE id = $5 AND ($1 != 'enable' OR revoked_at IS NULL)
+                       RETURNING id, name, enabled, draining, status, labels, last_seen_at""",
                     state, updates[0], updates[1], updates[2], _uuid(runner_id),
                 )
                 if record is None:
@@ -816,27 +817,10 @@ class AsyncpgControlPlane:
         return _runner_record(record)
 
     async def set_runner_draining(self, runner_id: str, draining: bool) -> None:
-        """Record a runner's own report of whether it is draining.
-
-        Writing `draining` is the whole fix -- every placement query already
-        gates on `r.draining = false`, so the next scheduling pass stops
-        considering the runner.
-
-        Narrower than `set_runner_state` in the columns it touches: a runner
-        reports one fact about itself, so an operator's `enabled` and
-        `revoked_at` decisions survive the report. It is *not* narrower in
-        `draining` itself, which both methods write -- a runner reporting
-        `draining=false` clears an operator drain, and an operator `enable`
-        clears a runner's. Separating the two owners needs a second column and
-        a change to the three placement predicates; until then #119, which owns
-        the operator side, has to decide how the two reconcile.
-
-        A revoked runner matches nothing and the report is rejected, which ends
-        its control stream -- the same thing its next message would do, since
-        `_load_runner_credential` refuses revoked rows.
-        """
         updated = await self._pool.execute(
-            "UPDATE app.runners SET draining = $2 WHERE id = $1 AND revoked_at IS NULL",
+            """UPDATE app.runners
+               SET draining = operator_draining OR $2
+               WHERE id = $1 AND revoked_at IS NULL""",
             _uuid(runner_id),
             draining,
         )

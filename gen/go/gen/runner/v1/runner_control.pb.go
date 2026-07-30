@@ -807,6 +807,7 @@ func (x *CancelExecution) GetLeaseGeneration() int64 {
 
 type DrainRunner struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Undrain       bool                   `protobuf:"varint,1,opt,name=undrain,proto3" json:"undrain,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -839,6 +840,13 @@ func (x *DrainRunner) ProtoReflect() protoreflect.Message {
 // Deprecated: Use DrainRunner.ProtoReflect.Descriptor instead.
 func (*DrainRunner) Descriptor() ([]byte, []int) {
 	return file_proto_runner_control_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *DrainRunner) GetUndrain() bool {
+	if x != nil {
+		return x.Undrain
+	}
+	return false
 }
 
 type RunnerDraining struct {
@@ -1025,8 +1033,9 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\x12expires_at_unix_ms\x18\x03 \x01(\x03R\x0fexpiresAtUnixMs\"_\n" +
 	"\x0fCancelExecution\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12)\n" +
-	"\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\"\r\n" +
-	"\vDrainRunner\",\n" +
+	"\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\"'\n" +
+	"\vDrainRunner\x12\x18\n" +
+	"\aundrain\x18\x01 \x01(\bR\aundrain\",\n" +
 	"\x0eRunnerDraining\x12\x1a\n" +
 	"\bdraining\x18\x01 \x01(\bR\bdraining\"\xd3\x01\n" +
 	"\x0eExecutionEvent\x12\x15\n" +

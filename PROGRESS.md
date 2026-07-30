@@ -533,6 +533,21 @@ Record only validation that was actually run.
 
 Monitor the workflow-quality/recovery PR CI. If CI exposes a failure, reproduce it in this worktree, make a focused fix, rerun the relevant checks, and update this record before the next commit.
 
+---
+
+## Issue #119 — Runner drain, undrain, and revoke controls
+
+## In Progress
+
+- [ ] Wire runner state controls through control-plane gRPC, API, and Web UI
+  - Started: 2026-07-30
+  - Agent/session identifier: issue-119
+  - Relevant files: `proto/control_plane.proto`, `orchestrator/src/moirai/grpc/{control_plane,runner_control,sessions}.py`, `api/internal/{orchestrator,http/handlers}/`, `api/openapi.yaml`, `web/src/{api,runners}.tsx`
+  - Current state: API and Web expose read-only runner status; persistence and runner protocol already support state.
+  - Remaining work: Implement routes, UI controls, state delivery, tests, generated stubs, validation, review, PR.
+  - Definition of done: Admin can drain, undrain, and revoke a runner with durable state and connected-session delivery.
+  - Targeted validation: orchestrator, API, Web, and protobuf checks.
+
 
 ---
 
@@ -3637,3 +3652,21 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 - Validation passed: `uv run --project orchestrator -- python -m unittest discover -s orchestrator/tests -p test_control_plane_grpc.py` (12 tests); `make test-web` (129 tests); `npx @bufbuild/buf@1.50.0 lint`; generated stub diff check; `git diff --check`.
 - Validation blocked: `make test-orchestrator` cannot create `.venv` because system Python lacks `ensurepip`; `make test-api` cannot run because `go` is unavailable; `make proto-check` cannot run because `docker` is unavailable. Direct replacement checks above passed where possible.
 - Adversarial review: checked terminal-state fencing, project-lock conflict behavior, repeated actions, runner cancellation generation, CSRF/admin route wiring, and generated RPC signatures. No remaining blocker found.
+
+---
+
+# Issue #119 — Runner drain, undrain, and revoke controls
+
+- Completed: 2026-07-30
+- Agent/session identifier: issue-119
+- Branch: `issue-119`
+- Scope: runner-control protocol, persistence/gRPC sessions, API/OpenAPI, Web runner controls, generated stubs, and append-only progress.
+- Behavior delivered: admin+CSRF APIs drain, undrain, or revoke runners; operator drain state is isolated from runner-reported state, so a stale heartbeat cannot clear an operator drain. Connected runners receive drain/undrain commands; revoke queues a drain then closes the session and invalidates its credential. The UI renders drain/undrain actions and a confirmed revoke action.
+- Tests added: control-plane authorization/delivery, runner stream delivery, runner undrain admission, API mutation guards and payload normalization, Web API/control rendering, persistence migration and PostgreSQL operator-drain/revocation cases.
+- Validation passed: `go test ./...` and `go vet ./...` in `api`; Web Vitest (131), TypeScript, ESLint (10 existing warnings); orchestrator full suite (488 passed, 33 skipped), targeted gRPC/migration suites, Ruff; Buf lint/generation; `git diff --check`.
+- Validation blocked: runner suite has pre-existing compile failures in `runner/internal/pipeline/pipeline.go:49` and `runner/internal/control/offer.go:186`, plus an unrelated OpenCode continuation assertion. `mypy src` has 107 pre-existing generated/unrelated diagnostics. PostgreSQL integration requires `LOOP_TEST_DATABASE_URL` and was skipped.
+- Adversarial review: found and fixed operator-drain ownership race; separate `operator_draining` prevents runner reports from re-enabling placement. Checked revoke ordering, stream closure, CSRF/admin mapping, nil labels, and legacy drain compatibility. No remaining issue-119 finding.
+
+## Next Recommended Implementation
+
+Repair pre-existing runner compile failures, then run `make test-runner` and `make test-postgres-integration LOOP_TEST_DATABASE_URL=...`.

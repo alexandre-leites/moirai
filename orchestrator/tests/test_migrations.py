@@ -60,6 +60,12 @@ class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("project_circuit_half_open_probe_idx", contents)
         self.assertIn("provider_circuit_half_open_probe_idx", contents)
 
+    async def test_runner_operator_drain_migration_preserves_runner_reports(self) -> None:
+        migration = Path(__file__).parents[1] / "migrations" / "009_runner_operator_drain.sql"
+        contents = migration.read_text(encoding="utf-8")
+        self.assertIn("operator_draining", contents)
+        self.assertIn("DEFAULT FALSE", contents)
+
     async def test_discovery_rejects_duplicate_versions(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

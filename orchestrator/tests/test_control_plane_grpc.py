@@ -154,6 +154,20 @@ class FakeControlPlane:
     async def list_runners(self) -> list[dict[str, object]]:
         return []
 
+    async def set_runner_state(
+        self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
+    ) -> dict[str, object]:
+        self.runner_state = (runner_id, state, actor_user_id, now)
+        return {
+            "id": runner_id,
+            "name": "runner-a",
+            "enabled": state != "revoke",
+            "draining": state != "enable",
+            "status": "offline" if state == "revoke" else "online",
+            "labels": ["docker"],
+            "last_seen_at": NOW,
+        }
+
 
 class _FakeWorkflowRuntime:
     def __init__(self) -> None:
@@ -184,7 +198,7 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.control_plane = FakeControlPlane()
         self.server = grpc.aio.server()
-        register_services(self.server, self.control_plane, now=lambda: NOW)
+        self.runner_service = register_services(self.server, self.control_plane, now=lambda: NOW)
         port = self.server.add_insecure_port("127.0.0.1:0")
         await self.server.start()
         self.channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
@@ -298,6 +312,31 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                 metadata=(("x-loop-session", "viewer-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+
+    async def test_runner_controls_require_admin_csrf_and_persist_actor(self) -> None:
+        session = await self.runner_service._sessions.connect("runner-1")
+        response = await self.client.SetRunnerState(
+            control_plane_pb2.SetRunnerStateRequest(runner_id="runner-1", state="drain"),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
+        )
+        self.assertTrue(response.runner.draining)
+        self.assertIsNotNone((await session.next_message()).drain)
+        self.assertEqual(
+            self.control_plane.runner_state,
+            ("runner-1", "drain", "00000000-0000-0000-0000-000000000099", NOW),
+        )
+        with self.assertRaises(grpc.aio.AioRpcError) as viewer:
+            await self.client.SetRunnerState(
+                control_plane_pb2.SetRunnerStateRequest(runner_id="runner-1", state="drain"),
+                metadata=(("x-loop-session", "viewer-session"), ("x-loop-csrf", "csrf-token")),
+            )
+        self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+        with self.assertRaises(grpc.aio.AioRpcError) as missing_csrf:
+            await self.client.SetRunnerState(
+                control_plane_pb2.SetRunnerStateRequest(runner_id="runner-1", state="drain"),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(missing_csrf.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
     async def test_maps_login_failures_and_declined_capabilities_to_typed_errors(self) -> None:
         with self.assertRaises(grpc.aio.AioRpcError) as rejected:
