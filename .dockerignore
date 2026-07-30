@@ -1,14 +1,31 @@
+# Root build context. Only api/Dockerfile and runner/Dockerfile build from here;
+# web/ and orchestrator/ build from their own directories and carry their own
+# .dockerignore, which is why both are excluded below.
 .git/
 .github/
+.claude/
 aidocs/
+docs/
 tasks/
+scripts/
+schemas/
+proto/
+
+# Never send credentials or local configuration to the daemon. Nothing copies
+# these, but a build context is not a place to find out.
 secrets/
+.env
+.env.*
+
 **/node_modules/
 **/dist/
 **/__pycache__/
 **/.venv/
 **/venv/
 **/*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
 orchestrator/
 web/
 *.md
