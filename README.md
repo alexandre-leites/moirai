@@ -32,9 +32,39 @@ curl --fail http://localhost:8080/ready
 
 `docker compose ps` reports every service as healthy once startup completes. The API port is bound to loopback for local diagnostics; use the web endpoint on port 3000 for normal browser access. Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to remove local database and runner data.
 
+That is the whole installation: Compose builds `orchestrator/`, `api/`, `runner/`, and `web/` from this checkout, so no language toolchain has to be installed on the host. Every service image runs its process as an unprivileged user, drops all Linux capabilities, and sets `no-new-privileges`.
+
 Compose reads passwords, tokens, and registration credentials only from the files in `secrets/`. Do not put their values in `.env` or shell environment variables. The `.env` file contains non-secret configuration only; its `${...}` values are the variables Compose reads.
 
 `secrets/github_token` is mounted into both the orchestrator and the runner. The orchestrator uses it for issue synchronization and pull requests; the runner uses it to authenticate `git clone`, `git fetch`, and `git push` for the repositories it works on. A task packet only names the credential it needs, and the runner resolves the value locally, so the token never travels over the control stream. `LOOP_RUNNER_ALLOWED_ENVIRONMENT` must list `GITHUB_TOKEN` for that resolution to be permitted; a packet naming a variable that is not allowed or not configured fails the execution instead of running unauthenticated.
+
+## Running published images
+
+The same stack runs from the images published to GitHub Container Registry, without building anything. `compose.ghcr.yaml` replaces the four `build:` sections with `image:` references and changes nothing else — same networks, secrets, healthchecks, and capability drops.
+
+```bash
+# secrets/ and .env are prepared exactly as above
+docker login ghcr.io          # required while the repository is private
+export MOIRAI_IMAGE_TAG=1.4.0 # defaults to latest, which moves
+docker compose -f compose.yaml -f compose.ghcr.yaml pull
+docker compose -f compose.yaml -f compose.ghcr.yaml up --detach --wait
+```
+
+The images are `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}`, each a `linux/amd64` + `linux/arm64` manifest list. `MOIRAI_IMAGE_PREFIX` overrides the registry and namespace for a fork or mirror.
+
+## Releases
+
+[`docs/release.md`](docs/release.md) is the contract: image names, the trigger-to-tag mapping, the tagging strategy, and how to cut a release. In short:
+
+| Trigger | Image tags |
+| --- | --- |
+| push to `release/X.Y.Z` | `X.Y.Z-rc.<run number>`, `X.Y.Z-rc`, `sha-<short sha>` |
+| published GitHub Release `vX.Y.Z`, newest | `X.Y.Z`, `X.Y`, `X`, `latest`, `sha-<short sha>` |
+| published GitHub Release `vX.Y.Z`, not newest | `X.Y.Z`, `X.Y`, `sha-<short sha>` |
+| published Release flagged pre-release, or tagged `vX.Y.Z-<id>` | that exact version, `sha-<short sha>` |
+| manual `workflow_dispatch` | builds everything, publishes nothing |
+
+Pushing a git tag on its own publishes nothing; a GitHub Release has to be published. `make test-release-tags` runs the executable specification of that mapping, and [`.github/workflows/release.yml`](.github/workflows/release.yml) runs it before deriving a single tag.
 
 ## Workflow recovery guarantees
 
