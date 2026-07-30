@@ -231,6 +231,8 @@ func writeClientError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, orchestrator.ErrUnauthorized):
 		apiserver.WriteError(w, http.StatusUnauthorized, "Unauthorized", "")
+	case errors.Is(err, orchestrator.ErrForbidden):
+		apiserver.WriteError(w, http.StatusForbidden, "Forbidden", "")
 	case errors.Is(err, orchestrator.ErrInvalidInput):
 		apiserver.WriteError(w, http.StatusUnprocessableEntity, "Validation error", err.Error())
 	case errors.Is(err, orchestrator.ErrNotFound):

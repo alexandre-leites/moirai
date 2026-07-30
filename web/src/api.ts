@@ -100,6 +100,7 @@ export type ApiClient = {
   setProjectEnabled(id: string, enabled: boolean): Promise<Project>;
 
   listRunners(signal?: AbortSignal): Promise<Runner[]>;
+  setRunnerState(id: string, state: "drain" | "enable" | "revoke"): Promise<Runner>;
 
   listTokens(signal?: AbortSignal): Promise<RunnerToken[]>;
   createToken(allowedLabels?: string[]): Promise<CreatedToken>;
@@ -257,6 +258,17 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
         throw new Error("The runner list response was malformed.");
       }
       return body.runners.map((runner) => ({ ...runner, labels: runner.labels ?? [] }));
+    },
+
+    async setRunnerState(id: string, state: "drain" | "enable" | "revoke"): Promise<Runner> {
+      const action = state === "enable" ? "undrain" : state;
+      const res = await fetchClient(`/api/v1/runners/${id}/${action}`, {
+        method: "POST",
+        headers: csrfHeaders(),
+        credentials: "include",
+      });
+      const runner: RunnerPayload = await json(res);
+      return { ...runner, labels: runner.labels ?? [] };
     },
 
     async listTokens(signal?: AbortSignal): Promise<RunnerToken[]> {

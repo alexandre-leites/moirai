@@ -18,6 +18,7 @@ func TestWriteClientErrorMapsOrchestratorErrors(t *testing.T) {
 		wantStatus int
 	}{
 		{orchestrator.ErrUnauthorized, http.StatusUnauthorized},
+		{orchestrator.ErrForbidden, http.StatusForbidden},
 		{orchestrator.ErrInvalidInput, http.StatusUnprocessableEntity},
 		{orchestrator.ErrNotFound, http.StatusNotFound},
 		{context.DeadlineExceeded, http.StatusGatewayTimeout},

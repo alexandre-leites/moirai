@@ -210,6 +210,30 @@ class RunnerControlGrpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renewal.lease_acknowledged.expires_at_unix_ms, int(renewed_expiry.timestamp() * 1000))
         await stream.done_writing()
 
+    async def test_operator_drain_delivers_control_message_and_keeps_stream_open(self) -> None:
+        registered, stream = await self._connected_runner()
+
+        self.assertTrue(await self.server_service.set_draining(registered.runner_id, True))
+        self.assertIsNotNone((await stream.read()).drain)
+        await stream.write(
+            runner_control_pb2.RunnerToOrchestrator(
+                runner_id=registered.runner_id,
+                credential=registered.credential,
+                runner_draining=runner_control_pb2.RunnerDraining(draining=True),
+            )
+        )
+        await self._await_draining(registered.runner_id, True)
+        self.assertIsNone(self.control_plane.schedule(NOW, timedelta(minutes=1)))
+        await stream.write(
+            runner_control_pb2.RunnerToOrchestrator(
+                runner_id=registered.runner_id,
+                credential=registered.credential,
+                heartbeat=runner_control_pb2.Heartbeat(labels=["docker"]),
+            )
+        )
+        await stream.done_writing()
+        self.assertEqual(await stream.read(), grpc.aio.EOF)
+
     async def test_connect_drain_report_keeps_the_stream_open_and_stops_scheduling(self) -> None:
         registered, stream = await self._connected_runner()
 

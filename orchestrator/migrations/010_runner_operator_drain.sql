@@ -1,0 +1,2 @@
+ALTER TABLE app.runners
+    ADD COLUMN IF NOT EXISTS operator_draining BOOLEAN NOT NULL DEFAULT FALSE;

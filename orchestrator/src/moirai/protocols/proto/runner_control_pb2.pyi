@@ -121,8 +121,10 @@ class CancelExecution(_message.Message):
     def __init__(self, execution_id: _Optional[str] = ..., lease_generation: _Optional[int] = ...) -> None: ...
 
 class DrainRunner(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    __slots__ = ("undrain",)
+    UNDRAIN_FIELD_NUMBER: _ClassVar[int]
+    undrain: bool
+    def __init__(self, undrain: _Optional[bool] = ...) -> None: ...
 
 class RunnerDraining(_message.Message):
     __slots__ = ("draining",)

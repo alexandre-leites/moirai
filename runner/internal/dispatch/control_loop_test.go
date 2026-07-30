@@ -433,6 +433,29 @@ func TestControlLoopDrainRejectsNewOffer(t *testing.T) {
 	}
 }
 
+func TestControlLoopUndrainAcceptsNewOffer(t *testing.T) {
+	client := &loopClient{}
+	loop, err := NewControlLoopWithOutbox(client, &staticDispatcher{}, time.Now, time.Minute, 15*time.Second, nil, "")
+	if err != nil {
+		t.Fatalf("NewControlLoop() error = %v", err)
+	}
+	loop.Drain()
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Drain{Drain: &runnerv1.DrainRunner{Undrain: true}}}); err != nil {
+		t.Fatalf("Handle(undrain) error = %v", err)
+	}
+	if loop.Draining() {
+		t.Fatal("runner remained draining")
+	}
+	if err := loop.Handle(context.Background(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: loopOffer(t)}}); err != nil {
+		t.Fatalf("Handle(offer) error = %v", err)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.accepted) != 1 {
+		t.Fatalf("accepted = %#v", client.accepted)
+	}
+}
+
 func TestControlLoopDrainKeepsBusyExecutionUntilTerminal(t *testing.T) {
 	now := time.Now()
 	client := &loopClient{}

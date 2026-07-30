@@ -82,6 +82,14 @@ class RunnerSessionRegistry:
             session = self._sessions.get(runner_id)
             return session is not None and session.deliver_message(message)
 
+    async def disconnect_runner(self, runner_id: str) -> bool:
+        async with self._lock:
+            session = self._sessions.pop(runner_id, None)
+        if session is None:
+            return False
+        session.close()
+        return True
+
     async def connected(self, runner_id: str) -> bool:
         async with self._lock:
             return runner_id in self._sessions

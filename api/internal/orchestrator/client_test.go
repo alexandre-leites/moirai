@@ -42,6 +42,7 @@ func TestDialRejectsEmptyEndpoint(t *testing.T) {
 func TestSentinelErrorsAreDefined(t *testing.T) {
 	_ = orchestrator.ErrUnavailable
 	_ = orchestrator.ErrUnauthorized
+	_ = orchestrator.ErrForbidden
 	_ = orchestrator.ErrInvalidInput
 	_ = orchestrator.ErrNotFound
 }
@@ -52,7 +53,7 @@ func TestMapStatusCodeToError(t *testing.T) {
 		sentinel error
 	}{
 		{codes.Unauthenticated, orchestrator.ErrUnauthorized},
-		{codes.PermissionDenied, orchestrator.ErrUnauthorized},
+		{codes.PermissionDenied, orchestrator.ErrForbidden},
 		{codes.InvalidArgument, orchestrator.ErrInvalidInput},
 		{codes.FailedPrecondition, orchestrator.ErrInvalidInput},
 		{codes.NotFound, orchestrator.ErrNotFound},

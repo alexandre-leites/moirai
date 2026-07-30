@@ -130,6 +130,10 @@ class ControlPlane(Protocol):
 
     async def list_runners(self) -> list[RunnerRecord]: ...
 
+    async def set_runner_state(
+        self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
+    ) -> RunnerRecord: ...
+
 
 if TYPE_CHECKING:
     # Forces `make typecheck` to fail if AsyncpgControlPlane (the production

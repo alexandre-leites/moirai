@@ -23,6 +23,7 @@ import (
 var (
 	ErrUnavailable  = errors.New("orchestrator unavailable")
 	ErrUnauthorized = errors.New("orchestrator rejected request: unauthorized")
+	ErrForbidden    = errors.New("orchestrator rejected request: forbidden")
 	ErrInvalidInput = errors.New("orchestrator rejected request: invalid input")
 	ErrNotFound     = errors.New("orchestrator resource not found")
 )
@@ -259,6 +260,14 @@ func (c *Client) ListRunners(ctx context.Context) (*controlv1.ListRunnersRespons
 	return resp, nil
 }
 
+func (c *Client) SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error) {
+	resp, err := c.client.SetRunnerState(ctx, &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) ListWorkflows(ctx context.Context) (*controlv1.ListWorkflowsResponse, error) {
 	resp, err := c.client.ListWorkflows(ctx, &controlv1.ListWorkflowsRequest{})
 	if err != nil {
@@ -316,8 +325,10 @@ func MapStatusError(err error) error {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 	switch s.Code() {
-	case codes.Unauthenticated, codes.PermissionDenied:
+	case codes.Unauthenticated:
 		return fmt.Errorf("%w: %s", ErrUnauthorized, s.Message())
+	case codes.PermissionDenied:
+		return fmt.Errorf("%w: %s", ErrForbidden, s.Message())
 	case codes.InvalidArgument, codes.FailedPrecondition:
 		return fmt.Errorf("%w: %s", ErrInvalidInput, s.Message())
 	case codes.NotFound:
