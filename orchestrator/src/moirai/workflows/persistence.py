@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 from moirai.persistence.circuits import reopen_probe_circuits
+
+_LOGGER = logging.getLogger(__name__)
 
 _VALID_ROLES = frozenset({"planner", "developer", "pipeline", "reviewer", "repairer"})
 
@@ -101,22 +104,37 @@ class AsyncpgWorkflowPersistence:
                     now,
                 )
                 if "pull_request_id" in updates:
+                    # merged_at and merge_commit are COALESCEd against the row
+                    # rather than overwritten: they are the durable proof that
+                    # the merge happened, and a later transition that touches
+                    # the pull request without re-reading the merge (a
+                    # re-entered merge node, a recovery path) carries neither.
+                    # Assigning EXCLUDED unconditionally would erase the merge
+                    # record on the next write. state is overwritten because it
+                    # is the current fact, not a milestone.
                     await connection.execute(
                         """
                         INSERT INTO app.pull_requests
-                            (id, workflow_run_id, provider, external_id, url, head_commit, state, raw_snapshot)
-                        VALUES (gen_random_uuid(), $1, 'github', $2, $3, $4, $5, '{}'::jsonb)
+                            (id, workflow_run_id, provider, external_id, url, head_commit, state,
+                             merged_at, merge_commit, raw_snapshot)
+                        VALUES (gen_random_uuid(), $1, 'github', $2, $3, $4, $5, $6, $7, '{}'::jsonb)
                         ON CONFLICT (workflow_run_id) DO UPDATE
                         SET external_id = EXCLUDED.external_id,
                             url = EXCLUDED.url,
                             head_commit = EXCLUDED.head_commit,
-                            state = EXCLUDED.state
+                            state = EXCLUDED.state,
+                            merged_at = COALESCE(EXCLUDED.merged_at, app.pull_requests.merged_at),
+                            merge_commit = COALESCE(
+                                EXCLUDED.merge_commit, app.pull_requests.merge_commit
+                            )
                         """,
                         _uuid(workflow_run_id),
                         str(updates.get("pull_request_id")),
                         str(updates.get("pull_request_url") or ""),
                         str(updates.get("pull_request_head_commit") or ""),
                         str(updates.get("pull_request_state") or "open"),
+                        _merged_at(updates, now),
+                        _optional_value(updates.get("pull_request_merge_commit")),
                     )
 
 
@@ -400,6 +418,51 @@ class AsyncpgWorkflowPersistence:
                     now,
                 )
         return {"id": str(execution_id), "role": role, "attempt": int(attempt), "created": True}
+
+
+def _optional_value(value: object) -> str | None:
+    """SQL NULL for anything the code host did not report.
+
+    The graph state keeps these as empty strings so a checkpoint stays
+    JSON-plain; the column's one encoding for "absent" is NULL.
+    """
+    text = "" if value is None else str(value).strip()
+    return text or None
+
+
+def _merged_at(updates: dict[str, object], now: datetime) -> datetime | None:
+    """When the pull request merged, as a timestamp the column can hold.
+
+    Non-NULL only when `pull_request_merged` is True, so no timestamp can ever
+    be written for a pull request nobody said had merged -- the reported
+    timestamp is read *after* that test, never as a substitute for it. One
+    authority for "this merged", not two: the boolean is set from a
+    `PullRequest` the code host reported merged, and gating on the `state`
+    string as well would let a second, weaker signal write the column.
+
+    The code host reports an ISO-8601 string, so it is parsed here rather than
+    handed to asyncpg as text. A merge the code host confirmed but timestamped
+    unusably or not at all still gets a timestamp -- `now` -- because the
+    alternative is a merged pull request whose `merged_at` stays NULL, which is
+    precisely the state this column exists to rule out. Anything else gets
+    NULL, and the COALESCE in the upsert keeps that from erasing an earlier
+    merge.
+    """
+    if updates.get("pull_request_merged") is not True:
+        return None
+    reported = _optional_value(updates.get("pull_request_merged_at"))
+    if reported is None:
+        _LOGGER.warning("code host confirmed a merge without a timestamp; stamping the local clock")
+        return now
+    try:
+        parsed = datetime.fromisoformat(reported)
+    except ValueError:
+        _LOGGER.warning(
+            "code host reported an unparseable merge timestamp; stamping the local clock",
+            extra={"reported_merged_at": reported},
+        )
+        return now
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _execution_request(record: Any, created: bool) -> dict[str, Any]:

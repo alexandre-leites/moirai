@@ -35,6 +35,11 @@ class RetryBudget:
     ci_repair_attempts: int = 3
     github_check_poll_attempts: int = 20
     total_agent_executions: int = 10
+    # How many times the merge node re-reads a pull request the code host has
+    # not yet reported merged before the run blocks. Spent inside one node
+    # entry, so nothing has to re-enter the node for the bound to be reachable.
+    # It costs no agent execution -- it bounds waiting, not work.
+    merge_verification_attempts: int = 5
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,11 @@ class GateState:
     review_cycles: int = 0
     ci_repair_attempts: int = 0
     total_agent_executions: int = 0
+    # Set only by the merge node, and only from a pull request the code host
+    # reported merged after the merge was asked for. It defaults to False so
+    # every path that has not verified a merge -- including one that never
+    # reached the merge node -- routes as "not merged".
+    pull_request_merged: bool = False
 
 
 def route_after_plan(state: GateState, budget: RetryBudget) -> WorkflowRoute:
@@ -93,6 +103,26 @@ def route_after_checks(state: GateState, budget: RetryBudget) -> WorkflowRoute:
     # `pipeline_repair_attempts` instead, leaving this bound unreachable.
     if state.ci_repair_attempts < budget.ci_repair_attempts:
         return _agent_budget_route(state, budget, WorkflowRoute.CI_REPAIR)
+    return WorkflowRoute.BLOCKED
+
+
+def route_after_merge(state: GateState) -> WorkflowRoute:
+    """Where the graph goes once the merge node has reported.
+
+    COMPLETE is reachable on one condition only: the code host confirmed the
+    pull request merged. Completion closes the issue and applies
+    `agent:delivered`, and `PROJECT.md` lists merge among the deterministic
+    gates that must hold before that happens, so a merge command that returned
+    without an error is not enough.
+
+    Everything else is BLOCKED. The merge node already reports `blocked`
+    itself, with the reason, on every path that is not a confirmed merge -- so
+    in practice this arm is the invariant rather than the decision: no future
+    edit to the node can reach `complete` by returning some other status
+    without a verified merge.
+    """
+    if state.pull_request_merged:
+        return WorkflowRoute.COMPLETE
     return WorkflowRoute.BLOCKED
 
 

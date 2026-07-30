@@ -20,6 +20,11 @@ const (
 	defaultHeartbeatInterval = 10 * time.Second
 	defaultReconnectMin      = time.Second
 	defaultReconnectMax      = time.Minute
+	// maxContinuationBudget caps LOOP_RUNNER_MAX_CONTINUATIONS. Continuations
+	// share one packet timeout, so a large budget buys ever shorter agent runs
+	// rather than more work; a misconfiguration is better rejected at load time
+	// than discovered as a run that continues twenty times in one minute.
+	maxContinuationBudget = 10
 )
 
 type Config struct {
@@ -68,6 +73,13 @@ type Config struct {
 	RepositoryLockPoll   time.Duration
 	CleanupAttempts      int
 	CleanupRetryDelay    time.Duration
+	// MaxContinuations bounds how many times one execution re-engages its agent
+	// after the runner's goal gate finds the objective unmet. Zero switches the
+	// goal loop off. Continuations run inside a single lease and share the
+	// packet's own timeout, so this multiplies neither the orchestrator's retry
+	// budgets nor an execution's wall-clock bound — though a continuing
+	// execution does hold its runner and project slot for longer within it.
+	MaxContinuations int
 }
 
 func (c Config) IdentityPath() string {
@@ -116,6 +128,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		CleanupRetryDelay:    250 * time.Millisecond,
 		RetentionMaxAge:      72 * time.Hour,
 		RetentionMaxCount:    10,
+		MaxContinuations:     3,
 		TLSCAFile:            envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CA_FILE"),
 		TLSClientCertFile:    envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE"),
 		TLSClientKeyFile:     envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE"),
@@ -181,6 +194,9 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		if *value.target, err = intEnv(lookupEnv, value.key, *value.target); err != nil {
 			return Config{}, err
 		}
+	}
+	if config.MaxContinuations, err = boundedIntEnv(lookupEnv, "LOOP_RUNNER_MAX_CONTINUATIONS", config.MaxContinuations, 0, maxContinuationBudget); err != nil {
+		return Config{}, err
 	}
 	config.DockerCPULimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_CPU_LIMIT")
 	config.DockerMemoryLimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_MEMORY_LIMIT")
@@ -252,6 +268,9 @@ func (c Config) Validate() error {
 	}
 	if c.EventBufferSize < 1 || c.EventPayloadBytes < 1 || c.LogChunkBytes < 1 || c.MaxLogBytes < 1 || c.CleanupAttempts < 1 {
 		return errors.New("runner sizing configuration is invalid")
+	}
+	if c.MaxContinuations < 0 || c.MaxContinuations > maxContinuationBudget {
+		return errors.New("runner continuation budget is invalid")
 	}
 	if len(c.WorkspaceRetention) > 0 && (c.RetentionMaxAge <= 0 || c.RetentionMaxCount < 1) {
 		return errors.New("runner workspace retention must be bounded by an age and a workspace count")
@@ -364,6 +383,23 @@ func intEnv(lookupEnv func(string) (string, bool), key string, defaultValue int)
 	parsed, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || parsed < 1 {
 		return 0, fmt.Errorf("%s must be a positive integer", key)
+	}
+	return parsed, nil
+}
+
+// boundedIntEnv reads an integer setting whose valid range includes values
+// intEnv rejects. The continuation budget is the case: zero is meaningful there
+// — it switches the goal loop off — and an upper bound is worth enforcing at
+// load time, since each continuation is another agent run against the same
+// packet timeout.
+func boundedIntEnv(lookupEnv func(string) (string, bool), key string, defaultValue, minimum, maximum int) (int, error) {
+	value, ok := lookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", key, minimum, maximum)
 	}
 	return parsed, nil
 }

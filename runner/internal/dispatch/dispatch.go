@@ -95,6 +95,12 @@ type Dispatcher struct {
 	// Operators who do not want work-in-progress refs on the code host can turn
 	// it off; the commit is then kept only in the retained workspace.
 	PushWorkInProgress bool
+	// MaxContinuations bounds how many times one execution may re-engage its
+	// agent after the goal gate finds the objective unmet (see goalgate.go).
+	// Zero switches the gate and its continuation loop off, restoring one-shot
+	// execution. Continuations happen inside a single lease, so no orchestrator
+	// budget is touched by them.
+	MaxContinuations int
 	// EmitLog, when set, is called with each chunk of agent stdout/stderr
 	// as it is produced, so it can be streamed to the orchestrator as log
 	// events (see control.EventReporter.EmitLog).
@@ -126,6 +132,14 @@ type Result struct {
 	// LogTail is a bounded excerpt of the failing pipeline command's output, or
 	// of the agent's log, recorded so a retry has more than a status to work from.
 	LogTail string `json:"logTail,omitempty"`
+	// Continuations counts how many times the goal gate re-engaged the agent
+	// inside this execution, and GateVerdict is the gate's verdict on the
+	// attempt being reported, together with the reason the loop stopped. They
+	// travel to the orchestrator so it can tell "delivered after 2
+	// continuations" from "gave up after 3" — the same terminal status covers
+	// both today, and only these two fields distinguish them.
+	Continuations int    `json:"continuations,omitempty"`
+	GateVerdict   string `json:"gateVerdict,omitempty"`
 }
 
 func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (result Result, err error) {
@@ -205,7 +219,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return Result{}, err
 	}
 	if packet.Role == taskpacket.RolePipeline {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, environment, packet.Pipeline)
 		result = Result{Status: "completed", ExitCode: 0, InitialRevision: initial.Revision, PipelineResults: pipelineResults}
 		if pipelineErr != nil {
 			result.Status = "failed"
@@ -229,19 +243,15 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	}
 
 	output := dispatcher.logOutput(lease)
-	backendResult, executeErr := dispatcher.Backend.Execute(ctx, agents.Request{
-		ExecutionID: packet.ExecutionID,
-		Role:        agents.Role(packet.Role),
-		Workspace:   workspace.Repository,
-		Prompt:      promptFor(packet),
-		ResultPath:  packet.ExpectedOutput,
-		Timeout:     time.Duration(packet.TimeoutSeconds) * time.Second,
-		Environment: environment,
-		Output:      output,
-	})
+	// The agent phase is a goal loop rather than a single launch: the gate
+	// decides whether the objective was met and, while it was not and budget
+	// remains, the agent is continued in the same session (see goalgate.go).
+	// With MaxContinuations at zero this is exactly one Execute, as before.
+	run := dispatcher.runAgent(ctx, packet, workspace, initial, environment, output)
 	if forwarder, ok := output.(*logForwarder); ok {
 		forwarder.Close()
 	}
+	backendResult, executeErr := run.result, run.err
 	result = Result{
 		Status:          backendResult.Status,
 		ExitCode:        backendResult.ExitCode,
@@ -249,16 +259,18 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		ChangedFiles:    backendResult.ChangedFiles,
 		CommandsRun:     backendResult.CommandsRun,
 		RemainingWork:   backendResult.RemainingWork,
-		SessionID:       backendResult.SessionID,
+		SessionID:       run.sessionID,
 		InitialRevision: initial.Revision,
 		Raw:             backendResult.Raw,
+		Continuations:   run.continuations,
+		GateVerdict:     run.verdictText(),
 	}
 	// Only a completed agent run is worth validating. Running the pipeline over
 	// an agent-reported block would replace its status, reason, and remaining
 	// work with a generic pipeline failure — destroying the very signal the
 	// block exists to deliver.
 	if executeErr == nil && result.Status == "completed" && len(packet.Pipeline) > 0 {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, environment, packet.Pipeline)
 		result.PipelineResults = pipelineResults
 		if pipelineErr != nil {
 			executeErr = pipelineErr
@@ -336,7 +348,7 @@ func prepareRequest(packet taskpacket.Packet, environment map[string]string) (re
 	}, nil
 }
 
-func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, commands []taskpacket.PipelineCommand) ([]pipeline.Result, error) {
+func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, environment map[string]string, commands []taskpacket.PipelineCommand) ([]pipeline.Result, error) {
 	runner := dispatcher.Pipeline
 	if runner == nil {
 		runner = pipeline.LocalRunner{}
@@ -345,7 +357,7 @@ func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, 
 	for _, command := range commands {
 		pipelineCommands = append(pipelineCommands, pipeline.Command{Command: command.Command, Timeout: time.Duration(command.TimeoutSeconds) * time.Second})
 	}
-	return runner.Run(ctx, workspace, pipelineCommands)
+	return runner.Run(ctx, workspace, environment, pipelineCommands)
 }
 
 func (dispatcher Dispatcher) snapshot(ctx context.Context, workspace repository.Workspace) (repository.RevisionSummary, error) {

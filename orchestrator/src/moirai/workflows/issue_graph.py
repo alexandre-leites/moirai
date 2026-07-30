@@ -9,6 +9,7 @@ from .policy import (
     RetryBudget,
     route_after_checks,
     route_after_human_response,
+    route_after_merge,
     route_after_pipeline,
     route_after_plan,
     route_after_review,
@@ -49,6 +50,16 @@ class IssueWorkflowState(TypedDict, total=False):
     base_branch: str
     pull_request_id: str
     pull_request_url: str
+    pull_request_head_commit: str
+    pull_request_state: str
+    # The verified merge. `pull_request_merged` is the only gate that lets the
+    # graph reach `complete`, and the other two are the evidence for it: they
+    # are written to app.pull_requests so "this pull request merged, here, at
+    # this time" survives the run. Empty string means "the code host did not
+    # report one", which the persistence layer stores as NULL.
+    pull_request_merged: bool
+    pull_request_merged_at: str
+    pull_request_merge_commit: str
     merge_method: str
 
 
@@ -122,6 +133,21 @@ def route_checks(
         Literal["wait_for_checks", "wait_for_human", "merge", "ci_repair", "blocked"],
         route_after_checks(_gate_state(state), budget).value,
     )
+
+
+def route_merge(state: IssueWorkflowState) -> Literal["complete", "blocked"]:
+    """The edge out of the merge node.
+
+    The blocked short-circuit comes first for the same reason
+    `suspend_after_dispatch` has one: the node reports a terminal outcome by
+    returning `status: "blocked"` (a pull request closed without merging, a
+    merge the code host refused, a merge that was never confirmed), and that
+    has to reach the terminal node carrying its own reason rather than being
+    re-judged on gate values it never set.
+    """
+    if state.get("status") == "blocked":
+        return "blocked"
+    return cast(Literal["complete", "blocked"], route_after_merge(_gate_state(state)).value)
 
 
 def route_human(
@@ -254,7 +280,17 @@ def build_issue_graph(
         lambda state: route_human(state, budget),
         {"merge": "merge", "repair": "repair", "blocked": "blocked"},
     )
-    graph.add_edge("merge", "complete")
+    # Not an unconditional edge to `complete`: `complete` closes the issue and
+    # applies `agent:delivered`, so it is reachable only from a merge the code
+    # host confirmed. Anything else lands on `blocked`, with the reason the
+    # merge node recorded -- a terminal status, which releases the project lock
+    # and puts the run in front of a human, rather than a park that nothing in
+    # this codebase would ever come back to (see the merge node's docstring).
+    graph.add_conditional_edges(
+        "merge",
+        route_merge,
+        {"complete": "complete", "blocked": "blocked"},
+    )
     graph.add_edge("complete", END)
     graph.add_edge("blocked", END)
     return graph.compile(
@@ -281,4 +317,5 @@ def _gate_state(state: IssueWorkflowState) -> GateState:
         review_cycles=state.get("review_cycles", 0),
         ci_repair_attempts=state.get("ci_repair_attempts", 0),
         total_agent_executions=state.get("total_agent_executions", 0),
+        pull_request_merged=state.get("pull_request_merged", False),
     )

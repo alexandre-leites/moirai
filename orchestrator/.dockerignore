@@ -8,5 +8,6 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-uv.lock
 README.md
+# uv.lock is deliberately NOT ignored: the image installs its dependency closure
+# from the lock (see Dockerfile).

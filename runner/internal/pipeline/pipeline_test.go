@@ -2,12 +2,17 @@ package pipeline
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/loop-engineering/runner/internal/execution"
 )
 
 func TestLocalRunnerRecordsSequentialResults(t *testing.T) {
-	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), []Command{
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{
 		{Command: "printf first", Timeout: time.Second},
 		{Command: "printf second", Timeout: time.Second},
 	})
@@ -19,8 +24,76 @@ func TestLocalRunnerRecordsSequentialResults(t *testing.T) {
 	}
 }
 
+func TestLocalRunnerDoesNotInheritRunnerEnvironment(t *testing.T) {
+	t.Setenv("RUNNER_SECRET", "must-not-reach-pipeline")
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), map[string]string{"DECLARED_VALUE": "allowed"}, []Command{{Command: "env", Timeout: time.Second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := parseEnvironment(t, results[0].Output)
+	if environment["RUNNER_SECRET"] != "" || environment["DECLARED_VALUE"] != "allowed" {
+		t.Fatalf("pipeline environment = %#v", environment)
+	}
+	for _, name := range []string{"PATH", "HOME", "TMPDIR"} {
+		if environment[name] == "" {
+			t.Fatalf("pipeline environment missing %s: %#v", name, environment)
+		}
+	}
+}
+
+func TestRunnersUseSamePipelineEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	localResults, err := (LocalRunner{}).Run(context.Background(), workspace, map[string]string{"DECLARED_VALUE": "allowed"}, []Command{{Command: "env", Timeout: time.Second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	recorded := filepath.Join(directory, "environment")
+	binary := filepath.Join(directory, "docker")
+	script := "#!/bin/sh\nprevious=\nfor argument in \"$@\"; do if [ \"$previous\" = --env-file ]; then cat \"$argument\" > \"" + recorded + "\"; fi; previous=\"$argument\"; done\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (DockerRunner{Executor: execution.DockerExecutor{Binary: binary, Image: "example/pipeline:1"}}).Run(context.Background(), workspace, map[string]string{"DECLARED_VALUE": "allowed"}, []Command{{Command: "true", Timeout: time.Second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(recorded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := parseEnvironment(t, string(contents)), parseEnvironment(t, localResults[0].Output); !sameEnvironment(got, want) {
+		t.Fatalf("Docker environment = %#v, local environment = %#v", got, want)
+	}
+}
+
+func parseEnvironment(t *testing.T, output string) map[string]string {
+	t.Helper()
+	values := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		name, value, found := strings.Cut(line, "=")
+		if !found {
+			t.Fatalf("environment line = %q", line)
+		}
+		values[name] = value
+	}
+	return values
+}
+
+func sameEnvironment(first, second map[string]string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for name, value := range first {
+		if second[name] != value {
+			return false
+		}
+	}
+	return true
+}
+
 func TestLocalRunnerStopsAtFailureAndRecordsExitCode(t *testing.T) {
-	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), []Command{
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{
 		{Command: "printf before", Timeout: time.Second},
 		{Command: "false", Timeout: time.Second},
 		{Command: "printf after", Timeout: time.Second},
@@ -43,7 +116,7 @@ func TestParseCommandTemplateRejectsShellSyntax(t *testing.T) {
 }
 
 func TestLocalRunnerMarksTimeout(t *testing.T) {
-	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), []Command{{Command: "sleep 1", Timeout: 10 * time.Millisecond}})
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{{Command: "sleep 1", Timeout: 10 * time.Millisecond}})
 	if err == nil || len(results) != 1 || !results[0].TimedOut || results[0].ExitCode != -1 {
 		t.Fatalf("results = %#v, error = %v", results, err)
 	}

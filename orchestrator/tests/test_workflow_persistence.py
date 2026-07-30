@@ -58,6 +58,7 @@ class _Connection:
 
     async def execute(self, query: str, *args: object) -> str:
         self.queries.append(query)
+        self.calls.append((query, args))
         return "INSERT 0 1"
 
 
@@ -165,6 +166,93 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertTrue(any("INSERT INTO app.pull_requests" in q for q in self.pool.connection.queries))
+
+    async def test_a_verified_merge_writes_merged_at_and_the_merge_commit(self) -> None:
+        """The merge node's confirming read is only worth taking if it lands in
+        the durable record: `merged_at` had no writer at all before (issue
+        #121), so nothing could tell an attempted merge from a completed one."""
+        await self.store.transition(
+            WORKFLOW_ID,
+            "merging",
+            {
+                "status": "merging",
+                "pull_request_id": "42",
+                "pull_request_url": "https://github.com/example/repo/pull/42",
+                "pull_request_head_commit": "abc123",
+                "pull_request_state": "merged",
+                "pull_request_merged": True,
+                "pull_request_merged_at": "2026-01-02T03:04:05+00:00",
+                "pull_request_merge_commit": "def456",
+            },
+        )
+        query, arguments = next(
+            call for call in self.pool.connection.calls if "INSERT INTO app.pull_requests" in call[0]
+        )
+        self.assertEqual(arguments[4], "merged")
+        self.assertEqual(arguments[5], datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+        self.assertEqual(arguments[6], "def456")
+        # A later write that carries no merge must not erase the merge.
+        self.assertIn("merged_at = COALESCE(EXCLUDED.merged_at", query)
+        self.assertIn("merge_commit = COALESCE(", query)
+
+    async def test_an_unmerged_pull_request_writes_no_merge_evidence(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "merging",
+            {
+                "status": "merging",
+                "pull_request_id": "42",
+                "pull_request_state": "open",
+                "pull_request_merged": False,
+                "pull_request_merged_at": "",
+                "pull_request_merge_commit": "",
+            },
+        )
+        _, arguments = next(
+            call for call in self.pool.connection.calls if "INSERT INTO app.pull_requests" in call[0]
+        )
+        self.assertIsNone(arguments[5])
+        self.assertIsNone(arguments[6])
+
+    async def test_a_timestamp_alone_never_makes_a_pull_request_look_merged(self) -> None:
+        """`merged_at` is written only for an update that reports a merge, so a
+        stray timestamp cannot manufacture one."""
+        await self.store.transition(
+            WORKFLOW_ID,
+            "merging",
+            {
+                "status": "merging",
+                "pull_request_id": "42",
+                "pull_request_state": "open",
+                "pull_request_merged": False,
+                "pull_request_merged_at": "2026-01-02T03:04:05+00:00",
+                "pull_request_merge_commit": "def456",
+            },
+        )
+        _, arguments = next(
+            call for call in self.pool.connection.calls if "INSERT INTO app.pull_requests" in call[0]
+        )
+        self.assertIsNone(arguments[5])
+
+    async def test_a_merge_the_code_host_did_not_timestamp_still_gets_one(self) -> None:
+        """A merged pull request with a NULL `merged_at` is exactly the hole
+        this column exists to close, so the writer stamps its own clock rather
+        than recording the merge as untimed."""
+        await self.store.transition(
+            WORKFLOW_ID,
+            "merging",
+            {
+                "status": "merging",
+                "pull_request_id": "42",
+                "pull_request_state": "merged",
+                "pull_request_merged": True,
+                "pull_request_merged_at": "",
+            },
+        )
+        _, arguments = next(
+            call for call in self.pool.connection.calls if "INSERT INTO app.pull_requests" in call[0]
+        )
+        self.assertEqual(arguments[5], NOW)
 
     async def test_terminal_transitions_update_project_circuit_and_only_mark_real_progress(self) -> None:
         await self.store.transition(
