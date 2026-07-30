@@ -364,6 +364,33 @@ describe("createApiClient request shapes", () => {
     await expect(api.listTokens()).resolves.toEqual(tokens);
   });
 
+  it("revokeToken rejects a 404 with ApiError and keeps the expected message", async () => {
+    const { fetchClient } = recorder(() =>
+      problemResponse({ title: "Not found" }, 404)
+    );
+    await expect(createApiClient(fetchClient).revokeToken("nonexistent")).rejects.toThrow("Not found");
+  });
+
+  it("revokeToken rejects a 403 with ApiError", async () => {
+    const { fetchClient } = recorder(() =>
+      problemResponse({ title: "forbidden" }, 403)
+    );
+    await expect(createApiClient(fetchClient).revokeToken("t1")).rejects.toThrow("forbidden");
+  });
+
+  it("revokeToken resolves a 204 without throwing", async () => {
+    const { fetchClient } = recorder(() => new Response(null, { status: 204 }));
+    await expect(createApiClient(fetchClient).revokeToken("t1")).resolves.toBeUndefined();
+  });
+
+  it("revokeToken falls back to status text when the body is empty and non-2xx", async () => {
+    const { fetchClient } = recorder(() => new Response(null, { status: 500 }));
+    const error = (await createApiClient(fetchClient)
+      .revokeToken("t1")
+      .catch((err: unknown) => err)) as ApiError;
+    expect(error.message).toBe("request failed: 500");
+  });
+
   it("reports an unreachable API as unhealthy instead of throwing", async () => {
     const { fetchClient } = recorder(() => new Response(null, { status: 503 }));
     await expect(createApiClient(fetchClient).health()).resolves.toBe("unhealthy");
