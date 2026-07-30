@@ -7,6 +7,7 @@ from moirai.workflows.policy import (
     WorkflowRoute,
     route_after_checks,
     route_after_human_response,
+    route_after_merge,
     route_after_pipeline,
     route_after_plan,
     route_after_review,
@@ -85,6 +86,19 @@ class WorkflowPolicyTests(unittest.TestCase):
             route_after_pipeline(GateState(ci_repair_attempts=2, pipeline_repair_attempts=1), budget),
             WorkflowRoute.REPAIR,
         )
+
+
+    def test_completion_is_reachable_only_from_a_verified_merge(self) -> None:
+        """Completion closes the issue and labels it delivered, so the one gate
+        that opens it is a merge the code host confirmed. Every other shape of
+        gate state -- including the passing checks and human approval that got
+        the run to the merge node -- keeps waiting."""
+        self.assertEqual(route_after_merge(GateState(pull_request_merged=True)), WorkflowRoute.COMPLETE)
+        self.assertEqual(route_after_merge(GateState()), WorkflowRoute.BLOCKED)
+        approved = GateState(
+            pipeline_passed=True, review_approved=True, checks_passed=True, human_approved=True
+        )
+        self.assertEqual(route_after_merge(approved), WorkflowRoute.BLOCKED)
 
 
 if __name__ == "__main__":

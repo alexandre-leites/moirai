@@ -2970,6 +2970,109 @@ Final per-job status on run `30471380437`, read from `gh api repos/alexandre-lei
 
 ---
 
+# Session: issue #121 — Merge is never verified: the issue is closed on an unconfirmed `gh pr merge` and `merged_at` is never written (branch `issue-121`)
+
+## Current Status
+
+- Overall status: Complete for issue #121.
+- Current phase: P1 bug fix in the workflow's final deterministic gate.
+- Active implementation: issue-121 agent session, 2026-07-29 — verify the merge before the workflow may complete. (Interrupted once by a session usage limit and resumed; the interruption left a `WIP: interrupted mid-implementation` commit on this branch, superseded by the commits that follow.)
+- Last updated: 2026-07-29.
+- Agent/session identifier: issue-121.
+
+## Done
+
+- [x] The merge is confirmed with the code host before the issue is closed, and the merge is recorded durably
+  - Completed: 2026-07-29.
+  - Relevant files: `orchestrator/src/moirai/workflows/nodes.py`, `orchestrator/src/moirai/workflows/policy.py`, `orchestrator/src/moirai/workflows/issue_graph.py`, `orchestrator/src/moirai/workflows/persistence.py`, `orchestrator/src/moirai/code_hosts/github_cli.py`, `orchestrator/migrations/008_pull_request_merge_commit.sql` (new), `orchestrator/tests/test_workflow_nodes.py`, `orchestrator/tests/test_github_code_host.py`, `orchestrator/tests/test_workflow_policy.py`, `orchestrator/tests/test_issue_graph.py`, `orchestrator/tests/test_workflow_persistence.py`, `orchestrator/tests/test_end_to_end.py`.
+  - Behavior delivered:
+    - **The merge node re-reads the pull request and decides on what the code host reports.** `merge` used to call `merge_pull_request` and transition to `merging`, whose edge ran unconditionally into `complete` — so a merge GitHub queued rather than completed, a branch-protection race, or a pull request closed by a human while the run waited all closed the issue and applied `agent:delivered`. The node now reads the pull request, merges only if it is neither merged nor closed, and then re-reads until the code host settles it.
+    - **`complete` is reachable only from a verified merge.** `route_after_merge` (`policy.py`) returns `COMPLETE` on `pull_request_merged` alone and `BLOCKED` on everything else; `route_merge` (`issue_graph.py`) short-circuits a node that reported `blocked` so its specific reason survives instead of being re-judged on gates it never set. The old `graph.add_edge("merge", "complete")` is gone.
+    - **Every non-merge outcome is terminal, with its own reason.** A pull request closed without merging, a merge the code host refused, a merge that never landed, an unreadable pull request, a project with no code host and a run with no pull request each block with a distinct message. See Decisions for why terminal rather than parked — this is the one place the implementation deliberately departs from the issue text.
+    - **The verification budget is spent inside one node entry.** `RetryBudget.merge_verification_attempts` (5) bounds the confirming re-reads, with a 2-second pause between them (injectable, so tests spend the budget without spending the clock). A merge that becomes visible on a later read still completes; one that never does blocks with the last thing the code host actually said. A failed read costs a check rather than the merge — it is the absence of a verdict, not a verdict.
+    - **`app.pull_requests.merged_at` finally has a writer, and the merge commit has a column.** The upsert writes the real `state`, `merged_at` and the new `merge_commit`, with the two merge fields `COALESCE`d against the existing row so a later transition carrying no merge cannot erase the record. `merged_at` is non-NULL only when `pull_request_merged` is True — one authority for "this merged", not two — and a merge confirmed without a usable timestamp is stamped with the transition clock and logged, because a merged pull request with a NULL `merged_at` is exactly the hole the column exists to close.
+    - **The adapter reports the merge, not just the word.** `get_pull_request` and `find_pull_request` request `mergedAt` and `mergeCommit`; `merged` is true on any of the three signals and `closed` means closed *and* not merged, so evidence of a merge can never be overruled by a state string. `state` is normalised in `__post_init__` — an invariant rather than a convention, so a `PullRequest` built anywhere (another `CodeHost`, a test double passing GitHub's own `MERGED`) cannot land on the wrong side of an exact comparison. `gh`'s Go zero-time and an empty commit oid normalise to absent; a `mergeCommit` reported as a bare SHA string is accepted as well as the `{"oid": …}` wrapper; a present-but-unexpected type is logged rather than silently dropped.
+    - **`create_pull_request` now emits the whole pull request record.** It used to hand-pick four fields, so a pull request a human merged while the run was still cycling through repairs — `create_or_find` lists with `--state all` — lost its real merge timestamp and got the orchestrator's clock instead.
+    - **The merge is never issued twice.** The state is read before anything is attempted, so a pull request already merged — by a previous entry, or by someone else while the run waited — is confirmed rather than re-merged.
+  - Validation performed: 470 orchestrator unit tests (21 new), 30 Postgres integration tests against a real database, two end-to-end tests driving the real compiled LangGraph through the unconfirmed-merge and closed-without-merge paths, and direct Postgres probes of the migration and the upsert.
+  - Commands executed:
+    - `make test-orchestrator` → `Ran 470 tests`, `OK (skipped=30)`.
+    - `make lint` → `All checks passed!`.
+    - `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-121` → `Success: no issues found in 48 source files`. (Namespaced cache: the default `/tmp/moirai-mypy-cache` is shared across worktrees and the target deletes it.)
+    - `docker run -d --name moirai-pg-issue-121 -p 55121:5432 postgres:16-alpine …` then `LOOP_TEST_DATABASE_URL="postgresql://moirai:moirai@127.0.0.1:55121/moirai" make test-postgres-integration` → `Ran 30 tests`, `OK`. Container removed afterwards (`docker rm -f moirai-pg-issue-121`).
+    - Migration probe (ad-hoc script, not committed): applied migrations 001–007, planted a legacy `app.pull_requests` row with `state = 'MERGED'`, then ran 008's SQL three times. Output: `legacy row state: MERGED`, `after run 1/2/3: state= merged`, `columns: ['merge_commit', 'merged_at']`. Idempotent, and it normalises the rows the adapter change would otherwise have stranded in mixed case.
+    - Upsert probe (ad-hoc script, not committed): a verified-merge transition wrote `state='merged'`, `merged_at=2026-01-02 03:04:05+00`, `merge_commit='def456'`; a subsequent transition carrying no merge left both intact.
+  - Notes: `grep -rn "merged_at" orchestrator/src` returned only the migration before this change, exactly as the issue reported. One of the issue's claims is stale: `merge_pull_request`'s return value was indeed discarded, but the node already read the pull request *before* merging (an earlier partial fix), so the "already merged" case did not re-merge; what was missing was the read *after*, which is what the decision depends on.
+
+## Decisions
+
+- **An unconfirmed merge blocks; it does not park.** This is a deliberate departure from the issue's Scope ("remain in a waiting status that the maintenance loop re-enters") and it was not the first implementation. The first one parked in `merging`, and an adversarial review of the diff killed it with evidence:
+  - *Nothing re-enters a parked node.* `find_stalled_workflow_runs` (`persistence/control_plane.py`) is an allow-list that deliberately excludes `pr_created`, `waiting_github_checks`, `waiting_human` and `merging`; the outbox only carries rows written by `accept_event`, and the merge node dispatches no execution, so no runner event will ever arrive. Resuming a graph that finished at END re-evaluates the outgoing *edge*, not the node. Measured against the real compiled LangGraph: with `aupdate_state(..., as_node=...)` the node is re-entered and the counter advances 1 → 2; with the production form (`aupdate_state(config, updates)` + `ainvoke(None, config)`, `runtime.py:134-135`) `aget_state(config).next` is `()` before and after, and nothing runs. The issue's premise that `main.py:452-480` "already re-enters runs with no in-flight work" does not hold for these statuses.
+  - *A parked run stops the whole project.* `app.project_locks` rows are deleted only for terminal statuses (`workflows/persistence.py`), and the scheduler's candidate query refuses any project holding one (`control_plane.py:1145-1148`: `AND NOT EXISTS (SELECT 1 FROM app.project_locks AS lock WHERE lock.project_id = p.id)`). There is no TTL reaper for that table. So one unconfirmed merge would have made *every* future workflow on that project unschedulable, silently, with the issue still wearing `agent:running` and no `blocking_reason` anywhere.
+  - Building the re-entry owner is not available to this change: it lives in `persistence/control_plane.py` (owned by open PR #158) and `workflows/runtime.py` / `main.py`, which issue #155 already scopes for exactly this purpose. Blocking with a specific reason releases the lock, labels the issue `agent:blocked`, and puts the run in front of a human — strictly more useful than a silent stall. When #155 lands a re-entry owner, the last branch of `merge` is one line from parking again.
+- **The bound moved inside the node.** A budget spent across node entries is not a budget when nothing re-enters the node: the counter could only ever reach 1. The confirming re-reads now happen in one entry, so the limit is genuinely reachable and `PROJECT.md`'s "bounded loops" is satisfied by something that actually runs.
+- **No new `merged` workflow status.** The issue's scope suggests transitioning to a `merged` status. It was not added. The status would be transient — written and then immediately replaced by `completed` — so no consumer would ever meaningfully see it, while four modules outside this session's ownership (`domain/models.py`'s `WorkflowStatus`, `services/issue_sync.py`'s label policy, `persistence/control_plane.py`'s stall predicate, and the console's status rendering) would each have to learn a status that parks nothing; and a crash in that one-statement window would leave a run in a status nothing recovers. The durable distinction the issue asks for ("nothing distinguishes *the merge was attempted* from *the pull request is merged*") is carried by `app.pull_requests.state` + `merged_at` + `merge_commit`, which is queryable and survives the run. None of the five acceptance criteria name a status.
+- **A refused merge blocks immediately; a failed read costs a check.** The asymmetry is deliberate. `merge_pull_request` raising is the code host stating a verdict, and re-reading cannot improve it. A read failing is the *absence* of a verdict, and treating it as "not merged" is how a genuinely merged pull request would get stranded.
+- **`merged` consults the evidence, not only the state string.** The change fetches `mergedAt` and `mergeCommit` precisely because one signal is not enough; deciding on `state` alone would have kept the single-signal trust the issue is about. The direction of the remaining doubt matters: reporting a merged pull request as unmerged blocks a delivered change, while the reverse cannot happen — GitHub populates neither field until a merge exists.
+
+## Post-review corrections
+
+Two independent adversarial reviews of the diff were run before the work was claimed done. Both independently identified the parked-run defect; between them they found eleven issues, of which these were fixed:
+
+- **The waiting state was a permanent, silent, project-wide stall** (critical, both reviews). See Decisions — the design changed from parking to a bounded in-node confirmation with a terminal outcome.
+- **Re-entry would have re-issued `gh pr merge` for a still-open pull request, and the second entry would have blocked rather than waited.** `merge_pull_request` re-runs `required_checks` first and raises on anything pending, which the node turned into `blocked` — so in the exact scenario the waiting state was built for (a queued auto-merge behind a pending check), the *second* entry failed rather than spending the budget. Resolved by construction: there is no second entry.
+- **`_merged_at` read the reported timestamp before testing whether anything had merged, and accepted the `pull_request_state` string as a second authority.** A stray `pull_request_merged_at` would have been written for an unmerged pull request, and `create_pull_request` — which dropped the merge fields — stamped the local clock over a merge timestamp GitHub had already supplied. Gated on the boolean alone; `create_pull_request` now emits the whole record.
+- **The confirming-read failure path wrote the stale pre-merge reading back.** The branch whose justification is "the merge may well have landed" was stamping `state = 'open'` on a pull request that had probably just merged. It now writes nothing, leaving the last known-good row intact.
+- **State normalisation was a convention, not an invariant.** Moved into `PullRequest.__post_init__`, so no construction site can produce an unnormalised state that silently fails an exact `== "merged"`.
+- **`merged` trusted one signal.** A payload with `state: "CLOSED"` and a non-null `mergedAt` would have taken the worst branch — permanent `blocked`, "closed without being merged" — while the persistence layer wrote the real `merged_at` into the same row. `merged` now wins over `closed`.
+- **Migration 008 left legacy rows in mixed case**, producing exactly the split the normalisation exists to prevent. It now normalises them, still idempotently.
+- **The parsing helpers discarded malformed evidence silently**, and the zero-timestamp rule was being applied to a commit SHA. Split into `_optional_timestamp` and `_optional_text`, both logging an unexpected type; `_commit_oid` accepts a bare SHA string as well as the `{"oid": …}` wrapper.
+- **The merge path emitted no log line on any failure.** Every non-merge outcome now logs with the workflow run ID, the pull request, and the reason; a confirmed merge logs its merge commit.
+- **One message covered six causes**, and was simply false for one of them (a missing `pull_request_id` is not a missing code host). Split.
+- **`_FakeCodeHost.merges` was dead in `test_end_to_end.py`** — the exact knob that would have exercised the parked path end to end, which is why the suite could not see the deadlock. Two end-to-end tests now drive the real graph through the unconfirmed-merge and closed-without-merge paths.
+
+Not fixed, deliberately — see Known Issues: transient-versus-permanent classification of `GitHubCliError` from the merge command itself (pre-existing, unchanged by this diff), and `str(None)` coercion in `_pull_request_from_json` (pre-existing).
+
+## Known Issues
+
+- Issue: nothing re-enters a run parked on an external event (`waiting_github_checks`, and formerly the merge node's waiting state). **Pre-existing, tracked as #155**, whose own "Out of scope" names merge verification (#121) as separate.
+  - Severity: P1, not introduced here. It is why this change blocks rather than parks.
+  - Impact: `wait_for_checks` still parks forever today; #155 documents that as the normal case. The merge node no longer adds to it.
+  - Evidence: measured against the real compiled LangGraph, both by this session and independently by two reviewers. See Decisions.
+  - Suggested resolution: #155. When it lands, the merge node's final branch can park again in one line, and the in-node confirmation becomes the fast path rather than the whole budget.
+
+- Issue: a `GitHubCliError` from `merge_pull_request` itself is always treated as permanent, including the transient cases — a required check that flipped back to pending between `wait_for_checks` and `merge`, a `gh` timeout, a rate limit, a 502.
+  - Severity: P2. Each such blip blocks a run and feeds `_update_project_circuit`, so a run of them can open the project's circuit.
+  - Impact: a workflow blocks on something that would have succeeded on a retry.
+  - Evidence: `issue_trackers/github_cli.py` converts timeouts into `GitHubCliError`, and `GitHubCliUnavailableError` subclasses it, so the node's single `except GitHubCliError` cannot tell them apart.
+  - Suggested resolution: classify before blocking — route pending-check refusals and timeouts through the confirmation loop, reserve `blocked` for refusals GitHub states are terminal. **Deliberately not changed here:** this is `main`'s behaviour, unchanged by this diff, and widening the merge node's error taxonomy is a separate decision from verifying the merge. It is the same class of problem as #116.
+
+- Issue: `merged_at` and `merge_commit` are now written but read by nothing — no query, API field or console surface.
+  - Severity: P3. The durable proof exists but is unobservable.
+  - Impact: an operator cannot yet see when or as what a pull request merged without querying Postgres directly.
+  - Suggested resolution: surface them on the workflow detail response. `api/` is owned by open PR #161, so this is a follow-up.
+
+- Issue: `orchestrator/README.md:85` describes `merging` as one of the "transient statuses on unconditional edges". The edge is no longer unconditional.
+  - Severity: P3 — a stale sentence in prose, no behavioural impact. (`merging` *is* still transient after this change, so the sentence is only half wrong.)
+  - Suggested resolution: **not fixed here on purpose.** `orchestrator/README.md` is owned by open PR #158, re-checked as `OPEN` with the README in its file list while this branch was being finished.
+
+## Validation Status
+
+- Targeted tests: Passed — 21 new tests. `test_workflow_nodes.py`: the verified merge writes the commit and timestamp and only then routes to `complete`; no second `gh pr merge` on re-entry; no merge at all for an already-merged pull request; an unconfirmed merge leaves the issue tracker untouched and ends terminal; the budget is spent inside one entry (read and pause counts asserted); a merge confirmed on a later check still completes; a failed confirming read costs a check rather than the merge; a merge no read ever confirms blocks without guessing the record; closed-without-merge blocks with its own reason; no code host and no pull request block with distinct reasons. `test_github_code_host.py`: merge commit and timestamp parsed; closed reported distinctly from merged; nulls and `gh`'s zero-time treated as absent; every pull request read asks for the merge fields. Plus `test_workflow_policy.py`, `test_issue_graph.py`, `test_workflow_persistence.py` and two `test_end_to_end.py` tests through the real graph.
+- Service tests: Passed — `make test-orchestrator`, `Ran 470 tests`, `OK (skipped=30)`.
+- Full repository tests: Not run — `make test` also builds `web/` and `runner/`, neither of which this change touches.
+- Build: Not applicable — no Go or web change.
+- Lint: Passed — `make lint`, `All checks passed!`.
+- Type checks: Passed — `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-121`, `Success: no issues found in 48 source files`.
+- Database migrations: Passed — `008_pull_request_merge_commit.sql` applied by `MigrationRunner` against a real PostgreSQL 16; its SQL re-executed three times over a planted legacy `MERGED` row with no error and a stable `merged` result; `make test-postgres-integration` green (`Ran 30 tests`, `OK`), including `test_migrations_are_recorded_and_idempotent`.
+- Docker Compose: Not run — no Compose change, and the CI runner cannot reach the Docker daemon (see the previous session's Known Issues).
+- End-to-end workflow: Passed at the graph level — `test_end_to_end.py` now exercises the real read/merge/re-read sequence, including the two paths that must not deliver. Against the live GitHub CLI: not run.
+
+## Next Recommended Implementation
+
+- #155 — re-enter a parked run *at the node*. It unblocks `wait_for_checks`, and it is what would let an unconfirmed merge wait and retry instead of blocking.
+- Surface `app.pull_requests.merged_at` / `merge_commit` on the workflow detail API and the console, once #161 lands.
+- Once #158 lands, correct the one stale clause at `orchestrator/README.md:85`.
 # Session: issue #124 — API and runner Prometheus gauges are hardcoded to zero
 
 ## Current Status
