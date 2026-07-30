@@ -7,6 +7,8 @@ from typing import Literal, cast
 ExecutionRole = Literal["planner", "developer", "pipeline", "reviewer", "repairer"]
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+_MAX_CONTEXT_ENTRIES = 64
+_MAX_CONTEXT_ENTRY_BYTES = 8 * 1024
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,13 @@ def pipeline_task_execution(
     default_branch: str,
     pipeline: tuple[PipelineCommand, ...],
     timeout_seconds: int = 3600,
+    acceptance_criteria: tuple[str, ...] = (),
+    plan: tuple[str, ...] = (),
+    previous_failures: tuple[str, ...] = (),
+    current_commit: str = "",
+    diff_summary: str = "",
+    failed_checks: tuple[str, ...] = (),
+    review_findings: tuple[str, ...] = (),
 ) -> TaskExecutionRequest:
     request = task_execution(
         job_id=job_id,
@@ -191,6 +200,13 @@ def pipeline_task_execution(
         local_repository_path=local_repository_path,
         default_branch=default_branch,
         timeout_seconds=timeout_seconds,
+        acceptance_criteria=acceptance_criteria,
+        plan=plan,
+        previous_failures=previous_failures,
+        current_commit=current_commit,
+        diff_summary=diff_summary,
+        failed_checks=failed_checks,
+        review_findings=review_findings,
     )
     return replace(request, pipeline=pipeline)
 
@@ -207,6 +223,7 @@ def planner_task_execution(
     local_repository_path: str | None,
     default_branch: str,
     timeout_seconds: int = 1800,
+    acceptance_criteria: tuple[str, ...] = (),
 ) -> TaskExecutionRequest:
     return task_execution(
         job_id=job_id,
@@ -221,6 +238,7 @@ def planner_task_execution(
         local_repository_path=local_repository_path,
         default_branch=default_branch,
         timeout_seconds=timeout_seconds,
+        acceptance_criteria=acceptance_criteria,
     )
 
 
@@ -256,7 +274,11 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
         request.failed_checks,
         request.review_findings,
     )
-    if any(len(values) > 64 or any(not value.strip() for value in values) for values in context_lists):
+    if any(
+        len(values) > _MAX_CONTEXT_ENTRIES
+        or any(not value.strip() or len(value.encode()) > _MAX_CONTEXT_ENTRY_BYTES for value in values)
+        for values in context_lists
+    ):
         raise ValueError("task execution context is invalid")
     _validate_environment_refs(request.environment_refs)
     return {

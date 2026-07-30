@@ -410,6 +410,17 @@ class _DurablePool:
         self.blocking_reason: str | None = None
         self.last_gate_verdict: str | None = None
         self.remaining_work: list[str] = []
+        self.human_guidance: str | None = None
+        self.current_commit: str | None = None
+        self.planner_result: dict[str, object] | None = None
+        self.review_result: dict[str, object] | None = None
+        self.pipeline_result: dict[str, object] | None = None
+        self.latest_execution_type: str | None = None
+        self.latest_execution_attempt: int | None = None
+        self.latest_execution_status: str | None = None
+        self.latest_execution_exit_code: int | None = None
+        self.latest_execution_result: dict[str, object] | None = None
+        self.issue_body = "Add durable delivery."
         # A bootstrap offer by default: the run has never queued an execution
         # request, which is the one case the planner fallback packet is for.
         self.has_execution_history = False
@@ -477,16 +488,26 @@ class _DurablePool:
                 "job_id": self.job_id,
                 "external_id": "42",
                 "title": "Implement scheduler",
-                "body": "Add durable delivery.",
+                "body": self.issue_body,
                 "project_id": self.project_id,
                 "repository_mode": "managed_clone",
                 "repository_url": "https://example.test/repo.git",
                 "local_repository_path": None,
                 "default_branch": "main",
+                "current_commit": self.current_commit,
                 "last_failure_fingerprint": self.last_failure_fingerprint,
                 "blocking_reason": self.blocking_reason,
                 "last_gate_verdict": self.last_gate_verdict,
                 "remaining_work": self.remaining_work,
+                "human_guidance": self.human_guidance,
+                "planner_result": self.planner_result,
+                "review_result": self.review_result,
+                "pipeline_result": self.pipeline_result,
+                "latest_execution_type": self.latest_execution_type,
+                "latest_execution_attempt": self.latest_execution_attempt,
+                "latest_execution_status": self.latest_execution_status,
+                "latest_execution_exit_code": self.latest_execution_exit_code,
+                "latest_execution_result": self.latest_execution_result,
             }
             record["has_execution_history"] = self.has_execution_history
             if self.execution_request_status == "dispatched":
@@ -693,6 +714,66 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             packet["previousFailures"],
             ["returned without evidence: no changed files", "finish tests"],
         )
+
+    async def test_continuation_packet_carries_planning_review_and_pipeline_context(self) -> None:
+        pool = _DurablePool()
+        pool.job_status = "completed"
+        pool.execution_request_status = "queued"
+        pool.issue_body = "\n- [ ] Preserve planner context\n- [x] Explain failures\n"
+        pool.current_commit = "cafebabe"
+        pool.planner_result = {
+            "result": {
+                "status": "ready",
+                "summary": "plan",
+                "assumptions": [],
+                "questions": [],
+                "risk": "low",
+                "steps": ["Inspect workflow state", "Implement packet hydration"],
+                "acceptanceCriteria": ["Keep planner criteria"],
+            }
+        }
+        pool.review_result = {"findings": ["Handle failed commands"]}
+        pool.pipeline_result = {
+            "exitCode": 1,
+            "pipelineResults": [{"command": "pytest -q", "exitCode": 1, "output": "old\nfailed"}],
+        }
+        pool.latest_execution_type = "run_developer"
+        pool.latest_execution_attempt = 2
+        pool.latest_execution_status = "failed"
+        pool.latest_execution_exit_code = 1
+        pool.latest_execution_result = {
+            "changedFiles": ["orchestrator/control_plane.py"],
+            "summary": "agent stopped after failing test",
+        }
+        pool.last_failure_fingerprint = "pipeline:deadbeef"
+        control_plane = AsyncpgControlPlane(pool)
+
+        scheduled = await control_plane.schedule_execution(NOW, timedelta(seconds=30))
+        assert scheduled is not None
+        packet = await control_plane.build_task_packet(scheduled)
+
+        self.assertEqual(packet["acceptanceCriteria"], ["Preserve planner context", "Explain failures", "Keep planner criteria"])
+        self.assertEqual(packet["plan"], ["Inspect workflow state", "Implement packet hydration"])
+        self.assertEqual(packet["reviewFindings"], ["Handle failed commands"])
+        self.assertEqual(packet["failedChecks"], ["pytest -q exited 1:\nold\nfailed"])
+        self.assertEqual(packet["currentCommit"], "cafebabe")
+        self.assertEqual(packet["diffSummary"], "Changed files: orchestrator/control_plane.py")
+        self.assertEqual(packet["previousFailures"], ["developer attempt 2 failed (exit 1):\nagent stopped after failing test"])
+        self.assertNotIn("pipeline:deadbeef", packet["previousFailures"])
+
+    async def test_invalid_planner_result_is_not_included_in_a_continuation_packet(self) -> None:
+        pool = _DurablePool()
+        pool.job_status = "completed"
+        pool.execution_request_status = "queued"
+        pool.planner_result = {"result": {"status": "ready", "steps": ["unsafe"]}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        scheduled = await control_plane.schedule_execution(NOW, timedelta(seconds=30))
+        assert scheduled is not None
+        packet = await control_plane.build_task_packet(scheduled)
+
+        self.assertEqual(packet["plan"], [])
+        self.assertEqual(packet["acceptanceCriteria"], ["Implement scheduler"])
 
     async def test_schedule_creates_an_atomic_offer_and_project_lock(self) -> None:
         pool = _DurablePool()
@@ -1417,6 +1498,48 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
             if "UPDATE app.executions" in query and "attempt = $8" in query
         )
         self.assertEqual(update_call[7], 3)
+
+    async def test_terminal_planner_result_is_persisted_without_a_started_event(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "planner", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+        plan = {
+            "status": "ready",
+            "summary": "plan",
+            "assumptions": [],
+            "questions": [],
+            "risk": "low",
+            "acceptanceCriteria": ["ship context"],
+            "steps": ["persist result"],
+        }
+
+        await control_plane.accept_event(
+            self._event(f"{self.REQUEST_ID}-plan", "completed", {"result": plan}),
+            NOW,
+        )
+
+        insert = next(args for query, args in pool.calls if "INSERT INTO app.executions" in query and "finished_at" in query)
+        self.assertEqual(json.loads(str(insert[5]))["result"], plan)
+
+    async def test_terminal_final_revision_updates_workflow_current_commit(self) -> None:
+        pool = _EventPool()
+        pool.dispatched = {self.REQUEST_ID: {"role": "developer", "attempt": 1}}
+        control_plane = AsyncpgControlPlane(pool)
+
+        await control_plane.accept_event(
+            self._event(
+                f"{self.REQUEST_ID}-implement",
+                "completed",
+                {"finalRevision": "cafebabe", "changedFiles": ["src/packet.py"], "result": {"status": "completed"}},
+            ),
+            NOW,
+        )
+
+        commit_update = next(
+            (args for query, args in pool.calls if "SET current_commit = $2" in query),
+            None,
+        )
+        self.assertEqual(commit_update, (pool.job_row["workflow_run_id"], "cafebabe", NOW))
 
     async def test_reviewer_approval_persists_ai_review_and_outbox_entry(self) -> None:
         pool = _EventPool()

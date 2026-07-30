@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -52,6 +53,7 @@ from moirai.workflows.runner_events import (
     validate_runner_event,
     workflow_transition_for_terminal_event,
 )
+from moirai.workflows.schema_validation import SchemaNotFoundError, load_schema, validate
 from moirai.workflows.task_packets import (
     ExecutionRole,
     PipelineCommand,
@@ -68,6 +70,10 @@ _LOGGER = logging.getLogger(__name__)
 # counts *repeats*, so it is 0 for the first outcome of a run and N-1 once
 # N identical outcomes have been observed.
 NON_PROGRESS_OUTCOME_LIMIT = 4
+_CONTEXT_ENTRY_LIMIT = 64
+_CONTEXT_ENTRY_BYTES = 8 * 1024
+_CONTEXT_TAIL_LINES = 50
+_ISSUE_CHECKLIST_ITEM = re.compile(r"^\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*$", re.MULTILINE)
 
 # Workflow-run statuses that mean the run is over. A terminal run never has
 # work in flight, so nothing may resurrect it.
@@ -1133,6 +1139,10 @@ class AsyncpgControlPlane:
                     p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
                     w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
                     w.last_gate_verdict, w.remaining_work, w.human_guidance,
+                    planner.result AS planner_result, review.result AS review_result,
+                    pipeline.result AS pipeline_result, latest.execution_type AS latest_execution_type,
+                    latest.attempt AS latest_execution_attempt, latest.status AS latest_execution_status,
+                    latest.exit_code AS latest_execution_exit_code, latest.result AS latest_execution_result,
                     request.id AS execution_request_id, request.role AS execution_role,
                     EXISTS (
                         SELECT 1 FROM app.workflow_execution_requests AS any_request
@@ -1149,6 +1159,34 @@ class AsyncpgControlPlane:
                 ORDER BY dispatched_at DESC, id DESC
                 LIMIT 1
             ) AS request ON true
+            LEFT JOIN LATERAL (
+                SELECT result
+                FROM app.executions
+                WHERE job_id = j.id AND execution_type = 'run_planner' AND status = 'completed'
+                ORDER BY finished_at DESC NULLS LAST, id DESC
+                LIMIT 1
+            ) AS planner ON true
+            LEFT JOIN LATERAL (
+                SELECT result
+                FROM app.ai_reviews
+                WHERE workflow_run_id = w.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) AS review ON true
+            LEFT JOIN LATERAL (
+                SELECT result
+                FROM app.pipeline_runs
+                WHERE workflow_run_id = w.id AND status = 'failed'
+                ORDER BY finished_at DESC NULLS LAST, id DESC
+                LIMIT 1
+            ) AS pipeline ON true
+            LEFT JOIN LATERAL (
+                SELECT execution_type, attempt, status, exit_code, result
+                FROM app.executions
+                WHERE job_id = j.id AND status IN ('completed', 'failed', 'cancelled')
+                ORDER BY finished_at DESC NULLS LAST, id DESC
+                LIMIT 1
+            ) AS latest ON true
             WHERE j.id = $1 AND j.status = 'offered'
             """,
             _uuid(scheduled.offer.job_id),
@@ -1174,16 +1212,21 @@ class AsyncpgControlPlane:
         repository_url = _optional_text(record["repository_url"])
         local_repository_path = _optional_text(record["local_repository_path"])
         default_branch = str(record["default_branch"])
+        planner_execution_result = _json_object(record.get("planner_result"))
+        planner_result = _schema_result(planner_execution_result.get("result"), "planner-result")
+        review_result = _json_object(record.get("review_result"))
+        pipeline_result = _json_object(record.get("pipeline_result"))
+        latest_execution_result = _json_object(record.get("latest_execution_result"))
         current_commit = _optional_text(record.get("current_commit")) or ""
-        prior_failure = _optional_text(record.get("last_failure_fingerprint"))
-        blocking_reason = _optional_text(record.get("blocking_reason"))
-        last_gate_verdict = _optional_text(record.get("last_gate_verdict"))
-        remaining_work = _text_list(record.get("remaining_work"))
-        human_guidance = _optional_text(record.get("human_guidance"))
-        acceptance_criteria = (issue_title,)
-        previous_failures = tuple(
-            value for value in (prior_failure, blocking_reason, last_gate_verdict, human_guidance, *remaining_work) if value
+        acceptance_criteria = _acceptance_criteria(issue_body, issue_title, planner_result)
+        plan = _context_entries(planner_result.get("steps"))
+        review_findings = _context_entries(review_result.get("findings") if review_result else None)
+        failed_checks = _pipeline_failures(pipeline_result)
+        previous_failures = _previous_failures(
+            record,
+            latest_execution_result,
         )
+        diff_summary = _diff_summary(current_commit, latest_execution_result)
         request_id = record.get("execution_request_id")
         role = record.get("execution_role")
         if request_id is None or role is None:
@@ -1198,6 +1241,7 @@ class AsyncpgControlPlane:
                     repository_url=repository_url,
                     local_repository_path=local_repository_path,
                     default_branch=default_branch,
+                    acceptance_criteria=acceptance_criteria,
                 )
             )
         if role == "pipeline":
@@ -1227,6 +1271,13 @@ class AsyncpgControlPlane:
                     local_repository_path=local_repository_path,
                     default_branch=default_branch,
                     pipeline=pipeline,
+                    acceptance_criteria=acceptance_criteria,
+                    plan=plan,
+                    previous_failures=previous_failures,
+                    current_commit=current_commit,
+                    diff_summary=diff_summary,
+                    failed_checks=failed_checks,
+                    review_findings=review_findings,
                 )
             )
         if role not in {"planner", "developer", "reviewer", "repairer"}:
@@ -1245,8 +1296,12 @@ class AsyncpgControlPlane:
                 local_repository_path=local_repository_path,
                 default_branch=default_branch,
                 acceptance_criteria=acceptance_criteria,
+                plan=plan,
                 previous_failures=previous_failures,
                 current_commit=current_commit,
+                diff_summary=diff_summary,
+                failed_checks=failed_checks,
+                review_findings=review_findings,
             )
         )
 
@@ -2235,13 +2290,24 @@ class AsyncpgControlPlane:
                             now,
                         )
                     elif summary.terminal:
-                        result_json = (
-                            json.dumps(
-                                {"changedFiles": summary.changed_files, "commandsRun": summary.commands_run},
-                                separators=(",", ":"),
-                            )
-                            if summary.succeeded
-                            else None
+                        result_json = json.dumps(
+                            _execution_result(summary, event.payload), separators=(",", ":"), sort_keys=True
+                        )
+                        await connection.execute(
+                            """
+                            INSERT INTO app.executions
+                                (id, job_id, execution_type, attempt, status, lease_generation, started_at, finished_at, timeout_seconds, exit_code, result)
+                            VALUES (gen_random_uuid(), $1, $2, $8, $3, $7, $4, $4, 3600, $5, $6::jsonb)
+                            ON CONFLICT (job_id, execution_type, attempt) DO NOTHING
+                            """,
+                            _uuid(event.job_id),
+                            execution_type,
+                            summary.event_type,
+                            now,
+                            summary.exit_code,
+                            result_json,
+                            event.lease_generation,
+                            attempt,
                         )
                         await connection.execute(
                             """
@@ -2260,6 +2326,16 @@ class AsyncpgControlPlane:
                             attempt,
                         )
 
+                if summary.terminal:
+                    final_revision = _final_revision(event.payload)
+                    if final_revision:
+                        await connection.execute(
+                            "UPDATE app.workflow_runs SET current_commit = $2, updated_at = $3 WHERE id = $1",
+                            job["workflow_run_id"],
+                            final_revision,
+                            now,
+                        )
+
                 if resolved_role == "pipeline" and summary.terminal:
                     await connection.execute(
                         """
@@ -2269,11 +2345,7 @@ class AsyncpgControlPlane:
                         """,
                         job["workflow_run_id"],
                         "passed" if summary.succeeded else "failed",
-                        json.dumps(
-                            {"exitCode": summary.exit_code, "commandsRun": summary.commands_run},
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
+                        json.dumps(_execution_result(summary, event.payload), separators=(",", ":"), sort_keys=True),
                         now,
                     )
 
@@ -2898,6 +2970,144 @@ def _project_configuration(
             "required_runner_labels": labels,
         }
     raise ValueError("repository mode is invalid")
+
+
+def _final_revision(payload: dict[str, Any]) -> str:
+    value = payload.get("finalRevision")
+    if not isinstance(value, str):
+        return ""
+    revision = value.strip()
+    return revision if 0 < len(revision) <= 256 else ""
+
+
+def _execution_result(summary: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "changedFiles": summary.changed_files,
+        "commandsRun": summary.commands_run,
+    }
+    for key in ("summary", "logTail", "pipelineResults", "remainingWork"):
+        value = payload.get(key)
+        if value is not None:
+            result[key] = value
+    if summary.result is not None:
+        result["result"] = summary.result
+    return result
+
+
+def _schema_result(value: Any, schema_name: str) -> dict[str, Any]:
+    result = _json_object(value)
+    try:
+        return result if not validate(result, load_schema(schema_name)) else {}
+    except (SchemaNotFoundError, ValueError):
+        return {}
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _bounded_context_entry(value: str) -> str:
+    encoded = value.strip().encode()
+    if len(encoded) <= _CONTEXT_ENTRY_BYTES:
+        return encoded.decode()
+    return encoded[:_CONTEXT_ENTRY_BYTES].decode(errors="ignore").rstrip()
+
+
+def _context_entries(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    entries: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            text = item
+        elif isinstance(item, (dict, list)):
+            text = json.dumps(item, separators=(",", ":"), sort_keys=True)
+        else:
+            continue
+        text = _bounded_context_entry(text)
+        if text:
+            entries.append(text)
+        if len(entries) == _CONTEXT_ENTRY_LIMIT:
+            break
+    return tuple(entries)
+
+
+def _acceptance_criteria(issue_body: str, issue_title: str, planner_result: dict[str, Any]) -> tuple[str, ...]:
+    issue_criteria = _context_entries(_ISSUE_CHECKLIST_ITEM.findall(issue_body))
+    planner_criteria = _context_entries(planner_result.get("acceptanceCriteria"))
+    criteria = tuple(dict.fromkeys((*issue_criteria, *planner_criteria)))
+    return criteria[:_CONTEXT_ENTRY_LIMIT] or (_bounded_context_entry(issue_title),)
+
+
+def _tail_lines(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return _bounded_context_entry("\n".join(value.strip().splitlines()[-_CONTEXT_TAIL_LINES:]))
+
+
+def _pipeline_failures(result: dict[str, Any]) -> tuple[str, ...]:
+    failures: list[str] = []
+    raw_results = result.get("pipelineResults")
+    if isinstance(raw_results, list):
+        for item in raw_results:
+            if not isinstance(item, dict) or not isinstance(item.get("command"), str):
+                continue
+            exit_code = item.get("exitCode")
+            if not isinstance(exit_code, int) or exit_code == 0:
+                continue
+            output = _tail_lines(item.get("output"))
+            text = f"{item['command']} exited {exit_code}"
+            failures.append(f"{text}:\n{output}" if output else text)
+    if failures:
+        return _context_entries(failures)
+    exit_code = result.get("exitCode")
+    if isinstance(exit_code, int) and exit_code != 0:
+        output = _tail_lines(result.get("logTail"))
+        text = f"pipeline exited {exit_code}"
+        return _context_entries((f"{text}:\n{output}" if output else text,))
+    return ()
+
+
+def _previous_failures(record: Any, execution_result: dict[str, Any]) -> tuple[str, ...]:
+    entries: list[str] = []
+    status = _optional_text(record.get("latest_execution_status"))
+    if status in {"failed", "cancelled"}:
+        execution_type = _optional_text(record.get("latest_execution_type")) or "execution"
+        role = {
+            "run_planner": "planner",
+            "run_developer": "developer",
+            "run_local_pipeline": "pipeline",
+            "run_reviewer": "reviewer",
+            "run_repair": "repairer",
+        }.get(execution_type, execution_type)
+        attempt = record.get("latest_execution_attempt")
+        exit_code = record.get("latest_execution_exit_code")
+        detail = _tail_lines(execution_result.get("summary") or execution_result.get("logTail"))
+        text = f"{role} attempt {attempt if isinstance(attempt, int) else '?'} {status}"
+        if isinstance(exit_code, int):
+            text += f" (exit {exit_code})"
+        entries.append(f"{text}:\n{detail}" if detail else text)
+    for value in (
+        record.get("blocking_reason"),
+        record.get("last_gate_verdict"),
+        record.get("human_guidance"),
+        *_text_list(record.get("remaining_work")),
+    ):
+        if isinstance(value, str) and value.strip():
+            entries.append(value)
+    return _context_entries(entries)
+
+
+def _diff_summary(current_commit: str, execution_result: dict[str, Any]) -> str:
+    changed_files = _context_entries(execution_result.get("changedFiles"))
+    if changed_files:
+        return _bounded_context_entry("Changed files: " + ", ".join(changed_files))
+    return _bounded_context_entry(f"Current commit: {current_commit}") if current_commit else ""
 
 
 def _optional_text(value: Any) -> str | None:
