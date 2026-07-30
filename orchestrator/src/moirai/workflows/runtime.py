@@ -134,6 +134,10 @@ class PersistedWorkflowRuntime:
                             from langgraph.types import Command
 
                             result = self._graph.ainvoke(Command(resume="poll"), config)
+                        elif any(key in state_updates for key in ("human_approved", "human_changes_requested", "human_guidance")):
+                            from langgraph.types import Command
+
+                            result = self._graph.ainvoke(Command(resume="human"), config)
                         else:
                             result = self._graph.ainvoke(None, config)
             else:

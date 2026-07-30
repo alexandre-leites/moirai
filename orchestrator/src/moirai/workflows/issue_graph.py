@@ -48,6 +48,9 @@ class IssueWorkflowState(TypedDict, total=False):
     human_approval_required: bool
     human_approved: bool
     human_changes_requested: bool
+    human_question: str
+    human_resume_phase: str
+    human_guidance: str
     ci_repair_attempts: int
     github_check_poll_attempts: int
     blocking_reason: str
@@ -157,13 +160,18 @@ def route_merge(state: IssueWorkflowState) -> Literal["complete", "blocked"]:
 
 def route_human(
     state: IssueWorkflowState, budget: RetryBudget = _DEFAULT_BUDGET
-) -> Literal["merge", "repair", "blocked"]:
+) -> Literal["plan", "review", "merge", "repair", "blocked"]:
     del budget
+    if state.get("human_guidance"):
+        phase = state.get("human_resume_phase")
+        if phase == "planning":
+            return "plan"
+        if phase == "ai_review":
+            return "review"
     return cast(
-        Literal["merge", "repair", "blocked"],
+        Literal["plan", "review", "merge", "repair", "blocked"],
         route_after_human_response(
-            state.get("human_approved", False),
-            state.get("human_changes_requested", False),
+            state.get("human_approved", False), state.get("human_changes_requested", False)
         ).value,
     )
 
@@ -194,6 +202,8 @@ def suspend_after_dispatch(
     def route(state: IssueWorkflowState) -> str:
         if state.get("status") == "blocked":
             return "blocked"
+        if state.get("status") == "waiting_human":
+            return "wait_for_human"
         if state.get("awaiting_execution"):
             return _SUSPEND
         return router(state)
@@ -231,27 +241,27 @@ def build_issue_graph(
     graph.add_conditional_edges(
         "plan",
         suspend_after_dispatch(lambda state: route_plan(state, budget)),
-        {"plan": "plan", "implement": "implement", "blocked": "blocked", _SUSPEND: END},
+        {"plan": "plan", "implement": "implement", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "implement",
         suspend_after_dispatch(lambda state: "implement" if state.get("continuation_requested") else "pipeline"),
-        {"implement": "implement", "pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+        {"implement": "implement", "pipeline": "pipeline", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "pipeline",
         suspend_after_dispatch(lambda state: route_pipeline(state, budget)),
-        {"review": "review", "repair": "repair", "blocked": "blocked", _SUSPEND: END},
+        {"review": "review", "repair": "repair", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "review",
         suspend_after_dispatch(lambda state: route_review(state, budget)),
-        {"push": "push", "repair": "repair", "blocked": "blocked", _SUSPEND: END},
+        {"push": "push", "repair": "repair", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "repair",
         suspend_after_dispatch(lambda state: "repair" if state.get("continuation_requested") else "pipeline"),
-        {"repair": "repair", "pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+        {"repair": "repair", "pipeline": "pipeline", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     # A CI repair rejoins the workflow exactly where a local repair does: the
     # repaired tree gets its own local pipeline verdict, then AI review, push
@@ -260,12 +270,12 @@ def build_issue_graph(
     graph.add_conditional_edges(
         "ci_repair",
         suspend_after_dispatch(lambda state: "ci_repair" if state.get("continuation_requested") else "pipeline"),
-        {"ci_repair": "ci_repair", "pipeline": "pipeline", "blocked": "blocked", _SUSPEND: END},
+        {"ci_repair": "ci_repair", "pipeline": "pipeline", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_conditional_edges(
         "push",
         suspend_after_dispatch(lambda state: "create_pull_request"),
-        {"create_pull_request": "create_pull_request", "blocked": "blocked", _SUSPEND: END},
+        {"create_pull_request": "create_pull_request", "wait_for_human": "wait_for_human", "blocked": "blocked", _SUSPEND: END},
     )
     graph.add_edge("create_pull_request", "wait_for_checks")
     graph.add_conditional_edges(
@@ -283,7 +293,7 @@ def build_issue_graph(
     graph.add_conditional_edges(
         "wait_for_human",
         lambda state: route_human(state, budget),
-        {"merge": "merge", "repair": "repair", "blocked": "blocked"},
+        {"plan": "plan", "review": "review", "merge": "merge", "repair": "repair", "blocked": "blocked"},
     )
     # Not an unconditional edge to `complete`: `complete` closes the issue and
     # applies `agent:delivered`, so it is reachable only from a merge the code

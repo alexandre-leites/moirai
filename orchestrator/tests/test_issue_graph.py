@@ -69,6 +69,8 @@ class IssueGraphRouteTests(unittest.TestCase):
         self.assertEqual(route({"status": "blocked", "blocking_reason": "budget"}), "blocked")
 
     def test_human_route_routes_based_on_human_response(self) -> None:
+        self.assertEqual(route_human({"human_guidance": "use v2", "human_resume_phase": "planning"}), "plan")
+        self.assertEqual(route_human({"human_guidance": "support v1", "human_resume_phase": "ai_review"}), "review")
         self.assertEqual(route_human({"human_approved": True}), "merge")
         self.assertEqual(route_human({"human_changes_requested": True}), "repair")
         self.assertEqual(route_human({}), "blocked")

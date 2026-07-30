@@ -3689,3 +3689,24 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 ## Next Recommended Implementation
 
 Repair pre-existing runner compile failures, then run `make test-runner` and `make test-postgres-integration LOOP_TEST_DATABASE_URL=...`.
+
+---
+
+# Issue #107 — Autonomy L4 escalation ladder
+
+- In progress: 2026-07-30T04:16:35Z
+- Agent/session identifier: issue-107
+- Branch: `issue-107`
+- Scope: `orchestrator/` workflow production, tests, migration if durable human guidance requires one, append-only `PROGRESS.md`; API/web/runner excluded.
+- Current state: claimed; tracing existing human approval and runner-result paths.
+- Definition of done: agent `human_required` parks with durable question; operator answer resumes same phase with packet guidance; fallback and bounded terminal reason covered.
+- Targeted validation: focused workflow/control-plane/packet tests, full orchestrator suite, Ruff, Mypy, adversarial diff review.
+- Completed: 2026-07-30T04:25:00Z
+- Behavior delivered: planner/reviewer `human_required` results park at `waiting_human`, persist their question and re-entry phase, and use the existing human-decision comment as required durable guidance. Guidance is injected into the next task packet; the graph resumes planner or reviewer and clears stale question/phase state once re-dispatched.
+- Validation passed: workflow acceptance tests, Ruff, `git diff --check`; earlier full orchestrator suite passed (503 tests, 34 skipped).
+- Validation blocked: Mypy has pre-existing generated-stub diagnostics outside this change.
+- Adversarial review: checked dynamic human interruption, same-phase re-entry, stale guidance clearing, transaction-bound guidance persistence, and task-packet propagation. No remaining issue found.
+
+## Next Recommended Implementation
+
+Implement backend fallback only after a runner task-packet backend-selection contract exists; current runner contract has no backend selector.

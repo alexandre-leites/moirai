@@ -249,6 +249,14 @@ def _agent_blocking_reason(summary: RunnerEventSummary, role: str | None) -> str
     return reason[:MAX_BLOCKING_REASON_CHARS]
 
 
+def _human_question(summary: RunnerEventSummary, field: str, fallback: str) -> str:
+    result = summary.result or {}
+    values = result.get(field)
+    questions = [value.strip() for value in values if isinstance(value, str) and value.strip()] if isinstance(values, list) else []
+    question = "\n".join(questions) or str(result.get("summary") or "").strip() or fallback
+    return question[:MAX_BLOCKING_REASON_CHARS]
+
+
 def workflow_transition_for_terminal_event(
     summary: RunnerEventSummary,
     current_status: str,
@@ -357,12 +365,12 @@ def _terminal_event_transition(
                 state_updates={"status": "implementing", "plan_valid": True},
             )
         if status == "human_required":
+            question = _human_question(summary, "questions", "planner requires human input")
             return WorkflowTransition(
-                new_status="blocked",
+                new_status="waiting_human",
                 state_updates={
-                    "status": "blocked",
-                    "plan_valid": False,
-                    "blocking_reason": "planner requires human input",
+                    "status": "waiting_human", "plan_valid": False, "human_question": question,
+                    "human_resume_phase": "planning", "blocking_reason": question,
                 },
             )
         if status == "blocked":
@@ -411,12 +419,12 @@ def _terminal_event_transition(
                 state_updates={"status": "pushing", "review_approved": True},
             )
         if verdict == "human_required":
+            question = _human_question(summary, "findings", "reviewer requires human input")
             return WorkflowTransition(
-                new_status="blocked",
+                new_status="waiting_human",
                 state_updates={
-                    "status": "blocked",
-                    "review_approved": False,
-                    "blocking_reason": "reviewer requires human input",
+                    "status": "waiting_human", "review_approved": False, "human_question": question,
+                    "human_resume_phase": "ai_review", "blocking_reason": question,
                 },
             )
         # "changes_requested", "invalid", or an unparseable/missing result:

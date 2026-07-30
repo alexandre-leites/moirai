@@ -247,6 +247,9 @@ class PersistedWorkflowNodes:
         return {}
 
     async def wait_for_human(self, state: IssueWorkflowState) -> WorkflowUpdate:
+        if state.get("human_question") and not (state.get("human_approved") or state.get("human_changes_requested") or state.get("human_guidance")):
+            from langgraph.types import interrupt
+            interrupt({"question": state["human_question"]})
         updates: WorkflowUpdate = {"status": "waiting_human"}
         if state.get("human_approved"):
             updates["human_approved"] = True
@@ -488,6 +491,9 @@ class PersistedWorkflowNodes:
             "awaiting_execution": True,
             "continuation_requested": False,
         }
+        if state.get("human_resume_phase") == status:
+            updates["human_resume_phase"] = None
+            updates["human_question"] = None
         if attempts is not None:
             updates[attempts.counter] = _attempts(state, attempts.counter) + 1
         if role not in _NON_AGENT_ROLES:
