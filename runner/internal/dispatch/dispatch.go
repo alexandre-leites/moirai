@@ -219,7 +219,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return Result{}, err
 	}
 	if packet.Role == taskpacket.RolePipeline {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, environment, packet.Pipeline)
 		result = Result{Status: "completed", ExitCode: 0, InitialRevision: initial.Revision, PipelineResults: pipelineResults}
 		if pipelineErr != nil {
 			result.Status = "failed"
@@ -270,7 +270,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// work with a generic pipeline failure — destroying the very signal the
 	// block exists to deliver.
 	if executeErr == nil && result.Status == "completed" && len(packet.Pipeline) > 0 {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, packet.Pipeline)
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, environment, packet.Pipeline)
 		result.PipelineResults = pipelineResults
 		if pipelineErr != nil {
 			executeErr = pipelineErr
@@ -348,7 +348,7 @@ func prepareRequest(packet taskpacket.Packet, environment map[string]string) (re
 	}, nil
 }
 
-func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, commands []taskpacket.PipelineCommand) ([]pipeline.Result, error) {
+func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, environment map[string]string, commands []taskpacket.PipelineCommand) ([]pipeline.Result, error) {
 	runner := dispatcher.Pipeline
 	if runner == nil {
 		runner = pipeline.LocalRunner{}
@@ -357,7 +357,7 @@ func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, 
 	for _, command := range commands {
 		pipelineCommands = append(pipelineCommands, pipeline.Command{Command: command.Command, Timeout: time.Duration(command.TimeoutSeconds) * time.Second})
 	}
-	return runner.Run(ctx, workspace, pipelineCommands)
+	return runner.Run(ctx, workspace, environment, pipelineCommands)
 }
 
 func (dispatcher Dispatcher) snapshot(ctx context.Context, workspace repository.Workspace) (repository.RevisionSummary, error) {

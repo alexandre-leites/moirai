@@ -71,11 +71,13 @@ func (manager *workspaceManager) recordArtifacts() error {
 }
 
 type pipelineRunner struct {
-	results []pipeline.Result
-	err     error
+	results     []pipeline.Result
+	err         error
+	environment map[string]string
 }
 
-func (runner pipelineRunner) Run(context.Context, string, []pipeline.Command) ([]pipeline.Result, error) {
+func (runner *pipelineRunner) Run(_ context.Context, _ string, environment map[string]string, _ []pipeline.Command) ([]pipeline.Result, error) {
+	runner.environment = environment
 	return runner.results, runner.err
 }
 
@@ -425,6 +427,32 @@ func TestDispatcherFailsBeforePreparingWhenDeclaredEnvironmentIsUnresolvable(t *
 	}
 }
 
+func TestDispatcherPassesResolvedEnvironmentToEveryPipelinePath(t *testing.T) {
+	for _, role := range []taskpacket.Role{taskpacket.RolePipeline, taskpacket.RoleDeveloper} {
+		t.Run(string(role), func(t *testing.T) {
+			manager := &workspaceManager{workspace: testWorkspace(t)}
+			lease := validLease()
+			lease.Packet.Role = role
+			lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "TOKEN", SecretRef: "secret/token"}}
+			lease.Packet.Pipeline = []taskpacket.PipelineCommand{{Command: "true", TimeoutSeconds: 1}}
+			runner := &pipelineRunner{}
+			dispatcher := Dispatcher{
+				Workspaces:         manager,
+				Backend:            &backend{result: agents.Result{Status: "completed"}},
+				Pipeline:           runner,
+				Environment:        environmentResolver{values: map[string]string{"TOKEN": "resolved"}},
+				AllowedEnvironment: []string{"TOKEN"},
+			}
+			if _, err := dispatcher.Execute(context.Background(), lease); err != nil {
+				t.Fatal(err)
+			}
+			if runner.environment["TOKEN"] != "resolved" {
+				t.Fatalf("pipeline environment = %#v", runner.environment)
+			}
+		})
+	}
+}
+
 func TestDispatcherAllowsOnlyConfiguredTaskEnvironment(t *testing.T) {
 	manager := &workspaceManager{workspace: testWorkspace(t)}
 	agent := &backend{result: agents.Result{Status: "completed"}}
@@ -627,7 +655,7 @@ func TestDispatcherSkipsThePipelineWhenTheAgentReportedABlock(t *testing.T) {
 			RemainingWork: []string{"decide the schema"},
 		}},
 		Delivery: delivery,
-		Pipeline: pipelineRunner{
+		Pipeline: &pipelineRunner{
 			results: []pipeline.Result{{Command: "go test ./...", ExitCode: 1}},
 			err:     errors.New("pipeline command failed with exit code 1: go test ./..."),
 		},
@@ -658,7 +686,7 @@ func TestDispatcherRecordsPipelineFailureBranchCommitAndLogTail(t *testing.T) {
 		Workspaces: manager,
 		Backend:    &backend{result: agents.Result{Status: "completed"}},
 		Delivery:   delivery,
-		Pipeline: pipelineRunner{
+		Pipeline: &pipelineRunner{
 			results: []pipeline.Result{{Command: "go test ./...", ExitCode: 1, Output: "\x1b[31mpipeline output: FAIL\x1b[0m\n"}},
 			err:     errors.New("pipeline command failed with exit code 1: go test ./..."),
 		},

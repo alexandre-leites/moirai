@@ -67,7 +67,7 @@ func (supervisor *Supervisor) Execute(
 	command.Dir = workspace
 	command.Stdout = stdout
 	command.Stderr = stderr
-	command.Env = environment(request.Environment, workspace)
+	command.Env = MinimalEnvironment(request.Environment, workspace)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	started := time.Now().UTC()
@@ -136,7 +136,7 @@ func (supervisor *Supervisor) untrack(executionID string) {
 	delete(supervisor.processes, executionID)
 }
 
-func environment(overrides map[string]string, workspace string) []string {
+func MinimalEnvironment(overrides map[string]string, workspace string) []string {
 	environment := []string{
 		"HOME=" + workspace,
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

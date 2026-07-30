@@ -3294,3 +3294,30 @@ An adversarial review of the committed diff (`ae07534`) found three more issues.
 - **The advertised metrics seam had no production caller** (medium-low). `loop.Metrics` and `Reporter.Metrics` were nil in production and fell back to `metrics.Default()`, which `metrics.New(bind)` happens to serve — correct today, but the `ControlLoop.Metrics` doc comment described wiring through `UseMetrics` that nothing performed, and building the server with a recorder of its own would have silently sent every runner metric except the heartbeat age to an unscraped registry. `runner/cmd/runner/main.go` now calls `loop.UseMetrics(metricsServer.Recorder())`. `UseMetrics` also republishes the queue depth, so a depth recovered from the outbox before the recorder was assigned is carried across rather than stranded on the default recorder.
 
 Review findings accepted without change: the API's request metrics cannot pre-materialise their label children the way the runner's do (routes are registered by handlers after the server is built, and the RPC-by-status-code cross product is large) — `api/README.md` now explains the asymmetry and says to alert on `absent()` rather than assume a series exists; `orchestratorCalls` stays a package variable because the interceptor that writes it is installed at dial time, before any server exists to hold it; a 405 lands in `route="unmatched"` because the mux answers it from a handler it never registered, which the route-label comment and the README now state.
+
+---
+
+# Issue #122 — Pipeline environment isolation
+
+- Completed: 2026-07-30
+- Agent/session identifier: issue-122
+- Branch: `issue-122`
+- Scope: `runner/` production and tests only.
+
+## Done
+
+- [x] Isolate local and Docker pipeline command environments
+  - Relevant files: `runner/internal/execution/local.go`, `runner/internal/pipeline/pipeline.go`, `runner/internal/pipeline/pipeline_test.go`, `runner/internal/dispatch/dispatch.go`, `runner/internal/dispatch/dispatch_test.go`, `runner/internal/dispatch/control_loop_test.go`.
+  - Behavior delivered: pipeline runners receive the resolved task environment, construct the same minimal `PATH`, `HOME`, and `TMPDIR` base used by local agent execution, and do not inherit runner-process variables. Both dedicated pipeline and post-agent pipeline paths receive the resolved declared environment.
+  - Tests added: parent sentinel exclusion, declared variable availability, required base variables, local/Docker environment parity, and both dispatcher pipeline paths.
+  - Adversarial review: checked execution paths, Docker env-file input, both dispatcher call sites, interface fakes, and environment parity. No remaining finding.
+
+## Validation Status
+
+- Targeted validation attempted: `GOCACHE=/tmp/moirai-issue-122-gocache GOMODCACHE=/tmp/moirai-issue-122-gomodcache go test -race ./internal/pipeline ./internal/dispatch ./internal/execution`.
+- Blocker: host has no `go` or `gofmt` executable, so targeted tests, formatter, vet, build, and `make test-runner` cannot run locally. `git diff --check` passed.
+- Full repository tests: not run; scope is runner only.
+
+## Next Recommended Implementation
+
+Run `make test-runner` in a Go-enabled environment, then merge this issue after review.
