@@ -60,6 +60,14 @@ class MigrationRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("project_circuit_half_open_probe_idx", contents)
         self.assertIn("provider_circuit_half_open_probe_idx", contents)
 
+    async def test_non_delivery_migration_persists_continuation_evidence(self) -> None:
+        migration = Path(__file__).parents[1] / "migrations" / "009_non_delivery_outcomes.sql"
+        contents = migration.read_text(encoding="utf-8")
+        self.assertIn("continuation_attempts", contents)
+        self.assertIn("last_delivery_outcome", contents)
+        self.assertIn("last_gate_verdict", contents)
+        self.assertIn("remaining_work", contents)
+
     async def test_discovery_rejects_duplicate_versions(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

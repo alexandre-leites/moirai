@@ -127,10 +127,12 @@ class PersistedWorkflowNodes:
         )
 
     async def implement(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        return await self._dispatch(
-            state, "developer", "implementing",
-            AttemptBudget("implementation_attempts", _BUDGET.implementation_attempts),
+        attempts = (
+            AttemptBudget("continuation_attempts", self.budget.continuation_attempts)
+            if state.get("continuation_requested")
+            else AttemptBudget("implementation_attempts", self.budget.implementation_attempts)
         )
+        return await self._dispatch(state, "developer", "implementing", attempts)
 
     async def pipeline(self, state: IssueWorkflowState) -> WorkflowUpdate:
         # Unconditional: the local pipeline is the deterministic gate that
@@ -152,10 +154,12 @@ class PersistedWorkflowNodes:
     async def repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
         # Repairs asked for before the work leaves the machine: a failing local
         # pipeline, an AI review requesting changes, a human requesting changes.
-        return await self._dispatch(
-            state, "repairer", "repairing",
-            AttemptBudget("pipeline_repair_attempts", _BUDGET.pipeline_repair_attempts),
+        attempts = (
+            AttemptBudget("continuation_attempts", self.budget.continuation_attempts)
+            if state.get("continuation_requested")
+            else AttemptBudget("pipeline_repair_attempts", self.budget.pipeline_repair_attempts)
         )
+        return await self._dispatch(state, "repairer", "repairing", attempts)
 
     async def ci_repair(self, state: IssueWorkflowState) -> WorkflowUpdate:
         # Repairs asked for by failing GitHub checks. Same repairer role and
@@ -177,10 +181,12 @@ class PersistedWorkflowNodes:
         # there is no open request left to adopt. Anything that lets the graph
         # reach one repair node while the other's request is still open has to
         # give the two nodes distinguishable requests.
-        return await self._dispatch(
-            state, "repairer", "repairing",
-            AttemptBudget("ci_repair_attempts", _BUDGET.ci_repair_attempts),
+        attempts = (
+            AttemptBudget("continuation_attempts", self.budget.continuation_attempts)
+            if state.get("continuation_requested")
+            else AttemptBudget("ci_repair_attempts", self.budget.ci_repair_attempts)
         )
+        return await self._dispatch(state, "repairer", "repairing", attempts)
 
     async def push(self, state: IssueWorkflowState) -> WorkflowUpdate:
         return await self._dispatch(state, "developer", "pushing", None)
@@ -422,10 +428,17 @@ class PersistedWorkflowNodes:
             return None
         return await _await(self.issue_tracker_factory(state.get("project_id", "")))
 
-    async def _budget_exhausted(self, state: IssueWorkflowState) -> WorkflowUpdate:
+    async def _budget_exhausted(
+        self, state: IssueWorkflowState, attempts: AttemptBudget | None = None
+    ) -> WorkflowUpdate:
+        reason = (
+            "non-delivery continuation budget exhausted"
+            if attempts is not None and attempts.counter == "continuation_attempts"
+            else "workflow retry budget exhausted"
+        )
         return await self._transition(state, "blocked", {
             "status": "blocked",
-            "blocking_reason": "workflow retry budget exhausted",
+            "blocking_reason": reason,
             "awaiting_execution": False,
         })
 
@@ -451,13 +464,13 @@ class PersistedWorkflowNodes:
         if open_request is not None:
             return await self._reuse(workflow_run_id, open_request, role, status)
         if attempts is not None and _attempts(state, attempts.counter) >= attempts.limit:
-            return await self._budget_exhausted(state)
+            return await self._budget_exhausted(state, attempts)
         # The exhaustion check applies to every role, including the ones that do
         # not spend the budget: once no agent run is affordable, the pipeline's
         # verdict has nowhere to route (both of its successors dispatch agents),
         # so validating first would only cost a runner execution to reach the
         # same blocked state.
-        if int(state.get("total_agent_executions", 0)) >= _BUDGET.total_agent_executions:
+        if int(state.get("total_agent_executions", 0)) >= self.budget.total_agent_executions:
             return await self._budget_exhausted(state)
         request = await _await(self.dispatcher.dispatch(workflow_run_id, role))
         if not request["created"]:
@@ -473,6 +486,7 @@ class PersistedWorkflowNodes:
             "status": status,
             "execution_id": request["id"],
             "awaiting_execution": True,
+            "continuation_requested": False,
         }
         if attempts is not None:
             updates[attempts.counter] = _attempts(state, attempts.counter) + 1

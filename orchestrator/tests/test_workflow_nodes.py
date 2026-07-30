@@ -162,6 +162,33 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             ["planner", "developer", "reviewer", "repairer", "repairer"],
         )
 
+    async def test_non_delivery_continuation_spends_its_own_budget(self) -> None:
+        update = await self.nodes.implement({
+            "workflow_run_id": "workflow-1",
+            "implementation_attempts": 1,
+            "continuation_attempts": 0,
+            "continuation_requested": True,
+            "total_agent_executions": 1,
+        })
+        self.assertEqual(update["status"], "implementing")
+        self.assertEqual(update["continuation_attempts"], 1)
+        self.assertNotIn("implementation_attempts", update)
+        self.assertFalse(update["continuation_requested"])
+        self.assertEqual(update["total_agent_executions"], 2)
+
+    async def test_non_delivery_continuation_budget_blocks_with_specific_reason(self) -> None:
+        nodes = PersistedWorkflowNodes(
+            self.persistence, self.dispatcher, budget=RetryBudget(continuation_attempts=1)
+        )
+        update = await nodes.implement({
+            "workflow_run_id": "workflow-1",
+            "continuation_requested": True,
+            "continuation_attempts": 1,
+        })
+        self.assertEqual(update["status"], "blocked")
+        self.assertEqual(update["blocking_reason"], "non-delivery continuation budget exhausted")
+        self.assertEqual(self.dispatcher.dispatches, [])
+
     async def test_each_repair_node_spends_only_its_own_budget(self) -> None:
         """`ci_repair_attempts` has exactly one writer, the `ci_repair` node,
         and a CI repair leaves the local pipeline's repair budget untouched."""

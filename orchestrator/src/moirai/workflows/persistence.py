@@ -20,6 +20,10 @@ _VALID_ROLES = frozenset({"planner", "developer", "pipeline", "reviewer", "repai
 _DURABLE_COLUMNS: dict[str, str] = {
     "planning_attempts": "planning_attempts",
     "implementation_attempts": "implementation_attempts",
+    "continuation_attempts": "continuation_attempts",
+    "last_delivery_outcome": "last_delivery_outcome",
+    "last_gate_verdict": "last_gate_verdict",
+    "remaining_work": "remaining_work",
     "pipeline_repair_attempts": "pipeline_repair_attempts",
     "review_cycles": "review_cycles",
     "ci_repair_attempts": "ci_repair_attempts",
@@ -225,8 +229,10 @@ class AsyncpgWorkflowPersistence:
                 record = await connection.fetchrow(
                     """
                     SELECT wr.id, wr.project_id, wr.status, wr.branch_name, wr.planning_attempts,
-                           wr.implementation_attempts, wr.pipeline_repair_attempts, wr.review_cycles,
-                            wr.ci_repair_attempts, wr.github_check_poll_attempts, wr.total_agent_executions, wr.blocking_reason,
+                           wr.implementation_attempts, wr.continuation_attempts, wr.pipeline_repair_attempts,
+                           wr.review_cycles, wr.ci_repair_attempts, wr.github_check_poll_attempts,
+                           wr.total_agent_executions, wr.last_delivery_outcome, wr.last_gate_verdict,
+                           wr.remaining_work, wr.blocking_reason,
 
                            wr.pull_request_external_id, wr.pull_request_url, i.external_id,
                            i.human_approval_required, p.default_branch, p.configuration,
@@ -293,6 +299,10 @@ class AsyncpgWorkflowPersistence:
             "merge_method": merge_method,
             "planning_attempts": int(record["planning_attempts"]),
             "implementation_attempts": int(record["implementation_attempts"]),
+            "continuation_attempts": int(record.get("continuation_attempts", 0)),
+            "last_delivery_outcome": _optional_text(record.get("last_delivery_outcome")),
+            "last_gate_verdict": _optional_text(record.get("last_gate_verdict")),
+            "remaining_work": _string_list(record.get("remaining_work", [])),
             "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
             "review_cycles": int(record["review_cycles"]),
             "ci_repair_attempts": int(record["ci_repair_attempts"]),
@@ -476,6 +486,15 @@ def _execution_request(record: Any, created: bool) -> dict[str, Any]:
 
 def _optional_text(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _string_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
 def _uuid(value: str) -> Any:

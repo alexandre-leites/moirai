@@ -1068,6 +1068,7 @@ class AsyncpgControlPlane:
             SELECT j.id AS job_id, i.external_id, i.title, i.body, p.id AS project_id,
                     p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
                     w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
+                    w.last_gate_verdict, w.remaining_work,
                     request.id AS execution_request_id, request.role AS execution_role,
                     EXISTS (
                         SELECT 1 FROM app.workflow_execution_requests AS any_request
@@ -1112,8 +1113,12 @@ class AsyncpgControlPlane:
         current_commit = _optional_text(record.get("current_commit")) or ""
         prior_failure = _optional_text(record.get("last_failure_fingerprint"))
         blocking_reason = _optional_text(record.get("blocking_reason"))
+        last_gate_verdict = _optional_text(record.get("last_gate_verdict"))
+        remaining_work = _text_list(record.get("remaining_work"))
         acceptance_criteria = (issue_title,)
-        previous_failures = tuple(value for value in (prior_failure, blocking_reason) if value)
+        previous_failures = tuple(
+            value for value in (prior_failure, blocking_reason, last_gate_verdict, *remaining_work) if value
+        )
         request_id = record.get("execution_request_id")
         role = record.get("execution_role")
         if request_id is None or role is None:
@@ -2833,6 +2838,15 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _text_list(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return ()
+    return tuple(item for item in value if isinstance(item, str) and item) if isinstance(value, list) else ()
 
 
 def _runner_failure_fingerprint(component: str, message: str) -> str:

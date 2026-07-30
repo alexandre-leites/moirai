@@ -405,6 +405,10 @@ class _DurablePool:
         self.unanswered_since: datetime | None = None
         self.last_event_sequence = 0
         self.execution_request_id = "00000000-0000-0000-0000-000000000007"
+        self.last_failure_fingerprint: str | None = None
+        self.blocking_reason: str | None = None
+        self.last_gate_verdict: str | None = None
+        self.remaining_work: list[str] = []
         # A bootstrap offer by default: the run has never queued an execution
         # request, which is the one case the planner fallback packet is for.
         self.has_execution_history = False
@@ -478,6 +482,10 @@ class _DurablePool:
                 "repository_url": "https://example.test/repo.git",
                 "local_repository_path": None,
                 "default_branch": "main",
+                "last_failure_fingerprint": self.last_failure_fingerprint,
+                "blocking_reason": self.blocking_reason,
+                "last_gate_verdict": self.last_gate_verdict,
+                "remaining_work": self.remaining_work,
             }
             record["has_execution_history"] = self.has_execution_history
             if self.execution_request_status == "dispatched":
@@ -667,6 +675,23 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             ["GITHUB_TOKEN"],
         )
         self.assertTrue(any("workflow_execution_requests" in query for query in pool.queries))
+
+    async def test_non_delivery_evidence_is_sent_to_the_continuation_packet(self) -> None:
+        pool = _DurablePool()
+        pool.job_status = "completed"
+        pool.execution_request_status = "queued"
+        pool.last_gate_verdict = "returned without evidence: no changed files"
+        pool.remaining_work = ["finish tests"]
+        control_plane = AsyncpgControlPlane(pool)
+
+        scheduled = await control_plane.schedule_execution(NOW, timedelta(seconds=30))
+        assert scheduled is not None
+        packet = await control_plane.build_task_packet(scheduled)
+
+        self.assertEqual(
+            packet["previousFailures"],
+            ["returned without evidence: no changed files", "finish tests"],
+        )
 
     async def test_schedule_creates_an_atomic_offer_and_project_lock(self) -> None:
         pool = _DurablePool()
@@ -1601,7 +1626,18 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
             transitions.append((workflow_run_id, new_status, dict(updates)))
 
         await AsyncpgControlPlane(pool).accept_event(
-            self._event(f"{self.REQUEST_ID}-implement", "completed", {"exitCode": 0}),
+            self._event(
+                f"{self.REQUEST_ID}-implement", "completed",
+                {
+                    "exitCode": 0,
+                    "changedFiles": ["a.py"],
+                    "result": {
+                        "protocolVersion": "1.0", "executionId": f"{self.REQUEST_ID}-implement",
+                        "status": "completed", "summary": "implemented", "changedFiles": ["a.py"],
+                        "commandsRun": [], "remainingWork": [], "knownLimitations": [],
+                    },
+                },
+            ),
             NOW,
             on_transition=on_transition,
         )
@@ -1618,7 +1654,11 @@ class AcceptEventRoleResolutionTests(unittest.IsolatedAsyncioTestCase):
             [(
                 "00000000-0000-0000-0000-000000000001",
                 "local_pipeline",
-                {"status": "local_pipeline", "awaiting_execution": False},
+                {
+                    "status": "local_pipeline",
+                    "last_delivery_outcome": "delivered",
+                    "awaiting_execution": False,
+                },
             )],
         )
 

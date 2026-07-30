@@ -126,6 +126,27 @@ class AsyncpgWorkflowPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pull_request_url = $8", update_query)
         self.assertIn("completed_at = COALESCE(completed_at, $9)", update_query)
 
+    async def test_transition_persists_non_delivery_evidence(self) -> None:
+        await self.store.transition(
+            WORKFLOW_ID,
+            "implementing",
+            {
+                "status": "implementing",
+                "continuation_attempts": 1,
+                "last_delivery_outcome": "returned_without_evidence",
+                "last_gate_verdict": "returned without evidence: no changed files",
+                "remaining_work": ["finish tests"],
+            },
+        )
+        query, arguments = next(
+            call for call in self.pool.connection.calls if "UPDATE app.workflow_runs" in call[0]
+        )
+        self.assertIn("continuation_attempts = $4", query)
+        self.assertIn("last_delivery_outcome = $5", query)
+        self.assertIn("last_gate_verdict = $6", query)
+        self.assertIn("remaining_work = $7", query)
+        self.assertEqual(arguments[6], ["finish tests"])
+
     async def test_transition_stores_an_empty_outcome_hash_as_null(self) -> None:
         """Issue #101: "no diff" had two encodings. The control plane's own
         writer uses SQL NULL, so this writer must never persist "" instead."""
