@@ -52,11 +52,12 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 	}
 	defer stderr.Close()
 	defer writeLogMetadata(filepath.Dir(resultPath), "docker-cli", stdoutLog, stderrLog)
+	defer os.Remove(filepath.Join(filepath.Dir(resultPath), "execution-manifest.json"))
 	command := append(append([]string(nil), backend.Arguments...), request.Prompt)
 	executor := backend.Executor
 	executor.Image = backend.Image
 	executionResult, err := executor.Execute(ctx, execution.Request{ExecutionID: request.ExecutionID, Workspace: request.Workspace, Command: command, Environment: request.Environment, Timeout: request.Timeout, OnStarted: func(pid int) {
-		writeExecutionManifest(filepath.Dir(resultPath), "docker-cli", request.ExecutionID, pid)
+		writeExecutionManifest(filepath.Dir(resultPath), "docker-cli", request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 	}}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("Docker CLI backend execution failed: %w", err)

@@ -15,6 +15,7 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/control"
 	"github.com/loop-engineering/runner/internal/metrics"
+	"github.com/loop-engineering/runner/internal/taskpacket"
 )
 
 const defaultEventBufferSize = 128
@@ -138,6 +139,10 @@ func NewControlLoopWithCapacity(client ControlClient, dispatcher executionDispat
 }
 
 func NewControlLoopWithEventBuffer(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string, capacity, eventBufferSize int) (*ControlLoop, error) {
+	return NewControlLoopWithEventLimits(client, dispatcher, now, leaseDuration, renewalLead, redactionPrefixes, outboxPath, capacity, eventBufferSize, 16*1024, 6*1024)
+}
+
+func NewControlLoopWithEventLimits(client ControlClient, dispatcher executionDispatcher, now func() time.Time, leaseDuration, renewalLead time.Duration, redactionPrefixes []string, outboxPath string, capacity, eventBufferSize, eventPayloadBytes, logChunkBytes int) (*ControlLoop, error) {
 	if client == nil || now == nil {
 		return nil, errors.New("runner control loop dependencies are required")
 	}
@@ -160,7 +165,7 @@ func NewControlLoopWithEventBuffer(client ControlClient, dispatcher executionDis
 	if eventBufferSize < 2*capacity {
 		eventBufferSize = 2 * capacity
 	}
-	reporter, err := control.NewEventReporter(client, eventBufferSize, redactionPrefixes, outboxPath)
+	reporter, err := control.NewEventReporterWithLimits(client, eventBufferSize, redactionPrefixes, outboxPath, eventPayloadBytes, logChunkBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -210,11 +215,8 @@ func (loop *ControlLoop) Run(ctx context.Context) error {
 		}
 		backoff = loop.reconnectMin()
 		if err := loop.Handle(ctx, message); err != nil {
-			if errors.Is(err, control.ErrNotConnected) || errors.Is(err, control.ErrStaleEventLease) {
-				loop.logger().Warn("recoverable runner control race", "error", err)
-				continue
-			}
-			return err
+			loop.logger().Warn("runner control message rejected", "error", err)
+			continue
 		}
 	}
 }
@@ -446,6 +448,42 @@ func (loop *ControlLoop) Cancel(executionID string, generation int64) bool {
 		go func() { _ = dispatcher.Cancel(context.Background(), lease) }()
 	}
 	return true
+}
+
+func (loop *ControlLoop) CancelAll() {
+	if loop == nil {
+		return
+	}
+	loop.mu.Lock()
+	leases := make([]control.Lease, 0, len(loop.active))
+	for _, active := range loop.active {
+		if active.terminal || active.cancelled {
+			continue
+		}
+		active.cancelled = true
+		active.cancel()
+		leases = append(leases, active.lease)
+	}
+	loop.mu.Unlock()
+	if dispatcher, ok := loop.Dispatcher.(cancellableDispatcher); ok {
+		for _, lease := range leases {
+			go func(lease control.Lease) { _ = dispatcher.Cancel(context.Background(), lease) }(lease)
+		}
+	}
+}
+
+func (loop *ControlLoop) ReportRecoveredFailure(jobID string, generation int64, executionID string) error {
+	if loop == nil || loop.Reporter == nil || jobID == "" || generation < 1 || executionID == "" {
+		return errors.New("recovered execution is invalid")
+	}
+	sequence, err := loop.Reporter.RecoverTerminal(control.Lease{JobID: jobID, Generation: generation, Packet: taskpacket.Packet{JobID: jobID, ExecutionID: executionID}}, "failed", map[string]any{
+		"status": "failed",
+		"error":  "runner restarted while this execution was active",
+	})
+	if sequence > 0 {
+		return nil
+	}
+	return err
 }
 
 func (loop *ControlLoop) Reconcile() error {

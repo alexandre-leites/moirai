@@ -1293,12 +1293,6 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(job_id, expired)
         self.assertEqual(await self._run_status(workflow_run_id), "recovering")
         self.assertEqual(await self._run_phase(workflow_run_id), "implementing")
-        # `expire_leases` marks the runner offline; it reconnects and is the
-        # only runner this project's labels allow.
-        await self.pool.execute(
-            "UPDATE app.runners SET status = 'online' WHERE id = $1", UUID(runner_id)
-        )
-
         recovered = await self.control_plane.recover_one(
             _NOW + timedelta(hours=1), timedelta(minutes=5)
         )

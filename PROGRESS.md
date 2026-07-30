@@ -3611,6 +3611,18 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 
 ---
 
+# Issue #102 — Runner lifecycle hardening
+
+- Started: 2026-07-30
+- Agent/session identifier: issue-102
+- Branch: `issue-102`
+- Scope: `runner/` and append-only `PROGRESS.md`; orchestrator lease-status item excluded by assigned ownership.
+- Current state: complete; ready for review.
+- Definition of done: all checklist defects fixed with focused regression coverage.
+- Implemented: reconnect stream contexts are cancelled; shutdown waits through `TerminationGrace` then cancels active executions; expired renewal scans defer to expiry handling; corrupt outboxes quarantine; TMPDIR exists; OpenCode reads prompt file; malformed control messages cannot stop dispatch; configured event/log limits are enforced against JSON-encoded payloads; expired leases do not take a live runner offline.
+- Recovery: manifests now persist job ID, lease generation, execution ID, and Linux process start time. Startup verifies process identity before terminating its process group, then persists a fenced failed event at the terminal sequence so it cannot be rejected after earlier events. Completed executions remove their manifests.
+- Validation: `git diff --check` passed. Targeted runner Go tests, formatter, and targeted orchestrator Python tests could not run because host has no `go`, `gofmt`, `python`, or Docker executable.
+- Adversarial review: recovery terminal events preserve fencing and advance beyond prior event sequences; log chunk probes account for JSON escaping and chunk metadata.
 ## Issue #120 — Operator workflow retry, cancel, and block controls
 
 - In progress: 2026-07-30

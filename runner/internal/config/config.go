@@ -266,7 +266,7 @@ func (c Config) Validate() error {
 	if c.LeaseRenewalLead >= c.LeaseDuration {
 		return errors.New("runner lease renewal lead must be shorter than lease duration")
 	}
-	if c.EventBufferSize < 1 || c.EventPayloadBytes < 1 || c.LogChunkBytes < 1 || c.MaxLogBytes < 1 || c.CleanupAttempts < 1 {
+	if c.EventBufferSize < 1 || c.EventPayloadBytes < 1 || c.EventPayloadBytes > 16*1024 || c.LogChunkBytes < 1 || c.MaxLogBytes < 1 || c.CleanupAttempts < 1 {
 		return errors.New("runner sizing configuration is invalid")
 	}
 	if c.MaxContinuations < 0 || c.MaxContinuations > maxContinuationBudget {

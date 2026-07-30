@@ -24,8 +24,10 @@ const (
 )
 
 type Request struct {
-	ExecutionID string
-	Role        Role
+	JobID           string
+	LeaseGeneration int64
+	ExecutionID     string
+	Role            Role
 	Workspace   string
 	Prompt      string
 	ResultPath  string
@@ -153,6 +155,7 @@ func (backend OpenCodeBackend) run(parent context.Context, request Request, resu
 	defer stderr.Close()
 
 	defer writeLogMetadata(filepath.Dir(resultPath), "opencode", stdoutLog, stderrLog)
+	defer os.Remove(filepath.Join(filepath.Dir(resultPath), "execution-manifest.json"))
 	supervisor := backend.supervisor()
 	executionResult, err := supervisor.Execute(parent, execution.Request{
 		ExecutionID: request.ExecutionID,
@@ -161,7 +164,7 @@ func (backend OpenCodeBackend) run(parent context.Context, request Request, resu
 		Environment: request.Environment,
 		Timeout:     request.Timeout,
 		OnStarted: func(pid int) {
-			writeExecutionManifest(filepath.Dir(resultPath), "opencode", request.ExecutionID, pid)
+			writeExecutionManifest(filepath.Dir(resultPath), "opencode", request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 		},
 	}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 
@@ -215,7 +218,7 @@ func (backend OpenCodeBackend) command(request Request, resume bool) []string {
 	if resume && request.SessionID != "" {
 		command = append(command, "--session", request.SessionID)
 	}
-	return append(command, request.Prompt)
+	return append(command, "Read .loop/prompt.md and follow its instructions.")
 }
 
 func (backend OpenCodeBackend) binary() string {

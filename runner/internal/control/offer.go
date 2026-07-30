@@ -188,7 +188,6 @@ func (s *OfferState) RenewDue() ([]string, error) {
 			continue
 		}
 		if !now.Before(entry.lease.ExpiresAt) {
-			delete(s.active, jobID)
 			continue
 		}
 		due = append(due, entry.lease)

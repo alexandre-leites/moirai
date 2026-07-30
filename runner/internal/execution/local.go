@@ -60,6 +60,9 @@ func (supervisor *Supervisor) Execute(
 	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
 		return Result{}, fmt.Errorf("workspace is not a directory: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".loop", "tmp"), 0o700); err != nil {
+		return Result{}, fmt.Errorf("create workspace temporary directory: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(parent, request.Timeout)
 	defer cancel()

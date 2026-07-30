@@ -176,7 +176,8 @@ func run(ctx context.Context) error {
 	}
 	metricsServer := metrics.New(settings.MetricsBind)
 	metricsServer.Start()
-	if err := agents.ReconcileManifests(settings.DataDir); err != nil {
+	recovered, err := agents.ReconcileManifests(settings.DataDir)
+	if err != nil {
 		return fmt.Errorf("reconcile runner executions: %w", err)
 	}
 	service, connection, err := control.Dial(ctx, settings.OrchestratorEndpoint, control.TLSOptions{
@@ -230,7 +231,7 @@ func run(ctx context.Context) error {
 	if err := dispatcher.SweepRetainedWorkspaces(ctx); err != nil {
 		slog.Warn("could not fully sweep retained workspaces at startup", "error", err)
 	}
-	loop, err := dispatch.NewControlLoopWithEventBuffer(
+	loop, err := dispatch.NewControlLoopWithEventLimits(
 		client,
 		dispatcher,
 		time.Now,
@@ -240,9 +241,16 @@ func run(ctx context.Context) error {
 		settings.EventOutboxPath(),
 		settings.Capacity,
 		settings.EventBufferSize,
+		settings.EventPayloadBytes,
+		settings.LogChunkBytes,
 	)
 	if err != nil {
 		return fmt.Errorf("create runner dispatch loop: %w", err)
+	}
+	for _, execution := range recovered {
+		if err := loop.ReportRecoveredFailure(execution.JobID, execution.LeaseGeneration, execution.ExecutionID); err != nil {
+			return fmt.Errorf("report recovered execution: %w", err)
+		}
 	}
 	loop.ReconnectMin = settings.ReconnectMin
 	loop.ReconnectMax = settings.ReconnectMax
@@ -292,8 +300,11 @@ func run(ctx context.Context) error {
 	}
 	if ctx.Err() != nil {
 		loop.Drain()
-		if err := loop.WaitForIdle(context.Background()); err != nil {
-			return fmt.Errorf("drain runner executions: %w", err)
+		shutdown, cancel := context.WithTimeout(context.Background(), settings.TerminationGrace)
+		err := loop.WaitForIdle(shutdown)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) {
+			loop.CancelAll()
 		}
 	}
 	return supervisorErr

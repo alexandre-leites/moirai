@@ -4,16 +4,21 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"time"
 )
 
-func writeExecutionManifest(directory, backend, executionID string, pid int) {
-	contents, err := json.Marshal(struct {
-		Backend     string    `json:"backend"`
-		ExecutionID string    `json:"executionId"`
-		PID         int       `json:"pid"`
-		StartedAt   time.Time `json:"startedAt"`
-	}{backend, executionID, pid, time.Now().UTC()})
+func writeExecutionManifest(directory, backend, jobID string, generation int64, executionID string, pid int) {
+	started, err := processStartTime(pid)
+	if err != nil || jobID == "" || generation < 1 || executionID == "" {
+		return
+	}
+	contents, err := json.Marshal(executionManifest{
+		Backend:          backend,
+		JobID:            jobID,
+		LeaseGeneration:  generation,
+		ExecutionID:      executionID,
+		PID:              pid,
+		ProcessStartTime: started,
+	})
 	if err == nil {
 		_ = os.WriteFile(filepath.Join(directory, "execution-manifest.json"), append(contents, '\n'), 0o600)
 	}

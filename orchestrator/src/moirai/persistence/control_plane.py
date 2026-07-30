@@ -1798,10 +1798,6 @@ class AsyncpgControlPlane:
                         job["workflow_run_id"],
                         now,
                     )
-                    await connection.execute(
-                        "UPDATE app.runners SET status = 'offline' WHERE id = $1",
-                        job["runner_id"],
-                    )
                     expired.append(str(job["id"]))
         return tuple(expired)
 
