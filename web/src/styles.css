@@ -222,3 +222,60 @@ td { font-size: 14px; }
 .stale-badge { margin-left: 8px; }
 .runner-row--stale { background: color-mix(in srgb, var(--warning) 10%, transparent); }
 .runner-row--stale > td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+
+.workflow-detail {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.workflow-detail dl, .workflow-attempts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 16px;
+}
+
+.workflow-detail dt { color: var(--text-dim); }
+.workflow-detail dd { overflow-wrap: anywhere; }
+
+.workflow-timeline {
+  list-style: none;
+  margin-bottom: 12px;
+  border-left: 1px solid var(--border);
+}
+
+.workflow-timeline-event {
+  padding: 0 0 16px 16px;
+  position: relative;
+}
+
+.workflow-timeline-event::before {
+  content: "";
+  position: absolute;
+  left: -5px;
+  top: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.workflow-timeline-event time {
+  margin-left: 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.workflow-timeline-event pre {
+  margin-top: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}

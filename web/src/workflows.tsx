@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { ApiClient, Workflow } from "./api";
 
 const AWAITING_APPROVAL_STATUS = "waiting_human";
@@ -6,14 +7,26 @@ const TERMINAL_STATUSES = new Set(["blocked", "failed", "cancelled"]);
 
 export function WorkflowsPage({ api }: { api: ApiClient }) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [projectNames, setProjectNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [reasonByID, setReasonByID] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     const ctrl = new AbortController();
-    api.listWorkflows(ctrl.signal).then(setWorkflows).catch(() => undefined).finally(() => setLoading(false));
+    Promise.all([api.listWorkflows(ctrl.signal), api.listProjects(ctrl.signal)])
+      .then(([loadedWorkflows, projects]) => {
+        setWorkflows(loadedWorkflows);
+        setProjectNames(Object.fromEntries(projects.map((project) => [project.id, project.name])));
+      })
+      .catch((err: unknown) => {
+        if (!ctrl.signal.aborted) setLoadError(err instanceof Error ? err.message : "Could not load workflows.");
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) setLoading(false);
+      });
     return () => ctrl.abort();
   }, [api]);
 
@@ -53,6 +66,7 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
   }
 
   if (loading) return <p>Loading workflows...</p>;
+  if (loadError) return <p className="error" role="alert">Could not load workflows: {loadError}</p>;
 
   return (
     <div>
@@ -64,8 +78,8 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
           <tbody>
             {workflows.map((w) => (
               <tr key={w.id}>
-                <td className="mono">{w.id.slice(0, 12)}</td>
-                <td>{w.projectId}</td>
+                <td className="mono"><Link to={`/workflows/${w.id}`}>{w.id.slice(0, 12)}</Link></td>
+                <td>{projectNames[w.projectId] ?? w.projectId}</td>
                 <td>{w.status}</td>
                 <td>{w.phase}</td>
                 <td>

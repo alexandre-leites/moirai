@@ -11,6 +11,7 @@ import { ProjectsPage } from "./projects";
 import { RunnersPage } from "./runners";
 import { TokensPage } from "./tokens";
 import { WorkflowsPage } from "./workflows";
+import { WorkflowDetailPage } from "./workflow-detail";
 import "./styles.css";
 
 const api = createApiClient();
@@ -126,6 +127,7 @@ function App() {
             <Route path="/runners" element={<ProtectedRoute><RunnersPage api={api} /></ProtectedRoute>} />
             <Route path="/tokens" element={<AdminRoute><TokensPage api={api} /></AdminRoute>} />
             <Route path="/workflows" element={<ProtectedRoute><WorkflowsPage api={api} /></ProtectedRoute>} />
+            <Route path="/workflows/:workflowId" element={<ProtectedRoute><WorkflowDetailPage api={api} /></ProtectedRoute>} />
           </Routes>
         </Layout>
       </AuthProvider>

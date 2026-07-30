@@ -3689,3 +3689,21 @@ Run `make test-runner` in a Go-enabled environment, then merge this issue after 
 ## Next Recommended Implementation
 
 Repair pre-existing runner compile failures, then run `make test-runner` and `make test-postgres-integration LOOP_TEST_DATABASE_URL=...`.
+
+---
+
+# Issue #117 — Workflow detail UI
+
+- In progress: 2026-07-30T04:16:32Z
+- Agent/session identifier: issue-117
+- Branch: `issue-117`
+- Scope: web workflow-detail UI and append-only `PROGRESS.md`; API, orchestrator, runner, and proto excluded.
+- Current state: implementing workflow detail data client, route, linked list rows with project names, paged event timeline, and error/empty states.
+- Definition of done: workflow detail exposes issue, execution state, branch, attempts, blocking reason, PR URL, and paged runner events/logs; list routes rows to detail; `make test-web`, typecheck, lint, and adversarial review pass.
+- Targeted validation: `make test-web`; `npm run typecheck`; `npm run lint`; `git diff --check`.
+- Completed: 2026-07-30T04:22:55Z
+- Behavior delivered: `/workflows/:workflowId` renders issue, workflow status/phase, branch, blocking reason, attempt counters, pull-request URL or explicit absence, and reverse-chronological runner-event timeline with readable nested log output. Cursor-backed loading appends older events. Workflow rows now route to details and map project IDs to names.
+- Tests added: API request shape; workflow list links/project names/load failure; workflow detail data, missing PR/events, pagination, timeline order, and failure/loading states.
+- Validation passed: `make test-web` — TypeScript no-emit, ESLint (10 pre-existing warnings; 0 errors), Vitest (139 passed); `git diff --check`.
+- Adversarial review: checked session credentials and URL encoding on reads, initial/detail and paginated event failures, empty-state distinction, nested runner `payload.message` logs, newest-first ordering across pages, cursor exhaustion, external PR link isolation, and abort protection. No remaining issue-117 finding.
+- Scope check: only `web/` implementation/tests plus append-only `PROGRESS.md`; API, orchestrator, runner, and proto unchanged.

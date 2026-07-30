@@ -13,6 +13,35 @@ export type Workflow = {
   phase: string;
 };
 
+export type WorkflowDetail = Workflow & {
+  issueExternalId: string;
+  issueTitle: string;
+  branchName: string;
+  pullRequestExternalId?: string;
+  pullRequestUrl?: string;
+  pullRequestState?: string;
+  blockingReason?: string;
+  planningAttempts: number;
+  implementationAttempts: number;
+  pipelineRepairAttempts: number;
+  ciRepairAttempts: number;
+  reviewCycles: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowEvent = {
+  id: string;
+  type: string;
+  createdAt: string;
+  payload: unknown;
+};
+
+export type WorkflowEventsPage = {
+  events: WorkflowEvent[];
+  nextCursor?: string;
+};
+
 // Mirrors the `Runner` schema in api/openapi.yaml, served by
 // GET /api/v1/runners (api/internal/http/handlers/runners.go). `status` is the
 // orchestrator's own column, currently "online" or "offline"; it is typed as a
@@ -107,6 +136,8 @@ export type ApiClient = {
   revokeToken(id: string): Promise<void>;
 
   listWorkflows(signal?: AbortSignal): Promise<Workflow[]>;
+  getWorkflow(id: string, signal?: AbortSignal): Promise<WorkflowDetail>;
+  listWorkflowEvents(id: string, cursor?: string, signal?: AbortSignal): Promise<WorkflowEventsPage>;
   submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<Workflow>;
   retryWorkflow(id: string, reason?: string): Promise<Workflow>;
   cancelWorkflow(id: string, reason?: string): Promise<Workflow>;
@@ -299,6 +330,20 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       const res = await fetchClient("/api/v1/workflows", { signal, credentials: "include" });
       const body: { workflows: Workflow[] } = await json(res);
       return body.workflows;
+    },
+
+    async getWorkflow(id: string, signal?: AbortSignal): Promise<WorkflowDetail> {
+      const res = await fetchClient(`/api/v1/workflows/${encodeURIComponent(id)}`, { signal, credentials: "include" });
+      return json(res);
+    },
+
+    async listWorkflowEvents(id: string, cursor?: string, signal?: AbortSignal): Promise<WorkflowEventsPage> {
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const res = await fetchClient(`/api/v1/workflows/${encodeURIComponent(id)}/events${query}`, {
+        signal,
+        credentials: "include",
+      });
+      return json(res);
     },
 
     async submitWorkflowDecision(
