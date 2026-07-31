@@ -319,11 +319,26 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
     },
 
     async revokeToken(id: string): Promise<void> {
-      await fetchClient(`/api/v1/runner-tokens/${id}`, {
+      const res = await fetchClient(`/api/v1/runner-tokens/${id}`, {
         method: "DELETE",
         headers: { ...csrfHeaders() },
         credentials: "include",
       });
+      if (!res.ok) {
+        if (res.status === 401) unauthorizedHandler?.();
+        let title = `request failed: ${res.status}`;
+        let detail: string | undefined;
+        try {
+          const body = await res.json();
+          if (body && typeof body === "object") {
+            if (typeof body.title === "string") title = body.title;
+            if (typeof body.detail === "string" && body.detail) detail = body.detail;
+          }
+        } catch {
+          // Response body was not JSON — fall back to the generic message.
+        }
+        throw new ApiError(res.status, detail ? `${title}: ${detail}` : title, detail);
+      }
     },
 
     async listWorkflows(signal?: AbortSignal): Promise<Workflow[]> {

@@ -6,6 +6,9 @@ export function TokensPage({ api }: { api: ApiClient }) {
   const [loading, setLoading] = useState(true);
   const [created, setCreated] = useState<CreatedToken | null>(null);
   const [labels, setLabels] = useState("");
+  const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [revoking, setRevoking] = useState<Set<string>>(new Set());
 
   const load = () => {
     const ctrl = new AbortController();
@@ -17,22 +20,34 @@ export function TokensPage({ api }: { api: ApiClient }) {
   useEffect(() => load(), [api]);
 
   const handleCreate = async () => {
+    setError("");
+    setCreating(true);
     try {
       const result = await api.createToken(labels.split(",").map((l) => l.trim()).filter(Boolean));
       setCreated(result);
       setLabels("");
       load();
-    } catch {
-      // silently fail
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Token creation failed");
+    } finally {
+      setCreating(false);
     }
   };
 
   const handleRevoke = async (id: string) => {
+    setError("");
+    setRevoking((prev) => new Set(prev).add(id));
     try {
       await api.revokeToken(id);
       setTokens(tokens.filter((t) => t.id !== id));
-    } catch {
-      // silently fail
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Token revocation failed");
+    } finally {
+      setRevoking((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -48,8 +63,11 @@ export function TokensPage({ api }: { api: ApiClient }) {
             onChange={(e) => setLabels(e.target.value)}
             placeholder="Allowed labels (comma-separated)"
           />
-          <button onClick={handleCreate}>Generate</button>
+          <button onClick={handleCreate} disabled={creating}>
+            {creating ? "Generating..." : "Generate"}
+          </button>
         </div>
+        {error && <p className="error" role="alert">{error}</p>}
         {created && (
           <div className="token-display">
             <p className="warning">This token is shown once. Copy it now.</p>
@@ -71,7 +89,9 @@ export function TokensPage({ api }: { api: ApiClient }) {
                 <td>{t.usedAt ? new Date(t.usedAt).toLocaleDateString() : "Unused"}</td>
                 <td>
                   {!t.revokedAt && !t.usedAt && (
-                    <button onClick={() => handleRevoke(t.id)}>Revoke</button>
+                    <button onClick={() => handleRevoke(t.id)} disabled={revoking.has(t.id)}>
+                      {revoking.has(t.id) ? "Revoking..." : "Revoke"}
+                    </button>
                   )}
                 </td>
               </tr>
