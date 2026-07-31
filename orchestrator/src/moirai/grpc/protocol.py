@@ -84,6 +84,19 @@ class QueueEntryRecord(TypedDict):
     blocked_reason: str
 
 
+class IssueSyncStatusRecord(TypedDict):
+    project_id: str
+    project_name: str
+    enabled: bool
+    issue_count: int
+    eligible_count: int
+    last_synced_at: datetime | None
+    consecutive_failures: int
+    next_retry_at: datetime | None
+    last_error: str | None
+    backing_off: bool
+
+
 class ControlPlane(Protocol):
     """The control-plane surface ControlPlaneService depends on.
 
@@ -182,6 +195,8 @@ class ControlPlane(Protocol):
     async def list_runners(self) -> list[RunnerRecord]: ...
 
     async def list_queue(self, now: datetime, limit: int) -> list[QueueEntryRecord]: ...
+
+    async def issue_sync_status(self, now: datetime) -> list[IssueSyncStatusRecord]: ...
 
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 

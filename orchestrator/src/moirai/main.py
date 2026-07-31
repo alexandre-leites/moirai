@@ -263,6 +263,7 @@ def register_services(
     control_plane: Any,
     now: Callable[[], Any] | None = None,
     workflow_runtime: Any | None = None,
+    issue_sync: Any | None = None,
 ) -> RunnerControlService:
     from moirai.grpc.control_plane import ControlPlaneService
     from moirai.grpc.runner_control import RunnerControlService
@@ -271,7 +272,11 @@ def register_services(
     runner_service = RunnerControlService(control_plane, now=now, workflow_runtime=workflow_runtime)
     control_plane_pb2_grpc.add_ControlPlaneServicer_to_server(
         ControlPlaneService(
-            control_plane, now=now, workflow_runtime=workflow_runtime, runner_control=runner_service
+            control_plane,
+            now=now,
+            workflow_runtime=workflow_runtime,
+            runner_control=runner_service,
+            issue_sync=issue_sync,
         ),
         server,
     )
@@ -404,7 +409,14 @@ async def serve(
             issue_tracker_factory=code_hosts.issue_tracker,
         )
 
-        runner_service = register_services(server, control_plane, workflow_runtime=workflow_runtime)
+        issue_sync = IssueSync(
+            control_plane, lambda project: github_issue_tracker_for_project(project, github_runner)
+        )
+        await issue_sync.restore_retry_state(datetime.now(UTC))
+
+        runner_service = register_services(
+            server, control_plane, workflow_runtime=workflow_runtime, issue_sync=issue_sync
+        )
 
         scheduler = Scheduler(
             control_plane,

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ApiClient, Runner } from "./api";
+import { useIsAdmin } from "./auth";
 import {
   countOnline,
   describeHeartbeat,
@@ -22,6 +23,7 @@ export type RunnersViewProps = {
   onRefresh: () => void;
   onSetState?: (runner: Runner, state: "drain" | "enable" | "revoke") => void;
   actioningRunnerID?: string | null;
+  isAdmin: boolean;
 };
 
 function LabelList({ labels }: { labels: string[] }) {
@@ -40,11 +42,13 @@ function RunnerRows({
   now,
   onSetState,
   actioningRunnerID,
+  isAdmin,
 }: {
   runners: Runner[];
   now: number;
   onSetState?: RunnersViewProps["onSetState"];
   actioningRunnerID?: string | null;
+  isAdmin: boolean;
 }) {
   return (
     <>
@@ -71,7 +75,7 @@ function RunnerRows({
               )}
             </td>
             <td>
-              {onSetState && runner.enabled && (
+              {isAdmin && onSetState && runner.enabled && (
                 <>
                   <button
                     onClick={() => onSetState(runner, runner.draining ? "enable" : "drain")}
@@ -98,6 +102,7 @@ export function RunnersView({
   onRefresh,
   onSetState,
   actioningRunnerID,
+  isAdmin,
 }: RunnersViewProps) {
   return (
     <div>
@@ -146,11 +151,11 @@ export function RunnersView({
                     <th>Labels</th>
                     <th>Draining</th>
                     <th>Last heartbeat</th>
-                    <th>Actions</th>
+                    {isAdmin && <th>Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  <RunnerRows runners={runners} now={now} onSetState={onSetState} actioningRunnerID={actioningRunnerID} />
+                  <RunnerRows runners={runners} now={now} onSetState={onSetState} actioningRunnerID={actioningRunnerID} isAdmin={isAdmin} />
                 </tbody>
               </table>
             </div>
@@ -160,6 +165,7 @@ export function RunnersView({
 }
 
 export function RunnersPage({ api }: { api: ApiClient }) {
+  const isAdmin = useIsAdmin();
   const [runners, setRunners] = useState<Runner[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -241,6 +247,7 @@ export function RunnersPage({ api }: { api: ApiClient }) {
       onRefresh={onRefresh}
       onSetState={onSetState}
       actioningRunnerID={actioningRunnerID}
+      isAdmin={isAdmin}
     />
   );
 }

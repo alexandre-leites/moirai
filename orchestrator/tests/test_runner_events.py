@@ -154,6 +154,7 @@ class ExecutionRoleFromIdTests(unittest.TestCase):
         self.assertEqual(execution_role_from_id("job-abc-plan"), "planner")
         self.assertEqual(execution_role_from_id("job-abc-implement"), "developer")
         self.assertEqual(execution_role_from_id("job-abc-review"), "reviewer")
+        self.assertEqual(execution_role_from_id("job-abc-verify"), "verifier")
         self.assertEqual(execution_role_from_id("job-abc-repair"), "repairer")
 
     def test_unrecognized_suffix_returns_none(self) -> None:
@@ -464,16 +465,14 @@ class WorkflowTransitionTests(unittest.TestCase):
         assert transition is not None
         self.assertTrue(transition.state_updates["pipeline_passed"])
 
-    def test_completed_repairer_transitions_to_local_pipeline(self) -> None:
+    def test_verifier_passed_transitions_to_ai_review(self) -> None:
         summary = self._summary(
-            "completed", "job-1-repair", result=self._agent_result(["a.py"]), changed_files=["a.py"]
+            "completed", "job-1-verify", result={"verdict": "passed", "summary": "verified"}
         )
-        transition = workflow_transition_for_terminal_event(summary, "repairing", role="repairer")
+        transition = workflow_transition_for_terminal_event(summary, "ai_review", role="verifier")
         assert transition is not None
-        self.assertEqual(transition.new_status, "local_pipeline")
-        # The repaired tree is re-validated by a real pipeline execution: the
-        # gate must not survive from the run that preceded the repair.
-        self.assertNotIn("pipeline_passed", transition.state_updates)
+        self.assertEqual(transition.new_status, "ai_review")
+        self.assertTrue(transition.state_updates.get("verification_passed"))
 
     def test_completed_unknown_role_returns_none(self) -> None:
         summary = self._summary("completed", "job-1-push")

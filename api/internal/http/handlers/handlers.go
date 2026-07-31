@@ -29,6 +29,20 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /api/v1/projects/{project_id}", requireMutation(h.limiter, h.updateProject))
 	mux.Handle("POST /api/v1/projects/{project_id}/enable", requireMutation(h.limiter, h.enableProject))
 	mux.Handle("POST /api/v1/projects/{project_id}/disable", requireMutation(h.limiter, h.disableProject))
+	mux.Handle("GET /api/v1/scheduler/metrics", auth.RequireSession(http.HandlerFunc(h.schedulerMetrics)))
+}
+
+func (h *ProjectHandlers) schedulerMetrics(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.GetSchedulerMetrics(requestContext(r))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, map[string]any{
+		"queueDepth":      resp.QueueDepth,
+		"activeWorkflows": resp.ActiveWorkflows,
+		"scheduledJobs":   resp.ScheduledJobs,
+	})
 }
 
 func (h *ProjectHandlers) listProjects(w http.ResponseWriter, r *http.Request) {
