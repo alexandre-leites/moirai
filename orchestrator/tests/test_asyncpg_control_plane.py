@@ -2523,5 +2523,50 @@ class FailureFingerprintDefinitionTests(unittest.TestCase):
         self.assertNotIn("secret-value", first)
 
 
+class _QueuePool:
+    """Answers `list_queue`'s single SELECT over app.issues AS i."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, object]] = []
+        self.query: str | None = None
+
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        del arguments
+        self.query = query
+        return self.rows
+
+
+class QueueDefinitionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_queue_selects_open_eligible_issues_with_reason(self) -> None:
+        pool = _QueuePool()
+        pool.rows = [
+            {
+                "project_id": "00000000-0000-0000-0000-000000000001",
+                "project_name": "Alpha",
+                "external_id": "42",
+                "title": "Implement queue",
+                "priority": 100,
+                "blocked_reason": "no_matching_runner",
+            },
+            {
+                "project_id": "00000000-0000-0000-0000-000000000002",
+                "project_name": "Beta",
+                "external_id": "7",
+                "title": "Lower priority",
+                "priority": 10,
+                "blocked_reason": "",
+            },
+        ]
+        entries = await AsyncpgControlPlane(pool).list_queue(NOW, 25)
+        assert pool.query is not None
+        self.assertIn("i.state = 'open'", pool.query)
+        self.assertIn("i.eligible = true", pool.query)
+        self.assertIn("ORDER BY i.priority DESC", pool.query)
+        self.assertIn("LIMIT $2", pool.query)
+        self.assertEqual(entries[0]["external_id"], "42")
+        self.assertEqual(entries[0]["blocked_reason"], "no_matching_runner")
+        self.assertEqual(entries[1]["blocked_reason"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

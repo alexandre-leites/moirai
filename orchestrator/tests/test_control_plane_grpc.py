@@ -20,6 +20,8 @@ class FakeControlPlane:
     def __init__(self) -> None:
         self.token_labels: tuple[str, ...] | None = None
         self.token_expiry: datetime | None = None
+        self.revoked_session_token: str | None = None
+        self.revoked_session_at: datetime | None = None
 
     async def login(self, username: str, password: str, now: datetime) -> SessionCredentials:
         if username != "admin" or password != "correct":
@@ -182,6 +184,20 @@ class FakeControlPlane:
 
     async def list_runners(self) -> list[dict[str, object]]:
         return []
+
+    async def list_queue(self, now: datetime, limit: int) -> list[dict[str, object]]:
+        del now
+        self.queue_request = ("list_queue", limit)
+        return [
+            {
+                "project_id": "project-1",
+                "project_name": "Example",
+                "external_id": "42",
+                "title": "Implement queue",
+                "priority": 100,
+                "blocked_reason": "",
+            }
+        ]
 
     async def revoke_session(self, session_token: str, now: datetime) -> None:
         self.revoked_session_token = session_token
@@ -382,6 +398,28 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                 metadata=(("x-loop-session", "viewer-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+
+    async def test_list_queue_returns_entries_and_enforces_limits(self) -> None:
+        response = await self.client.ListQueue(
+            control_plane_pb2.ListQueueRequest(limit=10),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(self.control_plane.queue_request, ("list_queue", 10))
+        self.assertEqual(len(response.entries), 1)
+        self.assertEqual(response.entries[0].project_id, "project-1")
+        self.assertEqual(response.entries[0].priority, 100)
+        self.assertEqual(response.entries[0].blocked_reason, "")
+
+        with self.assertRaises(grpc.aio.AioRpcError) as too_many:
+            await self.client.ListQueue(
+                control_plane_pb2.ListQueueRequest(limit=101),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(too_many.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+        with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
+            await self.client.ListQueue(control_plane_pb2.ListQueueRequest())
+        self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
     async def test_runner_controls_require_admin_csrf_and_persist_actor(self) -> None:
         session = await self.runner_service._sessions.connect("runner-1")

@@ -265,6 +265,14 @@ func (c *Client) ListRunners(ctx context.Context) (*controlv1.ListRunnersRespons
 	return resp, nil
 }
 
+func (c *Client) ListQueue(ctx context.Context, limit int32) (*controlv1.ListQueueResponse, error) {
+	resp, err := c.client.ListQueue(ctx, &controlv1.ListQueueRequest{Limit: limit})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error) {
 	resp, err := c.client.SetRunnerState(ctx, &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state})
 	if err != nil {

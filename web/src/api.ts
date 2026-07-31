@@ -153,6 +153,8 @@ export type ApiClient = {
   retryWorkflow(id: string, reason?: string): Promise<Workflow>;
   cancelWorkflow(id: string, reason?: string): Promise<Workflow>;
   blockWorkflow(id: string, reason: string): Promise<Workflow>;
+
+  listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]>;
 };
 
 // CSRF_COOKIE_NAME must match auth.CSRFCookieName in api/internal/auth/session.go —
@@ -397,5 +399,23 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
     async blockWorkflow(id: string, reason: string): Promise<Workflow> {
       return controlWorkflow(id, "block", reason);
     },
+
+    // --- Queue -----------------------------------------------------------------
+
+    async listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]> {
+      const query = limit ? `?limit=${limit}` : "";
+      const res = await fetchClient(`/api/v1/queue${query}`, { signal, credentials: "include" });
+      const body: { entries: QueueEntry[] } = await json(res);
+      return body.entries;
+    },
   };
 }
+
+export type QueueEntry = {
+  projectId: string;
+  projectName: string;
+  externalId: string;
+  title: string;
+  priority: number;
+  blockedReason: string;
+};

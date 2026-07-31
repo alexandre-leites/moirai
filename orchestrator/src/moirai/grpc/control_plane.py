@@ -10,6 +10,7 @@ import grpc
 from moirai.grpc.protocol import (
     ControlPlane,
     ProjectRecord,
+    QueueEntryRecord,
     RegistrationTokenRecord,
     RunnerRecord,
     WorkflowDetailRecord,
@@ -21,6 +22,8 @@ from proto import control_plane_pb2, control_plane_pb2_grpc
 
 _SESSION_METADATA_KEY = "x-loop-session"
 _CSRF_METADATA_KEY = "x-loop-csrf"
+_QUEUE_DEFAULT_LIMIT = 50
+_QUEUE_MAX_LIMIT = 100
 
 
 class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
@@ -302,6 +305,26 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             runners=[_runner_message(runner) for runner in runners]
         )
 
+    async def ListQueue(
+        self,
+        request: control_plane_pb2.ListQueueRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.ListQueueResponse:
+        await self._require_session(context)
+        limit = request.limit if request.limit > 0 else _QUEUE_DEFAULT_LIMIT
+        if limit > _QUEUE_MAX_LIMIT:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"queue limit must be between 1 and {_QUEUE_MAX_LIMIT}",
+            )
+        try:
+            entries = await self._control_plane.list_queue(self._now(), limit)
+        except NotImplementedError:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "queue is unavailable")
+        return control_plane_pb2.ListQueueResponse(
+            entries=[_queue_entry_message(entry) for entry in entries]
+        )
+
     async def SetRunnerState(
         self,
         request: control_plane_pb2.SetRunnerStateRequest,
@@ -504,6 +527,17 @@ def _runner_message(runner: RunnerRecord) -> control_plane_pb2.Runner:
         status=runner["status"],
         labels=runner["labels"],
         last_seen_at=_optional_timestamp(runner["last_seen_at"]),
+    )
+
+
+def _queue_entry_message(entry: QueueEntryRecord) -> control_plane_pb2.QueueEntry:
+    return control_plane_pb2.QueueEntry(
+        project_id=entry["project_id"],
+        project_name=entry["project_name"],
+        external_id=entry["external_id"],
+        title=entry["title"],
+        priority=entry["priority"],
+        blocked_reason=entry["blocked_reason"],
     )
 
 

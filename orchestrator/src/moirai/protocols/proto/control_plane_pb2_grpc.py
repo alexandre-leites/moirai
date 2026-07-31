@@ -79,6 +79,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.ListRunnersResponse.FromString,
                 _registered_method=True)
+        self.ListQueue = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/ListQueue',
+                request_serializer=proto_dot_control__plane__pb2.ListQueueRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ListQueueResponse.FromString,
+                _registered_method=True)
         self.SetRunnerState = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/SetRunnerState',
                 request_serializer=proto_dot_control__plane__pb2.SetRunnerStateRequest.SerializeToString,
@@ -192,6 +197,12 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListQueue(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SetRunnerState(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -295,6 +306,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.ListRunners,
                     request_deserializer=proto_dot_control__plane__pb2.ListRunnersRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.ListRunnersResponse.SerializeToString,
+            ),
+            'ListQueue': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListQueue,
+                    request_deserializer=proto_dot_control__plane__pb2.ListQueueRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ListQueueResponse.SerializeToString,
             ),
             'SetRunnerState': grpc.unary_unary_rpc_method_handler(
                     servicer.SetRunnerState,
@@ -678,6 +694,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/ListRunners',
             proto_dot_control__plane__pb2.ListRunnersRequest.SerializeToString,
             proto_dot_control__plane__pb2.ListRunnersResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListQueue(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/ListQueue',
+            proto_dot_control__plane__pb2.ListQueueRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ListQueueResponse.FromString,
             options,
             channel_credentials,
             insecure,

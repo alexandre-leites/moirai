@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     # Protocol-conformance check, so this side must not import it at runtime.
     from moirai.grpc.protocol import (
         ProjectRecord,
+        QueueEntryRecord,
         RegistrationTokenRecord,
         RunnerRecord,
         WorkflowDetailRecord,
@@ -135,6 +136,90 @@ class _CircuitProbeUnavailable(Exception):
     Raised and caught entirely inside `_claim_circuit_probes`; it exists to
     reach the enclosing savepoint, never to reach a caller.
     """
+
+
+def _runner_conditions(runner: str) -> str:
+    """SQL conditions a runner row must satisfy to serve a project.
+
+    Shared by `AsyncpgControlPlane.schedule` and `.list_queue` so the two can
+    never disagree on what "a runner can serve this project" means. `runner`
+    is the SQL alias of the `app.runners` row; the conditions reference the
+    `p` alias of `app.projects` for the required labels, so `p` must be in
+    scope wherever the fragment is embedded.
+    """
+    return (
+        f"{runner}.enabled = true"
+        f" AND {runner}.draining = false"
+        f" AND {runner}.revoked_at IS NULL"
+        f" AND {runner}.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)"
+        f" AND ("
+        f"    SELECT COUNT(*) FROM app.jobs AS active_job"
+        f"    WHERE active_job.runner_id = {runner}.id"
+        f"      AND active_job.status IN ('offered', 'preparing', 'running')"
+        f" ) < {runner}.capacity"
+    )
+
+
+def _locked_condition(project: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM app.project_locks AS lock WHERE lock.project_id = {project}.id)"
+    )
+
+
+def _project_circuit_condition(project: str, cooldown: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM app.project_circuit_state AS circuit"
+        f" WHERE circuit.project_id = {project}.id"
+        f" AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > {cooldown})))"
+    )
+
+
+def _provider_circuit_condition(issue: str, cooldown: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM app.provider_circuit_state AS circuit"
+        f" WHERE circuit.provider = {issue}.provider"
+        f" AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > {cooldown})))"
+    )
+
+
+def _scheduling_conditions(issue: str, project: str, cooldown: str) -> str:
+    """The issue/project half of the scheduling predicate.
+
+    `schedule()` ANDs this with `_runner_conditions`. `list_queue()` keeps the
+    whole predicate under a CASE and negates each term to report why an issue
+    is not currently scheduled, so the reader cannot drift from the writer.
+    """
+    return (
+        f"{issue}.eligible = true"
+        f" AND {project}.enabled = true"
+        f" AND {_locked_condition(project)}"
+        f" AND {_project_circuit_condition(project, cooldown)}"
+        f" AND {_provider_circuit_condition(issue, cooldown)}"
+    )
+
+
+def _blocked_reason_case(issue: str, project: str, cooldown: str) -> str:
+    """The first scheduling condition an issue fails, or '' when it passes all.
+
+    Ordering is deliberate: `project_disabled` is the root cause and is
+    reported first, then transient blockers in the order an operator would
+    clear them (lock, project circuit, provider circuit), then runner
+    availability. Every `WHEN NOT (...) ` term is the textual negation of the
+    exact condition `_scheduling_conditions`/`_runner_conditions` generate.
+    """
+    return (
+        f"CASE"
+        f" WHEN NOT {project}.enabled THEN 'project_disabled'"
+        f" WHEN NOT ({_locked_condition(project)}) THEN 'project_locked'"
+        f" WHEN NOT ({_project_circuit_condition(project, cooldown)}) THEN 'project_circuit_open'"
+        f" WHEN NOT ({_provider_circuit_condition(issue, cooldown)}) THEN 'provider_circuit_open'"
+        f" WHEN NOT EXISTS ("
+        f"    SELECT 1 FROM app.runners AS runner"
+        f"    WHERE runner.status = 'online' AND {_runner_conditions('runner')}"
+        f" ) THEN 'no_matching_runner'"
+        f" ELSE ''"
+        f" END"
+    )
 
 
 class AsyncpgControlPlane:
@@ -1402,31 +1487,8 @@ class AsyncpgControlPlane:
                     FROM app.issues AS i
                     JOIN app.projects AS p ON p.id = i.project_id
                     JOIN app.runners AS r ON r.status = 'online'
-                    WHERE i.eligible = true
-                      AND p.enabled = true
-                      AND r.enabled = true
-                      AND r.draining = false
-                      AND r.revoked_at IS NULL
-                      AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
-                       AND NOT EXISTS (
-                           SELECT 1 FROM app.project_locks AS lock
-                           WHERE lock.project_id = p.id
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1 FROM app.project_circuit_state AS circuit
-                           WHERE circuit.project_id = p.id
-                             AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > $1))
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1 FROM app.provider_circuit_state AS circuit
-                           WHERE circuit.provider = i.provider
-                             AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > $1))
-                       )
-                       AND (
-                           SELECT COUNT(*) FROM app.jobs AS active_job
-                          WHERE active_job.runner_id = r.id
-                            AND active_job.status IN ('offered', 'preparing', 'running')
-                      ) < r.capacity
+                    WHERE {_scheduling_conditions("i", "p", "$1")}
+                      AND {_runner_conditions("r")}
                     ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at,
                              i.project_id, i.external_id, r.id
                     FOR UPDATE OF i, p, r SKIP LOCKED
@@ -1511,6 +1573,45 @@ class AsyncpgControlPlane:
         lease = JobLease(str(job_id), runner.id, 1, expires_at)
         offer = JobOffer(str(job_id), workflow.id, issue.id, runner.id, expires_at, lease)
         return ScheduledJob(Assignment(issue, runner), workflow, offer)
+
+    async def list_queue(self, now: datetime, limit: int = 50) -> list[QueueEntryRecord]:
+        """Return the eligible-issue queue in the scheduler's own ordering.
+
+        Every eligible open issue appears, disabled projects included, so an
+        operator can see *why* the top entries are not running. Each entry
+        carries a machine-readable `blocked_reason`; it is empty exactly when
+        `schedule()` would consider the issue schedulable, because the reason
+        is computed from the same predicate fragments `schedule()` embeds.
+        """
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        records = await self._pool.fetch(
+            f"""
+            SELECT i.external_id, i.title, i.priority,
+                   p.id AS project_id, p.name AS project_name,
+                   {_blocked_reason_case("i", "p", "$1")} AS blocked_reason
+            FROM app.issues AS i
+            JOIN app.projects AS p ON p.id = i.project_id
+            WHERE i.eligible = true
+              AND i.state = 'open'
+            ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at,
+                     i.project_id, i.external_id
+            LIMIT $2
+            """,
+            now - self._circuit_probe_cooldown,
+            limit,
+        )
+        return [
+            {
+                "project_id": str(record["project_id"]),
+                "project_name": str(record["project_name"]),
+                "external_id": str(record["external_id"]),
+                "title": str(record["title"]),
+                "priority": int(record["priority"]),
+                "blocked_reason": str(record["blocked_reason"]),
+            }
+            for record in records
+        ]
 
     async def schedule_execution(self, now: datetime, offer_ttl: timedelta) -> ScheduledJob | None:
         if offer_ttl <= timedelta():

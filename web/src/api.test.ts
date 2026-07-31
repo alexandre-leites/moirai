@@ -137,6 +137,7 @@ describe("createApiClient CSRF handling", () => {
       ["listWorkflowEvents", (api) => api.listWorkflowEvents("w1")],
       ["listTokens", (api) => api.listTokens()],
       ["listRunners", (api) => api.listRunners()],
+      ["listQueue", (api) => api.listQueue()],
     ];
 
     for (const [name, read] of reads) {
@@ -395,6 +396,17 @@ describe("createApiClient request shapes", () => {
     const { fetchClient } = recorder(() => new Response(null, { status: 503 }));
     await expect(createApiClient(fetchClient).health()).resolves.toBe("unhealthy");
     await expect(createApiClient(async () => new Response(null, { status: 200 })).health()).resolves.toBe("healthy");
+  });
+
+  it("listQueue unwraps the envelope and forwards the limit query", async () => {
+    const entries = [{ projectId: "p1", projectName: "svc", externalId: "42", title: "Fix bug", priority: 100, blockedReason: "" }];
+    const { calls, fetchClient } = recorder(() => jsonResponse({ entries }));
+    const api = createApiClient(fetchClient);
+
+    await expect(api.listQueue()).resolves.toEqual(entries);
+    expect(calls[0].url).toBe("/api/v1/queue");
+    await expect(api.listQueue(undefined, 25)).resolves.toEqual(entries);
+    expect(calls[1].url).toBe("/api/v1/queue?limit=25");
   });
 
   it("forwards the abort signal so a navigation cancels the request in flight", async () => {
