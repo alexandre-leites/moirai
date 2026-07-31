@@ -3811,3 +3811,21 @@ Implement backend fallback only after a runner task-packet backend-selection con
 - Adversarial review: checked malformed planner result rejection, terminal-only planner persistence, payload entry limits, checklist fallback and planner criteria merge, failure fingerprint omission, output-tail selection, stale/empty revision rejection, pipeline-result fallback, and terminal payload field limit. No remaining issue #106 finding.
 - Known validation blocker: `PATH=/tmp/opencode/go/bin:$PATH go test ./internal/dispatch -run TestTerminalPayloadIncludesBoundedFailedPipelineOutput` cannot compile the unchanged `runner/internal/control/offer.go:186` (`jobID` declared and unused). Runner source changed only because command-level exit/output evidence cannot be reconstructed in the orchestrator.
 - Next recommended implementation: issue #114 pipeline configuration write path, then validate task-packet pipeline evidence against PostgreSQL.
+
+---
+
+## Issue #196 — Responsive layout at 390px
+
+## Done
+
+- [x] Add mobile navigation and compact table layout
+  - PR: #200
+  - Merged: `787befa3f09fa4ae6584d188d0f6c33e801e9fed`
+  - Files: `web/src/main.tsx`, `web/src/styles.css` (92 insertions, 8 deletions)
+  - Behavior delivered:
+    1. **Mobile nav**: sticky header with hamburger toggle → slide-in panel (nav, health, sign out). Closes on route change, backdrop click, Escape.
+    2. **Compact tables**: narrower font/padding/buttons/pills below 560px so runner controls visible at 390px.
+    3. **Desktop unchanged**: all under `@media (max-width: 820px)` and `@media (max-width: 560px)`.
+  - Validation performed: 140/140 web tests pass; typecheck clean; lint 0 errors (12 pre-existing warnings); production build clean.
+  - CI status: all 10 checks queued — both self-hosted runners offline at time of merge. Merged via `gh pr merge --squash`.
+  - Commands executed: `npm test` (140/140); `npm run typecheck` (clean); `npx eslint .` (0 errors); `npm run build` (clean)
