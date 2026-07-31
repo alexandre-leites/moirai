@@ -756,6 +756,34 @@ func TestDispatcherKeepsWorkInProgressLocalWhenPushingIsNotPermitted(t *testing.
 	}
 }
 
+// TestDispatcherAnchorsCompletedWorkThatMayNotPush verifies issue #167: a
+// completed file-modifying execution whose role lacks `mayPush` (e.g. repairer)
+// commits on the execution branch but never publishes. The commit must be
+// anchored outside refs/heads so the next preparation cannot destroy it.
+func TestDispatcherAnchorsCompletedWorkThatMayNotPush(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	delivery := &deliveryManager{
+		commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"},
+	}
+	lease := deliverableLease()
+	lease.Packet.Constraints.MayPush = false
+	dispatcher := Dispatcher{Workspaces: manager, Backend: &backend{result: agents.Result{Status: "completed"}}, Delivery: delivery}
+
+	result, err := dispatcher.Execute(context.Background(), lease)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.Status != "completed" || !result.Committed || result.Pushed || result.Branch != "" {
+		t.Fatalf("completed run reported incorrect delivery state: %#v", result)
+	}
+	if len(delivery.recordedReferences) != 1 || delivery.recordedReferences[0] != "refs/moirai-wip/execution-1" {
+		t.Fatalf("completed work was not anchored: recorded references = %#v", delivery.recordedReferences)
+	}
+	if len(delivery.commits) != 1 || len(delivery.pushes) != 0 || len(delivery.workInProgressPushes) != 0 {
+		t.Fatalf("delivery calls = commits=%#v, pushes=%#v, wipPushes=%#v", delivery.commits, delivery.pushes, delivery.workInProgressPushes)
+	}
+}
+
 // TestDispatcherReportsTheOriginalFailureWhenRetainingWorkFails proves that
 // preserving a failed run's remains never replaces the failure the orchestrator
 // has to see.
