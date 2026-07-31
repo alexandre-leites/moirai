@@ -40,11 +40,13 @@ function RunnerRows({
   now,
   onSetState,
   actioningRunnerID,
+  isAdmin,
 }: {
   runners: Runner[];
   now: number;
   onSetState?: RunnersViewProps["onSetState"];
   actioningRunnerID?: string | null;
+  isAdmin: boolean;
 }) {
   return (
     <>
@@ -71,7 +73,7 @@ function RunnerRows({
               )}
             </td>
             <td>
-              {onSetState && runner.enabled && (
+              {onSetState && isAdmin && runner.enabled && (
                 <>
                   <button
                     onClick={() => onSetState(runner, runner.draining ? "enable" : "drain")}
@@ -99,6 +101,7 @@ export function RunnersView({
   onSetState,
   actioningRunnerID,
 }: RunnersViewProps) {
+  const isAdmin = useIsAdmin();
   return (
     <div>
       <div className="page-header">
@@ -146,11 +149,11 @@ export function RunnersView({
                     <th>Labels</th>
                     <th>Draining</th>
                     <th>Last heartbeat</th>
-                    <th>Actions</th>
+                    {isAdmin && <th>Actions</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  <RunnerRows runners={runners} now={now} onSetState={onSetState} actioningRunnerID={actioningRunnerID} />
+                  <RunnerRows runners={runners} now={now} onSetState={onSetState} actioningRunnerID={actioningRunnerID} isAdmin={isAdmin} />
                 </tbody>
               </table>
             </div>
@@ -160,6 +163,7 @@ export function RunnersView({
 }
 
 export function RunnersPage({ api }: { api: ApiClient }) {
+  const isAdmin = useIsAdmin();
   const [runners, setRunners] = useState<Runner[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -171,6 +175,7 @@ export function RunnersPage({ api }: { api: ApiClient }) {
 
   const onRefresh = useCallback(() => setRefreshToken((token) => token + 1), []);
   const onSetState = useCallback((runner: Runner, state: "drain" | "enable" | "revoke") => {
+    if (!isAdmin) return; // ponytail: backend is security boundary, ui safety only
     if (state === "revoke" && !window.confirm(`Revoke ${runner.name}? This disconnects it and invalidates its credential.`)) return;
     setActioningRunnerID(runner.id);
     void api.setRunnerState(runner.id, state).then((updated) => {
@@ -179,7 +184,7 @@ export function RunnersPage({ api }: { api: ApiClient }) {
     }).catch((error: unknown) => {
       setError(error instanceof Error ? error.message : String(error));
     }).finally(() => setActioningRunnerID(null));
-  }, [api]);
+  }, [api, isAdmin]);
 
   useEffect(() => {
     let cancelled = false;
