@@ -17,7 +17,9 @@ func TestEventReporterFlushWaitsForInFlight(t *testing.T) {
 	}
 
 	// Trigger async send
-	_, _ = reporter.Emit(lease.JobID, lease.Generation, "started", nil)
+	go func() {
+		_, _ = reporter.Emit(lease.JobID, lease.Generation, "started", nil)
+	}()
 	<-client.started // Wait for send to start
 
 	// Call Flush, it should block
