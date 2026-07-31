@@ -29,14 +29,44 @@ class WhoAmIRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class WhoAmIResponse(_message.Message):
-    __slots__ = ("user_id", "username", "role")
+    __slots__ = ("user_id", "username", "role", "email", "display_name")
     USER_ID_FIELD_NUMBER: _ClassVar[int]
     USERNAME_FIELD_NUMBER: _ClassVar[int]
     ROLE_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
     user_id: str
     username: str
     role: str
-    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ...) -> None: ...
+    email: str
+    display_name: str
+    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ..., email: _Optional[str] = ..., display_name: _Optional[str] = ...) -> None: ...
+
+class UpdateAccountRequest(_message.Message):
+    __slots__ = ("current_password", "new_password", "new_email", "display_name")
+    CURRENT_PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    NEW_PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    NEW_EMAIL_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    current_password: str
+    new_password: str
+    new_email: str
+    display_name: str
+    def __init__(self, current_password: _Optional[str] = ..., new_password: _Optional[str] = ..., new_email: _Optional[str] = ..., display_name: _Optional[str] = ...) -> None: ...
+
+class UpdateAccountResponse(_message.Message):
+    __slots__ = ("user_id", "username", "role", "email", "display_name")
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    ROLE_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    user_id: str
+    username: str
+    role: str
+    email: str
+    display_name: str
+    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ..., email: _Optional[str] = ..., display_name: _Optional[str] = ...) -> None: ...
 
 class ListProjectsRequest(_message.Message):
     __slots__ = ()

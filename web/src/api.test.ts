@@ -335,6 +335,22 @@ describe("createApiClient request shapes", () => {
     expect(calls[1].url).toBe("/api/v1/projects/p1/disable");
   });
 
+  it("PUTs the account update to the account endpoint", async () => {
+    const { calls, fetchClient } = recorder(() => jsonResponse({ userId: "u-1", username: "ada", role: "admin", email: "", displayName: "" }));
+    const api = createApiClient(fetchClient);
+
+    await api.updateAccount({ currentPassword: "old", newPassword: "new", newEmail: "ada@example.com", displayName: "Ada" });
+
+    expect(calls[0].url).toBe("/api/v1/auth/account");
+    expect(calls[0].init?.method).toBe("PUT");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      currentPassword: "old",
+      newPassword: "new",
+      newEmail: "ada@example.com",
+      displayName: "Ada",
+    });
+  });
+
   it("requests workflow detail and event pages with encoded IDs and cursors", async () => {
     const { calls, fetchClient } = recorder((call) => call.url.includes("/events")
       ? jsonResponse({ events: [], nextCursor: "next" })

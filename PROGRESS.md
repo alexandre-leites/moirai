@@ -2,11 +2,30 @@
 
 ## Current Status
 
-- Overall status: Web console mockup interaction coverage complete
-- Current phase: Design mockup completion
+- Overall status: Account management (change password / email / display name) implemented end to end
+- Current phase: Account management + password policy relaxation
 - Active implementation: None
-- Last updated: 2026-07-30
-- Agent/session identifier: opencode-empty-states-20260730
+- Last updated: 2026-07-31
+- Agent/session identifier: opencode-account-management-20260731
+
+## Done
+
+- [x] Implement user-facing account management (change password / email / display name) and relax the password policy
+  - Completed: 2026-07-31
+  - Agent/session identifier: opencode-account-management-20260731
+  - Relevant files: `proto/control_plane.proto`, `gen/go/gen/control/v1/control_plane{,_grpc}.pb.go`, `orchestrator/src/moirai/protocols/proto/control_plane_pb2{,.pyi,_grpc}.py`, `orchestrator/migrations/013_user_profile.sql`, `orchestrator/src/moirai/persistence/authentication.py`, `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/grpc/protocol.py`, `orchestrator/src/moirai/grpc/control_plane.py`, `api/internal/orchestrator/client.go`, `api/internal/http/handlers/auth.go`, `api/cmd/api/main.go`, `api/openapi.yaml`, `web/src/api.ts`, `web/src/auth.tsx`, `web/src/account.tsx`, `web/src/main.tsx`, `web/src/styles.css`, `buf.yaml`, and tests.
+  - Behavior delivered:
+    - Password policy relaxed to 8-1024 chars plus at least one number, one uppercase, one lowercase, and one symbol, enforced in `hash_password`.
+    - New `UpdateAccount` gRPC RPC (current password required for a password change, other sessions revoked, own session survives); `WhoAmI` now returns `email` and `display_name`.
+    - `app.users` gains `email` and `display_name` columns (migration 013, idempotent).
+    - `AsyncpgAuthentication.update_account` transactional (row lock, verify current password, revoke sibling sessions, audit event).
+    - REST `PUT /api/v1/auth/account` (session + CSRF + mutation rate limit) and extended `GET /api/v1/auth/me`; OpenAPI documents `User.email`/`displayName` and `AccountUpdate`.
+    - Web Account page (display name, email, password change with confirm) plus auth context `refresh()`; nav link in the sidebar.
+    - `buf.yaml` excludes `.claude` so `buf generate` ignores agent worktree copies of the protos.
+  - Validation performed: 513 orchestrator unit tests pass; 3 new PostgreSQL integration tests for `update_account` pass (throwaway postgres:16, schema reset, full integration suite baseline unchanged — 2 pre-existing `StalledRunRecovery` failures confirmed on clean `HEAD` before my changes); Go `go vet` + `go test ./...` pass; web `vitest run` 147 pass, `tsc --noEmit` clean, eslint 0 errors (12 pre-existing warnings); `ruff check` clean; `mypy --strict` clean; `buf lint` clean.
+  - Commands executed: `make proto-generate`; `.venv/bin/python3 -m unittest discover -s orchestrator/tests`; `LOOP_TEST_DATABASE_URL=... python3 -m unittest discover -s orchestrator/tests -p test_postgres_integration.py`; Dockerized `go vet ./...` and `go test ./...`; `node_modules/.bin/vitest run`; `node_modules/.bin/tsc --noEmit`; `node_modules/.bin/eslint .`; `.venv/bin/python3 -m ruff check orchestrator/src orchestrator/tests`; `.venv/bin/python3 -m mypy --cache-dir=/tmp/mypy-final orchestrator/src`; `make proto-check`.
+  - Notes: `.venv` was recreated (was missing pip); dev tools (`grpcio`, `protobuf`, `prometheus-client`, `asyncpg`, `psycopg`, `langgraph`, `ruff`, `mypy`, `types-grpcio`, `types-protobuf`, `asyncpg-stubs`) were installed into it to run local validation.
+  - Known issues: The 2 pre-existing `StalledRunRecovery` integration-test failures exist on clean `HEAD` (verified by stashing `orchestrator/src` + `orchestrator/migrations`); they are unrelated to this work.
 
 ## Done
 
@@ -376,6 +395,8 @@ Not run: `make test-postgres-integration` (requires `LOOP_TEST_DATABASE_URL`), `
 
 ## Pending Implementation
 
+- [ ] Continue the next incomplete MVP requirement after the account-management work is merged (see `Next Recommended Implementation` below).
+
 - [ ] Continue the next incomplete MVP requirement after current PRs merge.
 
 - [ ] Continue the next incomplete MVP requirement after the #51 PR is merged.
@@ -477,6 +498,8 @@ Not run: `make test-postgres-integration` (requires `LOOP_TEST_DATABASE_URL`), `
   - Suggested resolution: Address Fast Refresh and React hook dependency warnings in a dedicated web task.
 
 ## Next Recommended Implementation
+
+After the account-management change lands: implement email verification or password reset flows (a forgotten-password reset needs an out-of-band reset token with expiry, a `reset_tokens` table or signed-token column, and a recovery RPC), then continue with any remaining MVP acceptance criterion from `PROJECT.md` (the web console queue/scheduler-metrics placeholder on the Overview page is a concrete next item).
 
 Finish rebasing and validating PR #74, then wait for its CI to establish mergeability without merging it.
 
@@ -3881,3 +3904,83 @@ Implement backend fallback only after a runner task-packet backend-selection con
 ### Remaining
 
 - Commit, push, open PR with body `Closes #112`, monitor CI, merge, post audit-trail comment, apply FINISHED_LABEL.
+
+# Autonomous issue loop — pass record (2026-07-31)
+
+## Current Status
+
+- Overall status: gh-issue-loop armed via crontab; two passes executed
+- Current phase: Autonomous issue processing (P1/P2 queue)
+- Active implementation: None (queue blocked on stuck issues)
+- Last updated: 2026-07-31T03:06Z
+- Agent/session identifier: gh-issue-loop
+
+## Pass 1 (00:16Z): claimed 4, merged 3, 1 blocked on CI
+
+- #194 token revocation → PR #199 MERGED (`7d37075`), `ai-finished` applied
+- #196 mobile console → PR #200 MERGED (`787befa`), `ai-finished` applied
+- #198 logout session → PR #201 MERGED (`0d7db14`, merged pre-pass), `ai-finished` applied
+- #167 commit anchor → PR #202 MERGED (`f61f27d`, merged during pass 2), `ai-finished` applied
+
+## Pass 2 (02:30Z): reaped stale leases, claimed 2, merged 2
+
+- Reaped stale leases: #108, #114 (18h+ abandoned), then #168/#193/#195/#197 (agents infra-killed, no PRs)
+- #193 WIP preserved as commit `e52e9c1` on `issue-193`
+- #112 global queue → PR #205 MERGED (`1783334`), `ai-finished` applied
+- #192 project config UI → PR #204 MERGED (`f266203`), `ai-finished` applied
+- #118 de-claimed (proto conflict with #112); a subsequent cron fire re-claimed it, its agent polluted the main checkout (reverted, junk removed) and died without a PR
+
+## Queue state: blocked
+
+All remaining `ai-doable` issues carry `ai-working` with no lease and no PR. These are stuck issues needing a human to clear `WORKING_LABEL`:
+
+- #108, #114, #116, #143, #152 — claimed 07-30, agents dead, no PR
+- #168, #193, #195, #197 — claimed 02:29Z by cron-fired agents that died; leases reaped
+- #118 — claimed 02:35Z by a cron-fired agent that died; main-checkout pollution cleaned
+
+No eligible issues remain. New `ai-doable` issues or cleared labels will unblock the queue.
+
+## Cron behaviour observed
+
+- Crontab: `*/5 * * * * opencode run --auto --command gh-issue-loop run`
+- Cron-fired agents claimed issues but did not bind leases and did not work in worktrees (polluted the main checkout: stray `issue-*.json`, `run_loop.sh`, fake `issue-118` worktree dir, uncommitted `proto/control_plane.proto`). All cleaned up and reverted. PROGRESS.md was overwritten by a cron agent and restored from HEAD.
+- Loop command: `/root/.config/opencode/commands/gh-issue-loop.md`
+
+## Pass 3 (03:57Z): no-op, queue fully blocked
+
+- Eligible set empty: all 10 open issues carry `ai-working` (#108 #114 #116 #118 #143 #152 #168 #193 #195 #197). No leases held (INFLIGHT=0), no open PRs, no new `ai-doable` issues.
+- HEAD unchanged: `1783334` (feat: expose the eligible-issue queue through API and web (#205)).
+- Cron agents idle and clean this pass (no eligible issues to misclaim).
+- last-run.json: conclusion `all-blocked`.
+- Unblock requires human: clear `WORKING_LABEL` on stuck issues (never auto-clear), or new `ai-doable` issues appear.
+
+---
+
+# Session: user account profile features (2026-07-31)
+
+## Current Status
+
+- Overall status: implementing missing Web App -> API account features
+- Current phase: user account management (change password, change email, display name) + relaxed password policy
+- Active implementation: account profile vertical slice
+- Last updated: 2026-07-31T04:05Z
+- Agent/session identifier: implementer-account-profile
+
+## In Progress
+
+- [ ] User account profile features (change password / change email / display name) + relaxed password policy
+  - Started: 2026-07-31T04:05Z
+  - Relevant files: `proto/control_plane.proto`, `gen/go`, `orchestrator/src/moirai/protocols`, `orchestrator/src/moirai/persistence/authentication.py`, `orchestrator/src/moirai/persistence/control_plane.py`, `orchestrator/src/moirai/grpc/{control_plane,protocol}.py`, `orchestrator/migrations/013_user_profile.sql`, `api/internal/orchestrator/client.go`, `api/internal/http/handlers/auth.go`, `web/src/{api,auth,main}.tsx`, `web/src/account.tsx`
+  - Current state: design decided; proto + persistence + grpc + api + web
+  - Remaining work: implement all layers, regenerate protos, tests
+  - Definition of done: Web UI can change display name, email, and password; password policy is 8+ chars with 1 number / 1 capital / 1 lowercase / 1 symbol; tests pass; proto-check clean
+  - Targeted validation: `make test-orchestrator`, `make test-api`, `make test-web`, `make proto-check`, `make lint`, `make typecheck`
+
+## Decisions
+
+- New RPC `UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse)`; response carries updated user_id/username/role/email/display_name so web refreshes header without a second `me()` call.
+- `WhoAmIResponse` extended with `email` and `display_name`; `AuthenticatedSession` gains the two fields (default ""), SELECT in `validate_session` joins them from `app.users`.
+- `app.users` gains `email TEXT NOT NULL DEFAULT ''` and `display_name TEXT NOT NULL DEFAULT ''` via new migration `013_user_profile.sql`.
+- Password policy (was 12-1024, no complexity): 8-1024 chars, at least 1 number, 1 capital, 1 lowercase, 1 symbol. Change applies at `hash_password`/`_validate_password`, so only new/changed passwords; existing hashes keep verifying.
+- Changing password requires the current password and revokes every session except the caller's, forcing other devices to re-authenticate.
+- UpdateAccount requires session + CSRF; wrong current password maps to 422 (FailedPrecondition -> ErrInvalidInput).

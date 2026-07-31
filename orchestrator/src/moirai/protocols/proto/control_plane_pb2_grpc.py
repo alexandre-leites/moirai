@@ -24,6 +24,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.WhoAmIRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.WhoAmIResponse.FromString,
                 _registered_method=True)
+        self.UpdateAccount = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/UpdateAccount',
+                request_serializer=proto_dot_control__plane__pb2.UpdateAccountRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.UpdateAccountResponse.FromString,
+                _registered_method=True)
         self.ListProjects = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/ListProjects',
                 request_serializer=proto_dot_control__plane__pb2.ListProjectsRequest.SerializeToString,
@@ -126,6 +131,12 @@ class ControlPlaneServicer:
         raise NotImplementedError('Method not implemented!')
 
     def WhoAmI(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def UpdateAccount(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -251,6 +262,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.WhoAmI,
                     request_deserializer=proto_dot_control__plane__pb2.WhoAmIRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.WhoAmIResponse.SerializeToString,
+            ),
+            'UpdateAccount': grpc.unary_unary_rpc_method_handler(
+                    servicer.UpdateAccount,
+                    request_deserializer=proto_dot_control__plane__pb2.UpdateAccountRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.UpdateAccountResponse.SerializeToString,
             ),
             'ListProjects': grpc.unary_unary_rpc_method_handler(
                     servicer.ListProjects,
@@ -397,6 +413,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/WhoAmI',
             proto_dot_control__plane__pb2.WhoAmIRequest.SerializeToString,
             proto_dot_control__plane__pb2.WhoAmIResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def UpdateAccount(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/UpdateAccount',
+            proto_dot_control__plane__pb2.UpdateAccountRequest.SerializeToString,
+            proto_dot_control__plane__pb2.UpdateAccountResponse.FromString,
             options,
             channel_credentials,
             insecure,

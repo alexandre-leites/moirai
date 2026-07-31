@@ -7,6 +7,7 @@ from typing import Any
 
 import grpc
 
+from moirai.domain.control_plane import AuthenticationError
 from moirai.grpc.protocol import (
     ControlPlane,
     ProjectRecord,
@@ -76,6 +77,38 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             user_id=session.user_id,
             username=session.username,
             role=session.role,
+            email=session.email,
+            display_name=session.display_name,
+        )
+
+    async def UpdateAccount(
+        self,
+        request: control_plane_pb2.UpdateAccountRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.UpdateAccountResponse:
+        session = await self._require_session(context, require_csrf=True)
+        try:
+            profile = await self._control_plane.update_account(
+                session.user_id,
+                session.id,
+                request.current_password,
+                request.new_password,
+                request.new_email,
+                request.display_name,
+                self._now(),
+            )
+        except NotImplementedError:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "account management is unavailable")
+        except AuthenticationError:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "current password is incorrect")
+        except ValueError:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "account update is invalid")
+        return control_plane_pb2.UpdateAccountResponse(
+            user_id=profile.user_id,
+            username=profile.username,
+            role=profile.role,
+            email=profile.email,
+            display_name=profile.display_name,
         )
 
     async def ListProjects(

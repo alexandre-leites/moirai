@@ -1,10 +1,9 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Navigate } from "react-router-dom";
 import { useAuth } from "./auth";
 
 export function LoginPage() {
-  const { login } = useAuth();
-  const navigate = useNavigate();
+  const { login, state } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -20,13 +19,14 @@ export function LoginPage() {
     setLoading(true);
     try {
       await login(username, password);
-      navigate("/", { replace: true });
     } catch {
       setError("Login failed. Check your credentials.");
     } finally {
       setLoading(false);
     }
   };
+
+  if (state) return <Navigate to="/" replace />;
 
   return (
     <main className="login-page">

@@ -194,6 +194,14 @@ func (c *Client) WhoAmI(ctx context.Context) (*controlv1.WhoAmIResponse, error) 
 	return resp, nil
 }
 
+func (c *Client) UpdateAccount(ctx context.Context, req *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error) {
+	resp, err := c.client.UpdateAccount(ctx, req)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) ListProjects(ctx context.Context) (*controlv1.ListProjectsResponse, error) {
 	resp, err := c.client.ListProjects(ctx, &controlv1.ListProjectsRequest{})
 	if err != nil {

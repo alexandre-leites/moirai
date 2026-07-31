@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
-from moirai.persistence.authentication import AuthenticatedSession, SessionCredentials
+from moirai.persistence.authentication import (
+    AccountProfile,
+    AuthenticatedSession,
+    SessionCredentials,
+)
 
 if TYPE_CHECKING:
     from moirai.persistence.control_plane import AsyncpgControlPlane
@@ -93,6 +97,17 @@ class ControlPlane(Protocol):
     async def validate_session(
         self, session_token: str, csrf_token: str | None, now: datetime, require_csrf: bool
     ) -> AuthenticatedSession: ...
+
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> AccountProfile: ...
 
     async def list_projects(self) -> list[ProjectRecord]: ...
 

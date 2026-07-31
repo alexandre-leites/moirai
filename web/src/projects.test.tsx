@@ -51,7 +51,7 @@ function stubApi(stub: Stub, role = "admin") {
   const toggled: Toggle[] = [];
   const api = {
     setUnauthorizedHandler: () => undefined,
-    me: async (): Promise<CurrentUser> => ({ userId: "u-1", username: "ada", role }),
+    me: async (): Promise<CurrentUser> => ({ userId: "u-1", username: "ada", role, email: "", displayName: "" }),
     listProjects: stub.listProjects ?? (async () => []),
     createProject:
       stub.createProject ??

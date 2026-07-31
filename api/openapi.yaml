@@ -94,6 +94,31 @@ paths:
                 $ref: '#/components/schemas/User'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/account:
+    put:
+      summary: Update the authenticated user's account
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdate'
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
   /api/v1/projects:
     get:
       summary: List projects
@@ -554,6 +579,15 @@ components:
         userId: { type: string }
         username: { type: string }
         role: { type: string }
+        email: { type: string }
+        displayName: { type: string }
+    AccountUpdate:
+      type: object
+      properties:
+        currentPassword: { type: string }
+        newPassword: { type: string }
+        newEmail: { type: string }
+        displayName: { type: string }
     ProjectConfiguration:
       type: object
       properties:

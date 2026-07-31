@@ -92,6 +92,8 @@ export type CurrentUser = {
   userId: string;
   username: string;
   role: string;
+  email: string;
+  displayName: string;
 };
 
 export class ApiError extends Error {
@@ -119,6 +121,12 @@ export type ApiClient = {
   login(username: string, password: string): Promise<{ userId: string }>;
   logout(): Promise<void>;
   me(signal?: AbortSignal): Promise<CurrentUser>;
+  updateAccount(data: {
+    currentPassword?: string;
+    newPassword?: string;
+    newEmail?: string;
+    displayName?: string;
+  }): Promise<CurrentUser>;
 
   listProjects(signal?: AbortSignal): Promise<Project[]>;
   createProject(data: {
@@ -233,6 +241,21 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
 
     async me(signal?: AbortSignal): Promise<CurrentUser> {
       const res = await fetchClient("/api/v1/auth/me", { signal, credentials: "include" });
+      return json(res);
+    },
+
+    async updateAccount(data: {
+      currentPassword?: string;
+      newPassword?: string;
+      newEmail?: string;
+      displayName?: string;
+    }): Promise<CurrentUser> {
+      const res = await fetchClient("/api/v1/auth/account", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
       return json(res);
     },
 

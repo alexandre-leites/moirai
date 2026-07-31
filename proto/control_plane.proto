@@ -5,6 +5,7 @@ option go_package = "github.com/loop-engineering/contracts/gen/control/v1;contro
 service ControlPlane {
   rpc Login(LoginRequest) returns (LoginResponse);
   rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+  rpc UpdateAccount(UpdateAccountRequest) returns (UpdateAccountResponse);
   rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
   rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
   rpc UpdateProject(UpdateProjectRequest) returns (UpdateProjectResponse);
@@ -28,7 +29,14 @@ service ControlPlane {
 message LoginRequest { string username = 1; string password = 2; }
 message LoginResponse { string session_token = 1; string user_id = 2; string csrf_token = 3; }
 message WhoAmIRequest {}
-message WhoAmIResponse { string user_id = 1; string username = 2; string role = 3; }
+message WhoAmIResponse { string user_id = 1; string username = 2; string role = 3; string email = 4; string display_name = 5; }
+message UpdateAccountRequest {
+  string current_password = 1;
+  string new_password = 2;
+  string new_email = 3;
+  string display_name = 4;
+}
+message UpdateAccountResponse { string user_id = 1; string username = 2; string role = 3; string email = 4; string display_name = 5; }
 message ListProjectsRequest {}
 message Project {
   string id = 1;

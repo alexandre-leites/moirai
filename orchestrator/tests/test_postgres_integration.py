@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from moirai.domain.control_plane import AuthenticationError
+from moirai.persistence.authentication import AsyncpgAuthentication
 from moirai.persistence.control_plane import AsyncpgControlPlane
 from moirai.persistence.migrations import MigrationRunner
 from moirai.workflows.persistence import AsyncpgWorkflowPersistence
@@ -193,9 +194,101 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        await MigrationRunner(self.pool).run()
+        self.authentication = AsyncpgAuthentication(self.pool, session_ttl=timedelta(hours=1))
+        suffix = uuid4().hex
+        self.username = f"account-{suffix}"
+        await self.authentication.create_user(
+            username=self.username,
+            password="Correct horse battery staple 9!",
+            role="viewer",
+            now=_NOW,
+        )
+        self.credentials = await self.authentication.login(self.username, "Correct horse battery staple 9!", _NOW)
+        self.session_id = await self._session_id(self.credentials.session_token)
+
+    async def _session_id(self, session_token: str) -> str:
+        from moirai.persistence.authentication import _hash_token
+
+        row = await self.pool.fetchrow(
+            "SELECT id FROM app.user_sessions WHERE token_hash = $1",
+            _hash_token(session_token),
+        )
+        return str(row["id"])
+
+    async def test_update_account_changes_password_revokes_other_sessions_and_keeps_profile(self) -> None:
+        from uuid import UUID
+
+        from moirai.persistence.authentication import _hash_token
+
+        other_session_id = uuid4()
+        await self.pool.execute(
+            """
+            INSERT INTO app.user_sessions
+                (id, user_id, token_hash, csrf_token_hash, created_at, expires_at, last_seen_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $5)
+            """,
+            other_session_id,
+            UUID(self.credentials.user_id),
+            _hash_token("other-session-token"),
+            _hash_token("other-csrf-token"),
+            _NOW,
+            _NOW + timedelta(hours=1),
+        )
+        profile = await self.authentication.update_account(
+            user_id=self.credentials.user_id,
+            keep_session_id=self.session_id,
+            current_password="Correct horse battery staple 9!",
+            new_password="Correct horse battery staple 10!",
+            new_email="admin@example.com",
+            display_name="Admin User",
+            now=_NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(profile.email, "admin@example.com")
+        self.assertEqual(profile.display_name, "Admin User")
+        session = await self.authentication.validate_session(
+            self.credentials.session_token, self.credentials.csrf_token, _NOW + timedelta(minutes=2), True
+        )
+        self.assertEqual(session.email, "admin@example.com")
+        with self.assertRaises(AuthenticationError):
+            await self.authentication.validate_session(
+                "other-session-token", "other-csrf-token", _NOW + timedelta(minutes=2), True
+            )
+
+    async def test_update_account_rejects_a_wrong_current_password(self) -> None:
+        with self.assertRaisesRegex(AuthenticationError, "current password is incorrect"):
+            await self.authentication.update_account(
+                user_id=self.credentials.user_id,
+                keep_session_id=self.session_id,
+                current_password="wrong horse battery staple",
+                new_password="Correct horse battery staple 10!",
+                new_email="",
+                display_name="",
+                now=_NOW,
+            )
+
+    async def test_update_account_enforces_the_password_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "between 8 and 1024"):
+            await self.authentication.update_account(
+                user_id=self.credentials.user_id,
+                keep_session_id=self.session_id,
+                current_password="Correct horse battery staple 9!",
+                new_password="short",
+                new_email="",
+                display_name="",
+                now=_NOW,
+            )
+
+
 class OfferExpiryIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Offer expiry and rejection must not destroy an in-flight workflow run.
-
     See GitHub issue #91: an unanswered offer used to cancel the whole run,
     dropping the project lock and leaking the dispatched execution request,
     even when the run already had a pushed branch and an open pull request.

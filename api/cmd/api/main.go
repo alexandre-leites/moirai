@@ -48,7 +48,7 @@ func main() {
 	loginLimiter := auth.NewRateLimiter(time.Minute, 10, auth.WithTrustedProxies(runtimeConfig.TrustedProxies))
 	mutationLimiter := auth.NewRateLimiter(time.Minute, 60, auth.WithTrustedProxies(runtimeConfig.TrustedProxies))
 
-	handlers.NewAuthHandlers(client, runtimeConfig.CookieSecure, loginLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewAuthHandlers(client, runtimeConfig.CookieSecure, loginLimiter, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewProjectHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerTokenHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())

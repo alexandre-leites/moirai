@@ -6,6 +6,7 @@ import type { ApiClient, Project, Runner, Workflow } from "./api";
 import { AuthProvider, useAuth, useIsAdmin } from "./auth";
 import { loadHealth } from "./health";
 import type { HealthViewState } from "./health";
+import { AccountPage } from "./account";
 import { LoginPage } from "./login";
 import { ProjectsPage } from "./projects";
 import { QueuePage } from "./queue";
@@ -122,7 +123,7 @@ function Layout({ children }: { children: ReactNode }) {
         {navItems.map(([to, label]) => <NavLink key={to} end={to === "/"} to={to} className="nav-item" onClick={() => setMenuOpen(false)}><i />{label}</NavLink>)}
         {isAdmin && <NavLink to="/tokens" className="nav-item" onClick={() => setMenuOpen(false)}><i />Runner tokens</NavLink>}
       </nav>
-      <div className="side-foot"><span>{state?.username} · {state?.role}</span><HealthIndicator api={api} /><button className="quiet-button" onClick={() => void logout()}>Sign out</button></div>
+      <div className="side-foot"><span>{state?.username} · {state?.role}</span><Link className="account-link" to="/account">Account</Link><HealthIndicator api={api} /><button className="quiet-button" onClick={() => void logout()}>Sign out</button></div>
     </aside>
   </>;
 }
@@ -176,6 +177,7 @@ function App() {
     <Route path="/workflows" element={<ProtectedRoute><WorkflowsPage api={api} /></ProtectedRoute>} />
     <Route path="/queue" element={<ProtectedRoute><QueuePage api={api} /></ProtectedRoute>} />
     <Route path="/workflows/:workflowId" element={<ProtectedRoute><WorkflowDetailPage api={api} /></ProtectedRoute>} />
+    <Route path="/account" element={<ProtectedRoute><AccountPage api={api} /></ProtectedRoute>} />
   </Routes></Layout></AuthProvider></BrowserRouter>;
 }
 

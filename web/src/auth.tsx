@@ -11,6 +11,9 @@ type AuthContextValue = {
   loading: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  // Re-fetches the current user after an account update so display name/email
+  // changes reflect immediately in the UI.
+  refresh: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue>({
@@ -18,6 +21,7 @@ const AuthContext = createContext<AuthContextValue>({
   loading: true,
   login: async () => undefined,
   logout: async () => undefined,
+  refresh: async () => undefined,
 });
 
 export function useAuth(): AuthContextValue {
@@ -70,8 +74,12 @@ export function AuthProvider({ api, children }: { api: ApiClient; children: Reac
     setState(null);
   }, [api]);
 
+  const refresh = useCallback(async () => {
+    setState(await api.me());
+  }, [api]);
+
   return (
-    <AuthContext.Provider value={{ state, loading, login, logout }}>
+    <AuthContext.Provider value={{ state, loading, login, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );

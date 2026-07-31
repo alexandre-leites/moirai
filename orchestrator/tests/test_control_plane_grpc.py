@@ -4,8 +4,13 @@ from datetime import UTC, datetime, timedelta
 try:
     import grpc
 
+    from moirai.domain.control_plane import AuthenticationError
     from moirai.main import register_services
-    from moirai.persistence.authentication import AuthenticatedSession, SessionCredentials
+    from moirai.persistence.authentication import (
+        AccountProfile,
+        AuthenticatedSession,
+        SessionCredentials,
+    )
     from proto import control_plane_pb2, control_plane_pb2_grpc, runner_control_pb2_grpc
 except ModuleNotFoundError:
     grpc = None
@@ -43,6 +48,26 @@ class FakeControlPlane:
                 id="session-2", user_id="00000000-0000-0000-0000-000000000098", username="viewer", role="viewer", expires_at=now
             )
         raise PermissionError()
+
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> object:
+        if user_id != "00000000-0000-0000-0000-000000000099" or current_password != "correct":
+            raise AuthenticationError("current password is incorrect")
+        return AccountProfile(
+            user_id=user_id,
+            username="admin",
+            role="admin",
+            email=new_email or "admin@example.com",
+            display_name=display_name or "Admin",
+        )
 
     async def list_projects(self) -> list[dict[str, object]]:
         return [
@@ -287,6 +312,29 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.role, "admin")
         with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
             await self.client.WhoAmI(control_plane_pb2.WhoAmIRequest())
+        self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+
+    async def test_update_account_updates_the_profile(self) -> None:
+        response = await self.client.UpdateAccount(
+            control_plane_pb2.UpdateAccountRequest(
+                current_password="correct",
+                new_password="",
+                new_email="new@example.com",
+                display_name="New Name",
+            ),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
+        )
+        self.assertEqual(response.user_id, "00000000-0000-0000-0000-000000000099")
+        self.assertEqual(response.email, "new@example.com")
+        self.assertEqual(response.display_name, "New Name")
+        with self.assertRaises(grpc.aio.AioRpcError) as wrong_password:
+            await self.client.UpdateAccount(
+                control_plane_pb2.UpdateAccountRequest(current_password="wrong", new_password="x1Y!abcdef"),
+                metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
+            )
+        self.assertEqual(wrong_password.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+        with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
+            await self.client.UpdateAccount(control_plane_pb2.UpdateAccountRequest())
         self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
     async def test_maps_typed_responses_and_validates_runner_token_requests(self) -> None:

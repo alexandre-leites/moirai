@@ -24,7 +24,7 @@ function authApi(onLogin?: (attempt: Attempt) => Promise<{ userId: string }>) {
     setUnauthorizedHandler: () => undefined,
     async me(): Promise<CurrentUser> {
       if (!signedIn) throw new ApiError(401, "no session");
-      return { userId: "u-1", username: "ada", role: "admin" };
+      return { userId: "u-1", username: "ada", role: "admin", email: "", displayName: "" };
     },
     async login(username: string, password: string): Promise<{ userId: string }> {
       attempts.push({ username, password });
@@ -187,9 +187,8 @@ describe("LoginPage", () => {
 
     await pending.resolve({ userId: "u-1" });
 
-    expect(signIn(container).textContent).toBe("Sign in");
-    expect(signIn(container).disabled).toBe(false);
-    expect(field(container, /^Username/).disabled).toBe(false);
+    expect(container.querySelector("[data-testid=location]")?.textContent).toBe("/");
+    expect(container.querySelector("form")).toBeNull();
   });
 
   it("releases the form when the request fails, so a retry is possible", async () => {

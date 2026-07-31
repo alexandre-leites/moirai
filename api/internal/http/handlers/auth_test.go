@@ -10,7 +10,7 @@ import (
 )
 
 func TestAuthMeRequiresSession(t *testing.T) {
-	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10))
+	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -23,7 +23,7 @@ func TestAuthMeRequiresSession(t *testing.T) {
 }
 
 func TestLogoutClearsCookies(t *testing.T) {
-	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10))
+	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 
@@ -52,7 +52,7 @@ func TestLogoutClearsCookies(t *testing.T) {
 }
 
 func TestLogoutIdempotentWithoutSession(t *testing.T) {
-	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10))
+	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 

@@ -30,6 +30,7 @@ from moirai.domain.models import (
 )
 from moirai.domain.scheduling import Assignment
 from moirai.persistence.authentication import (
+    AccountProfile,
     AsyncpgAuthentication,
     AuthenticatedSession,
     SessionCredentials,
@@ -296,6 +297,26 @@ class AsyncpgControlPlane:
 
     async def revoke_session(self, session_token: str, now: datetime) -> None:
         await self._authentication.revoke_session(session_token, now)
+
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> AccountProfile:
+        return await self._authentication.update_account(
+            user_id,
+            keep_session_id,
+            current_password,
+            new_password,
+            new_email,
+            display_name,
+            now,
+        )
 
     async def reap_expired_data(self, now: datetime) -> dict[str, int]:
         return {

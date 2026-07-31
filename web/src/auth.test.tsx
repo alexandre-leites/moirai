@@ -13,7 +13,7 @@ import { button, click, deferred, mount, unmountAll } from "./test-dom";
 
 afterEach(unmountAll);
 
-const ADA: CurrentUser = { userId: "u-1", username: "ada", role: "admin" };
+const ADA: CurrentUser = { userId: "u-1", username: "ada", role: "admin", email: "ada@example.com", displayName: "Ada" };
 
 /** Renders the session the provider is holding, so the tests can read it. */
 function SessionProbe() {
@@ -185,5 +185,21 @@ describe("AuthProvider", () => {
 
     expect(calls.logout).toBe(1);
     expect(container.textContent).toContain("signed out");
+  });
+
+  it("reloads the session on refresh, picking up profile changes", async () => {
+    let current = ADA;
+    const { api } = stubApi({
+      me: async () => current,
+    });
+    const container = await mountWithAction(api, "rename", async ({ refresh }) => {
+      current = { ...ADA, displayName: "Countess" };
+      await refresh();
+    });
+    expect(container.textContent).toContain("ada/admin");
+
+    await click(button(container, /^rename$/));
+
+    expect(container.textContent).toContain("ada/admin");
   });
 });
