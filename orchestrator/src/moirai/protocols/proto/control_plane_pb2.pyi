@@ -354,6 +354,62 @@ class ListQueueResponse(_message.Message):
     entries: _containers.RepeatedCompositeFieldContainer[QueueEntry]
     def __init__(self, entries: _Optional[_Iterable[_Union[QueueEntry, _Mapping]]] = ...) -> None: ...
 
+class SyncNowRequest(_message.Message):
+    __slots__ = ("project_id",)
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    def __init__(self, project_id: _Optional[str] = ...) -> None: ...
+
+class ProjectSyncResult(_message.Message):
+    __slots__ = ("project_id", "synced_issues", "error")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    SYNCED_ISSUES_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    synced_issues: int
+    error: str
+    def __init__(self, project_id: _Optional[str] = ..., synced_issues: _Optional[int] = ..., error: _Optional[str] = ...) -> None: ...
+
+class SyncNowResponse(_message.Message):
+    __slots__ = ("results",)
+    RESULTS_FIELD_NUMBER: _ClassVar[int]
+    results: _containers.RepeatedCompositeFieldContainer[ProjectSyncResult]
+    def __init__(self, results: _Optional[_Iterable[_Union[ProjectSyncResult, _Mapping]]] = ...) -> None: ...
+
+class IssueSyncStatusRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class IssueSyncStatusEntry(_message.Message):
+    __slots__ = ("project_id", "project_name", "enabled", "issue_count", "eligible_count", "last_synced_at", "consecutive_failures", "next_retry_at", "last_error", "backing_off")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_NAME_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    ISSUE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    ELIGIBLE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    LAST_SYNCED_AT_FIELD_NUMBER: _ClassVar[int]
+    CONSECUTIVE_FAILURES_FIELD_NUMBER: _ClassVar[int]
+    NEXT_RETRY_AT_FIELD_NUMBER: _ClassVar[int]
+    LAST_ERROR_FIELD_NUMBER: _ClassVar[int]
+    BACKING_OFF_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    project_name: str
+    enabled: bool
+    issue_count: int
+    eligible_count: int
+    last_synced_at: str
+    consecutive_failures: int
+    next_retry_at: str
+    last_error: str
+    backing_off: bool
+    def __init__(self, project_id: _Optional[str] = ..., project_name: _Optional[str] = ..., enabled: _Optional[bool] = ..., issue_count: _Optional[int] = ..., eligible_count: _Optional[int] = ..., last_synced_at: _Optional[str] = ..., consecutive_failures: _Optional[int] = ..., next_retry_at: _Optional[str] = ..., last_error: _Optional[str] = ..., backing_off: _Optional[bool] = ...) -> None: ...
+
+class IssueSyncStatusResponse(_message.Message):
+    __slots__ = ("entries",)
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[IssueSyncStatusEntry]
+    def __init__(self, entries: _Optional[_Iterable[_Union[IssueSyncStatusEntry, _Mapping]]] = ...) -> None: ...
+
 class SetRunnerStateRequest(_message.Message):
     __slots__ = ("runner_id", "state")
     RUNNER_ID_FIELD_NUMBER: _ClassVar[int]

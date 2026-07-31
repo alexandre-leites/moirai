@@ -89,6 +89,16 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.ListQueueRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.ListQueueResponse.FromString,
                 _registered_method=True)
+        self.SyncNow = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/SyncNow',
+                request_serializer=proto_dot_control__plane__pb2.SyncNowRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.SyncNowResponse.FromString,
+                _registered_method=True)
+        self.IssueSyncStatus = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/IssueSyncStatus',
+                request_serializer=proto_dot_control__plane__pb2.IssueSyncStatusRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.IssueSyncStatusResponse.FromString,
+                _registered_method=True)
         self.SetRunnerState = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/SetRunnerState',
                 request_serializer=proto_dot_control__plane__pb2.SetRunnerStateRequest.SerializeToString,
@@ -214,6 +224,18 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SyncNow(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def IssueSyncStatus(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def SetRunnerState(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -327,6 +349,16 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.ListQueue,
                     request_deserializer=proto_dot_control__plane__pb2.ListQueueRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.ListQueueResponse.SerializeToString,
+            ),
+            'SyncNow': grpc.unary_unary_rpc_method_handler(
+                    servicer.SyncNow,
+                    request_deserializer=proto_dot_control__plane__pb2.SyncNowRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.SyncNowResponse.SerializeToString,
+            ),
+            'IssueSyncStatus': grpc.unary_unary_rpc_method_handler(
+                    servicer.IssueSyncStatus,
+                    request_deserializer=proto_dot_control__plane__pb2.IssueSyncStatusRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.IssueSyncStatusResponse.SerializeToString,
             ),
             'SetRunnerState': grpc.unary_unary_rpc_method_handler(
                     servicer.SetRunnerState,
@@ -764,6 +796,60 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/ListQueue',
             proto_dot_control__plane__pb2.ListQueueRequest.SerializeToString,
             proto_dot_control__plane__pb2.ListQueueResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SyncNow(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/SyncNow',
+            proto_dot_control__plane__pb2.SyncNowRequest.SerializeToString,
+            proto_dot_control__plane__pb2.SyncNowResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def IssueSyncStatus(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/IssueSyncStatus',
+            proto_dot_control__plane__pb2.IssueSyncStatusRequest.SerializeToString,
+            proto_dot_control__plane__pb2.IssueSyncStatusResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -142,6 +142,7 @@ ROLE_TO_SUFFIX = {
     "developer": "implement",
     "pipeline": "pipeline",
     "reviewer": "review",
+    "verifier": "verify",
     "repairer": "repair",
 }
 _SUFFIX_TO_ROLE = {suffix: role for role, suffix in ROLE_TO_SUFFIX.items()}
@@ -152,6 +153,7 @@ _SUFFIX_TO_EXECUTION_TYPE = {
     "plan": "run_planner",
     "implement": "run_developer",
     "review": "run_reviewer",
+    "verify": "run_verifier",
     "repair": "run_repair",
     "pipeline": "run_local_pipeline",
 }
@@ -434,6 +436,27 @@ def _terminal_event_transition(
         return WorkflowTransition(
             new_status="ai_review",
             state_updates={"status": "ai_review", "review_approved": False},
+        )
+
+    if resolved_role == "verifier":
+        verdict = _schema_field(summary.result, "verifier-result", "verdict")
+        if verdict == "passed":
+            return WorkflowTransition(
+                new_status="ai_review",
+                state_updates={"status": "ai_review", "verification_passed": True},
+            )
+        if verdict == "human_required":
+            question = _human_question(summary, "summary", "verifier requires human input")
+            return WorkflowTransition(
+                new_status="waiting_human",
+                state_updates={
+                    "status": "waiting_human", "verification_passed": False, "human_question": question,
+                    "human_resume_phase": "ai_review", "blocking_reason": question,
+                },
+            )
+        return WorkflowTransition(
+            new_status="recovering",
+            state_updates={"status": "recovering", "verification_passed": False},
         )
 
     if resolved_role == "repairer":

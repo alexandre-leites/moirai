@@ -1,12 +1,3 @@
----
-name: gh-issue-loop
-description: Autonomous GitHub issue-working loop. Picks eligible labelled issues, claims them, runs one sub-agent per issue in its own git worktree, and drives each PR all the way to merge under a hard concurrency ceiling. Use ONLY when the user explicitly asks to arm, run, stop, or check this loop.
-argument-hint: "[arm|run|status|stop] [key=value ...]"
-disable-model-invocation: true
-disallowed-tools: AskUserQuestion
-allowed-tools: Bash Read Write Edit Grep Glob Agent SendMessage CronCreate CronList CronDelete WebFetch
----
-
 # Autonomous GitHub issue-working loop
 
 One pass: find eligible issues, claim them, work them concurrently in isolated worktrees, and
@@ -20,7 +11,7 @@ file as both a skill and a symlinked custom command. Do not fork it.
 
 ## 0. MODE
 
-`$ARGUMENTS` selects the mode. Default when empty is `run`.
+`run` selects the mode. Default when empty is `run`.
 
 | Mode | Meaning |
 | :--- | :--- |
@@ -29,7 +20,7 @@ file as both a skill and a symlinked custom command. Do not fork it.
 | `status` | Report in-flight count, capacity, queue contents, and open loop PRs. Claim nothing, spawn nothing. |
 | `stop` | Cancel the recurring schedule. See **STOPPING THE LOOP**. |
 
-Any `key=value` tokens in `$ARGUMENTS` override the parameters below for this invocation.
+Any `key=value` tokens in `run` override the parameters below for this invocation.
 
 ## 1. PARAMETERS AND ENVIRONMENT
 
@@ -69,8 +60,8 @@ WORKING_LABEL="ai-working"
 FINISHED_LABEL="ai-finished"
 BATCH_SIZE=5
 export MAX_AGENTS=5 REAP_AFTER_MIN=90 STARTUP_GRACE_MIN=10
-for c in "$REPO/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \\
-         "\$HOME/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \\
+for c in "$REPO/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \
+         "\$HOME/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \
          "\$HOME/.config/opencode/skills/gh-issue-loop/bin/loop-slots.sh"; do
   [ -x "\$c" ] && SLOTS="\$c" && break
 done
@@ -90,19 +81,12 @@ and `reacquire` their own leases, in their own shells, having never sourced it �
 *exported* `MAX_AGENTS` never reaches them and they fall back to the built-in default of 5.
 Skip this write and the ceiling silently applies only to the parent.
 
-This is not hypothetical. A ceiling of 2 was breached to 3 exactly this way: a finished agent
-woke from a stale background waiter, ran `reacquire`, saw the default ceiling of 5 instead of
-the configured 2, and took a slot the loop had already handed to another issue. The `flock` was
-never the weak point — the ceiling *value* was, because only the parent knew it. The helper now
-reads `$LOOP_DIR/tunables` back on every invocation, so writing it is what makes the ceiling
-real for everyone.
-
 The trailing `:` is **required**, not decoration. Without it the last statement in `env.sh` is the
 `for` loop, which exits non-zero when the final `[ -x ... ]` test fails — so under `set -e`, or in
 any `. env.sh && ...` chain, sourcing would silently abort the call before the FATAL check below
 could report the real problem.
 
-Apply any `key=value` overrides from `$ARGUMENTS` by editing that file before use.
+Apply any `key=value` overrides from `run` by editing that file before use.
 
 **PREAMBLE — prepend this to every subsequent Bash call in the pass:**
 

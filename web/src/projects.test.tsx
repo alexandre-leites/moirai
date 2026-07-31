@@ -262,7 +262,7 @@ describe("ProjectsPage creation", () => {
     return form(container);
   }
 
-  it("opens and closes the create form from the same control", async () => {
+  it("opens and closes the create form via the modal close button", async () => {
     const { api } = stubApi({ listProjects: async () => [] });
     const container = await mountWithSession(api);
 
@@ -271,8 +271,28 @@ describe("ProjectsPage creation", () => {
     expect(container.querySelector("form")).not.toBeNull();
     expect(container.textContent).toContain("Create project");
 
-    await click(button(container, /Cancel/));
+    await click(button(container, /×/));
     expect(container.querySelector("form")).toBeNull();
+  });
+
+  it("opens the create form in a modal dialog and closes it via the backdrop", async () => {
+    const { api } = stubApi({ listProjects: async () => [] });
+    const container = await mountWithSession(api);
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    await click(button(container, /New project/));
+    const dialog = container.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.getAttribute("aria-modal")).toBe("true");
+    expect(dialog?.textContent).toContain("Create project");
+
+    // The create control is in the view-head; the modal must not live inside
+    // the page flow but overlay the whole viewport via the fixed backdrop.
+    expect(container.querySelector(".modal-backdrop")).not.toBeNull();
+
+    const backdrop = container.querySelector(".modal-backdrop") as HTMLElement;
+    await click(backdrop);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("creates from the Create button, not only from a synthetic form event", async () => {

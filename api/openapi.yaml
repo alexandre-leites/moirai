@@ -9,6 +9,20 @@ info:
 servers:
   - url: http://localhost:8080
 paths:
+  /api/v1/scheduler/metrics:
+    get:
+      summary: Get scheduler summary metrics
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Scheduler metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchedulerMetrics'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /live:
     get:
       summary: Liveness probe
@@ -366,6 +380,63 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/sync/status:
+    get:
+      summary: Per-project issue synchronization status
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Sync status for every project
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IssueSyncStatusEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/sync:
+    post:
+      summary: Run an issue-synchronization pass now
+      description: |
+        Empty body syncs every enabled project; a body with `projectId` syncs
+        only that project and clears any in-memory backoff it was under.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                projectId:
+                  type: string
+      responses:
+        '200':
+          description: Per-project sync results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SyncResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '504':
+          $ref: '#/components/responses/OrchestratorTimeout'
   /api/v1/workflows:
     get:
       summary: List workflows
@@ -648,6 +719,27 @@ components:
           type: array
           items: { type: string }
         lastSeenAt: { type: string }
+    SyncResult:
+      type: object
+      required: [projectId, syncedIssues]
+      properties:
+        projectId: { type: string }
+        syncedIssues: { type: integer }
+        error: { type: string }
+    IssueSyncStatusEntry:
+      type: object
+      required: [projectId, projectName, enabled, issueCount, eligibleCount, consecutiveFailures, backingOff]
+      properties:
+        projectId: { type: string }
+        projectName: { type: string }
+        enabled: { type: boolean }
+        issueCount: { type: integer }
+        eligibleCount: { type: integer }
+        lastSyncedAt: { type: string }
+        consecutiveFailures: { type: integer }
+        nextRetryAt: { type: string }
+        lastError: { type: string }
+        backingOff: { type: boolean }
     WorkflowControlRequest:
       type: object
       properties:
@@ -702,10 +794,10 @@ components:
       properties:
         status: { type: string, enum: [healthy, degraded] }
         orchestrator: { type: string, enum: [reachable, unreachable] }
-    Problem:
+    SchedulerMetrics:
       type: object
-      required: [status, title]
+      required: [queueDepth, activeWorkflows, scheduledJobs]
       properties:
-        status: { type: integer }
-        title: { type: string }
-        detail: { type: string }
+        queueDepth: { type: integer }
+        activeWorkflows: { type: integer }
+        scheduledJobs: { type: integer }

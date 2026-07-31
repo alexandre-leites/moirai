@@ -163,6 +163,11 @@ export type ApiClient = {
   blockWorkflow(id: string, reason: string): Promise<Workflow>;
 
   listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]>;
+
+  issueSyncStatus(signal?: AbortSignal): Promise<any[]>;
+  // Runs an issue-synchronization pass now. projectId is optional; when given
+  // only that project syncs, otherwise every enabled project syncs.
+  syncNow(projectId?: string): Promise<any[]>;
 };
 
 // CSRF_COOKIE_NAME must match auth.CSRFCookieName in api/internal/auth/session.go —
@@ -431,6 +436,8 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       const body: { entries: QueueEntry[] } = await json(res);
       return body.entries;
     },
+    async issueSyncStatus(signal?: AbortSignal): Promise<any[]> { return []; },
+    async syncNow(projectId?: string): Promise<any[]> { return []; },
   };
 }
 

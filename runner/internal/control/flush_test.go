@@ -1,32 +1,14 @@
 package control
 
 import (
-	"errors"
-	"sync"
 	"testing"
 	"time"
-
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 )
-
-type blockingEventClient struct {
-	started chan struct{}
-	release chan struct{}
-	sent    chan *runnerv1.ExecutionEvent
-}
-
-func (c *blockingEventClient) SendExecutionEvent(e *runnerv1.ExecutionEvent) error {
-	c.started <- struct{}{}
-	<-c.release
-	c.sent <- e
-	return nil
-}
 
 func TestEventReporterFlushWaitsForInFlight(t *testing.T) {
 	client := &blockingEventClient{
-		started: make(chan struct{}, 1),
+		started: make(chan struct{}),
 		release: make(chan struct{}),
-		sent:    make(chan *runnerv1.ExecutionEvent, 1),
 	}
 	reporter := newEventReporter(t, client, 1)
 	lease := eventLease()
@@ -35,7 +17,9 @@ func TestEventReporterFlushWaitsForInFlight(t *testing.T) {
 	}
 
 	// Trigger async send
-	_, _ = reporter.Emit(lease.JobID, lease.Generation, "started", nil)
+	go func() {
+		_, _ = reporter.Emit(lease.JobID, lease.Generation, "started", nil)
+	}()
 	<-client.started // Wait for send to start
 
 	// Call Flush, it should block

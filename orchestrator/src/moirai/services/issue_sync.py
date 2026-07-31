@@ -59,6 +59,9 @@ class IssueSync:
         self._sync_timeout_seconds = sync_timeout_seconds
         self._failure_counts: dict[str, int] = {}
         self._retry_after: dict[str, datetime] = {}
+        # Serializes sync passes so a manual `sync_now` and the background
+        # loop never drive two tracker passes at once.
+        self._sync_lock = asyncio.Lock()
 
     async def restore_retry_state(self, now: datetime) -> None:
         load_state = getattr(self._control_plane, "issue_sync_retry_state", None)
@@ -163,41 +166,59 @@ class IssueSync:
         results: dict[str, int | str] = {}
         answered = False
         failures: list[str] = []
-        for project in projects:
-            retry_after = self._retry_after.get(project.id)
-            if retry_after is not None and retry_after > now:
-                results[project.id] = "issue sync is backing off"
-                continue
-            try:
-                count = await self.sync_project(project, now)
-                # The tracker answered the read every other project depends on.
-                answered = True
-                await self.reconcile_project_labels(project)
-                self._failure_counts.pop(project.id, None)
-                self._retry_after.pop(project.id, None)
-                clear_failure = getattr(self._control_plane, "clear_issue_sync_failure", None)
-                if clear_failure is not None:
-                    await _await(clear_failure(project.id, now))
-                results[project.id] = count
-            except LabelReconciliationError as error:
-                # `answered` is already set: the read succeeded and only the
-                # label write failed, so this backs the project off and is not
-                # counted against the provider.
-                await self._record_sync_failure(project.id, error, now)
-                results[project.id] = str(error)
-            except IssueSyncError as error:
-                failures.append(str(error))
-                await self._record_sync_failure(project.id, error, now)
-                results[project.id] = str(error)
-        if answered:
-            clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
-            if clear_provider is not None:
-                await _await(clear_provider("github", now))
-        elif projects and len(failures) == len(projects):
-            record_provider = getattr(self._control_plane, "record_provider_failure", None)
-            if record_provider is not None:
-                await _await(record_provider("github", failures[0], now))
+        async with self._sync_lock:
+            for project in projects:
+                retry_after = self._retry_after.get(project.id)
+                if retry_after is not None and retry_after > now:
+                    results[project.id] = "issue sync is backing off"
+                    continue
+                try:
+                    count = await self.sync_project(project, now)
+                    # The tracker answered the read every other project depends on.
+                    answered = True
+                    await self.reconcile_project_labels(project)
+                    self._failure_counts.pop(project.id, None)
+                    self._retry_after.pop(project.id, None)
+                    clear_failure = getattr(self._control_plane, "clear_issue_sync_failure", None)
+                    if clear_failure is not None:
+                        await _await(clear_failure(project.id, now))
+                    results[project.id] = count
+                except LabelReconciliationError as error:
+                    # `answered` is already set: the read succeeded and only the
+                    # label write failed, so this backs the project off and is not
+                    # counted against the provider.
+                    await self._record_sync_failure(project.id, error, now)
+                    results[project.id] = str(error)
+                except IssueSyncError as error:
+                    failures.append(str(error))
+                    await self._record_sync_failure(project.id, error, now)
+                    results[project.id] = str(error)
+            if answered:
+                clear_provider = getattr(self._control_plane, "clear_provider_failure", None)
+                if clear_provider is not None:
+                    await _await(clear_provider("github", now))
+            elif projects and len(failures) == len(projects):
+                record_provider = getattr(self._control_plane, "record_provider_failure", None)
+                if record_provider is not None:
+                    await _await(record_provider("github", failures[0], now))
         return results
+
+    async def sync_now(self, now: datetime, project_id: str | None = None) -> dict[str, int | str]:
+        """Run a manual sync pass, on the operator's request.
+
+        A manual sync is an explicit override of any in-memory backoff: the
+        whole point of the button is "try again now". For a single project the
+        override is scoped to it; a global sync forgets every project's
+        backoff. DB-persisted backoff still clears on success through the
+        normal success path, and a pass that fails again re-records it.
+        """
+        if project_id is not None:
+            self._failure_counts.pop(project_id, None)
+            self._retry_after.pop(project_id, None)
+        else:
+            self._failure_counts.clear()
+            self._retry_after.clear()
+        return await self.sync_all_projects(now)
 
     async def _record_sync_failure(self, project_id: str, error: Exception, now: datetime) -> None:
         failures = self._failure_counts.get(project_id, 0) + 1
