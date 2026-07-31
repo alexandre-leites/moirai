@@ -741,6 +741,10 @@ func TestPrepareKeepsWorkBuiltOnTopOfThePublishedExecutionBranch(t *testing.T) {
 			if err != nil || !repair.Committed {
 				t.Fatalf("Commit() = %#v, %v", repair, err)
 			}
+			// Simulate the dispatcher anchoring completed work that may not push.
+			if err := manager.RecordWorkInProgress(context.Background(), workspace, "refs/moirai-wip/execution-1"); err != nil {
+				t.Fatalf("RecordWorkInProgress() error = %v", err)
+			}
 			cleanup()
 
 			pipeline, err := manager.Prepare(context.Background(), request)
@@ -776,8 +780,29 @@ func TestPrepareKeepsWorkBuiltOnTopOfThePublishedExecutionBranch(t *testing.T) {
 			if got := workspaceRevision(t, manager, resumed); got != diverged {
 				t.Fatalf("HEAD after divergence = %q, want the published tip %q", got, diverged)
 			}
+			// The repairer's commit must still be reachable through the anchor.
+			source := repositorySource(t, manager, request)
+			output, err := manager.gitOutput(context.Background(), "-C", source, "for-each-ref", "--format=%(refname)", "--contains", repair.Revision)
+			if err != nil {
+				t.Fatalf("for-each-ref --contains %q: %v", repair.Revision, err)
+			}
+			if !strings.Contains(output, "refs/moirai-wip/execution-1") {
+				t.Fatalf("repairer commit %q is not reachable from any reference:\n%s", repair.Revision, output)
+			}
 		})
 	}
+}
+
+func repositorySource(t *testing.T, manager Manager, request PrepareRequest) string {
+	t.Helper()
+	if request.RepositoryMode == RepositoryModeExistingPath {
+		return request.LocalRepositoryPath
+	}
+	root, err := manager.dataDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(root, "repositories", "project-"+request.ProjectID, "repo.git")
 }
 
 // TestPrepareBaseRevisionLeavesTheExecutionBranchWhereItIs pins "--refmap=" on

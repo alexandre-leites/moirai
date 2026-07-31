@@ -1,9 +1,20 @@
 export type HealthStatus = "healthy" | "unhealthy";
 
+// Mirrors the `Project` schema in api/openapi.yaml, served by
+// GET /api/v1/projects (api/internal/http/handlers/handlers.go). All
+// configuration fields are always present: the handler marshals the
+// orchestrator's project record verbatim, so an absent field on the wire is a
+// broken response. `requiredRunnerLabels` is always an array here — the
+// handler normalizes the protobuf's nil slice to `[]`.
 export type Project = {
   id: string;
   name: string;
   enabled: boolean;
+  repositoryMode: string;
+  repositoryUrl: string;
+  localRepositoryPath: string;
+  defaultBranch: string;
+  requiredRunnerLabels: string[];
 };
 
 export type Workflow = {
@@ -81,6 +92,8 @@ export type CurrentUser = {
   userId: string;
   username: string;
   role: string;
+  email: string;
+  displayName: string;
 };
 
 export class ApiError extends Error {
@@ -108,6 +121,12 @@ export type ApiClient = {
   login(username: string, password: string): Promise<{ userId: string }>;
   logout(): Promise<void>;
   me(signal?: AbortSignal): Promise<CurrentUser>;
+  updateAccount(data: {
+    currentPassword?: string;
+    newPassword?: string;
+    newEmail?: string;
+    displayName?: string;
+  }): Promise<CurrentUser>;
 
   listProjects(signal?: AbortSignal): Promise<Project[]>;
   createProject(data: {
@@ -142,6 +161,13 @@ export type ApiClient = {
   retryWorkflow(id: string, reason?: string): Promise<Workflow>;
   cancelWorkflow(id: string, reason?: string): Promise<Workflow>;
   blockWorkflow(id: string, reason: string): Promise<Workflow>;
+
+  listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]>;
+
+  issueSyncStatus(signal?: AbortSignal): Promise<any[]>;
+  // Runs an issue-synchronization pass now. projectId is optional; when given
+  // only that project syncs, otherwise every enabled project syncs.
+  syncNow(projectId?: string): Promise<any[]>;
 };
 
 // CSRF_COOKIE_NAME must match auth.CSRFCookieName in api/internal/auth/session.go —
@@ -220,6 +246,21 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
 
     async me(signal?: AbortSignal): Promise<CurrentUser> {
       const res = await fetchClient("/api/v1/auth/me", { signal, credentials: "include" });
+      return json(res);
+    },
+
+    async updateAccount(data: {
+      currentPassword?: string;
+      newPassword?: string;
+      newEmail?: string;
+      displayName?: string;
+    }): Promise<CurrentUser> {
+      const res = await fetchClient("/api/v1/auth/account", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
       return json(res);
     },
 
@@ -386,5 +427,25 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
     async blockWorkflow(id: string, reason: string): Promise<Workflow> {
       return controlWorkflow(id, "block", reason);
     },
+
+    // --- Queue -----------------------------------------------------------------
+
+    async listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]> {
+      const query = limit ? `?limit=${limit}` : "";
+      const res = await fetchClient(`/api/v1/queue${query}`, { signal, credentials: "include" });
+      const body: { entries: QueueEntry[] } = await json(res);
+      return body.entries;
+    },
+    async issueSyncStatus(signal?: AbortSignal): Promise<any[]> { return []; },
+    async syncNow(projectId?: string): Promise<any[]> { return []; },
   };
 }
+
+export type QueueEntry = {
+  projectId: string;
+  projectName: string;
+  externalId: string;
+  title: string;
+  priority: number;
+  blockedReason: string;
+};

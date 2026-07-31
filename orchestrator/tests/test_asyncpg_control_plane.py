@@ -590,7 +590,16 @@ class _ProjectPool:
 
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
         if "INSERT INTO app.projects" in query:
-            record = {"id": arguments[0], "name": arguments[1], "enabled": True}
+            record = {
+                "id": arguments[0],
+                "name": arguments[1],
+                "enabled": True,
+                "repository_mode": arguments[2],
+                "repository_url": arguments[3],
+                "local_repository_path": arguments[4],
+                "default_branch": arguments[5],
+                "configuration": arguments[6],
+            }
             self.projects[str(arguments[0])] = record
             return record
         if "UPDATE app.projects" in query:
@@ -601,6 +610,11 @@ class _ProjectPool:
                 record["enabled"] = arguments[1]
             else:
                 record["name"] = arguments[1]
+                record["repository_mode"] = arguments[2]
+                record["repository_url"] = arguments[3]
+                record["local_repository_path"] = arguments[4]
+                record["default_branch"] = arguments[5]
+                record["configuration"] = arguments[6]
             return record
         raise AssertionError(query)
 
@@ -1204,7 +1218,14 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             "00000000-0000-0000-0000-000000000099",
         )
         self.assertTrue(created["enabled"])
-        self.assertEqual((await control_plane.list_projects())[0]["name"], "Example")
+        self.assertEqual(created["repository_mode"], "managed_clone")
+        self.assertEqual(created["repository_url"], "https://example.test/repo.git")
+        self.assertEqual(created["default_branch"], "main")
+        self.assertEqual(sorted(created["required_runner_labels"]), ["docker", "linux"])
+        listed = (await control_plane.list_projects())[0]
+        self.assertEqual(listed["name"], "Example")
+        self.assertEqual(listed["repository_mode"], "managed_clone")
+        self.assertEqual(listed["required_runner_labels"], ["docker", "linux"])
         updated = await control_plane.update_project(
             str(created["id"]),
             "Renamed",
@@ -1217,6 +1238,11 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             "00000000-0000-0000-0000-000000000099",
         )
         self.assertEqual(updated["name"], "Renamed")
+        self.assertEqual(updated["repository_mode"], "existing_path")
+        self.assertEqual(updated["repository_url"], None)
+        self.assertEqual(updated["local_repository_path"], "/repositories/example")
+        self.assertEqual(updated["default_branch"], "trunk")
+        self.assertEqual(updated["required_runner_labels"], ["linux"])
         disabled = await control_plane.set_project_enabled(
             str(created["id"]), False, NOW, "00000000-0000-0000-0000-000000000099"
         )
@@ -2495,6 +2521,51 @@ class FailureFingerprintDefinitionTests(unittest.TestCase):
         second = _runner_failure_fingerprint("execution", "pipeline failed token=other-value")
         self.assertEqual(first, second)
         self.assertNotIn("secret-value", first)
+
+
+class _QueuePool:
+    """Answers `list_queue`'s single SELECT over app.issues AS i."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict[str, object]] = []
+        self.query: str | None = None
+
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        del arguments
+        self.query = query
+        return self.rows
+
+
+class QueueDefinitionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_queue_selects_open_eligible_issues_with_reason(self) -> None:
+        pool = _QueuePool()
+        pool.rows = [
+            {
+                "project_id": "00000000-0000-0000-0000-000000000001",
+                "project_name": "Alpha",
+                "external_id": "42",
+                "title": "Implement queue",
+                "priority": 100,
+                "blocked_reason": "no_matching_runner",
+            },
+            {
+                "project_id": "00000000-0000-0000-0000-000000000002",
+                "project_name": "Beta",
+                "external_id": "7",
+                "title": "Lower priority",
+                "priority": 10,
+                "blocked_reason": "",
+            },
+        ]
+        entries = await AsyncpgControlPlane(pool).list_queue(NOW, 25)
+        assert pool.query is not None
+        self.assertIn("i.state = 'open'", pool.query)
+        self.assertIn("i.eligible = true", pool.query)
+        self.assertIn("ORDER BY i.priority DESC", pool.query)
+        self.assertIn("LIMIT $2", pool.query)
+        self.assertEqual(entries[0]["external_id"], "42")
+        self.assertEqual(entries[0]["blocked_reason"], "no_matching_runner")
+        self.assertEqual(entries[1]["blocked_reason"], "")
 
 
 if __name__ == "__main__":

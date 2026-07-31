@@ -30,6 +30,7 @@ from moirai.domain.models import (
 )
 from moirai.domain.scheduling import Assignment
 from moirai.persistence.authentication import (
+    AccountProfile,
     AsyncpgAuthentication,
     AuthenticatedSession,
     SessionCredentials,
@@ -40,7 +41,9 @@ if TYPE_CHECKING:
     # Deferred: grpc/protocol.py imports this module's classes back for a
     # Protocol-conformance check, so this side must not import it at runtime.
     from moirai.grpc.protocol import (
+        IssueSyncStatusRecord,
         ProjectRecord,
+        QueueEntryRecord,
         RegistrationTokenRecord,
         RunnerRecord,
         WorkflowDetailRecord,
@@ -137,6 +140,90 @@ class _CircuitProbeUnavailable(Exception):
     """
 
 
+def _runner_conditions(runner: str) -> str:
+    """SQL conditions a runner row must satisfy to serve a project.
+
+    Shared by `AsyncpgControlPlane.schedule` and `.list_queue` so the two can
+    never disagree on what "a runner can serve this project" means. `runner`
+    is the SQL alias of the `app.runners` row; the conditions reference the
+    `p` alias of `app.projects` for the required labels, so `p` must be in
+    scope wherever the fragment is embedded.
+    """
+    return (
+        f"{runner}.enabled = true"
+        f" AND {runner}.draining = false"
+        f" AND {runner}.revoked_at IS NULL"
+        f" AND {runner}.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)"
+        f" AND ("
+        f"    SELECT COUNT(*) FROM app.jobs AS active_job"
+        f"    WHERE active_job.runner_id = {runner}.id"
+        f"      AND active_job.status IN ('offered', 'preparing', 'running')"
+        f" ) < {runner}.capacity"
+    )
+
+
+def _locked_condition(project: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM app.project_locks AS lock WHERE lock.project_id = {project}.id)"
+    )
+
+
+def _project_circuit_condition(project: str, cooldown: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM app.project_circuit_state AS circuit"
+        f" WHERE circuit.project_id = {project}.id"
+        f" AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > {cooldown})))"
+    )
+
+
+def _provider_circuit_condition(issue: str, cooldown: str) -> str:
+    return (
+        f"NOT EXISTS (SELECT 1 FROM app.provider_circuit_state AS circuit"
+        f" WHERE circuit.provider = {issue}.provider"
+        f" AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > {cooldown})))"
+    )
+
+
+def _scheduling_conditions(issue: str, project: str, cooldown: str) -> str:
+    """The issue/project half of the scheduling predicate.
+
+    `schedule()` ANDs this with `_runner_conditions`. `list_queue()` keeps the
+    whole predicate under a CASE and negates each term to report why an issue
+    is not currently scheduled, so the reader cannot drift from the writer.
+    """
+    return (
+        f"{issue}.eligible = true"
+        f" AND {project}.enabled = true"
+        f" AND {_locked_condition(project)}"
+        f" AND {_project_circuit_condition(project, cooldown)}"
+        f" AND {_provider_circuit_condition(issue, cooldown)}"
+    )
+
+
+def _blocked_reason_case(issue: str, project: str, cooldown: str) -> str:
+    """The first scheduling condition an issue fails, or '' when it passes all.
+
+    Ordering is deliberate: `project_disabled` is the root cause and is
+    reported first, then transient blockers in the order an operator would
+    clear them (lock, project circuit, provider circuit), then runner
+    availability. Every `WHEN NOT (...) ` term is the textual negation of the
+    exact condition `_scheduling_conditions`/`_runner_conditions` generate.
+    """
+    return (
+        f"CASE"
+        f" WHEN NOT {project}.enabled THEN 'project_disabled'"
+        f" WHEN NOT ({_locked_condition(project)}) THEN 'project_locked'"
+        f" WHEN NOT ({_project_circuit_condition(project, cooldown)}) THEN 'project_circuit_open'"
+        f" WHEN NOT ({_provider_circuit_condition(issue, cooldown)}) THEN 'provider_circuit_open'"
+        f" WHEN NOT EXISTS ("
+        f"    SELECT 1 FROM app.runners AS runner"
+        f"    WHERE runner.status = 'online' AND {_runner_conditions('runner')}"
+        f" ) THEN 'no_matching_runner'"
+        f" ELSE ''"
+        f" END"
+    )
+
+
 class AsyncpgControlPlane:
     def __init__(
         self,
@@ -185,6 +272,9 @@ class AsyncpgControlPlane:
                 (SELECT COUNT(*)
                  FROM app.workflow_runs
                  WHERE status NOT IN ('completed', 'blocked', 'failed', 'cancelled')) AS active_workflows,
+                (SELECT COUNT(*)
+                 FROM app.jobs
+                 WHERE status IN ('offered', 'preparing', 'running')) AS scheduled_jobs,
                 (SELECT EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_seen_at)))
                  FROM app.runners
                  WHERE enabled = true AND revoked_at IS NULL AND last_seen_at IS NOT NULL) AS runner_heartbeat_age
@@ -192,10 +282,11 @@ class AsyncpgControlPlane:
             now,
         )
         if record is None:
-            return {"queue_depth": 0, "active_workflows": 0, "runner_heartbeat_age": 0}
+            return {"queue_depth": 0, "active_workflows": 0, "scheduled_jobs": 0, "runner_heartbeat_age": 0}
         return {
             "queue_depth": float(record["queue_depth"] or 0),
             "active_workflows": float(record["active_workflows"] or 0),
+            "scheduled_jobs": float(record["scheduled_jobs"] or 0),
             "runner_heartbeat_age": float(record["runner_heartbeat_age"] or 0),
         }
 
@@ -211,6 +302,26 @@ class AsyncpgControlPlane:
 
     async def revoke_session(self, session_token: str, now: datetime) -> None:
         await self._authentication.revoke_session(session_token, now)
+
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> AccountProfile:
+        return await self._authentication.update_account(
+            user_id,
+            keep_session_id,
+            current_password,
+            new_password,
+            new_email,
+            display_name,
+            now,
+        )
 
     async def reap_expired_data(self, now: datetime) -> dict[str, int]:
         return {
@@ -258,7 +369,8 @@ class AsyncpgControlPlane:
                 (id, name, enabled, repository_mode, repository_url, local_repository_path,
                  default_branch, configuration, created_at, updated_at)
             VALUES ($1, $2, true, $3, $4, $5, $6, $7::jsonb, $8, $8)
-            RETURNING id, name, enabled
+            RETURNING id, name, enabled, repository_mode, repository_url,
+                      local_repository_path, default_branch, configuration
             """,
             project_id,
             normalized["name"],
@@ -271,19 +383,21 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project could not be created")
-        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project = _project_record(record)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.create", "project", project["id"], "succeeded", now)
         return project
 
     async def list_projects(self) -> list[ProjectRecord]:
         records = await self._pool.fetch(
-            "SELECT id, name, enabled FROM app.projects ORDER BY name ASC, id ASC"
+            """
+            SELECT id, name, enabled, repository_mode, repository_url,
+                   local_repository_path, default_branch, configuration
+            FROM app.projects
+            ORDER BY name ASC, id ASC
+            """
         )
-        return [
-            {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
-            for record in records
-        ]
+        return [_project_record(record) for record in records]
 
     async def list_enabled_projects(self) -> list[Project]:
         records = await self._pool.fetch(
@@ -458,17 +572,62 @@ class AsyncpgControlPlane:
         )
 
     async def clear_issue_sync_failure(self, project_id: str, now: datetime) -> None:
+        # This is the single "sync succeeded" write path: it clears the failure
+        # state and records when the project last synced, which the web console
+        # surfaces so an operator can see that issues are actually being picked
+        # up.
         await self._pool.execute(
             """
             INSERT INTO app.issue_sync_state
-                (project_id, consecutive_failures, next_retry_at, last_error, updated_at)
-            VALUES ($1, 0, NULL, NULL, $2)
+                (project_id, consecutive_failures, next_retry_at, last_error, last_synced_at, updated_at)
+            VALUES ($1, 0, NULL, NULL, $2, $2)
             ON CONFLICT (project_id) DO UPDATE
-            SET consecutive_failures = 0, next_retry_at = NULL, last_error = NULL, updated_at = EXCLUDED.updated_at
+            SET consecutive_failures = 0, next_retry_at = NULL, last_error = NULL,
+                last_synced_at = EXCLUDED.last_synced_at, updated_at = EXCLUDED.updated_at
             """,
             _uuid(project_id),
             now,
         )
+
+    async def issue_sync_status(self, now: datetime) -> list[IssueSyncStatusRecord]:
+        """Return per-project issue-sync status for the web console.
+
+        Every project appears, whether or not it has synced yet: a fresh
+        project reads as "never synced, zero issues", which is exactly the
+        state an operator needs to see before the first pass runs.
+        """
+        records = await self._pool.fetch(
+            """
+            SELECT p.id AS project_id, p.name AS project_name, p.enabled,
+                   COUNT(i.id) AS issue_count,
+                   COUNT(i.id) FILTER (WHERE i.eligible = true AND i.state = 'open')
+                       AS eligible_count,
+                   s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error,
+                   (s.next_retry_at IS NOT NULL AND s.next_retry_at > $1) AS backing_off
+            FROM app.projects AS p
+            LEFT JOIN app.issues AS i ON i.project_id = p.id AND i.state = 'open'
+            LEFT JOIN app.issue_sync_state AS s ON s.project_id = p.id
+            GROUP BY p.id, p.name, p.enabled, s.last_synced_at, s.consecutive_failures,
+                     s.next_retry_at, s.last_error
+            ORDER BY p.name
+            """,
+            now,
+        )
+        return [
+            {
+                "project_id": str(record["project_id"]),
+                "project_name": str(record["project_name"]),
+                "enabled": bool(record["enabled"]),
+                "issue_count": int(record["issue_count"]),
+                "eligible_count": int(record["eligible_count"]),
+                "last_synced_at": record["last_synced_at"],
+                "consecutive_failures": int(record["consecutive_failures"]),
+                "next_retry_at": record["next_retry_at"],
+                "last_error": record["last_error"],
+                "backing_off": bool(record["backing_off"]),
+            }
+            for record in records
+        ]
 
     async def record_provider_failure(self, provider: str, reason: str, now: datetime) -> None:
         """Records a provider failure and drops any probe pointer (issue #92).
@@ -555,7 +714,8 @@ class AsyncpgControlPlane:
                 configuration = $7::jsonb,
                 updated_at = $8
             WHERE id = $1
-            RETURNING id, name, enabled
+            RETURNING id, name, enabled, repository_mode, repository_url,
+                      local_repository_path, default_branch, configuration
             """,
             _uuid(project_id),
             normalized["name"],
@@ -568,7 +728,7 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project is unknown")
-        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project = _project_record(record)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.update", "project", project["id"], "succeeded", now)
         return project
@@ -579,7 +739,8 @@ class AsyncpgControlPlane:
         record = await self._pool.fetchrow(
             """
             UPDATE app.projects SET enabled = $2, updated_at = $3 WHERE id = $1
-            RETURNING id, name, enabled
+            RETURNING id, name, enabled, repository_mode, repository_url,
+                      local_repository_path, default_branch, configuration
             """,
             _uuid(project_id),
             enabled,
@@ -587,7 +748,7 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project is unknown")
-        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project = _project_record(record)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.enable" if enabled else "project.disable", "project", project["id"], "succeeded", now)
         return project
@@ -1397,31 +1558,8 @@ class AsyncpgControlPlane:
                     FROM app.issues AS i
                     JOIN app.projects AS p ON p.id = i.project_id
                     JOIN app.runners AS r ON r.status = 'online'
-                    WHERE i.eligible = true
-                      AND p.enabled = true
-                      AND r.enabled = true
-                      AND r.draining = false
-                      AND r.revoked_at IS NULL
-                      AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
-                       AND NOT EXISTS (
-                           SELECT 1 FROM app.project_locks AS lock
-                           WHERE lock.project_id = p.id
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1 FROM app.project_circuit_state AS circuit
-                           WHERE circuit.project_id = p.id
-                             AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > $1))
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1 FROM app.provider_circuit_state AS circuit
-                           WHERE circuit.provider = i.provider
-                             AND (circuit.state = 'half_open' OR (circuit.state = 'open' AND circuit.opened_at > $1))
-                       )
-                       AND (
-                           SELECT COUNT(*) FROM app.jobs AS active_job
-                          WHERE active_job.runner_id = r.id
-                            AND active_job.status IN ('offered', 'preparing', 'running')
-                      ) < r.capacity
+                    WHERE {_scheduling_conditions("i", "p", "$1")}
+                      AND {_runner_conditions("r")}
                     ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at,
                              i.project_id, i.external_id, r.id
                     FOR UPDATE OF i, p, r SKIP LOCKED
@@ -1506,6 +1644,45 @@ class AsyncpgControlPlane:
         lease = JobLease(str(job_id), runner.id, 1, expires_at)
         offer = JobOffer(str(job_id), workflow.id, issue.id, runner.id, expires_at, lease)
         return ScheduledJob(Assignment(issue, runner), workflow, offer)
+
+    async def list_queue(self, now: datetime, limit: int = 50) -> list[QueueEntryRecord]:
+        """Return the eligible-issue queue in the scheduler's own ordering.
+
+        Every eligible open issue appears, disabled projects included, so an
+        operator can see *why* the top entries are not running. Each entry
+        carries a machine-readable `blocked_reason`; it is empty exactly when
+        `schedule()` would consider the issue schedulable, because the reason
+        is computed from the same predicate fragments `schedule()` embeds.
+        """
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        records = await self._pool.fetch(
+            f"""
+            SELECT i.external_id, i.title, i.priority,
+                   p.id AS project_id, p.name AS project_name,
+                   {_blocked_reason_case("i", "p", "$1")} AS blocked_reason
+            FROM app.issues AS i
+            JOIN app.projects AS p ON p.id = i.project_id
+            WHERE i.eligible = true
+              AND i.state = 'open'
+            ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at,
+                     i.project_id, i.external_id
+            LIMIT $2
+            """,
+            now - self._circuit_probe_cooldown,
+            limit,
+        )
+        return [
+            {
+                "project_id": str(record["project_id"]),
+                "project_name": str(record["project_name"]),
+                "external_id": str(record["external_id"]),
+                "title": str(record["title"]),
+                "priority": int(record["priority"]),
+                "blocked_reason": str(record["blocked_reason"]),
+            }
+            for record in records
+        ]
 
     async def schedule_execution(self, now: datetime, offer_ttl: timedelta) -> ScheduledJob | None:
         if offer_ttl <= timedelta():
@@ -2970,6 +3147,23 @@ def _project_configuration(
             "required_runner_labels": labels,
         }
     raise ValueError("repository mode is invalid")
+
+
+def _project_record(record: dict[str, Any]) -> ProjectRecord:
+    configuration = record["configuration"]
+    if isinstance(configuration, str):
+        configuration = json.loads(configuration)
+    labels = configuration.get("required_runner_labels") if isinstance(configuration, dict) else None
+    return {
+        "id": str(record["id"]),
+        "name": str(record["name"]),
+        "enabled": bool(record["enabled"]),
+        "repository_mode": str(record["repository_mode"]),
+        "repository_url": _optional_text(record["repository_url"]),
+        "local_repository_path": _optional_text(record["local_repository_path"]),
+        "default_branch": str(record["default_branch"]),
+        "required_runner_labels": list(labels) if isinstance(labels, list) else [],
+    }
 
 
 def _final_revision(payload: dict[str, Any]) -> str:

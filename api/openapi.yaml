@@ -9,6 +9,20 @@ info:
 servers:
   - url: http://localhost:8080
 paths:
+  /api/v1/scheduler/metrics:
+    get:
+      summary: Get scheduler summary metrics
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Scheduler metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SchedulerMetrics'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /live:
     get:
       summary: Liveness probe
@@ -94,6 +108,31 @@ paths:
                 $ref: '#/components/schemas/User'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/account:
+    put:
+      summary: Update the authenticated user's account
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdate'
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
   /api/v1/projects:
     get:
       summary: List projects
@@ -341,6 +380,63 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/sync/status:
+    get:
+      summary: Per-project issue synchronization status
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Sync status for every project
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IssueSyncStatusEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/sync:
+    post:
+      summary: Run an issue-synchronization pass now
+      description: |
+        Empty body syncs every enabled project; a body with `projectId` syncs
+        only that project and clears any in-memory backoff it was under.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                projectId:
+                  type: string
+      responses:
+        '200':
+          description: Per-project sync results
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SyncResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '504':
+          $ref: '#/components/responses/OrchestratorTimeout'
   /api/v1/workflows:
     get:
       summary: List workflows
@@ -554,6 +650,15 @@ components:
         userId: { type: string }
         username: { type: string }
         role: { type: string }
+        email: { type: string }
+        displayName: { type: string }
+    AccountUpdate:
+      type: object
+      properties:
+        currentPassword: { type: string }
+        newPassword: { type: string }
+        newEmail: { type: string }
+        displayName: { type: string }
     ProjectConfiguration:
       type: object
       properties:
@@ -572,6 +677,18 @@ components:
         id: { type: string }
         name: { type: string }
         enabled: { type: boolean }
+        repositoryMode: { type: string }
+        repositoryUrl:
+          type: string
+          description: >-
+            Clone source for managed_clone projects. Userinfo (embedded
+            credentials) is never returned; any present userinfo is replaced
+            with a redacted placeholder.
+        localRepositoryPath: { type: string }
+        defaultBranch: { type: string }
+        requiredRunnerLabels:
+          type: array
+          items: { type: string }
     RunnerToken:
       type: object
       required: [id, allowedLabels, expiresAt]
@@ -602,6 +719,27 @@ components:
           type: array
           items: { type: string }
         lastSeenAt: { type: string }
+    SyncResult:
+      type: object
+      required: [projectId, syncedIssues]
+      properties:
+        projectId: { type: string }
+        syncedIssues: { type: integer }
+        error: { type: string }
+    IssueSyncStatusEntry:
+      type: object
+      required: [projectId, projectName, enabled, issueCount, eligibleCount, consecutiveFailures, backingOff]
+      properties:
+        projectId: { type: string }
+        projectName: { type: string }
+        enabled: { type: boolean }
+        issueCount: { type: integer }
+        eligibleCount: { type: integer }
+        lastSyncedAt: { type: string }
+        consecutiveFailures: { type: integer }
+        nextRetryAt: { type: string }
+        lastError: { type: string }
+        backingOff: { type: boolean }
     WorkflowControlRequest:
       type: object
       properties:
@@ -656,10 +794,10 @@ components:
       properties:
         status: { type: string, enum: [healthy, degraded] }
         orchestrator: { type: string, enum: [reachable, unreachable] }
-    Problem:
+    SchedulerMetrics:
       type: object
-      required: [status, title]
+      required: [queueDepth, activeWorkflows, scheduledJobs]
       properties:
-        status: { type: integer }
-        title: { type: string }
-        detail: { type: string }
+        queueDepth: { type: integer }
+        activeWorkflows: { type: integer }
+        scheduledJobs: { type: integer }

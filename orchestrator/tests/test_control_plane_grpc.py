@@ -4,8 +4,13 @@ from datetime import UTC, datetime, timedelta
 try:
     import grpc
 
+    from moirai.domain.control_plane import AuthenticationError
     from moirai.main import register_services
-    from moirai.persistence.authentication import AuthenticatedSession, SessionCredentials
+    from moirai.persistence.authentication import (
+        AccountProfile,
+        AuthenticatedSession,
+        SessionCredentials,
+    )
     from proto import control_plane_pb2, control_plane_pb2_grpc, runner_control_pb2_grpc
 except ModuleNotFoundError:
     grpc = None
@@ -20,6 +25,8 @@ class FakeControlPlane:
     def __init__(self) -> None:
         self.token_labels: tuple[str, ...] | None = None
         self.token_expiry: datetime | None = None
+        self.revoked_session_token: str | None = None
+        self.revoked_session_at: datetime | None = None
 
     async def login(self, username: str, password: str, now: datetime) -> SessionCredentials:
         if username != "admin" or password != "correct":
@@ -42,8 +49,39 @@ class FakeControlPlane:
             )
         raise PermissionError()
 
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> object:
+        if user_id != "00000000-0000-0000-0000-000000000099" or current_password != "correct":
+            raise AuthenticationError("current password is incorrect")
+        return AccountProfile(
+            user_id=user_id,
+            username="admin",
+            role="admin",
+            email=new_email or "admin@example.com",
+            display_name=display_name or "Admin",
+        )
+
     async def list_projects(self) -> list[dict[str, object]]:
-        return [{"id": "project-1", "name": "Example", "enabled": True}]
+        return [
+            {
+                "id": "project-1",
+                "name": "Example",
+                "enabled": True,
+                "repository_mode": "managed_clone",
+                "repository_url": "https://example.test/repo.git",
+                "local_repository_path": None,
+                "default_branch": "main",
+                "required_runner_labels": ["docker", "linux"],
+            }
+        ]
 
     async def create_project(
         self,
@@ -172,6 +210,20 @@ class FakeControlPlane:
     async def list_runners(self) -> list[dict[str, object]]:
         return []
 
+    async def list_queue(self, now: datetime, limit: int) -> list[dict[str, object]]:
+        del now
+        self.queue_request = ("list_queue", limit)
+        return [
+            {
+                "project_id": "project-1",
+                "project_name": "Example",
+                "external_id": "42",
+                "title": "Implement queue",
+                "priority": 100,
+                "blocked_reason": "",
+            }
+        ]
+
     async def revoke_session(self, session_token: str, now: datetime) -> None:
         self.revoked_session_token = session_token
         self.revoked_session_at = now
@@ -262,11 +314,46 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
             await self.client.WhoAmI(control_plane_pb2.WhoAmIRequest())
         self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
+    async def test_update_account_updates_the_profile(self) -> None:
+        response = await self.client.UpdateAccount(
+            control_plane_pb2.UpdateAccountRequest(
+                current_password="correct",
+                new_password="",
+                new_email="new@example.com",
+                display_name="New Name",
+            ),
+            metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
+        )
+        self.assertEqual(response.user_id, "00000000-0000-0000-0000-000000000099")
+        self.assertEqual(response.email, "new@example.com")
+        self.assertEqual(response.display_name, "New Name")
+        with self.assertRaises(grpc.aio.AioRpcError) as wrong_password:
+            await self.client.UpdateAccount(
+                control_plane_pb2.UpdateAccountRequest(current_password="wrong", new_password="x1Y!abcdef"),
+                metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
+            )
+        self.assertEqual(wrong_password.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+        with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
+            await self.client.UpdateAccount(control_plane_pb2.UpdateAccountRequest())
+        self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+
     async def test_maps_typed_responses_and_validates_runner_token_requests(self) -> None:
         projects = await self.client.ListProjects(
             control_plane_pb2.ListProjectsRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual([(project.id, project.name, project.enabled) for project in projects.projects], [("project-1", "Example", True)])
+        self.assertEqual(
+            [
+                (
+                    projects.projects[0].repository_mode,
+                    projects.projects[0].repository_url,
+                    projects.projects[0].local_repository_path,
+                    projects.projects[0].default_branch,
+                    list(projects.projects[0].required_runner_labels),
+                )
+            ],
+            [("managed_clone", "https://example.test/repo.git", "", "main", ["docker", "linux"])],
+        )
         created = await self.client.CreateProject(
             control_plane_pb2.CreateProjectRequest(
                 project=control_plane_pb2.ProjectConfiguration(
@@ -359,6 +446,28 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                 metadata=(("x-loop-session", "viewer-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(viewer.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+
+    async def test_list_queue_returns_entries_and_enforces_limits(self) -> None:
+        response = await self.client.ListQueue(
+            control_plane_pb2.ListQueueRequest(limit=10),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(self.control_plane.queue_request, ("list_queue", 10))
+        self.assertEqual(len(response.entries), 1)
+        self.assertEqual(response.entries[0].project_id, "project-1")
+        self.assertEqual(response.entries[0].priority, 100)
+        self.assertEqual(response.entries[0].blocked_reason, "")
+
+        with self.assertRaises(grpc.aio.AioRpcError) as too_many:
+            await self.client.ListQueue(
+                control_plane_pb2.ListQueueRequest(limit=101),
+                metadata=(("x-loop-session", "admin-session"),),
+            )
+        self.assertEqual(too_many.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+        with self.assertRaises(grpc.aio.AioRpcError) as anonymous:
+            await self.client.ListQueue(control_plane_pb2.ListQueueRequest())
+        self.assertEqual(anonymous.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
     async def test_runner_controls_require_admin_csrf_and_persist_actor(self) -> None:
         session = await self.runner_service._sessions.connect("runner-1")

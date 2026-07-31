@@ -1,5 +1,8 @@
 version: v1
 name: buf.build/loop-engineering/loop-engineering
+build:
+  excludes:
+    - .claude
 lint:
   use:
     - STANDARD

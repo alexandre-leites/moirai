@@ -51,22 +51,27 @@ class Metrics:
         self._runner_heartbeat_age = Gauge(
             "moirai_runner_heartbeat_age_seconds", "Age of the oldest runner heartbeat", registry=registry
         )
+        self._scheduled_job_count = Gauge(
+            "moirai_scheduled_job_count", "Scheduled job count", registry=registry
+        )
         self._registry = registry
 
     def start(self, bind: str) -> None:
         host, port = _split_bind(bind)
         start_http_server(port, addr=host, registry=self._registry)
 
-    def update(self, *, queue_depth: float = 0, active_workflows: float = 0, runner_heartbeat_age: float = 0) -> None:
+    def update(self, *, queue_depth: float = 0, active_workflows: float = 0, runner_heartbeat_age: float = 0, scheduled_job_count: float = 0) -> None:
         self._queue_depth.set(queue_depth)
         self._active_workflows.set(active_workflows)
         self._runner_heartbeat_age.set(runner_heartbeat_age)
+        self._scheduled_job_count.set(scheduled_job_count)
 
     def update_snapshot(self, snapshot: dict[str, float]) -> None:
         self.update(
             queue_depth=snapshot["queue_depth"],
             active_workflows=snapshot["active_workflows"],
             runner_heartbeat_age=snapshot["runner_heartbeat_age"],
+            scheduled_job_count=snapshot["scheduled_job_count"],
         )
 
 

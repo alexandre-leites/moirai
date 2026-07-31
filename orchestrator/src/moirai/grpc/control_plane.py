@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -7,9 +8,12 @@ from typing import Any
 
 import grpc
 
+from moirai.domain.control_plane import AuthenticationError
 from moirai.grpc.protocol import (
     ControlPlane,
+    IssueSyncStatusRecord,
     ProjectRecord,
+    QueueEntryRecord,
     RegistrationTokenRecord,
     RunnerRecord,
     WorkflowDetailRecord,
@@ -21,6 +25,12 @@ from proto import control_plane_pb2, control_plane_pb2_grpc
 
 _SESSION_METADATA_KEY = "x-loop-session"
 _CSRF_METADATA_KEY = "x-loop-csrf"
+_QUEUE_DEFAULT_LIMIT = 50
+_QUEUE_MAX_LIMIT = 100
+# Upper bound on a manual sync pass. A pass already in progress under the
+# shared sync lock is waited on, so this must exceed the per-project tracker
+# timeout rather than the single-project fast path.
+_SYNC_NOW_TIMEOUT_SECONDS = 120
 
 
 class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
@@ -31,6 +41,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         registration_token_ttl: timedelta = timedelta(minutes=15),
         workflow_runtime: Any | None = None,
         runner_control: Any | None = None,
+        issue_sync: Any | None = None,
     ) -> None:
         if registration_token_ttl <= timedelta():
             raise ValueError("registration token TTL must be positive")
@@ -39,6 +50,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         self._registration_token_ttl = registration_token_ttl
         self._workflow_runtime = workflow_runtime
         self._runner_control = runner_control
+        self._issue_sync = issue_sync
 
     async def Login(
         self,
@@ -73,6 +85,38 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             user_id=session.user_id,
             username=session.username,
             role=session.role,
+            email=session.email,
+            display_name=session.display_name,
+        )
+
+    async def UpdateAccount(
+        self,
+        request: control_plane_pb2.UpdateAccountRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.UpdateAccountResponse:
+        session = await self._require_session(context, require_csrf=True)
+        try:
+            profile = await self._control_plane.update_account(
+                session.user_id,
+                session.id,
+                request.current_password,
+                request.new_password,
+                request.new_email,
+                request.display_name,
+                self._now(),
+            )
+        except NotImplementedError:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "account management is unavailable")
+        except AuthenticationError:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, "current password is incorrect")
+        except ValueError:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "account update is invalid")
+        return control_plane_pb2.UpdateAccountResponse(
+            user_id=profile.user_id,
+            username=profile.username,
+            role=profile.role,
+            email=profile.email,
+            display_name=profile.display_name,
         )
 
     async def ListProjects(
@@ -302,12 +346,87 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             runners=[_runner_message(runner) for runner in runners]
         )
 
+    async def ListQueue(
+        self,
+        request: control_plane_pb2.ListQueueRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.ListQueueResponse:
+        await self._require_session(context)
+        limit = request.limit if request.limit > 0 else _QUEUE_DEFAULT_LIMIT
+        if limit > _QUEUE_MAX_LIMIT:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"queue limit must be between 1 and {_QUEUE_MAX_LIMIT}",
+            )
+        try:
+            entries = await self._control_plane.list_queue(self._now(), limit)
+        except NotImplementedError:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "queue is unavailable")
+        return control_plane_pb2.ListQueueResponse(
+            entries=[_queue_entry_message(entry) for entry in entries]
+        )
+
+    async def GetSchedulerMetrics(
+        self,
+        request: control_plane_pb2.GetSchedulerMetricsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.GetSchedulerMetricsResponse:
+        await self._require_session(context)
+        snapshot = await self._control_plane.metrics_snapshot(self._now())
+        return control_plane_pb2.GetSchedulerMetricsResponse(
+            queue_depth=int(snapshot["queue_depth"]),
+            active_workflows=int(snapshot["active_workflows"]),
+            scheduled_jobs=int(snapshot["scheduled_jobs"]),
+        )
+
+    async def SyncNow(
+        self,
+        request: control_plane_pb2.SyncNowRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.SyncNowResponse:
+        await self._require_session(context, administrator=True, require_csrf=True)
+        if self._issue_sync is None:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "issue sync is unavailable")
+        project_id = request.project_id.strip() or None
+        try:
+            results = await asyncio.wait_for(
+                self._issue_sync.sync_now(self._now(), project_id),
+                timeout=_SYNC_NOW_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            await context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "issue sync timed out")
+        except Exception:
+            logging.getLogger(__name__).exception("manual issue sync failed")
+            await context.abort(grpc.StatusCode.INTERNAL, "issue sync failed")
+        return control_plane_pb2.SyncNowResponse(
+            results=[
+                _project_sync_result_message(project_id, result)
+                for project_id, result in results.items()
+            ]
+        )
+
+    async def IssueSyncStatus(
+        self,
+        request: control_plane_pb2.IssueSyncStatusRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.IssueSyncStatusResponse:
+        del request
+        await self._require_session(context)
+        try:
+            entries = await self._control_plane.issue_sync_status(self._now())
+        except NotImplementedError:
+            await context.abort(grpc.StatusCode.UNIMPLEMENTED, "issue sync status is unavailable")
+        return control_plane_pb2.IssueSyncStatusResponse(
+            entries=[_issue_sync_status_message(entry) for entry in entries]
+        )
+
     async def SetRunnerState(
         self,
         request: control_plane_pb2.SetRunnerStateRequest,
         context: grpc.aio.ServicerContext,
     ) -> control_plane_pb2.SetRunnerStateResponse:
-        session = await self._require_session(context, administrator=True, require_csrf=True)
+        session = await self._require_session(context, administrator=False, require_csrf=True)
+        self._require_admin(session, context)
         if not request.runner_id or request.state not in {"enable", "drain", "revoke"}:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "runner state request is invalid")
         try:
@@ -373,6 +492,8 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
     async def RetryWorkflow(
         self, request: control_plane_pb2.RetryWorkflowRequest, context: grpc.aio.ServicerContext
     ) -> control_plane_pb2.RetryWorkflowResponse:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        self._require_admin(session, context)
         result = await self._control_workflow("retry", request, context)
         if self._workflow_runtime is None:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, "workflow resumption is unavailable")
@@ -386,6 +507,8 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
     async def CancelWorkflow(
         self, request: control_plane_pb2.CancelWorkflowRequest, context: grpc.aio.ServicerContext
     ) -> control_plane_pb2.CancelWorkflowResponse:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        self._require_admin(session, context)
         result = await self._control_workflow("cancel", request, context)
         await self._cancel_runner_execution(result)
         return control_plane_pb2.CancelWorkflowResponse(workflow=_workflow_message_from_result(result))
@@ -393,6 +516,8 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
     async def BlockWorkflow(
         self, request: control_plane_pb2.BlockWorkflowRequest, context: grpc.aio.ServicerContext
     ) -> control_plane_pb2.BlockWorkflowResponse:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        self._require_admin(session, context)
         result = await self._control_workflow("block", request, context)
         await self._cancel_runner_execution(result)
         return control_plane_pb2.BlockWorkflowResponse(workflow=_workflow_message_from_result(result))
@@ -400,7 +525,8 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
     async def _control_workflow(
         self, action: str, request: Any, context: grpc.aio.ServicerContext
     ) -> dict[str, object]:
-        session = await self._require_session(context, administrator=True, require_csrf=True)
+        session = await self._require_session(context, administrator=False, require_csrf=True)
+        self._require_admin(session, context)
         if not request.workflow_run_id:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "workflow run ID is required")
         try:
@@ -444,6 +570,10 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             await context.abort(grpc.StatusCode.PERMISSION_DENIED, "administrator access is required")
         return session
 
+    def _require_admin(self, session: AuthenticatedSession, context: grpc.aio.ServicerContext):
+        if session.role != "admin":
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, "administrator access is required")
+
 
 def _project_arguments(
     project: control_plane_pb2.ProjectConfiguration,
@@ -463,6 +593,11 @@ def _project_message(project: ProjectRecord) -> control_plane_pb2.Project:
         id=project["id"],
         name=project["name"],
         enabled=project["enabled"],
+        repository_mode=project.get("repository_mode", ""),
+        repository_url=project.get("repository_url") or "",
+        local_repository_path=project.get("local_repository_path") or "",
+        default_branch=project.get("default_branch", ""),
+        required_runner_labels=list(project.get("required_runner_labels") or []),
     )
 
 
@@ -499,6 +634,38 @@ def _runner_message(runner: RunnerRecord) -> control_plane_pb2.Runner:
         status=runner["status"],
         labels=runner["labels"],
         last_seen_at=_optional_timestamp(runner["last_seen_at"]),
+    )
+
+
+def _queue_entry_message(entry: QueueEntryRecord) -> control_plane_pb2.QueueEntry:
+    return control_plane_pb2.QueueEntry(
+        project_id=entry["project_id"],
+        project_name=entry["project_name"],
+        external_id=entry["external_id"],
+        title=entry["title"],
+        priority=entry["priority"],
+        blocked_reason=entry["blocked_reason"],
+    )
+
+
+def _project_sync_result_message(project_id: str, result: int | str) -> control_plane_pb2.ProjectSyncResult:
+    if isinstance(result, int):
+        return control_plane_pb2.ProjectSyncResult(project_id=project_id, synced_issues=result)
+    return control_plane_pb2.ProjectSyncResult(project_id=project_id, error=result)
+
+
+def _issue_sync_status_message(entry: IssueSyncStatusRecord) -> control_plane_pb2.IssueSyncStatusEntry:
+    return control_plane_pb2.IssueSyncStatusEntry(
+        project_id=entry["project_id"],
+        project_name=entry["project_name"],
+        enabled=entry["enabled"],
+        issue_count=entry["issue_count"],
+        eligible_count=entry["eligible_count"],
+        last_synced_at=_optional_timestamp(entry["last_synced_at"]),
+        consecutive_failures=entry["consecutive_failures"],
+        next_retry_at=_optional_timestamp(entry["next_retry_at"]),
+        last_error=entry["last_error"] or "",
+        backing_off=entry["backing_off"],
     )
 
 

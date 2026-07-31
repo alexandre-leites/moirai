@@ -295,6 +295,14 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 				executeErr = deliverErr
 			}
 		}
+		// A completed execution that may not push commits but publishes
+		// nothing. Anchor outside refs/heads so the next preparation
+		// cannot destroy the commit when it resets the branch.
+		if executeErr == nil && result.Status == "completed" && result.Committed && !packet.Constraints.MayPush {
+			if err := dispatcher.Delivery.RecordWorkInProgress(ctx, workspace, workInProgressReference(packet.ExecutionID)); err != nil {
+				slog.Warn("could not anchor completed work that may not push", "job_id", packet.JobID, "execution_id", packet.ExecutionID, "error", err)
+			}
+		}
 		if executeErr != nil || result.Status != "completed" {
 			dispatcher.retainWorkInProgress(ctx, workspace, packet, environment, &result)
 		}

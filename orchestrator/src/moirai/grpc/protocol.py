@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
-from moirai.persistence.authentication import AuthenticatedSession, SessionCredentials
+from moirai.persistence.authentication import (
+    AccountProfile,
+    AuthenticatedSession,
+    SessionCredentials,
+)
 
 if TYPE_CHECKING:
     from moirai.persistence.control_plane import AsyncpgControlPlane
@@ -13,6 +17,11 @@ class ProjectRecord(TypedDict):
     id: str
     name: str
     enabled: bool
+    repository_mode: str
+    repository_url: str | None
+    local_repository_path: str | None
+    default_branch: str
+    required_runner_labels: list[str]
 
 
 class RegistrationTokenRecord(TypedDict):
@@ -66,6 +75,28 @@ class RunnerRecord(TypedDict):
     last_seen_at: datetime | None
 
 
+class QueueEntryRecord(TypedDict):
+    project_id: str
+    project_name: str
+    external_id: str
+    title: str
+    priority: int
+    blocked_reason: str
+
+
+class IssueSyncStatusRecord(TypedDict):
+    project_id: str
+    project_name: str
+    enabled: bool
+    issue_count: int
+    eligible_count: int
+    last_synced_at: datetime | None
+    consecutive_failures: int
+    next_retry_at: datetime | None
+    last_error: str | None
+    backing_off: bool
+
+
 class ControlPlane(Protocol):
     """The control-plane surface ControlPlaneService depends on.
 
@@ -79,6 +110,17 @@ class ControlPlane(Protocol):
     async def validate_session(
         self, session_token: str, csrf_token: str | None, now: datetime, require_csrf: bool
     ) -> AuthenticatedSession: ...
+
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> AccountProfile: ...
 
     async def list_projects(self) -> list[ProjectRecord]: ...
 
@@ -151,6 +193,10 @@ class ControlPlane(Protocol):
     ) -> dict[str, object]: ...
 
     async def list_runners(self) -> list[RunnerRecord]: ...
+
+    async def list_queue(self, now: datetime, limit: int) -> list[QueueEntryRecord]: ...
+
+    async def issue_sync_status(self, now: datetime) -> list[IssueSyncStatusRecord]: ...
 
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 

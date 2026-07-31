@@ -29,28 +29,68 @@ class WhoAmIRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class WhoAmIResponse(_message.Message):
-    __slots__ = ("user_id", "username", "role")
+    __slots__ = ("user_id", "username", "role", "email", "display_name")
     USER_ID_FIELD_NUMBER: _ClassVar[int]
     USERNAME_FIELD_NUMBER: _ClassVar[int]
     ROLE_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
     user_id: str
     username: str
     role: str
-    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ...) -> None: ...
+    email: str
+    display_name: str
+    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ..., email: _Optional[str] = ..., display_name: _Optional[str] = ...) -> None: ...
+
+class UpdateAccountRequest(_message.Message):
+    __slots__ = ("current_password", "new_password", "new_email", "display_name")
+    CURRENT_PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    NEW_PASSWORD_FIELD_NUMBER: _ClassVar[int]
+    NEW_EMAIL_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    current_password: str
+    new_password: str
+    new_email: str
+    display_name: str
+    def __init__(self, current_password: _Optional[str] = ..., new_password: _Optional[str] = ..., new_email: _Optional[str] = ..., display_name: _Optional[str] = ...) -> None: ...
+
+class UpdateAccountResponse(_message.Message):
+    __slots__ = ("user_id", "username", "role", "email", "display_name")
+    USER_ID_FIELD_NUMBER: _ClassVar[int]
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    ROLE_FIELD_NUMBER: _ClassVar[int]
+    EMAIL_FIELD_NUMBER: _ClassVar[int]
+    DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    user_id: str
+    username: str
+    role: str
+    email: str
+    display_name: str
+    def __init__(self, user_id: _Optional[str] = ..., username: _Optional[str] = ..., role: _Optional[str] = ..., email: _Optional[str] = ..., display_name: _Optional[str] = ...) -> None: ...
 
 class ListProjectsRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
 class Project(_message.Message):
-    __slots__ = ("id", "name", "enabled")
+    __slots__ = ("id", "name", "enabled", "repository_mode", "repository_url", "local_repository_path", "default_branch", "required_runner_labels")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     ENABLED_FIELD_NUMBER: _ClassVar[int]
+    REPOSITORY_MODE_FIELD_NUMBER: _ClassVar[int]
+    REPOSITORY_URL_FIELD_NUMBER: _ClassVar[int]
+    LOCAL_REPOSITORY_PATH_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_BRANCH_FIELD_NUMBER: _ClassVar[int]
+    REQUIRED_RUNNER_LABELS_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     enabled: bool
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ...) -> None: ...
+    repository_mode: str
+    repository_url: str
+    local_repository_path: str
+    default_branch: str
+    required_runner_labels: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ..., repository_mode: _Optional[str] = ..., repository_url: _Optional[str] = ..., local_repository_path: _Optional[str] = ..., default_branch: _Optional[str] = ..., required_runner_labels: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class ListProjectsResponse(_message.Message):
     __slots__ = ("projects",)
@@ -285,6 +325,90 @@ class ListRunnersResponse(_message.Message):
     RUNNERS_FIELD_NUMBER: _ClassVar[int]
     runners: _containers.RepeatedCompositeFieldContainer[Runner]
     def __init__(self, runners: _Optional[_Iterable[_Union[Runner, _Mapping]]] = ...) -> None: ...
+
+class ListQueueRequest(_message.Message):
+    __slots__ = ("limit",)
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    limit: int
+    def __init__(self, limit: _Optional[int] = ...) -> None: ...
+
+class QueueEntry(_message.Message):
+    __slots__ = ("project_id", "project_name", "external_id", "title", "priority", "blocked_reason")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_NAME_FIELD_NUMBER: _ClassVar[int]
+    EXTERNAL_ID_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
+    BLOCKED_REASON_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    project_name: str
+    external_id: str
+    title: str
+    priority: int
+    blocked_reason: str
+    def __init__(self, project_id: _Optional[str] = ..., project_name: _Optional[str] = ..., external_id: _Optional[str] = ..., title: _Optional[str] = ..., priority: _Optional[int] = ..., blocked_reason: _Optional[str] = ...) -> None: ...
+
+class ListQueueResponse(_message.Message):
+    __slots__ = ("entries",)
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[QueueEntry]
+    def __init__(self, entries: _Optional[_Iterable[_Union[QueueEntry, _Mapping]]] = ...) -> None: ...
+
+class SyncNowRequest(_message.Message):
+    __slots__ = ("project_id",)
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    def __init__(self, project_id: _Optional[str] = ...) -> None: ...
+
+class ProjectSyncResult(_message.Message):
+    __slots__ = ("project_id", "synced_issues", "error")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    SYNCED_ISSUES_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    synced_issues: int
+    error: str
+    def __init__(self, project_id: _Optional[str] = ..., synced_issues: _Optional[int] = ..., error: _Optional[str] = ...) -> None: ...
+
+class SyncNowResponse(_message.Message):
+    __slots__ = ("results",)
+    RESULTS_FIELD_NUMBER: _ClassVar[int]
+    results: _containers.RepeatedCompositeFieldContainer[ProjectSyncResult]
+    def __init__(self, results: _Optional[_Iterable[_Union[ProjectSyncResult, _Mapping]]] = ...) -> None: ...
+
+class IssueSyncStatusRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class IssueSyncStatusEntry(_message.Message):
+    __slots__ = ("project_id", "project_name", "enabled", "issue_count", "eligible_count", "last_synced_at", "consecutive_failures", "next_retry_at", "last_error", "backing_off")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_NAME_FIELD_NUMBER: _ClassVar[int]
+    ENABLED_FIELD_NUMBER: _ClassVar[int]
+    ISSUE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    ELIGIBLE_COUNT_FIELD_NUMBER: _ClassVar[int]
+    LAST_SYNCED_AT_FIELD_NUMBER: _ClassVar[int]
+    CONSECUTIVE_FAILURES_FIELD_NUMBER: _ClassVar[int]
+    NEXT_RETRY_AT_FIELD_NUMBER: _ClassVar[int]
+    LAST_ERROR_FIELD_NUMBER: _ClassVar[int]
+    BACKING_OFF_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    project_name: str
+    enabled: bool
+    issue_count: int
+    eligible_count: int
+    last_synced_at: str
+    consecutive_failures: int
+    next_retry_at: str
+    last_error: str
+    backing_off: bool
+    def __init__(self, project_id: _Optional[str] = ..., project_name: _Optional[str] = ..., enabled: _Optional[bool] = ..., issue_count: _Optional[int] = ..., eligible_count: _Optional[int] = ..., last_synced_at: _Optional[str] = ..., consecutive_failures: _Optional[int] = ..., next_retry_at: _Optional[str] = ..., last_error: _Optional[str] = ..., backing_off: _Optional[bool] = ...) -> None: ...
+
+class IssueSyncStatusResponse(_message.Message):
+    __slots__ = ("entries",)
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[IssueSyncStatusEntry]
+    def __init__(self, entries: _Optional[_Iterable[_Union[IssueSyncStatusEntry, _Mapping]]] = ...) -> None: ...
 
 class SetRunnerStateRequest(_message.Message):
     __slots__ = ("runner_id", "state")

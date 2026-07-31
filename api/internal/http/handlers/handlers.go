@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/loop-engineering/api/internal/auth"
@@ -28,6 +29,20 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("PUT /api/v1/projects/{project_id}", requireMutation(h.limiter, h.updateProject))
 	mux.Handle("POST /api/v1/projects/{project_id}/enable", requireMutation(h.limiter, h.enableProject))
 	mux.Handle("POST /api/v1/projects/{project_id}/disable", requireMutation(h.limiter, h.disableProject))
+	mux.Handle("GET /api/v1/scheduler/metrics", auth.RequireSession(http.HandlerFunc(h.schedulerMetrics)))
+}
+
+func (h *ProjectHandlers) schedulerMetrics(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.GetSchedulerMetrics(requestContext(r))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, map[string]any{
+		"queueDepth":      resp.QueueDepth,
+		"activeWorkflows": resp.ActiveWorkflows,
+		"scheduledJobs":   resp.ScheduledJobs,
+	})
 }
 
 func (h *ProjectHandlers) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -36,14 +51,9 @@ func (h *ProjectHandlers) listProjects(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
-	type projectResponse struct {
-		ID      string `json:"id"`
-		Name    string `json:"name"`
-		Enabled bool   `json:"enabled"`
-	}
-	projects := make([]projectResponse, len(resp.Projects))
+	projects := make([]map[string]any, len(resp.Projects))
 	for i, p := range resp.Projects {
-		projects[i] = projectResponse{ID: p.Id, Name: p.Name, Enabled: p.Enabled}
+		projects[i] = projectPayload(p)
 	}
 	apiserver.WriteJSON(w, http.StatusOK, map[string]any{"projects": projects})
 }
@@ -132,7 +142,38 @@ func projectPayload(p *controlv1.Project) map[string]any {
 	if p == nil {
 		return nil
 	}
-	return map[string]any{"id": p.Id, "name": p.Name, "enabled": p.Enabled}
+	labels := p.RequiredRunnerLabels
+	if labels == nil {
+		labels = []string{}
+	}
+	return map[string]any{
+		"id":                   p.Id,
+		"name":                 p.Name,
+		"enabled":              p.Enabled,
+		"repositoryMode":       p.RepositoryMode,
+		"repositoryUrl":        redactURLUserinfo(p.RepositoryUrl),
+		"localRepositoryPath":  p.LocalRepositoryPath,
+		"defaultBranch":        p.DefaultBranch,
+		"requiredRunnerLabels": labels,
+	}
+}
+
+// redactURLUserinfo strips userinfo (username[:password]) from http(s)
+// repository URLs so credentials embedded in a stored clone URL never reach
+// the browser. Other URL forms (scp-style, local paths) pass through untouched.
+func redactURLUserinfo(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return raw
+	}
+	u.User = url.User("redacted")
+	return u.String()
 }
 
 type RunnerTokenHandlers struct {

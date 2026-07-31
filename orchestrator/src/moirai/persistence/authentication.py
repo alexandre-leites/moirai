@@ -45,6 +45,17 @@ class AuthenticatedSession:
     username: str
     role: str
     expires_at: datetime
+    email: str = ""
+    display_name: str = ""
+
+
+@dataclass(frozen=True)
+class AccountProfile:
+    user_id: str
+    username: str
+    role: str
+    email: str
+    display_name: str
 
 
 def hash_password(password: str) -> str:
@@ -196,7 +207,7 @@ class AsyncpgAuthentication:
             # the same session behind a row lock.
             row = await connection.fetchrow(
                 """
-                SELECT s.id, s.user_id, s.csrf_token_hash, s.expires_at, s.last_seen_at, u.username, u.role
+                SELECT s.id, s.user_id, s.csrf_token_hash, s.expires_at, s.last_seen_at, u.username, u.role, u.email, u.display_name
                 FROM app.user_sessions AS s
                 JOIN app.users AS u ON u.id = s.user_id
                 WHERE s.token_hash = $1
@@ -223,6 +234,91 @@ class AsyncpgAuthentication:
             username=str(row["username"]),
             role=str(row["role"]),
             expires_at=row["expires_at"],
+            email=str(row["email"] or ""),
+            display_name=str(row["display_name"] or ""),
+        )
+
+    async def update_account(
+        self,
+        user_id: str,
+        keep_session_id: str,
+        current_password: str,
+        new_password: str,
+        new_email: str,
+        display_name: str,
+        now: datetime,
+    ) -> AccountProfile:
+        """Update a user's profile, optionally changing the password.
+
+        Empty new_password leaves the password unchanged; a password change
+        requires the correct current password and revokes every other session
+        the user holds. Empty new_email/display_name leave those fields
+        unchanged. The caller's own session (keep_session_id) survives a
+        password change.
+        """
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                user = await connection.fetchrow(
+                    """
+                    SELECT id, username, role, password_hash, email, display_name
+                    FROM app.users
+                    WHERE id = $1
+                    FOR UPDATE
+                    """,
+                    _uuid(user_id),
+                )
+                if user is None:
+                    raise AuthenticationError("session is invalid")
+                updated_email = user["email"] or ""
+                updated_display_name = user["display_name"] or ""
+                if new_password:
+                    if not current_password or not verify_password(
+                        current_password, str(user["password_hash"])
+                    ):
+                        raise AuthenticationError("current password is incorrect")
+                    await connection.execute(
+                        "UPDATE app.users SET password_hash = $2, updated_at = $3 WHERE id = $1",
+                        user["id"],
+                        hash_password(new_password),
+                        now,
+                    )
+                    await connection.execute(
+                        """
+                        UPDATE app.user_sessions
+                        SET revoked_at = $3
+                        WHERE user_id = $1 AND id != $2 AND revoked_at IS NULL
+                        """,
+                        user["id"],
+                        _uuid(keep_session_id),
+                        now,
+                    )
+                if new_email:
+                    updated_email = _normalize_email(new_email)
+                if display_name:
+                    updated_display_name = _normalize_display_name(display_name)
+                if (updated_email, updated_display_name) != (user["email"] or "", user["display_name"] or ""):
+                    await connection.execute(
+                        "UPDATE app.users SET email = $2, display_name = $3, updated_at = $4 WHERE id = $1",
+                        user["id"],
+                        updated_email,
+                        updated_display_name,
+                        now,
+                    )
+                await self._append_audit(
+                    connection,
+                    actor_user_id=user["id"],
+                    action="user.password_changed" if new_password else "user.profile_updated",
+                    resource_type="user",
+                    resource_id=str(user["id"]),
+                    outcome="succeeded",
+                    now=now,
+                )
+        return AccountProfile(
+            user_id=str(user["id"]),
+            username=str(user["username"]),
+            role=str(user["role"]),
+            email=updated_email,
+            display_name=updated_display_name,
         )
 
     async def revoke_session(self, session_token: str, now: datetime) -> None:
@@ -338,8 +434,30 @@ def _normalize_username(username: str) -> str:
 
 
 def _validate_password(password: str) -> None:
-    if not isinstance(password, str) or len(password) < 12 or len(password) > 1024:
-        raise ValueError("password must contain between 12 and 1024 characters")
+    if not isinstance(password, str) or len(password) < 8 or len(password) > 1024:
+        raise ValueError("password must contain between 8 and 1024 characters")
+    if not any(character.isdigit() for character in password):
+        raise ValueError("password must contain at least one number")
+    if not any(character.isupper() for character in password):
+        raise ValueError("password must contain at least one capital letter")
+    if not any(character.islower() for character in password):
+        raise ValueError("password must contain at least one lowercase letter")
+    if not any(not character.isalnum() for character in password):
+        raise ValueError("password must contain at least one symbol")
+
+
+def _normalize_email(email: str) -> str:
+    normalized = email.strip()
+    if not normalized or len(normalized) > 254 or "@" not in normalized:
+        raise ValueError("email is invalid")
+    return normalized
+
+
+def _normalize_display_name(display_name: str) -> str:
+    normalized = display_name.strip()
+    if len(normalized) > 128:
+        raise ValueError("display name is too long")
+    return normalized
 
 
 def _encode(value: bytes) -> str:
@@ -356,13 +474,19 @@ def _uuid_or_none(value: str | None) -> Any:
     return UUID(value) if value is not None else None
 
 
+def _uuid(value: str) -> Any:
+    from uuid import UUID
+
+    return UUID(value)
+
+
 def _is_unique_violation(error: Exception) -> bool:
     return getattr(error, "sqlstate", None) == "23505"
 
 
 @lru_cache(maxsize=1)
 def _dummy_password_hash() -> str:
-    return hash_password("this password only exists to make the KDF cost constant-time")
+    return hash_password("This Dummy Password Only Exists For KDF Cost 123!")
 
 
 def _affected_rows(result: str) -> int:

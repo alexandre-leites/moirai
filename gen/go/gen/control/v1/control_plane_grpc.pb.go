@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	ControlPlane_Login_FullMethodName                         = "/loop.control.v1.ControlPlane/Login"
 	ControlPlane_WhoAmI_FullMethodName                        = "/loop.control.v1.ControlPlane/WhoAmI"
+	ControlPlane_UpdateAccount_FullMethodName                 = "/loop.control.v1.ControlPlane/UpdateAccount"
 	ControlPlane_ListProjects_FullMethodName                  = "/loop.control.v1.ControlPlane/ListProjects"
 	ControlPlane_CreateProject_FullMethodName                 = "/loop.control.v1.ControlPlane/CreateProject"
 	ControlPlane_UpdateProject_FullMethodName                 = "/loop.control.v1.ControlPlane/UpdateProject"
@@ -32,6 +33,9 @@ const (
 	ControlPlane_GetWorkflow_FullMethodName                   = "/loop.control.v1.ControlPlane/GetWorkflow"
 	ControlPlane_ListWorkflowEvents_FullMethodName            = "/loop.control.v1.ControlPlane/ListWorkflowEvents"
 	ControlPlane_ListRunners_FullMethodName                   = "/loop.control.v1.ControlPlane/ListRunners"
+	ControlPlane_ListQueue_FullMethodName                     = "/loop.control.v1.ControlPlane/ListQueue"
+	ControlPlane_SyncNow_FullMethodName                       = "/loop.control.v1.ControlPlane/SyncNow"
+	ControlPlane_IssueSyncStatus_FullMethodName               = "/loop.control.v1.ControlPlane/IssueSyncStatus"
 	ControlPlane_SetRunnerState_FullMethodName                = "/loop.control.v1.ControlPlane/SetRunnerState"
 	ControlPlane_Logout_FullMethodName                        = "/loop.control.v1.ControlPlane/Logout"
 	ControlPlane_SubmitHumanDecision_FullMethodName           = "/loop.control.v1.ControlPlane/SubmitHumanDecision"
@@ -46,6 +50,7 @@ const (
 type ControlPlaneClient interface {
 	Login(ctx context.Context, in *LoginRequest, opts ...grpc.CallOption) (*LoginResponse, error)
 	WhoAmI(ctx context.Context, in *WhoAmIRequest, opts ...grpc.CallOption) (*WhoAmIResponse, error)
+	UpdateAccount(ctx context.Context, in *UpdateAccountRequest, opts ...grpc.CallOption) (*UpdateAccountResponse, error)
 	ListProjects(ctx context.Context, in *ListProjectsRequest, opts ...grpc.CallOption) (*ListProjectsResponse, error)
 	CreateProject(ctx context.Context, in *CreateProjectRequest, opts ...grpc.CallOption) (*CreateProjectResponse, error)
 	UpdateProject(ctx context.Context, in *UpdateProjectRequest, opts ...grpc.CallOption) (*UpdateProjectResponse, error)
@@ -57,6 +62,9 @@ type ControlPlaneClient interface {
 	GetWorkflow(ctx context.Context, in *GetWorkflowRequest, opts ...grpc.CallOption) (*GetWorkflowResponse, error)
 	ListWorkflowEvents(ctx context.Context, in *ListWorkflowEventsRequest, opts ...grpc.CallOption) (*ListWorkflowEventsResponse, error)
 	ListRunners(ctx context.Context, in *ListRunnersRequest, opts ...grpc.CallOption) (*ListRunnersResponse, error)
+	ListQueue(ctx context.Context, in *ListQueueRequest, opts ...grpc.CallOption) (*ListQueueResponse, error)
+	SyncNow(ctx context.Context, in *SyncNowRequest, opts ...grpc.CallOption) (*SyncNowResponse, error)
+	IssueSyncStatus(ctx context.Context, in *IssueSyncStatusRequest, opts ...grpc.CallOption) (*IssueSyncStatusResponse, error)
 	SetRunnerState(ctx context.Context, in *SetRunnerStateRequest, opts ...grpc.CallOption) (*SetRunnerStateResponse, error)
 	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
 	SubmitHumanDecision(ctx context.Context, in *SubmitHumanDecisionRequest, opts ...grpc.CallOption) (*SubmitHumanDecisionResponse, error)
@@ -87,6 +95,16 @@ func (c *controlPlaneClient) WhoAmI(ctx context.Context, in *WhoAmIRequest, opts
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(WhoAmIResponse)
 	err := c.cc.Invoke(ctx, ControlPlane_WhoAmI_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) UpdateAccount(ctx context.Context, in *UpdateAccountRequest, opts ...grpc.CallOption) (*UpdateAccountResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateAccountResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_UpdateAccount_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +221,36 @@ func (c *controlPlaneClient) ListRunners(ctx context.Context, in *ListRunnersReq
 	return out, nil
 }
 
+func (c *controlPlaneClient) ListQueue(ctx context.Context, in *ListQueueRequest, opts ...grpc.CallOption) (*ListQueueResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListQueueResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_ListQueue_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) SyncNow(ctx context.Context, in *SyncNowRequest, opts ...grpc.CallOption) (*SyncNowResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SyncNowResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_SyncNow_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) IssueSyncStatus(ctx context.Context, in *IssueSyncStatusRequest, opts ...grpc.CallOption) (*IssueSyncStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IssueSyncStatusResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_IssueSyncStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlPlaneClient) SetRunnerState(ctx context.Context, in *SetRunnerStateRequest, opts ...grpc.CallOption) (*SetRunnerStateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetRunnerStateResponse)
@@ -269,6 +317,7 @@ func (c *controlPlaneClient) BlockWorkflow(ctx context.Context, in *BlockWorkflo
 type ControlPlaneServer interface {
 	Login(context.Context, *LoginRequest) (*LoginResponse, error)
 	WhoAmI(context.Context, *WhoAmIRequest) (*WhoAmIResponse, error)
+	UpdateAccount(context.Context, *UpdateAccountRequest) (*UpdateAccountResponse, error)
 	ListProjects(context.Context, *ListProjectsRequest) (*ListProjectsResponse, error)
 	CreateProject(context.Context, *CreateProjectRequest) (*CreateProjectResponse, error)
 	UpdateProject(context.Context, *UpdateProjectRequest) (*UpdateProjectResponse, error)
@@ -280,6 +329,9 @@ type ControlPlaneServer interface {
 	GetWorkflow(context.Context, *GetWorkflowRequest) (*GetWorkflowResponse, error)
 	ListWorkflowEvents(context.Context, *ListWorkflowEventsRequest) (*ListWorkflowEventsResponse, error)
 	ListRunners(context.Context, *ListRunnersRequest) (*ListRunnersResponse, error)
+	ListQueue(context.Context, *ListQueueRequest) (*ListQueueResponse, error)
+	SyncNow(context.Context, *SyncNowRequest) (*SyncNowResponse, error)
+	IssueSyncStatus(context.Context, *IssueSyncStatusRequest) (*IssueSyncStatusResponse, error)
 	SetRunnerState(context.Context, *SetRunnerStateRequest) (*SetRunnerStateResponse, error)
 	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
 	SubmitHumanDecision(context.Context, *SubmitHumanDecisionRequest) (*SubmitHumanDecisionResponse, error)
@@ -301,6 +353,9 @@ func (UnimplementedControlPlaneServer) Login(context.Context, *LoginRequest) (*L
 }
 func (UnimplementedControlPlaneServer) WhoAmI(context.Context, *WhoAmIRequest) (*WhoAmIResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method WhoAmI not implemented")
+}
+func (UnimplementedControlPlaneServer) UpdateAccount(context.Context, *UpdateAccountRequest) (*UpdateAccountResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateAccount not implemented")
 }
 func (UnimplementedControlPlaneServer) ListProjects(context.Context, *ListProjectsRequest) (*ListProjectsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListProjects not implemented")
@@ -334,6 +389,15 @@ func (UnimplementedControlPlaneServer) ListWorkflowEvents(context.Context, *List
 }
 func (UnimplementedControlPlaneServer) ListRunners(context.Context, *ListRunnersRequest) (*ListRunnersResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListRunners not implemented")
+}
+func (UnimplementedControlPlaneServer) ListQueue(context.Context, *ListQueueRequest) (*ListQueueResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListQueue not implemented")
+}
+func (UnimplementedControlPlaneServer) SyncNow(context.Context, *SyncNowRequest) (*SyncNowResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SyncNow not implemented")
+}
+func (UnimplementedControlPlaneServer) IssueSyncStatus(context.Context, *IssueSyncStatusRequest) (*IssueSyncStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method IssueSyncStatus not implemented")
 }
 func (UnimplementedControlPlaneServer) SetRunnerState(context.Context, *SetRunnerStateRequest) (*SetRunnerStateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetRunnerState not implemented")
@@ -406,6 +470,24 @@ func _ControlPlane_WhoAmI_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlPlaneServer).WhoAmI(ctx, req.(*WhoAmIRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_UpdateAccount_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateAccountRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).UpdateAccount(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_UpdateAccount_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).UpdateAccount(ctx, req.(*UpdateAccountRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -608,6 +690,60 @@ func _ControlPlane_ListRunners_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_ListQueue_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListQueueRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ListQueue(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ListQueue_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ListQueue(ctx, req.(*ListQueueRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_SyncNow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncNowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).SyncNow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_SyncNow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).SyncNow(ctx, req.(*SyncNowRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_IssueSyncStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IssueSyncStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).IssueSyncStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_IssueSyncStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).IssueSyncStatus(ctx, req.(*IssueSyncStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ControlPlane_SetRunnerState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetRunnerStateRequest)
 	if err := dec(in); err != nil {
@@ -732,6 +868,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ControlPlane_WhoAmI_Handler,
 		},
 		{
+			MethodName: "UpdateAccount",
+			Handler:    _ControlPlane_UpdateAccount_Handler,
+		},
+		{
 			MethodName: "ListProjects",
 			Handler:    _ControlPlane_ListProjects_Handler,
 		},
@@ -774,6 +914,18 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListRunners",
 			Handler:    _ControlPlane_ListRunners_Handler,
+		},
+		{
+			MethodName: "ListQueue",
+			Handler:    _ControlPlane_ListQueue_Handler,
+		},
+		{
+			MethodName: "SyncNow",
+			Handler:    _ControlPlane_SyncNow_Handler,
+		},
+		{
+			MethodName: "IssueSyncStatus",
+			Handler:    _ControlPlane_IssueSyncStatus_Handler,
 		},
 		{
 			MethodName: "SetRunnerState",

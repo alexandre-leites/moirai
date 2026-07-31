@@ -18,7 +18,7 @@ _SEED_TOKEN_HASH = sha256(_SEED_TOKEN_VALUE.encode()).hexdigest()
 # The environment a fully configured deployment starts with; individual tests
 # drop or override one variable at a time to describe a partial configuration.
 _CONFIGURED_ENVIRONMENT = {
-    "LOOP_INITIAL_ADMIN_PASSWORD": "correct horse battery staple",
+    "LOOP_INITIAL_ADMIN_PASSWORD": "Correct horse battery staple 9!",
     "RUNNER_REGISTRATION_TOKEN": _SEED_TOKEN_VALUE,
 }
 
@@ -175,7 +175,7 @@ class BootstrapAdminUserRaceTests(unittest.IsolatedAsyncioTestCase):
         pool = _FakePool()
 
         async def failing_create_user(_self: object, *args: object, **kwargs: object) -> str:
-            raise ValueError("password must contain between 12 and 1024 characters")
+            raise ValueError("password must contain between 8 and 1024 characters")
 
         with _environment(), patch.object(AsyncpgAuthentication, "create_user", failing_create_user):
             with self.assertRaises(ValueError):

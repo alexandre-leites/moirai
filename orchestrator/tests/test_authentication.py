@@ -37,6 +37,9 @@ class _Connection:
         if "FROM app.users" in query and "WHERE username" in query:
             user = self.pool.users.get(str(arguments[0]))
             return None if user is None else dict(user)
+        if "FROM app.users" in query and "FOR UPDATE" in query:
+            user = self.pool.users_by_id.get(str(arguments[0]))
+            return None if user is None else dict(user)
         if "FROM app.user_sessions AS s" in query:
             self.pool.session_lookups += 1
             session = self.pool.sessions.get(str(arguments[0]))
@@ -53,6 +56,8 @@ class _Connection:
                 "last_seen_at": session["last_seen_at"],
                 "username": user["username"],
                 "role": user["role"],
+                "email": user["email"],
+                "display_name": user["display_name"],
             }
         raise AssertionError(query)
 
@@ -80,9 +85,24 @@ class _Connection:
                 session["last_seen_at"] = arguments[1]
             return "UPDATE 1"
         if "UPDATE app.user_sessions" in query and "WHERE user_id = $1" in query:
+            exclude = str(arguments[1]) if "id != $2" in query else None
+            revoked_at = arguments[2] if "id != $2" in query else arguments[1]
             for session in self.pool.sessions.values():
-                if str(session["user_id"]) == str(arguments[0]) and session["revoked_at"] is None:
-                    session["revoked_at"] = arguments[1]
+                if (
+                    str(session["user_id"]) == str(arguments[0])
+                    and session["revoked_at"] is None
+                    and (exclude is None or str(session["id"]) != exclude)
+                ):
+                    session["revoked_at"] = revoked_at
+            return "UPDATE 1"
+        if "UPDATE app.users SET password_hash" in query:
+            user = self.pool.users_by_id[str(arguments[0])]
+            user["password_hash"] = arguments[1]
+            return "UPDATE 1"
+        if "UPDATE app.users SET email" in query:
+            user = self.pool.users_by_id[str(arguments[0])]
+            user["email"] = arguments[1]
+            user["display_name"] = arguments[2]
             return "UPDATE 1"
         if "INSERT INTO app.audit_events" in query:
             self.pool.audit.append(arguments)
@@ -92,13 +112,15 @@ class _Connection:
 
 class _Pool:
     def __init__(self) -> None:
-        password_hash = hash_password("correct horse battery staple")
+        password_hash = hash_password("Correct horse battery staple 9!")
         user = {
             "id": USER_ID,
             "username": "admin",
             "password_hash": password_hash,
             "enabled": True,
             "role": "admin",
+            "email": "",
+            "display_name": "",
         }
         self.users = {"admin": user}
         self.users_by_id = {USER_ID: user}
@@ -150,15 +172,15 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         self.authentication = AsyncpgAuthentication(self.pool, session_ttl=timedelta(hours=1))
 
     def test_scrypt_password_hashes_are_salted_and_verify(self) -> None:
-        first = hash_password("correct horse battery staple")
-        second = hash_password("correct horse battery staple")
+        first = hash_password("Correct horse battery staple 9!")
+        second = hash_password("Correct horse battery staple 9!")
         self.assertNotEqual(first, second)
-        self.assertTrue(verify_password("correct horse battery staple", first))
+        self.assertTrue(verify_password("Correct horse battery staple 9!", first))
         self.assertFalse(verify_password("wrong horse battery staple", first))
-        self.assertFalse(verify_password("correct horse battery staple", "plaintext"))
+        self.assertFalse(verify_password("Correct horse battery staple 9!", "plaintext"))
 
     async def test_login_stores_only_hashes_and_writes_audit_record(self) -> None:
-        credentials = await self.authentication.login(" admin ", "correct horse battery staple", NOW)
+        credentials = await self.authentication.login(" admin ", "Correct horse battery staple 9!", NOW)
         self.assertEqual(credentials.user_id, USER_ID)
         self.assertNotIn(credentials.session_token, self.pool.sessions)
         self.assertNotIn(credentials.csrf_token, self.pool.sessions)
@@ -171,7 +193,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
             await self.authentication.login("admin", "wrong horse battery staple", NOW)
         self.pool.users["admin"]["enabled"] = False
         with self.assertRaises(AuthenticationError):
-            await self.authentication.login("admin", "correct horse battery staple", NOW)
+            await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
 
     async def test_login_pays_the_same_kdf_cost_for_unknown_usernames(self) -> None:
         with patch(
@@ -187,9 +209,9 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(called_hash, "")
 
     async def test_login_revokes_the_previous_session_for_the_user(self) -> None:
-        first = await self.authentication.login("admin", "correct horse battery staple", NOW)
+        first = await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
         second = await self.authentication.login(
-            "admin", "correct horse battery staple", NOW + timedelta(minutes=1)
+            "admin", "Correct horse battery staple 9!", NOW + timedelta(minutes=1)
         )
         with self.assertRaises(AuthenticationError):
             await self.authentication.validate_session(
@@ -201,7 +223,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.user_id, USER_ID)
 
     async def test_session_requires_matching_csrf_and_honors_expiry(self) -> None:
-        credentials = await self.authentication.login("admin", "correct horse battery staple", NOW)
+        credentials = await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
         session = await self.authentication.validate_session(
             credentials.session_token, credentials.csrf_token, NOW + timedelta(minutes=1), True
         )
@@ -217,7 +239,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_validate_session_throttles_last_seen_at_writes(self) -> None:
-        credentials = await self.authentication.login("admin", "correct horse battery staple", NOW)
+        credentials = await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
         self.pool.last_seen_at_writes = 0
         await self.authentication.validate_session(
             credentials.session_token, credentials.csrf_token, NOW + timedelta(seconds=1), True
@@ -228,8 +250,57 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.pool.last_seen_at_writes, 1, "a stale last_seen_at must be refreshed")
 
+    async def test_update_account_changes_password_and_revokes_other_sessions(self) -> None:
+        await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
+        session_id = next(iter(self.pool.sessions_by_id))
+        other = dict(self.pool.sessions_by_id[session_id])
+        other["id"] = "00000000-0000-0000-0000-000000000099"
+        self.pool.sessions_by_id[str(other["id"])] = other
+        self.pool.sessions["other-token-hash"] = other
+        profile = await self.authentication.update_account(
+            USER_ID,
+            keep_session_id=session_id,
+            current_password="Correct horse battery staple 9!",
+            new_password="Correct horse battery staple 10!",
+            new_email="admin@example.com",
+            display_name="Admin User",
+            now=NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(profile.email, "admin@example.com")
+        self.assertEqual(profile.display_name, "Admin User")
+        self.assertTrue(verify_password("Correct horse battery staple 10!", self.pool.users["admin"]["password_hash"]))
+        self.assertEqual(len(self.pool.audit), 2, "login and password-change audit records")
+        self.assertEqual(self.pool.audit[1][2], "user.password_changed")
+        revoked = [s for s in self.pool.sessions_by_id.values() if s.get("revoked_at") is not None]
+        self.assertEqual(len(revoked), 1, "only the other session is revoked")
+
+    async def test_update_account_rejects_wrong_current_password(self) -> None:
+        with self.assertRaises(AuthenticationError):
+            await self.authentication.update_account(
+                USER_ID,
+                keep_session_id="00000000-0000-0000-0000-000000000001",
+                current_password="wrong password",
+                new_password="Correct horse battery staple 10!",
+                new_email="",
+                display_name="",
+                now=NOW + timedelta(minutes=1),
+            )
+
+    async def test_update_account_profile_only_leaves_password_unchanged(self) -> None:
+        profile = await self.authentication.update_account(
+            USER_ID,
+            keep_session_id="00000000-0000-0000-0000-000000000001",
+            current_password="",
+            new_password="",
+            new_email=" admin@example.com ",
+            display_name="  ",
+            now=NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(profile.email, "admin@example.com")
+        self.assertEqual(self.pool.audit[0][2], "user.profile_updated")
+
     async def test_revoked_session_cannot_be_reused(self) -> None:
-        credentials = await self.authentication.login("admin", "correct horse battery staple", NOW)
+        credentials = await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
         await self.authentication.revoke_session(credentials.session_token, NOW + timedelta(minutes=1))
         with self.assertRaises(AuthenticationError):
             await self.authentication.validate_session(
@@ -237,7 +308,7 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_reap_expired_sessions_deletes_past_grace_period(self) -> None:
-        await self.authentication.login("admin", "correct horse battery staple", NOW)
+        await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
         removed = await self.authentication.reap_expired_sessions(NOW + timedelta(minutes=30))
         self.assertEqual(removed, 0, "session has not expired yet")
         removed = await self.authentication.reap_expired_sessions(NOW + timedelta(days=3))

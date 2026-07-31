@@ -194,6 +194,14 @@ func (c *Client) WhoAmI(ctx context.Context) (*controlv1.WhoAmIResponse, error) 
 	return resp, nil
 }
 
+func (c *Client) UpdateAccount(ctx context.Context, req *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error) {
+	resp, err := c.client.UpdateAccount(ctx, req)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) ListProjects(ctx context.Context) (*controlv1.ListProjectsResponse, error) {
 	resp, err := c.client.ListProjects(ctx, &controlv1.ListProjectsRequest{})
 	if err != nil {
@@ -259,6 +267,38 @@ func (c *Client) RevokeRunnerRegistrationToken(ctx context.Context, tokenID stri
 
 func (c *Client) ListRunners(ctx context.Context) (*controlv1.ListRunnersResponse, error) {
 	resp, err := c.client.ListRunners(ctx, &controlv1.ListRunnersRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) ListQueue(ctx context.Context, limit int32) (*controlv1.ListQueueResponse, error) {
+	resp, err := c.client.ListQueue(ctx, &controlv1.ListQueueRequest{Limit: limit})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) SyncNow(ctx context.Context, projectID string) (*controlv1.SyncNowResponse, error) {
+	resp, err := c.client.SyncNow(ctx, &controlv1.SyncNowRequest{ProjectId: projectID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) IssueSyncStatus(ctx context.Context) (*controlv1.IssueSyncStatusResponse, error) {
+	resp, err := c.client.IssueSyncStatus(ctx, &controlv1.IssueSyncStatusRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) GetSchedulerMetrics(ctx context.Context) (*controlv1.GetSchedulerMetricsResponse, error) {
+	resp, err := c.client.GetSchedulerMetrics(ctx, &controlv1.GetSchedulerMetricsRequest{})
 	if err != nil {
 		return nil, mapError(err)
 	}

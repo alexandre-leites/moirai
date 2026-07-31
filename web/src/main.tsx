@@ -6,8 +6,10 @@ import type { ApiClient, Project, Runner, Workflow } from "./api";
 import { AuthProvider, useAuth, useIsAdmin } from "./auth";
 import { loadHealth } from "./health";
 import type { HealthViewState } from "./health";
+import { AccountPage } from "./account";
 import { LoginPage } from "./login";
 import { ProjectsPage } from "./projects";
+import { QueuePage } from "./queue";
 import { RunnersPage } from "./runners";
 import { TokensPage } from "./tokens";
 import { WorkflowsPage } from "./workflows";
@@ -71,6 +73,7 @@ function HealthIndicator({ api }: { api: ApiClient }) {
 const navItems = [
   ["/", "Overview"],
   ["/workflows", "Workflows"],
+  ["/queue", "Queue"],
   ["/projects", "Projects"],
   ["/runners", "Runners"],
 ] as const;
@@ -120,7 +123,7 @@ function Layout({ children }: { children: ReactNode }) {
         {navItems.map(([to, label]) => <NavLink key={to} end={to === "/"} to={to} className="nav-item" onClick={() => setMenuOpen(false)}><i />{label}</NavLink>)}
         {isAdmin && <NavLink to="/tokens" className="nav-item" onClick={() => setMenuOpen(false)}><i />Runner tokens</NavLink>}
       </nav>
-      <div className="side-foot"><span>{state?.username} · {state?.role}</span><HealthIndicator api={api} /><button className="quiet-button" onClick={() => void logout()}>Sign out</button></div>
+      <div className="side-foot"><span>{state?.username} · {state?.role}</span><Link className="account-link" to="/account">Account</Link><HealthIndicator api={api} /><button className="quiet-button" onClick={() => void logout()}>Sign out</button></div>
     </aside>
   </>;
 }
@@ -159,7 +162,7 @@ function Dashboard() {
     </div>
     <div className="grid cols-2 section-gap">
       <section className="card"><div className="card-h"><h2>Recent workflows</h2><Link to="/workflows">View all</Link></div><div className="table-wrap"><table><thead><tr><th>Workflow</th><th>Status</th><th>Phase</th></tr></thead><tbody>{data === null ? <tr><td colSpan={3}>Loading workflows...</td></tr> : data.workflows.length === 0 ? <tr><td colSpan={3} className="table-empty">No workflows have started yet.</td></tr> : data.workflows.slice(0, 5).map((workflow) => <tr key={workflow.id}><td><Link className="mono" to={`/workflows/${workflow.id}`}>{workflow.id.slice(0, 12)}</Link></td><td><Pill status={workflow.status} /></td><td>{workflow.phase}</td></tr>)}</tbody></table></div></section>
-      <section className="card"><div className="card-h"><h2>Global queue</h2></div><p className="empty-state">[placeholder — eligible issues will appear here]</p></section>
+      <section className="card"><div className="card-h"><h2>Global queue</h2><Link to="/queue">View queue</Link></div><p className="empty-state">[placeholder — eligible issues will appear here]</p></section>
     </div>
   </section>;
 }
@@ -172,7 +175,9 @@ function App() {
     <Route path="/runners" element={<ProtectedRoute><RunnersPage api={api} /></ProtectedRoute>} />
     <Route path="/tokens" element={<AdminRoute><TokensPage api={api} /></AdminRoute>} />
     <Route path="/workflows" element={<ProtectedRoute><WorkflowsPage api={api} /></ProtectedRoute>} />
+    <Route path="/queue" element={<ProtectedRoute><QueuePage api={api} /></ProtectedRoute>} />
     <Route path="/workflows/:workflowId" element={<ProtectedRoute><WorkflowDetailPage api={api} /></ProtectedRoute>} />
+    <Route path="/account" element={<ProtectedRoute><AccountPage api={api} /></ProtectedRoute>} />
   </Routes></Layout></AuthProvider></BrowserRouter>;
 }
 

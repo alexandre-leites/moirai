@@ -124,7 +124,18 @@ describe("WorkflowsPage loading and listing", () => {
   it("links rows to detail pages and uses project names", async () => {
     const { api } = stubApi({
       listWorkflows: async () => [workflow({ projectId: "project-id" })],
-      listProjects: async () => [{ id: "project-id", name: "Billing", enabled: true }],
+      listProjects: async () => [
+        {
+          id: "project-id",
+          name: "Billing",
+          enabled: true,
+          repositoryMode: "managed_clone",
+          repositoryUrl: "",
+          localRepositoryPath: "",
+          defaultBranch: "main",
+          requiredRunnerLabels: [],
+        },
+      ],
     });
     const container = await mount(page(api));
 
