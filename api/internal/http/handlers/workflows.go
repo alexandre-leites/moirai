@@ -36,21 +36,34 @@ func (h *WorkflowHandlers) list(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
-	type workflowResponse struct {
-		ID        string `json:"id"`
-		ProjectID string `json:"projectId"`
-		Status    string `json:"status"`
-		Phase     string `json:"phase"`
-	}
-	workflows := make([]workflowResponse, len(resp.Workflows))
-	for i, wf := range resp.Workflows {
-		workflows[i] = workflowResponse{
-			ID:        wf.Id,
-			ProjectID: wf.ProjectId,
-			Status:    wf.Status,
-			Phase:     wf.Phase,
+		type workflowResponse struct {
+			ID                string `json:"id"`
+			ProjectID         string `json:"projectId"`
+			Status            string `json:"status"`
+			Phase             string `json:"phase"`
+			IssueExternalID   string `json:"issueExternalId"`
+			IssueTitle        string `json:"issueTitle"`
+			PullRequestURL    string `json:"pullRequestUrl"`
+			PullRequestState  string `json:"pullRequestState"`
+			PlanningAttempts  int32  `json:"planningAttempts"`
+			ImplementationAttempts int32 `json:"implementationAttempts"`
 		}
-	}
+		workflows := make([]workflowResponse, len(resp.Workflows))
+		for i, wf := range resp.Workflows {
+			workflows[i] = workflowResponse{
+				ID:                     wf.Id,
+				ProjectID:              wf.ProjectId,
+				Status:                 wf.Status,
+				Phase:                  wf.Phase,
+				IssueExternalID:        wf.IssueExternalId,
+				IssueTitle:             wf.IssueTitle,
+				PullRequestURL:         wf.PullRequestUrl,
+				PullRequestState:       wf.PullRequestState,
+				PlanningAttempts:       wf.PlanningAttempts,
+				ImplementationAttempts: wf.ImplementationAttempts,
+			}
+		}
+
 	apiserver.WriteJSON(w, http.StatusOK, map[string]any{"workflows": workflows})
 }
 
