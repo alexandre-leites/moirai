@@ -172,6 +172,21 @@ class FakeControlPlane:
     async def list_runners(self) -> list[dict[str, object]]:
         return []
 
+    async def revoke_session(self, session_token: str, now: datetime) -> None:
+        self.revoked_session_token = session_token
+        self.revoked_session_at = now
+
+    async def append_audit(
+        self,
+        actor_user_id: str | None,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        outcome: str,
+        now: datetime,
+    ) -> None:
+        self.last_audit = (actor_user_id, action, resource_type, resource_id, outcome, now)
+
     async def set_runner_state(
         self, runner_id: str, state: str, actor_user_id: str | None, now: datetime
     ) -> dict[str, object]:
@@ -369,6 +384,26 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                 metadata=(("x-loop-session", "admin-session"),),
             )
         self.assertEqual(missing_csrf.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+
+    async def test_logout_revokes_session_and_records_audit(self) -> None:
+        await self.client.Logout(
+            control_plane_pb2.LogoutRequest(),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        self.assertEqual(self.control_plane.revoked_session_token, "admin-session")
+        self.assertEqual(self.control_plane.revoked_session_at, NOW)
+        self.assertEqual(self.control_plane.last_audit[1], "user.logout")
+
+    async def test_logout_idempotent_without_session(self) -> None:
+        await self.client.Logout(control_plane_pb2.LogoutRequest())
+        self.assertIsNone(self.control_plane.revoked_session_token)
+
+    async def test_logout_does_not_revoke_unknown_session(self) -> None:
+        await self.client.Logout(
+            control_plane_pb2.LogoutRequest(),
+            metadata=(("x-loop-session", "unknown-session"),),
+        )
+        self.assertIsNone(self.control_plane.revoked_session_token)
 
     async def test_maps_login_failures_and_declined_capabilities_to_typed_errors(self) -> None:
         with self.assertRaises(grpc.aio.AioRpcError) as rejected:
