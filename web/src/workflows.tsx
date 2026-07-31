@@ -77,15 +77,19 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
       {error && <p className="error">{error}</p>}
       {workflows.length === 0 ? <p className="empty-state">No active workflows or recorded runs yet.</p> : (
           <table>
-            <thead><tr><th>ID</th><th>Project</th><th>Issue</th><th>Status</th><th>Phase</th><th>Approval</th><th>Controls</th></tr></thead>
+            <thead><tr><th>ID</th><th>Project</th><th>Issue</th><th>Status</th><th>Phase</th><th>Progress</th><th>Approval</th><th>Controls</th></tr></thead>
             <tbody>
               {workflows.map((w) => (
                 <tr key={w.id}>
                   <td className="mono"><Link to={`/workflows/${w.id}`}>{w.id.slice(0, 12)}</Link></td>
                   <td>{projectNames[w.projectId] ?? w.projectId}</td>
-                  <td><span className="mono">{w.id.slice(0, 12)}</span></td>
+                  <td>
+                    <span className="mono" title={w.issueTitle}>{w.issueExternalId}</span>
+                    {w.pullRequestUrl && <a href={w.pullRequestUrl} target="_blank" rel="noreferrer">PR</a>}
+                  </td>
                   <td>{w.status}</td>
                   <td>{w.phase}</td>
+                  <td>{w.planningAttempts + w.implementationAttempts}</td>
                   <td>
                     {isAdmin && w.status === AWAITING_APPROVAL_STATUS ? (
                       <span className="workflow-decision-actions">
