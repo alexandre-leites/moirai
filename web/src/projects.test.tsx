@@ -21,20 +21,33 @@ import {
 afterEach(unmountAll);
 
 type CreateData = Parameters<ApiClient["createProject"]>[0];
+type UpdateData = Parameters<ApiClient["updateProject"]>[1];
 type Toggle = { id: string; enabled: boolean };
 
 function project(overrides: Partial<Project> = {}): Project {
-  return { id: "p-1", name: "billing", enabled: true, ...overrides };
+  return {
+    id: "p-1",
+    name: "billing",
+    enabled: true,
+    repositoryMode: "managed_clone",
+    repositoryUrl: "git@github.com:acme/billing.git",
+    localRepositoryPath: "",
+    defaultBranch: "main",
+    requiredRunnerLabels: [],
+    ...overrides,
+  };
 }
 
 type Stub = {
   listProjects?: ApiClient["listProjects"];
   createProject?: ApiClient["createProject"];
+  updateProject?: ApiClient["updateProject"];
   setProjectEnabled?: ApiClient["setProjectEnabled"];
 };
 
 function stubApi(stub: Stub, role = "admin") {
   const created: CreateData[] = [];
+  const updated: UpdateData[] = [];
   const toggled: Toggle[] = [];
   const api = {
     setUnauthorizedHandler: () => undefined,
@@ -46,6 +59,20 @@ function stubApi(stub: Stub, role = "admin") {
         created.push(data);
         return project({ id: "p-new", name: data.name });
       }),
+    updateProject:
+      stub.updateProject ??
+      (async (id: string, data: UpdateData) => {
+        updated.push(data);
+        return project({
+          id,
+          name: data.name,
+          repositoryMode: data.repositoryMode,
+          repositoryUrl: data.repositoryUrl ?? "",
+          localRepositoryPath: data.localRepositoryPath ?? "",
+          defaultBranch: data.defaultBranch,
+          requiredRunnerLabels: data.requiredRunnerLabels ?? [],
+        });
+      }),
     setProjectEnabled:
       stub.setProjectEnabled ??
       (async (id: string, enabled: boolean) => {
@@ -53,7 +80,7 @@ function stubApi(stub: Stub, role = "admin") {
         return project({ id, name: "billing", enabled });
       }),
   } as unknown as ApiClient;
-  return { api, created, toggled };
+  return { api, created, updated, toggled };
 }
 
 /**
@@ -397,5 +424,165 @@ describe("ProjectsPage creation", () => {
 
     await pending.resolve(project({ id: "p-2", name: "ledger" }));
     expect(container.querySelector("form")).toBeNull();
+  });
+});
+
+describe("ProjectsPage editing", () => {
+  it("shows a signed-in non-admin no edit control at all", async () => {
+    const { api } = stubApi({ listProjects: async () => [project()] }, "viewer");
+    const container = await mountWithSession(api);
+
+    expect(container.textContent).toContain("billing");
+    expect(buttons(container, /Edit/)).toHaveLength(0);
+  });
+
+  it("offers an admin an edit control per row", async () => {
+    const { api } = stubApi({
+      listProjects: async () => [project(), project({ id: "p-2", name: "ledger" })],
+    });
+    const container = await mountWithSession(api);
+
+    expect(buttons(container, /Edit/)).toHaveLength(2);
+  });
+
+  it("opens the edit form prefilled from the persisted configuration", async () => {
+    const { api } = stubApi({
+      listProjects: async () => [
+        project({
+          repositoryMode: "existing_path",
+          repositoryUrl: "",
+          localRepositoryPath: "/repositories/billing",
+          defaultBranch: "trunk",
+          requiredRunnerLabels: ["linux", "docker"],
+        }),
+      ],
+    });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    expect(editForm.textContent).toContain("Edit project");
+    expect(field(editForm, /^Name/).value).toBe("billing");
+    expect(selectField(editForm, /^Repository mode/).value).toBe("existing_path");
+    expect(container.textContent).not.toContain("Repository URL");
+    expect(field(editForm, /^Local path/).value).toBe("/repositories/billing");
+    expect(field(editForm, /^Default branch/).value).toBe("trunk");
+    expect(field(editForm, /^Required runner labels/).value).toBe("linux, docker");
+  });
+
+  it("prefills a managed-clone project with its URL", async () => {
+    const { api } = stubApi({ listProjects: async () => [project()] });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    expect(field(editForm, /^Repository URL/).value).toBe("git@github.com:acme/billing.git");
+  });
+
+  it("sends the updated configuration and replaces the row with the server result", async () => {
+    const { api, updated } = stubApi({ listProjects: async () => [project()] });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    await typeInto(field(editForm, /^Name/), "ledger");
+    await typeInto(field(editForm, /^Repository URL/), "git@github.com:acme/ledger.git");
+    await typeInto(field(editForm, /^Required runner labels/), "linux, docker");
+    await submitForm(editForm);
+
+    expect(updated).toEqual([
+      {
+        name: "ledger",
+        repositoryMode: "managed_clone",
+        repositoryUrl: "git@github.com:acme/ledger.git",
+        localRepositoryPath: undefined,
+        defaultBranch: "main",
+        requiredRunnerLabels: ["linux", "docker"],
+      },
+    ]);
+    expect(container.querySelector("form")).toBeNull();
+    expect(row(container, "ledger").textContent).toContain("Enabled");
+    expect(() => row(container, "billing")).toThrow();
+  });
+
+  it("switches a persisted managed-clone project to existing-path on save", async () => {
+    const { api, updated } = stubApi({ listProjects: async () => [project()] });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    await chooseOption(selectField(editForm, /^Repository mode/), "existing_path");
+    await typeInto(field(editForm, /^Local path/), "/repositories/billing");
+    await submitForm(editForm);
+
+    expect(updated[0].repositoryMode).toBe("existing_path");
+    expect(updated[0].localRepositoryPath).toBe("/repositories/billing");
+    expect(updated[0].repositoryUrl).toBeUndefined();
+  });
+
+  it("refuses to save a blank name without calling the API", async () => {
+    const { api, updated } = stubApi({ listProjects: async () => [project()] });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    await typeInto(field(editForm, /^Name/), "   ");
+    await submitForm(editForm);
+
+    expect(container.querySelector(".error")?.textContent).toBe("Project name is required");
+    expect(updated).toEqual([]);
+    expect(container.querySelector("form")).not.toBeNull();
+  });
+
+  it("surfaces a failed update in the form and keeps the operator's input", async () => {
+    const { api } = stubApi({
+      listProjects: async () => [project()],
+      updateProject: async () => {
+        throw new ApiError(422, "Validation error: project configuration is invalid", "project configuration is invalid");
+      },
+    });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    await typeInto(field(editForm, /^Name/), "ledger");
+    await submitForm(editForm);
+
+    expect(container.querySelector(".error")?.textContent).toBe(
+      "Validation error: project configuration is invalid"
+    );
+    expect(container.querySelector("form")).not.toBeNull();
+    expect(field(editForm, /^Name/).value).toBe("ledger");
+  });
+
+  it("locks the save control while the update is in flight", async () => {
+    const pending = deferred<Project>();
+    const { api } = stubApi({
+      listProjects: async () => [project()],
+      updateProject: () => pending.promise,
+    });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    await submitForm(editForm);
+
+    expect(button(editForm, /Saving\.\.\./).disabled).toBe(true);
+    expect(field(editForm, /^Name/).disabled).toBe(true);
+
+    await pending.resolve(project({ name: "ledger" }));
+    expect(container.querySelector("form")).toBeNull();
+  });
+
+  it("closes the edit form without saving from its own cancel control", async () => {
+    const { api, updated } = stubApi({ listProjects: async () => [project()] });
+    const container = await mountWithSession(api);
+
+    await click(button(row(container, "billing"), /Edit/));
+    const editForm = form(container);
+    await click(button(editForm, /Cancel/));
+
+    expect(container.querySelector("form")).toBeNull();
+    expect(updated).toEqual([]);
   });
 });

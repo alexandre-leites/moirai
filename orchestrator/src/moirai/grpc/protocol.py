@@ -13,6 +13,11 @@ class ProjectRecord(TypedDict):
     id: str
     name: str
     enabled: bool
+    repository_mode: str
+    repository_url: str | None
+    local_repository_path: str | None
+    default_branch: str
+    required_runner_labels: list[str]
 
 
 class RegistrationTokenRecord(TypedDict):

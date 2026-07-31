@@ -1,9 +1,20 @@
 export type HealthStatus = "healthy" | "unhealthy";
 
+// Mirrors the `Project` schema in api/openapi.yaml, served by
+// GET /api/v1/projects (api/internal/http/handlers/handlers.go). All
+// configuration fields are always present: the handler marshals the
+// orchestrator's project record verbatim, so an absent field on the wire is a
+// broken response. `requiredRunnerLabels` is always an array here — the
+// handler normalizes the protobuf's nil slice to `[]`.
 export type Project = {
   id: string;
   name: string;
   enabled: boolean;
+  repositoryMode: string;
+  repositoryUrl: string;
+  localRepositoryPath: string;
+  defaultBranch: string;
+  requiredRunnerLabels: string[];
 };
 
 export type Workflow = {

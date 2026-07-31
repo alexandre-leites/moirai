@@ -3829,3 +3829,24 @@ Implement backend fallback only after a runner task-packet backend-selection con
   - Validation performed: 140/140 web tests pass; typecheck clean; lint 0 errors (12 pre-existing warnings); production build clean.
   - CI status: all 10 checks queued — both self-hosted runners offline at time of merge. Merged via `gh pr merge --squash`.
   - Commands executed: `npm test` (140/140); `npm run typecheck` (clean); `npx eslint .` (0 errors); `npm run build` (clean)
+
+---
+
+## Issue #192 — Project configuration view and edit
+
+## In Progress
+
+- [x] Backend: project config surfaced on read and update paths
+  - Branch: `issue-192`
+  - Scope: proto + generated stubs, orchestrator persistence/gRPC/tests, API handlers/OpenAPI/tests, web `Project` type + admin edit UI + tests, append-only `PROGRESS.md`.
+  - Behavior delivered:
+    1. `Project` proto/record now carries `repository_mode`, `repository_url`, `local_repository_path`, `default_branch`, `required_runner_labels`; `create_project`, `update_project`, `set_project_enabled`, `list_projects` RETURN/SELECT them via `_project_record`.
+    2. `GET /api/v1/projects` returns the full configuration per project. `repositoryUrl` userinfo is redacted (`redactURLUserinfo` → `https://redacted@…`) so embedded credentials never reach the browser.
+    3. Admin-only inline edit form per project row (name, managed_clone/existing_path toggle with URL-vs-path field, default branch, comma-separated labels); non-admin sees no edit control. Updates `PUT /api/v1/projects/{id}` via existing `api.updateProject`.
+  - Validation: web `npm run typecheck` clean; `npm run lint` 0 errors (12 pre-existing warnings); `npm test` 164 passed (10 files); `npm run build` clean. API `go test ./...` passes except pre-existing `TestLogoutIdempotentWithoutSession` (reproduces at base `f61f27d`). Orchestrator `test_control_plane_grpc.py` + `test_asyncpg_control_plane.py` 98 passed, 2 pre-existing logout failures (`revoked_session_token` missing on `FakeControlPlane`). `git diff --check` clean.
+  - Remaining: commit, PR with body `Closes #192`, merge, audit-trail comment, FINISHED_LABEL.
+
+## Known Issues (pre-existing, not caused by #192)
+
+- `api/internal/http/handlers/auth_test.go:63` `TestLogoutIdempotentWithoutSession` got 401 want 204 — verified at base `f61f27d`.
+- `orchestrator/tests/test_control_plane_grpc.py:422,429` logout tests — `FakeControlPlane` lacks `revoked_session_token` attribute.

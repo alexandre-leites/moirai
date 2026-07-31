@@ -463,6 +463,11 @@ def _project_message(project: ProjectRecord) -> control_plane_pb2.Project:
         id=project["id"],
         name=project["name"],
         enabled=project["enabled"],
+        repository_mode=project.get("repository_mode", ""),
+        repository_url=project.get("repository_url") or "",
+        local_repository_path=project.get("local_repository_path") or "",
+        default_branch=project.get("default_branch", ""),
+        required_runner_labels=list(project.get("required_runner_labels") or []),
     )
 
 

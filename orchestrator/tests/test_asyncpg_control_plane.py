@@ -590,7 +590,16 @@ class _ProjectPool:
 
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
         if "INSERT INTO app.projects" in query:
-            record = {"id": arguments[0], "name": arguments[1], "enabled": True}
+            record = {
+                "id": arguments[0],
+                "name": arguments[1],
+                "enabled": True,
+                "repository_mode": arguments[2],
+                "repository_url": arguments[3],
+                "local_repository_path": arguments[4],
+                "default_branch": arguments[5],
+                "configuration": arguments[6],
+            }
             self.projects[str(arguments[0])] = record
             return record
         if "UPDATE app.projects" in query:
@@ -601,6 +610,11 @@ class _ProjectPool:
                 record["enabled"] = arguments[1]
             else:
                 record["name"] = arguments[1]
+                record["repository_mode"] = arguments[2]
+                record["repository_url"] = arguments[3]
+                record["local_repository_path"] = arguments[4]
+                record["default_branch"] = arguments[5]
+                record["configuration"] = arguments[6]
             return record
         raise AssertionError(query)
 
@@ -1204,7 +1218,14 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             "00000000-0000-0000-0000-000000000099",
         )
         self.assertTrue(created["enabled"])
-        self.assertEqual((await control_plane.list_projects())[0]["name"], "Example")
+        self.assertEqual(created["repository_mode"], "managed_clone")
+        self.assertEqual(created["repository_url"], "https://example.test/repo.git")
+        self.assertEqual(created["default_branch"], "main")
+        self.assertEqual(sorted(created["required_runner_labels"]), ["docker", "linux"])
+        listed = (await control_plane.list_projects())[0]
+        self.assertEqual(listed["name"], "Example")
+        self.assertEqual(listed["repository_mode"], "managed_clone")
+        self.assertEqual(listed["required_runner_labels"], ["docker", "linux"])
         updated = await control_plane.update_project(
             str(created["id"]),
             "Renamed",
@@ -1217,6 +1238,11 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             "00000000-0000-0000-0000-000000000099",
         )
         self.assertEqual(updated["name"], "Renamed")
+        self.assertEqual(updated["repository_mode"], "existing_path")
+        self.assertEqual(updated["repository_url"], None)
+        self.assertEqual(updated["local_repository_path"], "/repositories/example")
+        self.assertEqual(updated["default_branch"], "trunk")
+        self.assertEqual(updated["required_runner_labels"], ["linux"])
         disabled = await control_plane.set_project_enabled(
             str(created["id"]), False, NOW, "00000000-0000-0000-0000-000000000099"
         )
