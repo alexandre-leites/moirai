@@ -192,9 +192,12 @@ class PersistedWorkflowNodes:
         return await self._dispatch(state, "developer", "pushing", None)
 
     async def create_pull_request(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        code_host = await self._resolve_code_host(state)
+        code_host, missing_reason = await self._resolve_code_host(state)
         if code_host is None:
-            return await self._transition(state, "pr_created", {"status": "pr_created"})
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "blocking_reason": missing_reason,
+            })
         branch = state.get("branch_name", "")
         base_branch = state.get("base_branch", "main")
         issue_id = state.get("issue_id", "")
@@ -219,9 +222,17 @@ class PersistedWorkflowNodes:
         })
 
     async def wait_for_checks(self, state: IssueWorkflowState) -> WorkflowUpdate:
-        code_host = await self._resolve_code_host(state)
-        if code_host is None or not state.get("pull_request_id"):
-            return await self._transition(state, "waiting_github_checks", {"status": "waiting_github_checks"})
+        code_host, missing_reason = await self._resolve_code_host(state)
+        if code_host is None:
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "blocking_reason": missing_reason,
+            })
+        if not state.get("pull_request_id"):
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "blocking_reason": "no pull request ID in workflow state; cannot poll checks",
+            })
         checks = await code_host.required_checks(state["pull_request_id"])
         outcome = checks_result(checks)
         polls = int(state.get("github_check_poll_attempts", 0)) + 1
@@ -298,7 +309,7 @@ class PersistedWorkflowNodes:
         issued a second time for a merge that already landed (`AGENTS.md` §12,
         idempotent external side effects).
         """
-        code_host = await self._resolve_code_host(state)
+        code_host, _ = await self._resolve_code_host(state)
         pull_request_id = state.get("pull_request_id")
         if code_host is None:
             return await self._merge_blocked(
@@ -421,10 +432,13 @@ class PersistedWorkflowNodes:
             state, "blocked", {"status": "blocked", "blocking_reason": reason}
         )
 
-    async def _resolve_code_host(self, state: IssueWorkflowState) -> CodeHost | None:
+    async def _resolve_code_host(self, state: IssueWorkflowState) -> tuple[CodeHost | None, str | None]:
         if self.code_host_factory is None:
-            return None
-        return await _await(self.code_host_factory(state.get("project_id", "")))
+            return None, "no code host factory is configured"
+        host = await _await(self.code_host_factory(state.get("project_id", "")))
+        if host is None:
+            return None, "no code host is configured for this project, so no action can be taken"
+        return host, None
 
     async def _resolve_issue_tracker(self, state: IssueWorkflowState) -> IssueTracker | None:
         if self.issue_tracker_factory is None:

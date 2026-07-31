@@ -386,8 +386,8 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pr_checks_human_merge_and_completion_fallback_without_adapters(self) -> None:
         for node, status, extra_fields in (
-            (self.nodes.create_pull_request, "pr_created", {}),
-            (self.nodes.wait_for_checks, "waiting_github_checks", {}),
+            (self.nodes.create_pull_request, "blocked", {"blocking_reason": "no code host factory is configured"}),
+            (self.nodes.wait_for_checks, "blocked", {"blocking_reason": "no code host factory is configured"}),
             (self.nodes.wait_for_human, "waiting_human", {"human_approved": False}),
             # Merge is the exception: with no code host there is nothing to
             # confirm the merge against, and an unverified merge must not
@@ -403,7 +403,7 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, expected)
             self.assertEqual(result["status"], status)
         self.assertEqual([status for _, status, _ in self.persistence.transitions[-5:]], [
-            "pr_created", "waiting_github_checks", "waiting_human", "blocked", "completed",
+            "blocked", "blocked", "waiting_human", "blocked", "completed",
         ])
 
     async def test_nodes_reject_missing_workflow_id_before_side_effects(self) -> None:
@@ -425,9 +425,11 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(code_host.created_prs), 1)
         self.assertEqual(code_host.created_prs[0][1], "agent/42/fix")
 
-    async def test_create_pull_request_without_code_host_uses_fallback(self) -> None:
-        update = await self.nodes.create_pull_request(self.state)
-        self.assertEqual(update, {"status": "pr_created"})
+    async def test_unresolvable_code_host_does_not_consume_ci_repair_attempts(self) -> None:
+        state = {"workflow_run_id": "wf-1", "ci_repair_attempts": 0}
+        update = await self.nodes.create_pull_request(state)
+        self.assertEqual(update["status"], "blocked")
+        self.assertEqual(state.get("ci_repair_attempts", 0), 0)
 
     async def test_wait_for_checks_polls_code_host_and_sets_checks_passed(self) -> None:
         code_host = _FakeCodeHost()
@@ -455,9 +457,13 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         update = await nodes.wait_for_checks(state)
         self.assertFalse(update.get("checks_passed"))
 
-    async def test_wait_for_checks_without_pull_request_id_uses_fallback(self) -> None:
-        update = await self.nodes.wait_for_checks(self.state)
-        self.assertEqual(update, {"status": "waiting_github_checks"})
+    async def test_wait_for_checks_without_pull_request_id_blocks(self) -> None:
+        # If code_host is None (no factory), it will block because of that first.
+        # To test the pull_request_id missing case, I need a code host.
+        code_host = _FakeCodeHost()
+        nodes = PersistedWorkflowNodes(self.persistence, self.dispatcher, code_host_factory=lambda project_id: code_host)
+        update = await nodes.wait_for_checks(self.state)
+        self.assertEqual(update, {"status": "blocked", "blocking_reason": "no pull request ID in workflow state; cannot poll checks"})
 
     async def test_wait_for_checks_treats_empty_check_list_as_not_passed(self) -> None:
         code_host = _FakeCodeHost(_checks_result=[])
