@@ -127,6 +127,9 @@ func (manager Manager) Prepare(ctx context.Context, request PrepareRequest) (Wor
 		_ = manager.git(ctx, "-C", source, "worktree", "prune")
 		if err := manager.git(ctx, "-C", source, "worktree", "add", "-B", request.Branch, workspace.Repository, baseRevision); err != nil {
 			_ = os.RemoveAll(workspace.Root)
+			if strings.Contains(err.Error(), "already used by worktree at") {
+				return Workspace{}, fmt.Errorf("execution branch %q is already checked out at a worktree; check out a different branch there before retrying", request.Branch)
+			}
 			return Workspace{}, withPruneCause(fmt.Errorf("create worktree: %w", err), pruneErr)
 		}
 	}
