@@ -21,25 +21,10 @@ var ErrNoActiveEventLease = errors.New("runner event lease is not active")
 var ErrStaleEventLease = errors.New("runner event lease is stale")
 var ErrEventBufferFull = errors.New("execution event buffer is full")
 
-// ErrEventOutboxUnavailable reports that an event could not be mirrored to the
-// crash-safe outbox and was rolled back out of the queue rather than held only
-// in memory. It exists so a caller classifying a lost event can tell an outbox
-// failure from a rejected payload; the underlying cause is wrapped with it.
 var ErrEventOutboxUnavailable = errors.New("execution event outbox is unavailable")
 
-// ErrInvalidExecutionEvent reports an event the reporter refused to queue
-// because its type or its payload was unusable — most often a payload over the
-// size limit. It is the one rejection a caller can act on by re-emitting
-// something smaller, which ControlLoop.emitEvent does for terminal events.
 var ErrInvalidExecutionEvent = errors.New("execution event is invalid")
 
-// DropReason classifies an Emit failure for the runner's dropped-event
-// counter. Emit itself does not count its rejections: a rejected event is not
-// necessarily a lost one — ControlLoop.emitEvent retries a terminal event with
-// a reduced payload, and counting at the point of rejection would book a drop
-// for a run that went on to report its outcome perfectly well. Only the caller
-// knows whether the loss was final, so the caller counts it and asks this what
-// to call it.
 func DropReason(err error) string {
 	switch {
 	case errors.Is(err, ErrEventBufferFull):
@@ -51,10 +36,6 @@ func DropReason(err error) string {
 	case errors.Is(err, ErrInvalidExecutionEvent):
 		return metrics.DropInvalid
 	default:
-		// A transport failure reaches here: the event was queued and will be
-		// retried, but whatever the caller abandoned alongside it is gone for a
-		// reason this vocabulary does not name. Saying so beats inventing a
-		// classification the counter cannot support.
 		return metrics.DropUnknown
 	}
 }
@@ -63,22 +44,11 @@ type EventClient interface {
 	SendExecutionEvent(*runnerv1.ExecutionEvent) error
 }
 
-// leaseState carries the per-lease event sequence counter alongside the lease
-// itself so a lease retained after expiry keeps numbering where it left off.
 type leaseState struct {
 	lease Lease
 	next  int64
 }
 
-// EventReporter tracks execution-event sequencing for every concurrently
-// active lease on the runner, keyed by job ID. A single flat `pending` queue
-// preserves send order across leases and shares one `maxPending` budget.
-//
-// Terminal events (`completed`, `failed`, `cancelled`) are the one class the
-// orchestrator cannot reconstruct, so they are privileged over log noise in
-// two ways: they may evict a queued lower-priority event when the buffer is
-// full, and they survive lease expiry both in the queue (Abandon) and at the
-// source (Emit against an expired lease retained by Abandon).
 type EventReporter struct {
 	client            EventClient
 	maxPending        int
@@ -87,26 +57,14 @@ type EventReporter struct {
 	maxPayloadBytes   int
 	logChunkBytes     int
 
-	// Logger reports discarded events. Assign before the reporter is shared
-	// with other goroutines; nil falls back to slog.Default().
 	Logger *slog.Logger
 
-	// Metrics counts the events this reporter discards and publishes the depth
-	// of its pending queue. This reporter is the only component that can see
-	// either — it owns the queue — so it is where both are recorded. Assign
-	// before the reporter is shared with other goroutines; nil falls back to
-	// the process-wide recorder the metrics server exports.
 	Metrics *metrics.Recorder
 
 	mu sync.Mutex
-	// leases holds leases the runner currently owns, keyed by job ID.
-	leases map[string]*leaseState
-	// expired holds leases whose expiry was observed while their execution was
-	// still running, retained only so that execution's terminal event can still
-	// be sequenced, persisted, and delivered. Cleared by Finish. It is keyed by
-	// generation as well as job ID: the orchestrator can re-offer a job at the
-	// next generation while the superseded execution is still winding down, and
-	// that execution still owes a terminal event.
+	// cond waits for sending to finish during Flush
+	cond    *sync.Cond
+	leases  map[string]*leaseState
 	expired map[expiredLeaseKey]*leaseState
 	pending []*runnerv1.ExecutionEvent
 	sending bool
@@ -134,6 +92,7 @@ func NewEventReporterWithLimits(client EventClient, maxPending int, prefixes []s
 		maxPayloadBytes:   maxPayloadBytes,
 		logChunkBytes:     logChunkBytes,
 	}
+	reporter.cond = sync.NewCond(&reporter.mu)
 	if _, err := marshalEventPayloadWithLimit(map[string]any{"message": "", "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, prefixes, maxPayloadBytes); err != nil {
 		return nil, ErrEventReporterConfiguration
 	}
@@ -168,11 +127,6 @@ func (r *EventReporter) recorder() *metrics.Recorder {
 	return metrics.Default()
 }
 
-// PublishMetrics republishes the queue depth against whatever recorder is
-// assigned now. The constructor publishes the depth recovered from the outbox
-// before a caller has had a chance to set Metrics, so that first value lands on
-// the process-wide recorder; a caller that assigns its own must call this to
-// carry it across.
 func (r *EventReporter) PublishMetrics() {
 	if r == nil {
 		return
@@ -182,11 +136,6 @@ func (r *EventReporter) PublishMetrics() {
 	r.publishPendingLocked()
 }
 
-// publishPendingLocked republishes the queue depth from the queue itself, so
-// the gauge cannot drift from what the reporter actually holds. It is called at
-// every point the queue changes, with mu held (or before the reporter is
-// shared). Setting a Prometheus gauge is an atomic store against a child
-// resolved at recorder construction, so this adds no lock to the emit path.
 func (r *EventReporter) publishPendingLocked() {
 	r.recorder().SetPendingEvents(len(r.pending))
 }
@@ -207,13 +156,6 @@ func (r *EventReporter) Begin(lease Lease) error {
 	return nil
 }
 
-// Abandon releases a lease the runner no longer owns, typically because it
-// expired while the stream was down. Queued log and progress output for the
-// job is discarded, but its terminal events are kept: they stay fenced by
-// their lease generation, so the orchestrator can still decide what to do with
-// them, and dropping them here would destroy the run's only record of its
-// outcome. The lease is retained so a still-running execution can report its
-// terminal event; Finish clears that record.
 func (r *EventReporter) Abandon(jobID string, generation int64) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -260,12 +202,6 @@ func (r *EventReporter) Finish(jobID string, generation int64) bool {
 	return true
 }
 
-// Emit queues one execution event for delivery. A zero sequence with an error
-// means the event was rejected and never queued; the caller decides whether
-// that is a final loss and counts it (see DropReason). Emit itself counts only
-// the one event it destroys unilaterally — a queued event evicted to make room
-// for a higher-priority one — because that loss is final whatever the caller
-// does next.
 func (r *EventReporter) Emit(jobID string, generation int64, eventType string, payload map[string]any) (int64, error) {
 	if !validEventType(eventType) {
 		return 0, fmt.Errorf("%w: type %q", ErrInvalidExecutionEvent, eventType)
@@ -303,8 +239,6 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	}
 	r.pending = append(r.pending, event)
 	if err := r.persistLocked(); err != nil {
-		// The trade never completed, so put the evicted event back rather than
-		// losing it to an emit that produced nothing.
 		r.pending = r.pending[:len(r.pending)-1]
 		if evicted != nil {
 			r.pending = append(r.pending[:evictedIndex:evictedIndex], append([]*runnerv1.ExecutionEvent{evicted}, r.pending[evictedIndex:]...)...)
@@ -336,10 +270,6 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	return event.EventSequence, r.flush()
 }
 
-// emitStateLocked resolves the lease an event must be sequenced against. A
-// lease retained by Abandon accepts terminal events only: the runner no longer
-// owns the lease, so further progress and log output belongs to whoever does,
-// but the execution's outcome still has to be reported.
 func (r *EventReporter) emitStateLocked(jobID string, generation int64, eventType string) (*leaseState, error) {
 	if state, ok := r.leases[jobID]; ok && state.lease.Generation == generation {
 		return state, nil
@@ -356,9 +286,6 @@ func (r *EventReporter) emitStateLocked(jobID string, generation int64, eventTyp
 	return nil, ErrNoActiveEventLease
 }
 
-// knowsJobLocked reports whether any lease for the job is tracked, at any
-// generation, so a mismatched generation is reported as stale rather than as an
-// absent lease.
 func (r *EventReporter) knowsJobLocked(jobID string) bool {
 	if _, ok := r.leases[jobID]; ok {
 		return true
@@ -371,12 +298,6 @@ func (r *EventReporter) knowsJobLocked(jobID string) bool {
 	return false
 }
 
-// makeRoomLocked frees one slot for eventType by removing the oldest queued
-// event of the lowest priority below it, returning that event and the index it
-// came from so the caller can restore it if the emit does not complete. Log and
-// progress output is droppable for any lifecycle event; `started` is droppable
-// for a terminal event; terminal events are never discarded. A nil event means
-// nothing outranked could be freed.
 func (r *EventReporter) makeRoomLocked(eventType string) (*runnerv1.ExecutionEvent, int) {
 	priority := eventPriority(eventType)
 	victim := -1
@@ -397,8 +318,6 @@ func (r *EventReporter) makeRoomLocked(eventType string) (*runnerv1.ExecutionEve
 	return discarded, victim
 }
 
-// IsTerminalEventType reports whether an execution-event type carries the final
-// outcome of an execution. Terminal events must never be silently dropped.
 func IsTerminalEventType(eventType string) bool {
 	switch eventType {
 	case "completed", "failed", "cancelled":
@@ -439,12 +358,6 @@ func (r *EventReporter) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// EmitLog splits a log message into payload-sized chunks and queues each one.
-// A rejected chunk is a final loss — nothing retries log output, unlike the
-// terminal events ControlLoop.emitEvent re-emits — so this counts it here,
-// along with every chunk after it that is consequently never attempted. Losing
-// four chunks and reporting one drop would understate the loss precisely when a
-// chatty agent is the thing overrunning the buffer.
 func (r *EventReporter) EmitLog(jobID string, generation int64, message string) ([]int64, error) {
 	chunks := r.logChunks(message)
 	sequences := make([]int64, 0, len(chunks))
@@ -455,9 +368,6 @@ func (r *EventReporter) EmitLog(jobID string, generation int64, message string) 
 			"chunkCount": len(chunks),
 		})
 		if err != nil {
-			// A non-zero sequence means this chunk was queued and will be
-			// retried from the outbox; only the chunks never attempted are
-			// lost. A zero sequence means this one was rejected too.
 			lost := len(chunks) - index
 			if sequence > 0 {
 				lost--
@@ -477,6 +387,10 @@ func (r *EventReporter) Flush() error {
 		return ErrNoActiveEventLease
 	}
 	if r.sending {
+		// Wait until sending is false
+		for r.sending {
+			r.cond.Wait()
+		}
 		r.mu.Unlock()
 		return nil
 	}
@@ -486,10 +400,16 @@ func (r *EventReporter) Flush() error {
 }
 
 func (r *EventReporter) flush() error {
+	defer func() {
+		r.mu.Lock()
+		r.sending = false
+		r.cond.Broadcast()
+		r.mu.Unlock()
+	}()
+
 	for {
 		r.mu.Lock()
 		if len(r.pending) == 0 {
-			r.sending = false
 			r.mu.Unlock()
 			return nil
 		}
@@ -497,9 +417,6 @@ func (r *EventReporter) flush() error {
 		r.mu.Unlock()
 
 		if err := r.client.SendExecutionEvent(event); err != nil {
-			r.mu.Lock()
-			r.sending = false
-			r.mu.Unlock()
 			return err
 		}
 
@@ -508,7 +425,6 @@ func (r *EventReporter) flush() error {
 			r.pending = r.pending[1:]
 			r.publishPendingLocked()
 			if err := r.persistLocked(); err != nil {
-				r.sending = false
 				r.mu.Unlock()
 				return err
 			}
@@ -614,11 +530,6 @@ func redactPayloadWithPrefixes(value any, prefixes []string) any {
 		}
 		return redacted
 	case []string:
-		// Terminal payloads are built in Go, not decoded from JSON, so their
-		// string lists arrive as []string and never match the []any arm. Every
-		// one of them — changed files, commands run, the remaining work an
-		// agent reports — is agent-authored text that can carry a credential,
-		// so they are redacted rather than passed through by the default arm.
 		redacted := make([]string, len(current))
 		for index, item := range current {
 			redacted[index] = redactKnownSecretValues(item, prefixes)
@@ -650,11 +561,6 @@ func redactKnownSecretValues(value string, configured []string) string {
 				break
 			}
 			start := searched + offset
-			// A match that continues an identifier is part of a longer word, not
-			// the start of a token. Without this, `sk-` matches inside ordinary
-			// paths and commands — `task-runner.py`, `disk-usage.ts`, `make
-			// task-build` — and redacting there corrupts the changed-file and
-			// command lists a terminal payload carries.
 			if start > 0 && secretTokenByte(value[start-1]) {
 				searched = start + len(prefix)
 				continue
@@ -670,8 +576,6 @@ func redactKnownSecretValues(value string, configured []string) string {
 	return value
 }
 
-// secretTokenByte reports whether a byte can appear inside a credential token,
-// and therefore whether it continues one rather than delimiting it.
 func secretTokenByte(character byte) bool {
 	return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
 		(character >= '0' && character <= '9') || character == '_' || character == '-'
