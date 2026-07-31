@@ -266,12 +266,17 @@ func (*ListProjectsRequest) Descriptor() ([]byte, []int) {
 }
 
 type Project struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Enabled       bool                   `protobuf:"varint,3,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	Id                   string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name                 string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Enabled              bool                   `protobuf:"varint,3,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	RepositoryMode       string                 `protobuf:"bytes,4,opt,name=repository_mode,json=repositoryMode,proto3" json:"repository_mode,omitempty"`
+	RepositoryUrl        string                 `protobuf:"bytes,5,opt,name=repository_url,json=repositoryUrl,proto3" json:"repository_url,omitempty"`
+	LocalRepositoryPath  string                 `protobuf:"bytes,6,opt,name=local_repository_path,json=localRepositoryPath,proto3" json:"local_repository_path,omitempty"`
+	DefaultBranch        string                 `protobuf:"bytes,7,opt,name=default_branch,json=defaultBranch,proto3" json:"default_branch,omitempty"`
+	RequiredRunnerLabels []string               `protobuf:"bytes,8,rep,name=required_runner_labels,json=requiredRunnerLabels,proto3" json:"required_runner_labels,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Project) Reset() {
@@ -323,6 +328,41 @@ func (x *Project) GetEnabled() bool {
 		return x.Enabled
 	}
 	return false
+}
+
+func (x *Project) GetRepositoryMode() string {
+	if x != nil {
+		return x.RepositoryMode
+	}
+	return ""
+}
+
+func (x *Project) GetRepositoryUrl() string {
+	if x != nil {
+		return x.RepositoryUrl
+	}
+	return ""
+}
+
+func (x *Project) GetLocalRepositoryPath() string {
+	if x != nil {
+		return x.LocalRepositoryPath
+	}
+	return ""
+}
+
+func (x *Project) GetDefaultBranch() string {
+	if x != nil {
+		return x.DefaultBranch
+	}
+	return ""
+}
+
+func (x *Project) GetRequiredRunnerLabels() []string {
+	if x != nil {
+		return x.RequiredRunnerLabels
+	}
+	return nil
 }
 
 type ListProjectsResponse struct {
@@ -2359,11 +2399,16 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1a\n" +
 	"\busername\x18\x02 \x01(\tR\busername\x12\x12\n" +
 	"\x04role\x18\x03 \x01(\tR\x04role\"\x15\n" +
-	"\x13ListProjectsRequest\"G\n" +
+	"\x13ListProjectsRequest\"\xa8\x02\n" +
 	"\aProject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
-	"\aenabled\x18\x03 \x01(\bR\aenabled\"L\n" +
+	"\aenabled\x18\x03 \x01(\bR\aenabled\x12'\n" +
+	"\x0frepository_mode\x18\x04 \x01(\tR\x0erepositoryMode\x12%\n" +
+	"\x0erepository_url\x18\x05 \x01(\tR\rrepositoryUrl\x122\n" +
+	"\x15local_repository_path\x18\x06 \x01(\tR\x13localRepositoryPath\x12%\n" +
+	"\x0edefault_branch\x18\a \x01(\tR\rdefaultBranch\x124\n" +
+	"\x16required_runner_labels\x18\b \x03(\tR\x14requiredRunnerLabels\"L\n" +
 	"\x14ListProjectsResponse\x124\n" +
 	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\x8b\x02\n" +
 	"\x14ProjectConfiguration\x12\x12\n" +

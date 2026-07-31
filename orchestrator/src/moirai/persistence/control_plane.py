@@ -258,7 +258,8 @@ class AsyncpgControlPlane:
                 (id, name, enabled, repository_mode, repository_url, local_repository_path,
                  default_branch, configuration, created_at, updated_at)
             VALUES ($1, $2, true, $3, $4, $5, $6, $7::jsonb, $8, $8)
-            RETURNING id, name, enabled
+            RETURNING id, name, enabled, repository_mode, repository_url,
+                      local_repository_path, default_branch, configuration
             """,
             project_id,
             normalized["name"],
@@ -271,19 +272,21 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project could not be created")
-        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project = _project_record(record)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.create", "project", project["id"], "succeeded", now)
         return project
 
     async def list_projects(self) -> list[ProjectRecord]:
         records = await self._pool.fetch(
-            "SELECT id, name, enabled FROM app.projects ORDER BY name ASC, id ASC"
+            """
+            SELECT id, name, enabled, repository_mode, repository_url,
+                   local_repository_path, default_branch, configuration
+            FROM app.projects
+            ORDER BY name ASC, id ASC
+            """
         )
-        return [
-            {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
-            for record in records
-        ]
+        return [_project_record(record) for record in records]
 
     async def list_enabled_projects(self) -> list[Project]:
         records = await self._pool.fetch(
@@ -555,7 +558,8 @@ class AsyncpgControlPlane:
                 configuration = $7::jsonb,
                 updated_at = $8
             WHERE id = $1
-            RETURNING id, name, enabled
+            RETURNING id, name, enabled, repository_mode, repository_url,
+                      local_repository_path, default_branch, configuration
             """,
             _uuid(project_id),
             normalized["name"],
@@ -568,7 +572,7 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project is unknown")
-        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project = _project_record(record)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.update", "project", project["id"], "succeeded", now)
         return project
@@ -579,7 +583,8 @@ class AsyncpgControlPlane:
         record = await self._pool.fetchrow(
             """
             UPDATE app.projects SET enabled = $2, updated_at = $3 WHERE id = $1
-            RETURNING id, name, enabled
+            RETURNING id, name, enabled, repository_mode, repository_url,
+                      local_repository_path, default_branch, configuration
             """,
             _uuid(project_id),
             enabled,
@@ -587,7 +592,7 @@ class AsyncpgControlPlane:
         )
         if record is None:
             raise ValueError("project is unknown")
-        project: ProjectRecord = {"id": str(record["id"]), "name": str(record["name"]), "enabled": bool(record["enabled"])}
+        project = _project_record(record)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.enable" if enabled else "project.disable", "project", project["id"], "succeeded", now)
         return project
@@ -2970,6 +2975,23 @@ def _project_configuration(
             "required_runner_labels": labels,
         }
     raise ValueError("repository mode is invalid")
+
+
+def _project_record(record: dict[str, Any]) -> ProjectRecord:
+    configuration = record["configuration"]
+    if isinstance(configuration, str):
+        configuration = json.loads(configuration)
+    labels = configuration.get("required_runner_labels") if isinstance(configuration, dict) else None
+    return {
+        "id": str(record["id"]),
+        "name": str(record["name"]),
+        "enabled": bool(record["enabled"]),
+        "repository_mode": str(record["repository_mode"]),
+        "repository_url": _optional_text(record["repository_url"]),
+        "local_repository_path": _optional_text(record["local_repository_path"]),
+        "default_branch": str(record["default_branch"]),
+        "required_runner_labels": list(labels) if isinstance(labels, list) else [],
+    }
 
 
 def _final_revision(payload: dict[str, Any]) -> str:

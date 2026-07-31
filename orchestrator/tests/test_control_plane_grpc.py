@@ -43,7 +43,18 @@ class FakeControlPlane:
         raise PermissionError()
 
     async def list_projects(self) -> list[dict[str, object]]:
-        return [{"id": "project-1", "name": "Example", "enabled": True}]
+        return [
+            {
+                "id": "project-1",
+                "name": "Example",
+                "enabled": True,
+                "repository_mode": "managed_clone",
+                "repository_url": "https://example.test/repo.git",
+                "local_repository_path": None,
+                "default_branch": "main",
+                "required_runner_labels": ["docker", "linux"],
+            }
+        ]
 
     async def create_project(
         self,
@@ -267,6 +278,18 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
             control_plane_pb2.ListProjectsRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual([(project.id, project.name, project.enabled) for project in projects.projects], [("project-1", "Example", True)])
+        self.assertEqual(
+            [
+                (
+                    projects.projects[0].repository_mode,
+                    projects.projects[0].repository_url,
+                    projects.projects[0].local_repository_path,
+                    projects.projects[0].default_branch,
+                    list(projects.projects[0].required_runner_labels),
+                )
+            ],
+            [("managed_clone", "https://example.test/repo.git", "", "main", ["docker", "linux"])],
+        )
         created = await self.client.CreateProject(
             control_plane_pb2.CreateProjectRequest(
                 project=control_plane_pb2.ProjectConfiguration(

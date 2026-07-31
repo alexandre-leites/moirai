@@ -43,14 +43,24 @@ class ListProjectsRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class Project(_message.Message):
-    __slots__ = ("id", "name", "enabled")
+    __slots__ = ("id", "name", "enabled", "repository_mode", "repository_url", "local_repository_path", "default_branch", "required_runner_labels")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     ENABLED_FIELD_NUMBER: _ClassVar[int]
+    REPOSITORY_MODE_FIELD_NUMBER: _ClassVar[int]
+    REPOSITORY_URL_FIELD_NUMBER: _ClassVar[int]
+    LOCAL_REPOSITORY_PATH_FIELD_NUMBER: _ClassVar[int]
+    DEFAULT_BRANCH_FIELD_NUMBER: _ClassVar[int]
+    REQUIRED_RUNNER_LABELS_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     enabled: bool
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ...) -> None: ...
+    repository_mode: str
+    repository_url: str
+    local_repository_path: str
+    default_branch: str
+    required_runner_labels: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ..., repository_mode: _Optional[str] = ..., repository_url: _Optional[str] = ..., local_repository_path: _Optional[str] = ..., default_branch: _Optional[str] = ..., required_runner_labels: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class ListProjectsResponse(_message.Message):
     __slots__ = ("projects",)

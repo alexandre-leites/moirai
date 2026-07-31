@@ -572,6 +572,18 @@ components:
         id: { type: string }
         name: { type: string }
         enabled: { type: boolean }
+        repositoryMode: { type: string }
+        repositoryUrl:
+          type: string
+          description: >-
+            Clone source for managed_clone projects. Userinfo (embedded
+            credentials) is never returned; any present userinfo is replaced
+            with a redacted placeholder.
+        localRepositoryPath: { type: string }
+        defaultBranch: { type: string }
+        requiredRunnerLabels:
+          type: array
+          items: { type: string }
     RunnerToken:
       type: object
       required: [id, allowedLabels, expiresAt]
