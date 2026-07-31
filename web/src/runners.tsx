@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ApiClient, Runner } from "./api";
+import { useIsAdmin } from "./auth";
 import {
   countOnline,
   describeHeartbeat,
@@ -22,12 +23,13 @@ export type RunnersViewProps = {
   onRefresh: () => void;
   onSetState?: (runner: Runner, state: "drain" | "enable" | "revoke") => void;
   actioningRunnerID?: string | null;
+  isAdmin: boolean;
 };
 
 function LabelList({ labels }: { labels: string[] }) {
   if (labels.length === 0) return <span className="muted">none</span>;
   return (
-    <>
+    {onSetState <><> runner.enabled <><> (
       {labels.map((label) => (
         <span key={label} className="chip mono">{label}</span>
       ))}
@@ -49,31 +51,36 @@ function RunnerRows({
   isAdmin: boolean;
 }) {
   return (
-    <>
+    {onSetState <><> runner.enabled <><> (
       {runners.map((runner) => {
         const heartbeat = describeHeartbeat(runner.lastSeenAt, now);
         const status = describeRunnerStatus(runner, heartbeat);
         return (
           <tr key={runner.id} className={heartbeat.stale ? "runner-row--stale" : undefined}>
             <td>
+              {isAdmin && onSetState && runner.enabled && (
               <div>{runner.name}</div>
               <div className="mono muted">{runner.id.slice(0, 8)}</div>
             </td>
             <td><span className={`pill pill--${status.variant}`}>{status.label}</span></td>
+              {isAdmin && onSetState && runner.enabled && (
             <td><LabelList labels={runner.labels} /></td>
+              {isAdmin && onSetState && runner.enabled && (
             <td>
+              {isAdmin && onSetState && runner.enabled && (
               {runner.draining
                 ? <span className="pill pill--warn">Draining</span>
                 : <span className="muted">No</span>}
             </td>
             <td>
+              {isAdmin && onSetState && runner.enabled && (
               <span className="mono" title={heartbeat.title}>{heartbeat.label}</span>
               {heartbeat.stale && (
                 <span className="pill pill--warn stale-badge" title={STALE_HINT}>Stale</span>
               )}
             </td>
             <td>
-              {onSetState && isAdmin && runner.enabled && (
+              {isAdmin && onSetState && runner.enabled && (
                 <>
                   <button
                     onClick={() => onSetState(runner, runner.draining ? "enable" : "drain")}
@@ -100,6 +107,7 @@ export function RunnersView({
   onRefresh,
   onSetState,
   actioningRunnerID,
+  isAdmin,
 }: RunnersViewProps) {
   const isAdmin = useIsAdmin();
   return (
@@ -246,6 +254,7 @@ export function RunnersPage({ api }: { api: ApiClient }) {
       onRefresh={onRefresh}
       onSetState={onSetState}
       actioningRunnerID={actioningRunnerID}
+      isAdmin={isAdmin}
     />
   );
 }

@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     # Deferred: grpc/protocol.py imports this module's classes back for a
     # Protocol-conformance check, so this side must not import it at runtime.
     from moirai.grpc.protocol import (
+        IssueSyncStatusRecord,
         ProjectRecord,
         QueueEntryRecord,
         RegistrationTokenRecord,
@@ -271,6 +272,9 @@ class AsyncpgControlPlane:
                 (SELECT COUNT(*)
                  FROM app.workflow_runs
                  WHERE status NOT IN ('completed', 'blocked', 'failed', 'cancelled')) AS active_workflows,
+                (SELECT COUNT(*)
+                 FROM app.jobs
+                 WHERE status IN ('offered', 'preparing', 'running')) AS scheduled_jobs,
                 (SELECT EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_seen_at)))
                  FROM app.runners
                  WHERE enabled = true AND revoked_at IS NULL AND last_seen_at IS NOT NULL) AS runner_heartbeat_age
@@ -278,10 +282,11 @@ class AsyncpgControlPlane:
             now,
         )
         if record is None:
-            return {"queue_depth": 0, "active_workflows": 0, "runner_heartbeat_age": 0}
+            return {"queue_depth": 0, "active_workflows": 0, "scheduled_jobs": 0, "runner_heartbeat_age": 0}
         return {
             "queue_depth": float(record["queue_depth"] or 0),
             "active_workflows": float(record["active_workflows"] or 0),
+            "scheduled_jobs": float(record["scheduled_jobs"] or 0),
             "runner_heartbeat_age": float(record["runner_heartbeat_age"] or 0),
         }
 
@@ -567,17 +572,62 @@ class AsyncpgControlPlane:
         )
 
     async def clear_issue_sync_failure(self, project_id: str, now: datetime) -> None:
+        # This is the single "sync succeeded" write path: it clears the failure
+        # state and records when the project last synced, which the web console
+        # surfaces so an operator can see that issues are actually being picked
+        # up.
         await self._pool.execute(
             """
             INSERT INTO app.issue_sync_state
-                (project_id, consecutive_failures, next_retry_at, last_error, updated_at)
-            VALUES ($1, 0, NULL, NULL, $2)
+                (project_id, consecutive_failures, next_retry_at, last_error, last_synced_at, updated_at)
+            VALUES ($1, 0, NULL, NULL, $2, $2)
             ON CONFLICT (project_id) DO UPDATE
-            SET consecutive_failures = 0, next_retry_at = NULL, last_error = NULL, updated_at = EXCLUDED.updated_at
+            SET consecutive_failures = 0, next_retry_at = NULL, last_error = NULL,
+                last_synced_at = EXCLUDED.last_synced_at, updated_at = EXCLUDED.updated_at
             """,
             _uuid(project_id),
             now,
         )
+
+    async def issue_sync_status(self, now: datetime) -> list[IssueSyncStatusRecord]:
+        """Return per-project issue-sync status for the web console.
+
+        Every project appears, whether or not it has synced yet: a fresh
+        project reads as "never synced, zero issues", which is exactly the
+        state an operator needs to see before the first pass runs.
+        """
+        records = await self._pool.fetch(
+            """
+            SELECT p.id AS project_id, p.name AS project_name, p.enabled,
+                   COUNT(i.id) AS issue_count,
+                   COUNT(i.id) FILTER (WHERE i.eligible = true AND i.state = 'open')
+                       AS eligible_count,
+                   s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error,
+                   (s.next_retry_at IS NOT NULL AND s.next_retry_at > $1) AS backing_off
+            FROM app.projects AS p
+            LEFT JOIN app.issues AS i ON i.project_id = p.id AND i.state = 'open'
+            LEFT JOIN app.issue_sync_state AS s ON s.project_id = p.id
+            GROUP BY p.id, p.name, p.enabled, s.last_synced_at, s.consecutive_failures,
+                     s.next_retry_at, s.last_error
+            ORDER BY p.name
+            """,
+            now,
+        )
+        return [
+            {
+                "project_id": str(record["project_id"]),
+                "project_name": str(record["project_name"]),
+                "enabled": bool(record["enabled"]),
+                "issue_count": int(record["issue_count"]),
+                "eligible_count": int(record["eligible_count"]),
+                "last_synced_at": record["last_synced_at"],
+                "consecutive_failures": int(record["consecutive_failures"]),
+                "next_retry_at": record["next_retry_at"],
+                "last_error": record["last_error"],
+                "backing_off": bool(record["backing_off"]),
+            }
+            for record in records
+        ]
 
     async def record_provider_failure(self, provider: str, reason: str, now: datetime) -> None:
         """Records a provider failure and drops any probe pointer (issue #92).

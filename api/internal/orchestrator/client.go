@@ -281,6 +281,30 @@ func (c *Client) ListQueue(ctx context.Context, limit int32) (*controlv1.ListQue
 	return resp, nil
 }
 
+func (c *Client) SyncNow(ctx context.Context, projectID string) (*controlv1.SyncNowResponse, error) {
+	resp, err := c.client.SyncNow(ctx, &controlv1.SyncNowRequest{ProjectId: projectID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) IssueSyncStatus(ctx context.Context) (*controlv1.IssueSyncStatusResponse, error) {
+	resp, err := c.client.IssueSyncStatus(ctx, &controlv1.IssueSyncStatusRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) GetSchedulerMetrics(ctx context.Context) (*controlv1.GetSchedulerMetricsResponse, error) {
+	resp, err := c.client.GetSchedulerMetrics(ctx, &controlv1.GetSchedulerMetricsRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error) {
 	resp, err := c.client.SetRunnerState(ctx, &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state})
 	if err != nil {

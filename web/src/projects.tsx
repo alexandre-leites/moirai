@@ -1,6 +1,17 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import type { ApiClient, Project } from "./api";
 import { useIsAdmin } from "./auth";
+
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+        {children}
+        <button type="button" className="modal-close" aria-label="Close dialog" onClick={onClose}>×</button>
+      </section>
+    </div>
+  );
+}
 
 export function ProjectsPage({ api }: { api: ApiClient }) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -24,14 +35,19 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
 
   return (
     <div>
-      <div className="view-head"><h1>Projects</h1></div>
+      <div className="view-head">
+        <h1>Projects</h1>
+        <span className="crumb">Control plane</span>
+        {isAdmin && (
+          <button className="view-head-action" onClick={() => setShowCreate(true)}>
+            New project
+          </button>
+        )}
+      </div>
       <p className="view-sub">Repository configuration and scheduling eligibility.</p>
-      {isAdmin && (
-        <button onClick={() => setShowCreate(!showCreate)}>
-          {showCreate ? "Cancel" : "New project"}
-        </button>
+      {isAdmin && showCreate && (
+        <CreateProjectModal api={api} onCreated={(p) => { setProjects([...projects, p]); setShowCreate(false); }} onClose={() => setShowCreate(false)} />
       )}
-      {isAdmin && showCreate && <CreateProjectForm api={api} onCreated={(p) => { setProjects([...projects, p]); setShowCreate(false); }} />}
       {projects.length === 0 ? <p className="empty-state">No projects registered yet. Create a project to begin scheduling work.</p> : (
         <table>
           <thead><tr><th>Name</th><th>Status</th>{isAdmin && <th>Actions</th>}</tr></thead>
@@ -55,7 +71,7 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
                 rows.push(
                   <tr key={`${p.id}-edit`}>
                     <td colSpan={3}>
-                      <EditProjectForm api={api} project={p} onUpdated={replaceProject} onCancel={() => setEditingId(null)} />
+                      <EditProjectModal api={api} project={p} onUpdated={replaceProject} onClose={() => setEditingId(null)} />
                     </td>
                   </tr>
                 );
@@ -69,7 +85,7 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
   );
 }
 
-function CreateProjectForm({ api, onCreated }: { api: ApiClient; onCreated: (p: Project) => void }) {
+function CreateProjectModal({ api, onCreated, onClose }: { api: ApiClient; onCreated: (p: Project) => void; onClose: () => void }) {
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"managed_clone" | "existing_path">("managed_clone");
   const [url, setUrl] = useState("");
@@ -102,34 +118,36 @@ function CreateProjectForm({ api, onCreated }: { api: ApiClient; onCreated: (p: 
   };
 
   return (
-    <form onSubmit={handleSubmit} className="form">
-      <h3>Create project</h3>
-      {error && <p className="error">{error}</p>}
-      <label>Name <input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} /></label>
-      <label>Repository mode
-        <select value={mode} onChange={(e) => setMode(e.target.value as "managed_clone" | "existing_path")}>
-          <option value="managed_clone">Managed clone (Git URL)</option>
-          <option value="existing_path">Existing local path</option>
-        </select>
-      </label>
-      {mode === "managed_clone" && (
-        <label>Repository URL <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="git@github.com:owner/repo.git" /></label>
-      )}
-      {mode === "existing_path" && (
-        <label>Local path <input value={localPath} onChange={(e) => setLocalPath(e.target.value)} placeholder="/repositories/my-service" /></label>
-      )}
-      <label>Default branch <input value={defaultBranch} onChange={(e) => setDefaultBranch(e.target.value)} /></label>
-      <label>Required runner labels (comma-separated) <input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="linux, docker" /></label>
-      <button type="submit" disabled={saving}>{saving ? "Creating..." : "Create"}</button>
-    </form>
+    <Modal title="Create project" onClose={onClose}>
+      <form onSubmit={handleSubmit} className="form">
+        <h3>Create project</h3>
+        {error && <p className="error">{error}</p>}
+        <label>Name <input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} /></label>
+        <label>Repository mode
+          <select value={mode} onChange={(e) => setMode(e.target.value as "managed_clone" | "existing_path")}>
+            <option value="managed_clone">Managed clone (Git URL)</option>
+            <option value="existing_path">Existing local path</option>
+          </select>
+        </label>
+        {mode === "managed_clone" && (
+          <label>Repository URL <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="git@github.com:owner/repo.git" /></label>
+        )}
+        {mode === "existing_path" && (
+          <label>Local path <input value={localPath} onChange={(e) => setLocalPath(e.target.value)} placeholder="/repositories/my-service" /></label>
+        )}
+        <label>Default branch <input value={defaultBranch} onChange={(e) => setDefaultBranch(e.target.value)} /></label>
+        <label>Required runner labels (comma-separated) <input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="linux, docker" /></label>
+        <button type="submit" disabled={saving}>{saving ? "Creating..." : "Create"}</button>
+      </form>
+    </Modal>
   );
 }
 
-function EditProjectForm({ api, project, onUpdated, onCancel }: {
+function EditProjectModal({ api, project, onUpdated, onClose }: {
   api: ApiClient;
   project: Project;
   onUpdated: (p: Project) => void;
-  onCancel: () => void;
+  onClose: () => void;
 }) {
   const [name, setName] = useState(project.name);
   const [mode, setMode] = useState<"managed_clone" | "existing_path">(
@@ -165,27 +183,29 @@ function EditProjectForm({ api, project, onUpdated, onCancel }: {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="form">
-      <h3>Edit project</h3>
-      {error && <p className="error">{error}</p>}
-      <label>Name <input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} /></label>
-      <label>Repository mode
-        <select value={mode} onChange={(e) => setMode(e.target.value as "managed_clone" | "existing_path")}>
-          <option value="managed_clone">Managed clone (Git URL)</option>
-          <option value="existing_path">Existing local path</option>
-        </select>
-      </label>
-      {mode === "managed_clone" && (
-        <label>Repository URL <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="git@github.com:owner/repo.git" /></label>
-      )}
-      {mode === "existing_path" && (
-        <label>Local path <input value={localPath} onChange={(e) => setLocalPath(e.target.value)} placeholder="/repositories/my-service" /></label>
-      )}
-      <label>Default branch <input value={defaultBranch} onChange={(e) => setDefaultBranch(e.target.value)} /></label>
-      <label>Required runner labels (comma-separated) <input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="linux, docker" /></label>
-      <button type="submit" disabled={saving}>{saving ? "Saving..." : "Save"}</button>{" "}
-      <button type="button" onClick={onCancel} disabled={saving}>Cancel</button>
-    </form>
+    <Modal title="Edit project" onClose={onClose}>
+      <form onSubmit={handleSubmit} className="form">
+        <h3>Edit project</h3>
+        {error && <p className="error">{error}</p>}
+        <label>Name <input value={name} onChange={(e) => setName(e.target.value)} disabled={saving} /></label>
+        <label>Repository mode
+          <select value={mode} onChange={(e) => setMode(e.target.value as "managed_clone" | "existing_path")}>
+            <option value="managed_clone">Managed clone (Git URL)</option>
+            <option value="existing_path">Existing local path</option>
+          </select>
+        </label>
+        {mode === "managed_clone" && (
+          <label>Repository URL <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="git@github.com:owner/repo.git" /></label>
+        )}
+        {mode === "existing_path" && (
+          <label>Local path <input value={localPath} onChange={(e) => setLocalPath(e.target.value)} placeholder="/repositories/my-service" /></label>
+        )}
+        <label>Default branch <input value={defaultBranch} onChange={(e) => setDefaultBranch(e.target.value)} /></label>
+        <label>Required runner labels (comma-separated) <input value={labels} onChange={(e) => setLabels(e.target.value)} placeholder="linux, docker" /></label>
+        <button type="submit" disabled={saving}>{saving ? "Saving..." : "Save"}</button>{" "}
+        <button type="button" onClick={onClose} disabled={saving}>Cancel</button>
+      </form>
+    </Modal>
   );
 }
 

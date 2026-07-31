@@ -27,6 +27,7 @@ function render(props: Partial<RunnersViewProps> = {}): string {
       loading={false}
       now={NOW}
       onRefresh={() => undefined}
+      isAdmin={true}
       {...props}
     />
   );

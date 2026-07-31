@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
-ExecutionRole = Literal["planner", "developer", "pipeline", "reviewer", "repairer"]
+ExecutionRole = Literal["planner", "developer", "pipeline", "reviewer", "verifier", "repairer"]
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _MAX_CONTEXT_ENTRIES = 64
@@ -128,9 +128,9 @@ def task_execution(
     if repository_mode not in {"managed_clone", "existing_path"}:
         raise ValueError("task packet repository mode is invalid")
     mode = cast(Literal["managed_clone", "existing_path"], repository_mode)
-    if role not in {"planner", "developer", "pipeline", "reviewer", "repairer"}:
+    if role not in {"planner", "developer", "pipeline", "reviewer", "verifier", "repairer"}:
         raise ValueError("task packet execution role is invalid")
-    read_only = role in {"planner", "pipeline", "reviewer"}
+    read_only = role in {"planner", "pipeline", "reviewer", "verifier"}
     may_push = role == "developer"
     if environment_refs is None:
         environment_refs = environment_refs_for(repository_mode=mode, may_push=may_push)

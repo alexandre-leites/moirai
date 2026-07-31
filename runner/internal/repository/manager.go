@@ -123,8 +123,12 @@ func (manager Manager) Prepare(ctx context.Context, request PrepareRequest) (Wor
 		return Workspace{}, fmt.Errorf("create workspace: %w", err)
 	}
 	if err := manager.git(ctx, "-C", source, "worktree", "add", "-B", request.Branch, workspace.Repository, baseRevision); err != nil {
-		_ = os.RemoveAll(workspace.Root)
-		return Workspace{}, withPruneCause(fmt.Errorf("create worktree: %w", err), pruneErr)
+		// ponytail: attempt to prune and retry if branch is locked
+		_ = manager.git(ctx, "-C", source, "worktree", "prune")
+		if err := manager.git(ctx, "-C", source, "worktree", "add", "-B", request.Branch, workspace.Repository, baseRevision); err != nil {
+			_ = os.RemoveAll(workspace.Root)
+			return Workspace{}, withPruneCause(fmt.Errorf("create worktree: %w", err), pruneErr)
+		}
 	}
 	if err := manager.excludeLoopArtifacts(ctx, workspace.Repository); err != nil {
 		_ = os.RemoveAll(workspace.Root)

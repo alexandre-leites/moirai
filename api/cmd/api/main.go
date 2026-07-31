@@ -53,6 +53,7 @@ func main() {
 	handlers.NewRunnerTokenHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewQueueHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewSyncHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewWorkflowHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 
 	quit := make(chan os.Signal, 1)
