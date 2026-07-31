@@ -296,6 +296,34 @@ class ListRunnersResponse(_message.Message):
     runners: _containers.RepeatedCompositeFieldContainer[Runner]
     def __init__(self, runners: _Optional[_Iterable[_Union[Runner, _Mapping]]] = ...) -> None: ...
 
+class ListQueueRequest(_message.Message):
+    __slots__ = ("limit",)
+    LIMIT_FIELD_NUMBER: _ClassVar[int]
+    limit: int
+    def __init__(self, limit: _Optional[int] = ...) -> None: ...
+
+class QueueEntry(_message.Message):
+    __slots__ = ("project_id", "project_name", "external_id", "title", "priority", "blocked_reason")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    PROJECT_NAME_FIELD_NUMBER: _ClassVar[int]
+    EXTERNAL_ID_FIELD_NUMBER: _ClassVar[int]
+    TITLE_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
+    BLOCKED_REASON_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    project_name: str
+    external_id: str
+    title: str
+    priority: int
+    blocked_reason: str
+    def __init__(self, project_id: _Optional[str] = ..., project_name: _Optional[str] = ..., external_id: _Optional[str] = ..., title: _Optional[str] = ..., priority: _Optional[int] = ..., blocked_reason: _Optional[str] = ...) -> None: ...
+
+class ListQueueResponse(_message.Message):
+    __slots__ = ("entries",)
+    ENTRIES_FIELD_NUMBER: _ClassVar[int]
+    entries: _containers.RepeatedCompositeFieldContainer[QueueEntry]
+    def __init__(self, entries: _Optional[_Iterable[_Union[QueueEntry, _Mapping]]] = ...) -> None: ...
+
 class SetRunnerStateRequest(_message.Message):
     __slots__ = ("runner_id", "state")
     RUNNER_ID_FIELD_NUMBER: _ClassVar[int]

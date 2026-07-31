@@ -3850,3 +3850,34 @@ Implement backend fallback only after a runner task-packet backend-selection con
 
 - `api/internal/http/handlers/auth_test.go:63` `TestLogoutIdempotentWithoutSession` got 401 want 204 — verified at base `f61f27d`.
 - `orchestrator/tests/test_control_plane_grpc.py:422,429` logout tests — `FakeControlPlane` lacks `revoked_session_token` attribute.
+
+---
+
+## Issue #112 — Eligible-issue queue exposure (orchestrator → gRPC → API → web)
+
+- In progress: 2026-07-31
+- Agent/session identifier: issue-112
+- Branch: `issue-112`
+- Scope: `proto/control_plane.proto`, `orchestrator/`, `api/`, `web/`. Not touching `runner/`.
+
+### Implemented
+
+- **proto**: `ListQueue` RPC + `ListQueueRequest`/`QueueEntry`/`ListQueueResponse` messages. Regenerated Go + Python stubs via `buf generate` (buf 1.50.0) after fast-forwarding to `f266203` (#204) and resolving the pb2 conflict by regenerating on the merged tree.
+- **orchestrator**:
+  - `AsyncpgControlPlane.list_queue(now, limit=50)` — every eligible open issue (disabled projects included) in the scheduler's own ordering, each carrying a machine-readable `blocked_reason` computed by a `CASE` over the *same* predicate fragments `schedule()` embeds (`_scheduling_conditions`, `_runner_conditions`, `_locked_condition`, `_project_circuit_condition`, `_provider_circuit_condition`, `_blocked_reason_case`). `blocked_reason` is empty exactly when `schedule()` would run the issue.
+  - `ControlPlaneService.ListQueue` — session required, default limit 50, max 100 (INVALID_ARGUMENT beyond), UNIMPLEMENTED when the control plane lacks the reader. `QueueEntryRecord` added to the `ControlPlane` Protocol.
+  - Refactor: `schedule()` now embeds the shared fragments (textually equivalent; 477 tests pass).
+- **api**: `orchestrator.Client.ListQueue`, `QueueHandlers` with `GET /api/v1/queue?limit=1..100` (session-required, limit validated), registered in `main.go`.
+- **web**: `api.ts` gains `listQueue` + `QueueEntry` type (appended in a separated section at end of file to avoid clashing with #192); new `QueuePage` route `/queue` + nav item; Dashboard "Global queue" card links to it.
+- **Bugfix (pre-existing, blocks CI)**: `TestLogoutIdempotentWithoutSession` — logout sat behind `RequireSession(RequireCSRF(...))` middleware so an anonymous logout returned 401 instead of the idempotent 204 the handler/test intend. Dropped the middleware; the handler already defends against a missing session. Also initialized `revoked_session_token`/`revoked_session_at` on `FakeControlPlane` (the two grpc logout tests).
+
+### Validation
+
+- Orchestrator: `pytest orchestrator/tests` → 477 passed, 34 skipped; `ruff check orchestrator` → clean; `mypy orchestrator/src` → clean (48 files).
+- API: `go build ./...`, `go vet ./...`, `go test ./...` (golang:1.25 image) → all pass.
+- Web: `npm test` → 169 passed (11 files); `npm run typecheck` → clean; `npm run lint` → 0 errors (12 pre-existing warnings).
+- `git diff --check` → clean.
+
+### Remaining
+
+- Commit, push, open PR with body `Closes #112`, monitor CI, merge, post audit-trail comment, apply FINISHED_LABEL.

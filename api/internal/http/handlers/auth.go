@@ -26,7 +26,7 @@ func NewAuthHandlers(client *orchestrator.Client, cookieSecure bool, loginLimite
 
 func (h *AuthHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/auth/login", h.loginLimiter.Middleware(http.HandlerFunc(h.login)))
-	mux.Handle("POST /api/v1/auth/logout", auth.RequireSession(auth.RequireCSRF(http.HandlerFunc(h.logout))))
+	mux.Handle("POST /api/v1/auth/logout", http.HandlerFunc(h.logout))
 	mux.Handle("GET /api/v1/auth/me", auth.RequireSession(http.HandlerFunc(h.me)))
 }
 
