@@ -33,6 +33,7 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
   }, [api]);
 
   async function control(id: string, action: "retry" | "cancel" | "block") {
+    if (!isAdmin) return; // ponytail: backend is security boundary, ui safety only
     const reason = reasonByID[id] ?? "";
     if (action === "block" && !reason.trim()) {
       setError("A blocking reason is required.");
@@ -55,6 +56,7 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
   }
 
   async function decide(id: string, decision: "approved" | "changes_requested") {
+    if (!isAdmin) return; // ponytail: backend is security boundary, ui safety only
     setPendingId(id);
     setError(null);
     try {
@@ -76,6 +78,46 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
       <p className="view-sub">Durable workflow state, phase progress, and operator controls.</p>
       {error && <p className="error">{error}</p>}
       {workflows.length === 0 ? <p className="empty-state">No active workflows or recorded runs yet.</p> : (
+<<<<<<< HEAD
+        <table>
+          <thead><tr><th>ID</th><th>Project</th><th>Status</th><th>Phase</th><th>Approval</th><th>Controls</th></tr></thead>
+          <tbody>
+            {workflows.map((w) => (
+              <tr key={w.id}>
+                <td className="mono"><Link to={`/workflows/${w.id}`}>{w.id.slice(0, 12)}</Link></td>
+                <td>{projectNames[w.projectId] ?? w.projectId}</td>
+                <td>{w.status}</td>
+                <td>{w.phase}</td>
+                <td>
+                  {w.status === AWAITING_APPROVAL_STATUS && (
+                    <span className="workflow-decision-actions">
+                      <button disabled={!isAdmin || pendingId === w.id} onClick={() => decide(w.id, "approved")}>Approve</button>
+                      <button disabled={!isAdmin || pendingId === w.id} onClick={() => decide(w.id, "changes_requested")}>Request changes</button>
+                    </span>
+                  )}
+                </td>
+                <td>
+                  {isAdmin && (
+                    TERMINAL_STATUSES.has(w.status) ? (
+                      <button disabled={pendingId === w.id} onClick={() => control(w.id, "retry")}>Retry</button>
+                    ) : w.status !== "completed" ? (
+                      <span className="workflow-decision-actions">
+                        <input
+                          aria-label={`Reason for ${w.id}`}
+                          value={reasonByID[w.id] ?? ""}
+                          onChange={(event) => setReasonByID((current) => ({ ...current, [w.id]: event.target.value }))}
+                        />
+                        <button disabled={pendingId === w.id} onClick={() => control(w.id, "cancel")}>Cancel</button>
+                        <button disabled={pendingId === w.id} onClick={() => control(w.id, "block")}>Block</button>
+                      </span>
+                    ) : null
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+=======
           <table>
             <thead><tr><th>ID</th><th>Project</th><th>Issue</th><th>Status</th><th>Phase</th><th>Approval</th><th>Controls</th></tr></thead>
             <tbody>
@@ -115,6 +157,7 @@ export function WorkflowsPage({ api }: { api: ApiClient }) {
               ))}
             </tbody>
           </table>
+>>>>>>> origin/main
       )}
     </div>
   );
