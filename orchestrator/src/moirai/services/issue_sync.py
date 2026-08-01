@@ -20,6 +20,16 @@ async def _await(value: Any) -> Any:
     return value
 
 
+def _cause(error: BaseException) -> str:
+    """The failure reason for an operator, from the exception being wrapped.
+
+    Falls back to the class name: an exception raised with no message renders as
+    the empty string, which would leave a message ending in a bare colon.
+    """
+    detail = str(error).strip()
+    return detail or type(error).__name__
+
+
 class IssueSyncError(RuntimeError):
     pass
 
@@ -88,9 +98,19 @@ class IssueSync:
                 _await(tracker.list_open_issues()), timeout=self._sync_timeout_seconds
             )
         except TimeoutError as error:
-            raise IssueSyncError(f"issue tracker timed out for project {project.id}") from error
+            raise IssueSyncError(
+                f"issue tracker timed out for project {project.id} "
+                f"after {self._sync_timeout_seconds:g}s"
+            ) from error
         except Exception as error:
-            raise IssueSyncError(f"issue tracker failed for project {project.id}") from error
+            # The cause is the whole diagnosis and it is the only place the
+            # reason exists: GitHubCliError carries the CLI's own stderr,
+            # already redacted. `str(error)` here becomes issue_sync_state's
+            # last_error, which is what the console shows an operator -- without
+            # it they see "issue tracker failed" and have nowhere to go.
+            raise IssueSyncError(
+                f"issue tracker failed for project {project.id}: {_cause(error)}"
+            ) from error
 
         seen_external_ids: list[str] = []
         for external in external_issues:
@@ -119,7 +139,9 @@ class IssueSync:
                     )
                 )
             except Exception as error:
-                raise IssueSyncError(f"issue persistence failed for project {project.id}") from error
+                raise IssueSyncError(
+                    f"issue persistence failed for project {project.id}: {_cause(error)}"
+                ) from error
             seen_external_ids.append(external.external_id)
 
         mark_missing = getattr(self._control_plane, "mark_missing_issues_ineligible", None)
@@ -127,7 +149,9 @@ class IssueSync:
             try:
                 await _await(mark_missing(project.id, seen_external_ids, now))
             except Exception as error:
-                raise IssueSyncError(f"issue reconciliation failed for project {project.id}") from error
+                raise IssueSyncError(
+                    f"issue reconciliation failed for project {project.id}: {_cause(error)}"
+                ) from error
         return len(seen_external_ids)
 
     async def sync_all_projects(self, now: datetime) -> dict[str, int | str]:
