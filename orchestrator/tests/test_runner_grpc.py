@@ -9,6 +9,7 @@ try:
     from moirai.domain.control_plane import InMemoryControlPlane
     from moirai.domain.models import Issue, Project
     from moirai.grpc.runner_control import RunnerControlService
+    from moirai.persistence.secrets import SecretCipherError
     from proto import runner_control_pb2, runner_control_pb2_grpc
 except ModuleNotFoundError:
     grpc = None
@@ -431,6 +432,31 @@ class ResolveJobSecretTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
+    async def test_an_unopenable_credential_says_so_instead_of_reporting_INTERNAL(self) -> None:
+        """A missing or wrong LOOP_SECRET_KEY must name itself.
+
+        Folding this into the generic handler reported "secret could not be
+        resolved", which is indistinguishable from a broken runner. On a live
+        deployment that cost three failed planning attempts and an open circuit
+        before anyone could tell which it was. The message describes deployment
+        configuration, never a credential, so it is safe to pass to the runner.
+        """
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        async def unopenable(*_: object, **__: object) -> None:
+            raise SecretCipherError(
+                "no secret key is configured, so per-project credentials cannot be "
+                "stored or read; set LOOP_SECRET_KEY"
+            )
+
+        self.control_plane.resolve_job_secret = unopenable  # type: ignore[assignment]
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(self._request(runner_id, credential, job_id, generation))
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+        self.assertIn("LOOP_SECRET_KEY", raised.exception.details())
+
     async def test_an_incomplete_request_is_rejected(self) -> None:
         runner_id, credential, job_id, _ = await self._holding_runner()
 
@@ -510,3 +536,8 @@ class ResolveJobSecretWithoutTlsTests(ResolveJobSecretTests):
         # The TLS gate is checked before request validation, deliberately: a
         # deployment that cannot serve secrets at all should say so first.
         await self._expect_refusal(self._request("", "", "", 0))
+
+    async def test_an_unopenable_credential_says_so_instead_of_reporting_INTERNAL(self) -> None:
+        # Without TLS nothing is resolved at all, so the key never comes up.
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))

@@ -14,6 +14,7 @@ from moirai.domain.control_plane import AuthenticationError, JobOffer, OfferErro
 from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import ExecutionEvent
 from moirai.grpc.sessions import RunnerSession, RunnerSessionRegistry
+from moirai.persistence.secrets import SecretCipherError
 from moirai.workflows.runner_events import RunnerEventError, validate_runner_event
 from proto import runner_control_pb2, runner_control_pb2_grpc
 
@@ -177,10 +178,27 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             )
         except ValueError as error:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except SecretCipherError as error:
+            # No key configured, or one that cannot open what is stored. The
+            # message names the variable to set and is safe to pass on: it
+            # describes the deployment's configuration, never a credential.
+            # Folding this into the generic handler below reported
+            # "secret could not be resolved" and threw that away, which cost an
+            # operator three failed planning attempts and an open circuit before
+            # anyone could tell a missing key from a broken runner.
+            _LOGGER.error(
+                "a job secret could not be opened",
+                extra={
+                    "runner_id": request.runner_id,
+                    "job_id": request.job_id,
+                    "reason": str(error),
+                },
+            )
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
         except Exception:
-            # A credential that will not open reaches here. The runner must not
-            # be told it simply has none, or it would fall back to its own
-            # environment and act as the wrong identity.
+            # Anything else. The runner must not be told it simply has none, or
+            # it would fall back to its own environment and act as the wrong
+            # identity.
             _LOGGER.exception(
                 "resolving a job secret failed",
                 extra={"runner_id": request.runner_id, "job_id": request.job_id},
