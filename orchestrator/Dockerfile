@@ -35,14 +35,21 @@ RUN apt-get update \
 # with pip-audit, and rebuilding an old commit reproduces its dependency set.
 # The install is also its own layer, so editing orchestrator source no longer
 # reinstalls every dependency.
+#
+# --no-compile because this layer is built for both architectures and the arm64
+# one runs under QEMU. Writing .pyc for every module in the closure is pure
+# CPython execution, which is the worst case under emulation: it measured 696
+# seconds of a 920-second build. Python compiles each module on first import
+# instead, natively, once per container -- a startup cost a long-running server
+# pays once, in exchange for the build not paying it on every architecture.
 COPY --from=requirements /requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --require-hashes --requirement /tmp/requirements.txt \
+RUN pip install --no-cache-dir --no-compile --require-hashes --requirement /tmp/requirements.txt \
     && rm -f /tmp/requirements.txt \
     && rm -rf /root/.cache
 COPY pyproject.toml ./
 COPY migrations ./migrations
 COPY src ./src
-RUN pip install --no-cache-dir --no-deps . \
+RUN pip install --no-cache-dir --no-compile --no-deps . \
     && rm -rf /root/.cache
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod 0755 /docker-entrypoint.sh

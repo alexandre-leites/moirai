@@ -234,6 +234,7 @@ jobs:
           # Registry references are case sensitive and must be lowercase; the
           # repository owner is not guaranteed to be.
           image=$(printf '%s/%s' "$IMAGE_PREFIX" "$SERVICE" | tr '[:upper:]' '[:lower:]')
+          echo "image=$image" >> "$GITHUB_OUTPUT"
           {
             echo 'tags<<TAGS_EOF'
             # printf '%s\n', not '%s': without the trailing newline `read`
@@ -248,8 +249,11 @@ jobs:
 
       # The built-in GITHUB_TOKEN is the only credential involved; no
       # registry secret is provisioned for this repository.
+      # Unconditional: reading the build cache from a private package needs
+      # credentials, and a dry run should get the same cache hits a release
+      # does -- otherwise a rehearsal tells you nothing about release timing.
+      # Pushing is still gated separately, on `push` below.
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: needs.plan.outputs.push == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -282,8 +286,18 @@ jobs:
             index:org.opencontainers.image.revision=${{ github.sha }}
             index:org.opencontainers.image.version=${{ needs.plan.outputs.version }}
             index:org.opencontainers.image.created=${{ needs.plan.outputs.created }}
-          cache-from: type=gha,scope=release-${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=release-${{ matrix.service }}
+          # A registry cache, not type=gha, because releases run on a tag ref
+          # and the Actions cache can only be restored from the current ref or
+          # the default branch. A cache written by the v0.2.2 tag was therefore
+          # unreadable by v0.2.3, so every release started cold and paid the
+          # full emulated `pip install` again -- 696 seconds of a 920-second
+          # orchestrator build, for a dependency set that had not changed.
+          # A registry cache has no ref scoping, so release-to-release hits.
+          #
+          # Only written when publishing: a dry run must leave no trace in the
+          # registry, and a cache entry is a trace.
+          cache-from: type=registry,ref=${{ steps.refs.outputs.image }}:buildcache
+          cache-to: ${{ needs.plan.outputs.push == 'true' && format('type=registry,ref={0}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true', steps.refs.outputs.image) || '' }}
 
   verify:
     name: Verify published manifests
