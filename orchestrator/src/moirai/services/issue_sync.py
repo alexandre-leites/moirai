@@ -92,7 +92,10 @@ class IssueSync:
                 self._retry_after[project_id] = retry_after
 
     async def sync_project(self, project: Project, now: datetime) -> int:
-        tracker = self._issue_tracker_factory(project)
+        # The factory may be async: resolving a project's own GitHub
+        # credential is a database read. `_await` passes a plain tracker
+        # straight through, so synchronous factories are unaffected.
+        tracker = await _await(self._issue_tracker_factory(project))
         try:
             external_issues = await asyncio.wait_for(
                 _await(tracker.list_open_issues()), timeout=self._sync_timeout_seconds
@@ -254,7 +257,10 @@ class IssueSync:
             await _await(record_failure(project_id, failures, retry_at, str(error), now))
 
     async def reconcile_project_labels(self, project: Project) -> None:
-        tracker = self._issue_tracker_factory(project)
+        # The factory may be async: resolving a project's own GitHub
+        # credential is a database read. `_await` passes a plain tracker
+        # straight through, so synchronous factories are unaffected.
+        tracker = await _await(self._issue_tracker_factory(project))
         workflow_runs = await _await(
             self._control_plane.list_latest_workflow_runs_for_project(project.id)
         )

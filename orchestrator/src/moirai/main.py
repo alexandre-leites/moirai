@@ -258,6 +258,30 @@ async def _run_retention_reaper(
             pass
 
 
+async def _connect_control_plane(factory: Any, config: OrchestratorConfig) -> Any:
+    """Connects the control plane, with the credential cipher when one is configured.
+
+    The key is optional: a deployment that stores no per-project credentials
+    never needs one. Passing it is best-effort against the factory signature so
+    an injected test factory -- which takes only a database URL -- keeps working.
+    """
+    cipher = None
+    if config.secret_key:
+        from moirai.persistence.secrets import SecretCipher
+
+        cipher = SecretCipher.from_configured_key(config.secret_key)
+    if cipher is None:
+        return await factory(config.database_url)
+    try:
+        return await factory(config.database_url, secret_cipher=cipher)
+    except TypeError:
+        _LOGGER.warning(
+            "control plane factory does not accept a secret cipher; per-project "
+            "credentials will be unavailable"
+        )
+        return await factory(config.database_url)
+
+
 def register_services(
     server: Any,
     control_plane: Any,
@@ -359,7 +383,7 @@ async def serve(
     metrics.update()
     shutdown = stop_event or asyncio.Event()
     factory = control_plane_factory or AsyncpgControlPlane.connect
-    control_plane = await factory(active_config.database_url)
+    control_plane = await _connect_control_plane(factory, active_config)
     health = HealthState()
     server = grpc.aio.server(interceptors=(CorrelationLoggingInterceptor(),))
     workflow_runtime: Any | None = None
@@ -404,7 +428,17 @@ async def serve(
                 await verify_gh_ready(github_runner)
             except GitHubCliUnavailableError:
                 _LOGGER.warning("GitHub CLI is not authenticated; issue sync and code host operations will fail")
-        code_hosts = ProjectCodeHostFactory(pool, command_runner=github_runner)
+        # Per-project credentials, where a project has one; the shared runner
+        # built from LOOP_GITHUB_TOKEN otherwise.
+        read_project_token = getattr(control_plane, "project_credential", None)
+        credential_reader = (
+            (lambda project_id: read_project_token(project_id, "github_token"))
+            if read_project_token is not None
+            else None
+        )
+        code_hosts = ProjectCodeHostFactory(
+            pool, command_runner=github_runner, credential_reader=credential_reader
+        )
         checkpointer = await _build_checkpointer(active_config.database_url)
         health.mark_checkpointer(checkpointer is not None)
         workflow_runtime = build_persisted_runtime(
@@ -414,9 +448,16 @@ async def serve(
             issue_tracker_factory=code_hosts.issue_tracker,
         )
 
-        issue_sync = IssueSync(
-            control_plane, lambda project: github_issue_tracker_for_project(project, github_runner)
-        )
+        # Routed through the same factory as the code host so issue sync uses a
+        # project's own credential too -- it is the first thing to touch a
+        # private repository, and the first thing to fail without one.
+        async def _tracker_for(project: Any) -> Any:
+            tracker = await code_hosts.issue_tracker(project.id)
+            if tracker is not None:
+                return tracker
+            return github_issue_tracker_for_project(project, github_runner)
+
+        issue_sync = IssueSync(control_plane, _tracker_for)
         await issue_sync.restore_retry_state(datetime.now(UTC))
 
         runner_service = register_services(
@@ -443,10 +484,6 @@ async def serve(
             lambda task: _log_unexpected_completion("scheduler", health, shutdown, task)
         )
 
-        issue_sync = IssueSync(
-            control_plane, lambda project: github_issue_tracker_for_project(project, github_runner)
-        )
-        await issue_sync.restore_retry_state(datetime.now(UTC))
         issue_sync_task = asyncio.create_task(
             issue_sync.run(
                 shutdown, lambda: datetime.now(UTC), timedelta(minutes=1), on_run=health.mark_issue_sync_run

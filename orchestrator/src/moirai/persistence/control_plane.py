@@ -36,6 +36,7 @@ from moirai.persistence.authentication import (
     SessionCredentials,
 )
 from moirai.persistence.circuits import reap_orphaned_probes, reopen_probe_circuits
+from moirai.persistence.secrets import SealedSecret, SecretCipher, SecretCipherError
 
 if TYPE_CHECKING:
     # Deferred: grpc/protocol.py imports this module's classes back for a
@@ -230,6 +231,7 @@ class AsyncpgControlPlane:
         circuit_probe_cooldown: timedelta = timedelta(minutes=5),
         unanswered_offer_limit: int = 5,
         unanswered_offer_grace: timedelta = timedelta(minutes=15),
+        secret_cipher: SecretCipher | None = None,
     ) -> None:
         if circuit_probe_cooldown <= timedelta():
             raise ValueError("circuit probe cooldown must be positive")
@@ -242,6 +244,7 @@ class AsyncpgControlPlane:
         self._circuit_probe_cooldown = circuit_probe_cooldown
         self._unanswered_offer_limit = unanswered_offer_limit
         self._unanswered_offer_grace = unanswered_offer_grace
+        self._secret_cipher = secret_cipher
 
     @property
     def pool(self) -> Any:
@@ -249,13 +252,18 @@ class AsyncpgControlPlane:
         return self._pool
 
     @classmethod
-    async def connect(cls, database_url: str) -> AsyncpgControlPlane:
+    async def connect(
+        cls, database_url: str, secret_cipher: SecretCipher | None = None
+    ) -> AsyncpgControlPlane:
         try:
             import asyncpg
         except ModuleNotFoundError as error:
             raise RuntimeError("asyncpg is required to run the orchestrator") from error
         pg_dsn = database_url.replace("+asyncpg", "")
-        return cls(await asyncpg.create_pool(dsn=pg_dsn, min_size=1, max_size=10))
+        return cls(
+            await asyncpg.create_pool(dsn=pg_dsn, min_size=1, max_size=10),
+            secret_cipher=secret_cipher,
+        )
 
     async def close(self) -> None:
         await self._pool.close()
@@ -919,6 +927,127 @@ class AsyncpgControlPlane:
         if updated is None:
             raise AuthenticationError("runner is inactive")
         return _runner(updated, connected=True, healthy=True)
+
+    # --- Per-project credentials ------------------------------------------
+
+    VALID_CREDENTIAL_KINDS = ("github_token", "ssh_private_key")
+
+    def _cipher(self) -> SecretCipher:
+        if self._secret_cipher is None:
+            raise SecretCipherError(
+                "no secret key is configured, so per-project credentials cannot be "
+                "stored or read; set LOOP_SECRET_KEY (or LOOP_SECRET_KEY_FILE) to a "
+                "32-byte key, for example from `openssl rand -base64 32`"
+            )
+        return self._secret_cipher
+
+    async def set_project_credential(
+        self,
+        project_id: str,
+        kind: str,
+        value: str,
+        actor_user_id: str | None,
+        now: datetime,
+    ) -> None:
+        """Seals a credential and replaces whatever that project had for `kind`."""
+        if kind not in self.VALID_CREDENTIAL_KINDS:
+            raise ValueError(f"unknown credential kind: {kind}")
+        sealed = self._cipher().seal(value)
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """
+                    INSERT INTO app.project_credentials
+                        (project_id, kind, ciphertext, nonce, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $5)
+                    ON CONFLICT (project_id, kind) DO UPDATE
+                    SET ciphertext = EXCLUDED.ciphertext,
+                        nonce = EXCLUDED.nonce,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    _uuid(project_id),
+                    kind,
+                    sealed.ciphertext,
+                    sealed.nonce,
+                    now,
+                )
+                # The value is never audited, only that it changed and to which
+                # kind -- the resource id carries the project and the kind.
+                await AsyncpgAuthentication._append_audit(
+                    connection,
+                    actor_user_id=_uuid_or_none(actor_user_id),
+                    action="project.credential.set",
+                    resource_type="project_credential",
+                    resource_id=f"{project_id}/{kind}",
+                    outcome="succeeded",
+                    now=now,
+                )
+
+    async def clear_project_credential(
+        self, project_id: str, kind: str, actor_user_id: str | None, now: datetime
+    ) -> bool:
+        if kind not in self.VALID_CREDENTIAL_KINDS:
+            raise ValueError(f"unknown credential kind: {kind}")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                status = await connection.execute(
+                    "DELETE FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+                    _uuid(project_id),
+                    kind,
+                )
+                removed = status != "DELETE 0"
+                if removed:
+                    await AsyncpgAuthentication._append_audit(
+                        connection,
+                        actor_user_id=_uuid_or_none(actor_user_id),
+                        action="project.credential.cleared",
+                        resource_type="project_credential",
+                        resource_id=f"{project_id}/{kind}",
+                        outcome="succeeded",
+                        now=now,
+                    )
+                return removed
+
+    async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]:
+        """What is configured, never the values. This is the only read the API has."""
+        records = await self._pool.fetch(
+            """
+            SELECT kind, created_at, updated_at
+            FROM app.project_credentials
+            WHERE project_id = $1
+            ORDER BY kind
+            """,
+            _uuid(project_id),
+        )
+        return [
+            {
+                "kind": str(record["kind"]),
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+            }
+            for record in records
+        ]
+
+    async def project_credential(self, project_id: str, kind: str) -> str | None:
+        """Opens one credential for the orchestrator's own use.
+
+        Returns None when the project has none, so callers fall back to the
+        deployment-wide token. A stored value that cannot be opened is an error
+        rather than a None: silently falling back would use the wrong identity
+        against the code host and look like a permissions problem.
+        """
+        if kind not in self.VALID_CREDENTIAL_KINDS:
+            raise ValueError(f"unknown credential kind: {kind}")
+        record = await self._pool.fetchrow(
+            "SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+            _uuid(project_id),
+            kind,
+        )
+        if record is None:
+            return None
+        return self._cipher().open(
+            SealedSecret(ciphertext=bytes(record["ciphertext"]), nonce=bytes(record["nonce"]))
+        )
 
     async def list_workflows(self) -> list[WorkflowDetailRecord]:
         # Same projection as get_workflow below: the management console renders
