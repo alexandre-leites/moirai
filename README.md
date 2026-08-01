@@ -11,7 +11,37 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 - `proto/` contains the gRPC contracts; `api/openapi.yaml` is the maintained HTTP contract.
 - `docs/design/web-console/` is the approved management-console design package: benchmark mockup, UI specification, and implementation task breakdown.
 
-## Local stack
+## Quick start — the `local` stack
+
+One file, nothing to prepare: [`compose.local.yaml`](compose.local.yaml) carries a working
+default for every value, so it starts unattended and is meant to be pasted straight into
+Portainer (**Stacks → Add stack → Web editor**).
+
+```bash
+docker compose -f compose.local.yaml up --build -d
+```
+
+Then open <http://localhost:3000> and sign in as `admin` / `Moirai-Local-1`.
+
+**You do not need a GitHub token to bring it up.** The stack runs, the console works, and you
+can sign in and look around without one. Moirai just cannot do any *work* without it — reading
+issues, cloning, pushing and opening pull requests all happen as you — so set
+`MOIRAI_GITHUB_TOKEN` (scopes: `repo`, `workflow`) when you want it to actually run something.
+In Portainer that goes under **Environment variables** on the stack form.
+
+Everything else is optional and documented at the top of the file: `MOIRAI_ADMIN_PASSWORD`,
+`MOIRAI_POSTGRES_PASSWORD`, `MOIRAI_WEB_PORT`, `MOIRAI_RUNNER_LABELS`, `MOIRAI_RUNNER_CAPACITY`
+and the seed-project settings.
+
+Only port 3000 is published — nginx proxies `/api/` to the API over an internal network, so no
+other port needs exposing. That makes it work unchanged on a remote Portainer host.
+
+**This file is for a trusted, private host.** Its passwords have defaults, which means they are
+public knowledge, and the console is plain HTTP. Change them if the host is shared, and do not
+expose it to the internet. For anything else use the hardened stack below, which keeps every
+secret in a file and binds the API to loopback.
+
+## Hardened stack
 
 Prerequisites: Docker Engine with the Compose plugin and a GitHub token that can access the repository you intend to automate.
 
@@ -43,6 +73,12 @@ Compose reads passwords, tokens, and registration credentials only from the file
 `secrets/github_token` is mounted into both the orchestrator and the runner. The orchestrator uses it for issue synchronization and pull requests; the runner uses it to authenticate `git clone`, `git fetch`, and `git push` for the repositories it works on. A task packet only names the credential it needs, and the runner resolves the value locally, so the token never travels over the control stream. `LOOP_RUNNER_ALLOWED_ENVIRONMENT` must list `GITHUB_TOKEN` for that resolution to be permitted; a packet naming a variable that is not allowed or not configured fails the execution instead of running unauthenticated.
 
 ## Running published images
+
+> **No images are published yet.** The release workflow has never run — there are no releases
+> and no tags — so `ghcr.io/alexandre-leites/moirai/*` does not resolve. Until one is cut, use
+> `compose.local.yaml` or `compose.yaml`, both of which build from this checkout. Publishing is
+> one action: create a GitHub Release `vX.Y.Z` (see [Releases](#releases)), and the workflow
+> builds and pushes all four images.
 
 The same stack runs from the images published to GitHub Container Registry, without building anything. `compose.ghcr.yaml` replaces the four `build:` sections with `image:` references and changes nothing else — same networks, secrets, healthchecks, and capability drops.
 
