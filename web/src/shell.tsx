@@ -2,7 +2,7 @@
 // widths, per-route document titles, and the routing table (specification.md
 // §3.1 and §5.7).
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router";
 import type { ApiClient } from "./api";
 import { useAuth } from "./auth";
 import {

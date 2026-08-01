@@ -47,3 +47,34 @@ class MetricsSnapshotTests(unittest.IsolatedAsyncioTestCase):
             snapshot,
             {"queue_depth": 0, "active_workflows": 0, "scheduled_jobs": 0, "runner_heartbeat_age": 0},
         )
+
+
+class MetricsGaugeTests(unittest.IsolatedAsyncioTestCase):
+    """The snapshot's keys and the gauge writer's keys are one contract.
+
+    They drifted once — `update_snapshot` read `scheduled_job_count` while the
+    snapshot reported `scheduled_jobs` — and because the metrics loop logs and
+    swallows the exception, every gauge silently stayed at zero for the life of
+    the process instead of anything failing loudly.
+    """
+
+    async def test_gauges_take_their_values_from_a_real_snapshot(self) -> None:
+        from moirai.observability import Metrics
+
+        pool = _Pool(
+            {"queue_depth": 7, "active_workflows": 3, "scheduled_jobs": 2, "runner_heartbeat_age": 9.5}
+        )
+        snapshot = await AsyncpgControlPlane(pool).metrics_snapshot(datetime(2026, 1, 1, tzinfo=UTC))
+
+        metrics = Metrics()
+        metrics.update_snapshot(snapshot)
+
+        collected = {
+            sample.name: sample.value
+            for metric in metrics._registry.collect()
+            for sample in metric.samples
+        }
+        self.assertEqual(collected["moirai_queue_depth"], 7)
+        self.assertEqual(collected["moirai_active_workflow_count"], 3)
+        self.assertEqual(collected["moirai_scheduled_job_count"], 2)
+        self.assertEqual(collected["moirai_runner_heartbeat_age_seconds"], 9.5)

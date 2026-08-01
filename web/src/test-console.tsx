@@ -4,7 +4,7 @@
 // Deliberately not named `*.test.tsx` — vitest's `include` would collect it as a
 // suite of its own and fail it for having no tests.
 import type { ReactElement } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router";
 import type {
   ApiClient, CurrentUser, Project, QueueEntry, Runner, RunnerToken, Workflow, WorkflowEvent,
 } from "./api";

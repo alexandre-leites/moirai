@@ -1,7 +1,7 @@
 // Workflow detail (specification.md §5.4): the thread, the decision that gates
 // the merge, what the agent did, and the controls to stop it.
 import { useCallback, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router";
 import type { ApiClient, Workflow, WorkflowEvent } from "./api";
 import { ApiError } from "./api";
 import { useConsoleData } from "./console-data";

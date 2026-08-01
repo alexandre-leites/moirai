@@ -206,7 +206,10 @@ jobs:
           mkdir secrets
           printf '%s\n' 'postgres-password' > secrets/postgres_password
           printf '%s\n' 'postgresql+asyncpg://loop:postgres-password@postgres:5432/loop' > secrets/database_url
-          printf '%s\n' 'admin-password' > secrets/initial_admin_password
+          # Must satisfy the bootstrap password policy (8+ chars with a digit,
+          # upper, lower and symbol) or the orchestrator refuses to start and
+          # this job fails on an unhealthy container rather than a real defect.
+          printf '%s\n' 'Smoke-Test-Password-1' > secrets/initial_admin_password
           printf '%s\n' 'github-token' > secrets/github_token
           printf '%s\n' 'runner-registration-token' > secrets/runner_registration_token
           chmod 0400 secrets/*

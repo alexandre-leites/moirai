@@ -1,7 +1,7 @@
 // Projects (specification.md §5.6). Each project is one repository the Fates
 // may work on — its issues, its labels, its delivery policy.
 import { useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { ApiClient, Project, ProjectConfiguration } from "./api";
 import { ApiError } from "./api";
 import { activeWorkflowFor, useConsoleData } from "./console-data";

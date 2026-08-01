@@ -1,7 +1,7 @@
 // Workflow list (specification.md §5.3). Filter and search live in the query
 // string, so an operator can link a colleague straight at what they are looking at.
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router";
 import type { Workflow } from "./api";
 import { useConsoleData } from "./console-data";
 import { ATTEMPT_BUDGETS, NEEDS_ATTENTION_STATUSES, isTerminal } from "./status";

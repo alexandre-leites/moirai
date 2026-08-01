@@ -20,7 +20,7 @@ cp .env.example .env
 mkdir -p secrets
 printf '%s\n' 'choose-a-strong-postgres-password' > secrets/postgres_password
 printf '%s\n' 'postgresql+asyncpg://loop:choose-a-strong-postgres-password@postgres:5432/loop' > secrets/database_url
-printf '%s\n' 'choose-a-strong-admin-password' > secrets/initial_admin_password
+printf '%s\n' 'Choose-A-Strong-Admin-Password-1' > secrets/initial_admin_password
 printf '%s\n' 'github-token-with-repo-and-workflow-scopes' > secrets/github_token
 openssl rand -hex 32 > secrets/runner_registration_token
 chmod 600 secrets/*
@@ -29,6 +29,10 @@ docker compose ps
 curl --fail http://localhost:3000/
 curl --fail http://localhost:8080/ready
 ```
+
+The admin password is checked on first boot: at least 8 characters with a digit, a capital, a
+lowercase letter and a symbol. A password that fails the policy stops the orchestrator from
+starting, and Compose reports it as an unhealthy container rather than a bad password.
 
 `docker compose ps` reports every service as healthy once startup completes. The API port is bound to loopback for local diagnostics; use the web endpoint on port 3000 for normal browser access. Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to remove local database and runner data.
 

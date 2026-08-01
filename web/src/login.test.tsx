@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { ApiError, type ApiClient, type CurrentUser } from "./api";
 import { AuthProvider } from "./auth";
 import { LoginPage } from "./login";

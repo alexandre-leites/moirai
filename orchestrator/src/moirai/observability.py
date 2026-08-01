@@ -67,11 +67,15 @@ class Metrics:
         self._scheduled_job_count.set(scheduled_job_count)
 
     def update_snapshot(self, snapshot: dict[str, float]) -> None:
+        # The keys are `metrics_snapshot()`'s, in persistence/control_plane.py.
+        # It reports `scheduled_jobs`; reading `scheduled_job_count` here raised
+        # a KeyError on every tick, so no gauge was ever updated and all four
+        # stayed at zero for the life of the process.
         self.update(
             queue_depth=snapshot["queue_depth"],
             active_workflows=snapshot["active_workflows"],
             runner_heartbeat_age=snapshot["runner_heartbeat_age"],
-            scheduled_job_count=snapshot["scheduled_job_count"],
+            scheduled_job_count=snapshot["scheduled_jobs"],
         )
 
 

@@ -1,5 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "./api";
 import { AuthProvider } from "./auth";

@@ -1,7 +1,7 @@
 // Overview (specification.md §5.1). The organizing principle of the console:
 // human decisions and stuck work come before counts and lists.
 import { useCallback, useMemo } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { ApiClient, Health, IssueSyncStatus, SchedulerMetrics, Workflow, WorkflowEvent } from "./api";
 import { activeWorkflows, onlineRunners, useConsoleData } from "./console-data";
 import { ageAgo, plural, shortClock } from "./format";

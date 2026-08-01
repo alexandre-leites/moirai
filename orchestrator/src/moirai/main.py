@@ -374,12 +374,17 @@ async def serve(
     supports_durability = isinstance(control_plane, AsyncpgControlPlane)
     if supports_durability:
         pool = control_plane.pool
-        metrics_task = asyncio.create_task(_metrics_loop(control_plane, metrics, shutdown))
 
         from moirai.persistence.migrations import MigrationRunner
         migrations = await MigrationRunner(pool).run()
         if migrations:
             _LOGGER.info("applied migrations", extra={"migrations": migrations})
+
+        # After the migrations, not before: the pool opens a connection eagerly,
+        # and a metrics query prepared on it against a schema that does not exist
+        # yet fails -- and kept failing every tick thereafter, so the gauges the
+        # console reads stayed at zero for the life of the process.
+        metrics_task = asyncio.create_task(_metrics_loop(control_plane, metrics, shutdown))
 
         await _bootstrap_initial_setup(pool)
         await _seed_issue_if_needed(pool)
