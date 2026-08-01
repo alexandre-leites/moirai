@@ -246,3 +246,21 @@ while the snapshot reports `scheduled_jobs`. Both fixed, with a test that reads 
 back out of the registry.
 
 Run `30701717203` is green across all 12 jobs.
+
+### 2026-08-01 — First release, v0.1.0
+
+The release workflow had never run either, and was on the same dead runner pool. Once it could
+execute, a `workflow_dispatch` rehearsal — which builds every image for every architecture and
+publishes nothing — showed the runner image failing to build for `linux/arm64` with
+`qemu: uncaught target signal 4` and exit 132, twice in a row, while the same build succeeded
+locally.
+
+The crash is inside `npm install`, not the `opencode --version` check after it: on amd64 the step
+logs "added 5 packages" at 21s, and on arm64 nothing is logged for the 41 seconds between `apk
+add` finishing and the SIGILL. opencode's postinstall executes a Bun-built native binary for the
+target platform, and it used instructions the emulator the action resolved does not implement.
+Pinning `tonistiigi/binfmt:qemu-v9.2.2` with `cache-image: false` fixes it, verified locally with
+that exact emulator before spending another CI cycle.
+
+`v0.1.0` then published cleanly, `verify` included: 4 services × 5 tags, every one a manifest list
+carrying both architectures.

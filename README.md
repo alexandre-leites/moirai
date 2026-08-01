@@ -74,11 +74,17 @@ Compose reads passwords, tokens, and registration credentials only from the file
 
 ## Running published images
 
-> **No images are published yet.** The release workflow has never run — there are no releases
-> and no tags — so `ghcr.io/alexandre-leites/moirai/*` does not resolve. Until one is cut, use
-> `compose.local.yaml` or `compose.yaml`, both of which build from this checkout. Publishing is
-> one action: create a GitHub Release `vX.Y.Z` (see [Releases](#releases)), and the workflow
-> builds and pushes all four images.
+`v0.1.0` is published: all four images exist at `0.1.0`, `0.1`, `0`, `latest` and
+`sha-f62d553`, each a `linux/amd64` + `linux/arm64` manifest list.
+
+The repository is private, so the packages are too. Pulling needs a token with `read:packages`:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
+
+In Portainer, add the same credential under **Registries → Add registry → Custom**
+(`ghcr.io`), and the stack can then reference the published images directly.
 
 The same stack runs from the images published to GitHub Container Registry, without building anything. `compose.ghcr.yaml` replaces the four `build:` sections with `image:` references and changes nothing else — same networks, secrets, healthchecks, and capability drops.
 
