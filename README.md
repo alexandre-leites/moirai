@@ -113,10 +113,11 @@ you do.
 
 ## Published images
 
-`v0.1.0` is published: `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}` at `0.1.0`,
-`0.1`, `0`, `latest` and `sha-<short sha>`, each a `linux/amd64` + `linux/arm64` manifest list.
+`v0.2.0` is the current release: `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}`
+at `0.2.0`, `0.2`, `0`, `latest` and `sha-<short sha>`, each a `linux/amd64` + `linux/arm64`
+manifest list. `v0.1.0` remains available at `0.1.0` and `0.1`.
 
-`compose.yaml` pulls `latest` by default. Pin `MOIRAI_IMAGE_TAG=0.1.0` for anything reproducible;
+`compose.yaml` pulls `latest` by default. Pin `MOIRAI_IMAGE_TAG=0.2.0` for anything reproducible;
 `latest` moves with every release. `MOIRAI_IMAGE_PREFIX` points the stack at a fork or mirror.
 
 The packages inherit the repository's visibility, so while it is private a pull needs a token with

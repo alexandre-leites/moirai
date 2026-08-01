@@ -11,10 +11,15 @@
 # Docker host needs credentials for ghcr.io while this repository is private
 # (Registries -> Add registry -> Custom).
 #
-# Two optional overlays:
+# Three optional overlays, which combine:
 #
 #   -f compose.yaml -f compose.build.yaml    build the images from this checkout
 #   -f compose.yaml -f compose.secrets.yaml  read secrets from ./secrets/ files
+#   -f compose.yaml -f compose.tls.yaml      encrypt the orchestrator's control
+#                                            stream, which is what lets a runner
+#                                            be handed a project's own credential
+#                                            instead of using the shared
+#                                            GITHUB_TOKEN below
 #
 # ---------------------------------------------------------------------------
 # The defaults below are public knowledge, and the console is served over plain
@@ -22,6 +27,10 @@
 # MOIRAI_ADMIN_PASSWORD and MOIRAI_POSTGRES_PASSWORD if anyone else can reach
 # it, and put it behind TLS before exposing it. compose.secrets.yaml moves every
 # secret out of the environment and into files.
+#
+# compose.tls.yaml encrypts the *internal* control stream between services. It
+# is not a substitute for putting the console behind TLS, and neither is a
+# substitute for the other.
 # ---------------------------------------------------------------------------
 
 services:
