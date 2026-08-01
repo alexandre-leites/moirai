@@ -106,3 +106,41 @@ gets an error instead of a project whose issues quietly stop being scheduled.
 Where a value crosses a system boundary, check what the *other side* actually
 sends rather than what the field name suggests.
 
+## A validator written for identifiers, applied to prose
+
+**2026-08-01, v0.2.3.** `safeTextAllowEmpty` required `TrimSpace(v) == v` and no
+`unicode.IsControl` rune. That is right for a branch name, a URL, an execution
+ID. It was also applied to the GitHub issue **body** — and a newline is a
+control character, so every issue whose body had a second line produced a task
+packet the runner rejected as "task packet issue or objective is invalid".
+
+Nearly every real issue has a multi-line body, so no execution could ever start.
+A live deployment produced 765 consecutive rejected offers — one workflow per
+scheduler tick, each cancelled — before anyone could see why. The same validator
+was also on `diffSummary`, plan steps and review findings, all prose, so fixing
+only the body would have moved the wall one phase downstream.
+
+**Why:** the function's name says what it permits, not what it is *for*. Reusing
+it read as tightening a screw; it was applying a single-line rule to a field
+whose whole content is line structure.
+
+**How to apply:** name validators after the shape of the data, not the strictness
+(`safeProse` vs `safeTextAllowEmpty`), and when adding a field to an existing
+check, ask what a *real* value looks like rather than whether the rule compiles.
+For anything a human types, the realistic test input is multi-line — a one-line
+fixture proves nothing.
+
+## Log the reason you were given
+
+**2026-08-01, v0.2.3.** The runner rejected each offer with a reason string, the
+orchestrator received it, validated its length, and dropped it. The runner logged
+nothing on a *successful* rejection, because rejecting returns no error. So the
+one fact needed to diagnose the loop existed on the wire, at both ends, and was
+recorded nowhere.
+
+**Why:** dropping a diagnostic costs nothing until the day it is the only thing
+that would have told you, and then it costs an hour.
+
+**How to apply:** if a peer sends you a reason for refusing something, log it.
+A field that exists solely to explain a failure and is never read is a bug in
+waiting.

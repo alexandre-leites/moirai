@@ -314,6 +314,20 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             job_id = request.offer_rejected.job_id
             if not job_id or len(request.offer_rejected.reason) > 1024:
                 raise _StreamFailure(grpc.StatusCode.INVALID_ARGUMENT, "runner offer rejection is invalid")
+            # The reason is the only account of why a runner would not take the
+            # work, and it was being discarded here: a runner that rejects every
+            # offer produced a workflow per scheduler tick, each cancelled with
+            # `runner_rejected_offer` and no indication of what the runner
+            # objected to. Recording it turned an hour of database archaeology
+            # into one log line.
+            _LOGGER.warning(
+                "runner rejected a job offer",
+                extra={
+                    "runner_id": runner_id,
+                    "job_id": job_id,
+                    "reason": request.offer_rejected.reason or "(none given)",
+                },
+            )
             try:
                 await _await_if_needed(self._control_plane.reject_offer(job_id, runner_id, self._now()))
             except OfferError as error:

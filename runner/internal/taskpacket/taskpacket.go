@@ -102,7 +102,7 @@ func (packet Packet) Validate() error {
 	if !safeIdentifier(packet.JobID) || !safeIdentifier(packet.ExecutionID) {
 		return errors.New("task packet job ID and execution ID are required")
 	}
-	if !safeText(packet.Objective, 32768) || !safeIdentifier(packet.Issue.ExternalID) || !safeText(packet.Issue.Title, 1024) || !safeTextAllowEmpty(packet.Issue.Body, 65536) {
+	if !safeText(packet.Objective, 32768) || !safeIdentifier(packet.Issue.ExternalID) || !safeText(packet.Issue.Title, 1024) || !safeProse(packet.Issue.Body, 65536) {
 		return errors.New("task packet issue or objective is invalid")
 	}
 	if err := packet.Repository.validate(); err != nil {
@@ -181,12 +181,12 @@ func validateContext(packet Packet) error {
 			return errors.New("task packet context has too many entries")
 		}
 		for _, value := range values {
-			if !safeText(value, 8192) {
+			if value == "" || !safeProse(value, 8192) {
 				return errors.New("task packet context is invalid")
 			}
 		}
 	}
-	if !safeTextAllowEmpty(packet.CurrentCommit, 1024) || !safeTextAllowEmpty(packet.DiffSummary, 16384) {
+	if !safeTextAllowEmpty(packet.CurrentCommit, 1024) || !safeProse(packet.DiffSummary, 16384) {
 		return errors.New("task packet context is invalid")
 	}
 	return nil
@@ -236,6 +236,28 @@ func safeText(value string, maximum int) bool {
 	return value != "" && safeTextAllowEmpty(value, maximum)
 }
 
+// safeTextAllowEmpty is for single-line values: identifiers, paths, branches,
+// URLs, a title. It rejects every control character, which includes newlines,
+// and requires the value to be its own TrimSpace.
 func safeTextAllowEmpty(value string, maximum int) bool {
 	return len(value) <= maximum && strings.TrimSpace(value) == value && strings.IndexFunc(value, unicode.IsControl) < 0
+}
+
+// safeProse is for the free-form text a human wrote: an issue body, a plan
+// step, a review finding, a diff summary. Applying safeTextAllowEmpty to these
+// rejected every packet whose issue body had a second line -- which is nearly
+// every real issue -- as "task packet issue or objective is invalid", so no
+// execution could ever start.
+//
+// Line structure is the content here, not a smuggling risk: the value is
+// written into a prompt file, never into a command line or a shell. What is
+// still rejected is the rest of the control range -- NUL, escape, the C1 block
+// -- which has no place in prose and is what terminal-escape injection uses.
+func safeProse(value string, maximum int) bool {
+	if len(value) > maximum {
+		return false
+	}
+	return strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t'
+	}) < 0
 }
