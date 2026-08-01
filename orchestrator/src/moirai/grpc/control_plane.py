@@ -20,6 +20,7 @@ from moirai.grpc.protocol import (
     WorkflowEventRecord,
 )
 from moirai.persistence.authentication import AuthenticatedSession
+from moirai.persistence.secrets import SecretCipherError
 from proto import control_plane_pb2, control_plane_pb2_grpc
 
 _SESSION_METADATA_KEY = "x-loop-session"
@@ -186,6 +187,80 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         except ValueError:
             await context.abort(grpc.StatusCode.NOT_FOUND, "project is unknown")
         return control_plane_pb2.SetProjectEnabledResponse(project=_project_message(project))
+
+    async def SetProjectCredential(
+        self,
+        request: control_plane_pb2.SetProjectCredentialRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.SetProjectCredentialResponse:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        if not request.project_id or not request.kind:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project ID and credential kind are required")
+        if not request.value.strip():
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "credential value must not be empty; clear the credential instead",
+            )
+        try:
+            await self._control_plane.set_project_credential(
+                request.project_id, request.kind, request.value, session.user_id or None, self._now()
+            )
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except SecretCipherError as error:
+            # No key configured, or an unusable one. FAILED_PRECONDITION rather
+            # than INTERNAL: the deployment is missing configuration, and the
+            # message says which.
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+        return control_plane_pb2.SetProjectCredentialResponse(
+            credentials=await self._credential_messages(request.project_id)
+        )
+
+    async def ClearProjectCredential(
+        self,
+        request: control_plane_pb2.ClearProjectCredentialRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.ClearProjectCredentialResponse:
+        session = await self._require_session(context, administrator=True, require_csrf=True)
+        if not request.project_id or not request.kind:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project ID and credential kind are required")
+        try:
+            await self._control_plane.clear_project_credential(
+                request.project_id, request.kind, session.user_id or None, self._now()
+            )
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        return control_plane_pb2.ClearProjectCredentialResponse(
+            credentials=await self._credential_messages(request.project_id)
+        )
+
+    async def ListProjectCredentials(
+        self,
+        request: control_plane_pb2.ListProjectCredentialsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.ListProjectCredentialsResponse:
+        # Readable by any session: it reports only which kinds are configured.
+        await self._require_session(context)
+        if not request.project_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project ID is required")
+        return control_plane_pb2.ListProjectCredentialsResponse(
+            credentials=await self._credential_messages(request.project_id)
+        )
+
+    async def _credential_messages(
+        self, project_id: str
+    ) -> list[control_plane_pb2.ProjectCredential]:
+        describe = getattr(self._control_plane, "describe_project_credentials", None)
+        if describe is None:
+            return []
+        return [
+            control_plane_pb2.ProjectCredential(
+                kind=str(entry["kind"]),
+                created_at=_isoformat(entry.get("created_at")),
+                updated_at=_isoformat(entry.get("updated_at")),
+            )
+            for entry in await describe(project_id)
+        ]
 
     async def CreateRunnerRegistrationToken(
         self,
@@ -726,3 +801,8 @@ def _workflow_message_from_state(
         status=_text(state.get("status") or result.get("status")),
         phase=_text(state.get("status") or result.get("phase")),
     )
+
+
+def _isoformat(value: Any) -> str:
+    """Timestamps on the wire are ISO-8601 strings, matching the other messages."""
+    return value.isoformat() if hasattr(value, "isoformat") else ""

@@ -955,6 +955,14 @@ class AsyncpgControlPlane:
         sealed = self._cipher().seal(value)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
+                # Same "project is unknown" as update_project, so the servicer
+                # reports it the same way. Without this the foreign key still
+                # rejects the write, but as a database error the caller sees as
+                # "service unavailable" rather than as a bad project id.
+                if not await connection.fetchval(
+                    "SELECT true FROM app.projects WHERE id = $1", _uuid(project_id)
+                ):
+                    raise ValueError("project is unknown")
                 await connection.execute(
                     """
                     INSERT INTO app.project_credentials

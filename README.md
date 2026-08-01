@@ -35,6 +35,26 @@ one. Moirai just cannot do any *work* — reading issues, cloning, pushing and o
 all happen as you — so set `MOIRAI_GITHUB_TOKEN` (scopes `repo`, `workflow`) when you want it to
 run something.
 
+### Credentials for one project
+
+`MOIRAI_GITHUB_TOKEN` is deployment-wide: every project is reached as whoever it belongs to. A
+project can instead carry its own, under *Projects → Credentials*, which is how you reach a
+private repository the shared token cannot see. Anything Moirai does for that project — issue
+sync, clone, push, pull requests — then runs as that identity.
+
+Stored credentials are encrypted, so this needs a key:
+
+```bash
+echo "MOIRAI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
+```
+
+Without one the stack still runs; only per-project credentials are refused, with a message
+saying so. **Back the key up.** It is not derived from anything and is stored nowhere else, so
+losing it means every stored credential has to be entered again.
+
+A value is never shown again once saved — the console reports which credentials are set and
+when, and replacing one is the only way to change it.
+
 Only port 3000 is published; nginx proxies `/api/` to the API over an internal network. That is
 what lets the same file work unchanged against a remote Portainer host.
 

@@ -62,6 +62,15 @@ compose-overlays:
 	docker compose -f compose.yaml -f compose.build.yaml config --quiet
 	docker compose -f compose.yaml -f compose.build.yaml config | grep -q '^ *build:'
 	docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
-	! docker compose -f compose.yaml -f compose.secrets.yaml config | grep -qE '^ *(LOOP_DATABASE_URL|LOOP_INITIAL_ADMIN_PASSWORD|LOOP_RUNNER_REGISTRATION_TOKEN):'
+	! docker compose -f compose.yaml -f compose.secrets.yaml config | grep -qE '^ *(LOOP_DATABASE_URL|LOOP_INITIAL_ADMIN_PASSWORD|LOOP_RUNNER_REGISTRATION_TOKEN|LOOP_SECRET_KEY):'
+
+proto-lint:
+	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) lint
+
+proto-generate:
+	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) generate
+
+proto-check: proto-lint proto-generate
+	git diff --exit-code -- gen/go orchestrator/src/moirai/protocols
 
 validate: test-orchestrator lint typecheck compose compose-overlays test-release-tags proto-check

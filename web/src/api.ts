@@ -165,6 +165,18 @@ export type SchedulerMetrics = {
   scheduledJobs: number;
 };
 
+/**
+ * What a project has configured, never the value. There is deliberately no
+ * endpoint that returns a credential: it travels inbound only.
+ */
+export type ProjectCredential = {
+  kind: CredentialKind;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CredentialKind = "github_token" | "ssh_private_key";
+
 export type ProjectConfiguration = {
   name: string;
   repositoryMode: string;
@@ -219,6 +231,9 @@ export type ApiClient = {
   createProject(data: ProjectConfiguration): Promise<Project>;
   updateProject(id: string, data: ProjectConfiguration): Promise<Project>;
   setProjectEnabled(id: string, enabled: boolean): Promise<Project>;
+  listProjectCredentials(id: string, signal?: AbortSignal): Promise<ProjectCredential[]>;
+  setProjectCredential(id: string, kind: CredentialKind, value: string): Promise<ProjectCredential[]>;
+  clearProjectCredential(id: string, kind: CredentialKind): Promise<ProjectCredential[]>;
 
   listRunners(signal?: AbortSignal): Promise<Runner[]>;
   setRunnerState(id: string, state: "drain" | "enable" | "revoke"): Promise<Runner>;
@@ -388,6 +403,37 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
     async setProjectEnabled(id: string, enabled: boolean): Promise<Project> {
       const endpoint = enabled ? "enable" : "disable";
       return normalizeProject(await post(`/api/v1/projects/${encodeURIComponent(id)}/${endpoint}`));
+    },
+
+    async listProjectCredentials(id: string, signal?: AbortSignal): Promise<ProjectCredential[]> {
+      const body: { credentials?: ProjectCredential[] } = await get(
+        `/api/v1/projects/${encodeURIComponent(id)}/credentials`, signal
+      );
+      if (!Array.isArray(body.credentials)) throw new Error("The credential response was malformed.");
+      return body.credentials;
+    },
+
+    async setProjectCredential(id: string, kind: CredentialKind, value: string): Promise<ProjectCredential[]> {
+      const res = await fetchClient(
+        `/api/v1/projects/${encodeURIComponent(id)}/credentials/${encodeURIComponent(kind)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...csrfHeaders() },
+          credentials: "include",
+          body: JSON.stringify({ value }),
+        }
+      );
+      const body: { credentials?: ProjectCredential[] } = await json(res);
+      return body.credentials ?? [];
+    },
+
+    async clearProjectCredential(id: string, kind: CredentialKind): Promise<ProjectCredential[]> {
+      const res = await fetchClient(
+        `/api/v1/projects/${encodeURIComponent(id)}/credentials/${encodeURIComponent(kind)}`,
+        { method: "DELETE", headers: { ...csrfHeaders() }, credentials: "include" }
+      );
+      const body: { credentials?: ProjectCredential[] } = await json(res);
+      return body.credentials ?? [];
     },
 
     async listRunners(signal?: AbortSignal): Promise<Runner[]> {

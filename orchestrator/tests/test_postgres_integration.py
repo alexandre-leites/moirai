@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -12,6 +13,7 @@ from moirai.domain.control_plane import AuthenticationError
 from moirai.persistence.authentication import AsyncpgAuthentication
 from moirai.persistence.control_plane import AsyncpgControlPlane
 from moirai.persistence.migrations import MigrationRunner
+from moirai.persistence.secrets import SecretCipher, SecretCipherError
 from moirai.workflows.persistence import AsyncpgWorkflowPersistence
 
 _DATABASE_URL_ENV = "LOOP_TEST_DATABASE_URL"
@@ -2124,6 +2126,162 @@ class RunnerDrainIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             await self.control_plane.set_runner_draining(str(uuid4()), True)
+
+
+class ProjectCredentialIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Per-project credentials against the real schema.
+
+    The unit tests cover the cipher in isolation and the gRPC surface against an
+    in-memory control plane. What is only exercised here is migration 015 and the
+    SQL around it: the BYTEA round-trip, the composite primary key that makes a
+    second write a replacement rather than a duplicate, the kind CHECK, and the
+    cascade that stops a deleted project leaving its secrets behind.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        await MigrationRunner(self.pool).run()
+        self.cipher = SecretCipher.from_configured_key(base64.b64encode(os.urandom(32)).decode())
+        self.control_plane = AsyncpgControlPlane(self.pool, secret_cipher=self.cipher)
+        self.project_id = await self._project()
+
+    async def _project(self) -> str:
+        project = await self.control_plane.create_project(
+            f"credentials-{uuid4().hex[:12]}",
+            "managed_clone",
+            "https://example.test/credentials.git",
+            None,
+            "main",
+            set(),
+            _NOW,
+        )
+        # Seeded projects are scheduling candidates for every other test in this
+        # file; this one exists only to hang credentials off.
+        await self.pool.execute("UPDATE app.projects SET enabled = false WHERE id = $1", UUID(project["id"]))
+        return str(project["id"])
+
+    async def test_a_stored_credential_round_trips_through_the_database(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        self.assertEqual(
+            await self.control_plane.project_credential(self.project_id, "github_token"),
+            "ghp_integration",
+        )
+
+    async def test_the_plaintext_is_not_what_is_written_to_the_row(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        row = await self.pool.fetchrow(
+            "SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+            UUID(self.project_id),
+            "github_token",
+        )
+        self.assertNotIn(b"ghp_integration", bytes(row["ciphertext"]))
+        self.assertEqual(len(bytes(row["nonce"])), 12)
+
+    async def test_writing_twice_replaces_rather_than_duplicates(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "first", None, _NOW
+        )
+        later = _NOW + timedelta(hours=1)
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "second", None, later
+        )
+
+        self.assertEqual(
+            await self.control_plane.project_credential(self.project_id, "github_token"), "second"
+        )
+        described = await self.control_plane.describe_project_credentials(self.project_id)
+        self.assertEqual(len(described), 1)
+        # created_at is the first write, updated_at the replacement: the console
+        # reports "set <age> ago" from updated_at and would otherwise be stale.
+        self.assertEqual(described[0]["created_at"], _NOW)
+        self.assertEqual(described[0]["updated_at"], later)
+
+    async def test_the_two_kinds_are_stored_independently(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "a-token", None, _NOW
+        )
+        await self.control_plane.set_project_credential(
+            self.project_id, "ssh_private_key", "-----BEGIN KEY-----", None, _NOW
+        )
+
+        self.assertEqual(
+            [entry["kind"] for entry in await self.control_plane.describe_project_credentials(self.project_id)],
+            ["github_token", "ssh_private_key"],
+        )
+        self.assertTrue(await self.control_plane.clear_project_credential(
+            self.project_id, "github_token", None, _NOW
+        ))
+        self.assertIsNone(await self.control_plane.project_credential(self.project_id, "github_token"))
+        self.assertEqual(
+            await self.control_plane.project_credential(self.project_id, "ssh_private_key"),
+            "-----BEGIN KEY-----",
+        )
+
+    async def test_clearing_a_credential_that_is_not_set_reports_no_change(self) -> None:
+        self.assertFalse(await self.control_plane.clear_project_credential(
+            self.project_id, "github_token", None, _NOW
+        ))
+
+    async def test_an_unknown_kind_never_reaches_the_database(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.control_plane.set_project_credential(
+                self.project_id, "aws_key", "value", None, _NOW
+            )
+        # And the CHECK constraint is the backstop if a caller bypasses the guard.
+        with self.assertRaises(asyncpg.PostgresError):
+            await self.pool.execute(
+                "INSERT INTO app.project_credentials (project_id, kind, ciphertext, nonce, created_at, updated_at)"
+                " VALUES ($1, $2, $3, $4, $5, $5)",
+                UUID(self.project_id), "aws_key", b"x", b"y" * 12, _NOW,
+            )
+
+    async def test_a_value_sealed_with_another_key_is_an_error_not_a_fallback(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        stranger = AsyncpgControlPlane(
+            self.pool,
+            secret_cipher=SecretCipher.from_configured_key(base64.b64encode(os.urandom(32)).decode()),
+        )
+        # Falling back to the deployment-wide token here would act on the code
+        # host as the wrong identity and look like a permissions problem.
+        with self.assertRaises(SecretCipherError):
+            await stranger.project_credential(self.project_id, "github_token")
+
+    async def test_credentials_without_a_key_configured_are_refused_not_written(self) -> None:
+        keyless = AsyncpgControlPlane(self.pool)
+        with self.assertRaises(SecretCipherError):
+            await keyless.set_project_credential(
+                self.project_id, "github_token", "ghp_integration", None, _NOW
+            )
+        self.assertEqual(await keyless.describe_project_credentials(self.project_id), [])
+
+    async def test_an_unknown_project_is_reported_as_such_not_as_a_database_error(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            await self.control_plane.set_project_credential(
+                str(uuid4()), "github_token", "ghp_integration", None, _NOW
+            )
+        self.assertIn("unknown", str(raised.exception))
+
+    async def test_deleting_the_project_takes_its_credentials_with_it(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        await self.pool.execute("DELETE FROM app.projects WHERE id = $1", UUID(self.project_id))
+        self.assertEqual(
+            await self.pool.fetchval(
+                "SELECT count(*) FROM app.project_credentials WHERE project_id = $1", UUID(self.project_id)
+            ),
+            0,
+        )
 
 
 if __name__ == "__main__":

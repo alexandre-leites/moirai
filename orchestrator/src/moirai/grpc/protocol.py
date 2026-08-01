@@ -202,6 +202,19 @@ class ControlPlane(Protocol):
     # scheduled jobs and the oldest runner heartbeat age.
     async def metrics_snapshot(self, now: datetime) -> dict[str, float]: ...
 
+    # Per-project credentials. `describe_` reports which kinds are configured
+    # and when; it never returns a value, and there is deliberately no protocol
+    # method that returns one to a caller outside the orchestrator.
+    async def set_project_credential(
+        self, project_id: str, kind: str, value: str, actor_user_id: str | None, now: datetime
+    ) -> None: ...
+
+    async def clear_project_credential(
+        self, project_id: str, kind: str, actor_user_id: str | None, now: datetime
+    ) -> bool: ...
+
+    async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]: ...
+
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 
     async def append_audit(

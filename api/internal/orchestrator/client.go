@@ -237,6 +237,37 @@ func (c *Client) SetProjectEnabled(ctx context.Context, projectID string, enable
 	return resp, nil
 }
 
+func (c *Client) SetProjectCredential(ctx context.Context, projectID, kind, value string) (*controlv1.SetProjectCredentialResponse, error) {
+	resp, err := c.client.SetProjectCredential(ctx, &controlv1.SetProjectCredentialRequest{
+		ProjectId: projectID,
+		Kind:      kind,
+		Value:     value,
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) ClearProjectCredential(ctx context.Context, projectID, kind string) (*controlv1.ClearProjectCredentialResponse, error) {
+	resp, err := c.client.ClearProjectCredential(ctx, &controlv1.ClearProjectCredentialRequest{
+		ProjectId: projectID,
+		Kind:      kind,
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) ListProjectCredentials(ctx context.Context, projectID string) (*controlv1.ListProjectCredentialsResponse, error) {
+	resp, err := c.client.ListProjectCredentials(ctx, &controlv1.ListProjectCredentialsRequest{ProjectId: projectID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) CreateRunnerRegistrationToken(ctx context.Context, allowedLabels []string) (*controlv1.CreateRunnerRegistrationTokenResponse, error) {
 	resp, err := c.client.CreateRunnerRegistrationToken(ctx, &controlv1.CreateRunnerRegistrationTokenRequest{
 		AllowedLabels: allowedLabels,

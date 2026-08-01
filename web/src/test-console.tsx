@@ -6,7 +6,8 @@
 import type { ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import type {
-  ApiClient, CurrentUser, Project, QueueEntry, Runner, RunnerToken, Workflow, WorkflowEvent,
+  ApiClient, CurrentUser, Project, ProjectCredential, QueueEntry, Runner, RunnerToken,
+  Workflow, WorkflowEvent,
 } from "./api";
 import { AuthProvider } from "./auth";
 import { ConsoleDataProvider } from "./console-data";
@@ -88,6 +89,10 @@ export function token(overrides: Partial<RunnerToken> = {}): RunnerToken {
   };
 }
 
+export function credential(overrides: Partial<ProjectCredential> = {}): ProjectCredential {
+  return { kind: "github_token", createdAt: NOW, updatedAt: NOW, ...overrides };
+}
+
 export function event(overrides: Partial<WorkflowEvent> = {}): WorkflowEvent {
   return {
     id: "10",
@@ -121,6 +126,9 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     createProject: async () => project(),
     updateProject: async () => project(),
     setProjectEnabled: async () => project(),
+    listProjectCredentials: async () => [],
+    setProjectCredential: async () => [],
+    clearProjectCredential: async () => [],
     listRunners: async () => [],
     setRunnerState: async () => runner(),
     listTokens: async () => [],

@@ -63,10 +63,12 @@ class ProjectCodeHostFactory:
     async def _runner_for(self, project_id: str) -> CommandRunner | None:
         """The command runner this project's `gh` calls should use.
 
-        Falls back to the shared runner when the project has no credential of
-        its own, and when reading one fails: a credential that cannot be opened
-        is logged and skipped rather than taking issue sync down for a project
-        that used to work with the deployment-wide token.
+        A project with no credential of its own falls back to the shared runner.
+        A project whose credential cannot be *opened* does not: that means the
+        deployment's key changed or the row was altered, and quietly retrying as
+        the deployment-wide identity would reach GitHub as the wrong user and
+        report itself as a permissions problem. Raising instead puts the real
+        reason in the project's sync error, where an operator will see it.
         """
         if self._credential_reader is None:
             return self._command_runner
@@ -74,18 +76,8 @@ class ProjectCodeHostFactory:
         cached = self._runner_cache.get(project_id)
         if cached is not None and now - cached[0] < self._cache_ttl_seconds:
             return cached[1] or self._command_runner
-        runner: CommandRunner | None = None
-        try:
-            token = await self._credential_reader(project_id)
-        except Exception:
-            _LOGGER.exception(
-                "project %s has a GitHub credential that could not be read; "
-                "falling back to the deployment-wide token",
-                project_id,
-            )
-            token = None
-        if token:
-            runner = SubprocessCommandRunner(token)
+        token = await self._credential_reader(project_id)
+        runner = SubprocessCommandRunner(token) if token else None
         self._runner_cache[project_id] = (now, runner)
         return runner or self._command_runner
 

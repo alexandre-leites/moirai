@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -262,8 +263,14 @@ async def _connect_control_plane(factory: Any, config: OrchestratorConfig) -> An
     """Connects the control plane, with the credential cipher when one is configured.
 
     The key is optional: a deployment that stores no per-project credentials
-    never needs one. Passing it is best-effort against the factory signature so
-    an injected test factory -- which takes only a database URL -- keeps working.
+    never needs one. A misconfigured one is not optional -- it raises here,
+    during startup, rather than at the first credential write.
+
+    The cipher is passed only when the factory declares the parameter, so an
+    injected test factory taking just a database URL keeps working. The check is
+    on the signature rather than on a caught TypeError: retrying without the
+    cipher after *any* TypeError would turn an unrelated bug inside the factory
+    into a deployment that silently stores nothing encrypted.
     """
     cipher = None
     if config.secret_key:
@@ -272,14 +279,29 @@ async def _connect_control_plane(factory: Any, config: OrchestratorConfig) -> An
         cipher = SecretCipher.from_configured_key(config.secret_key)
     if cipher is None:
         return await factory(config.database_url)
-    try:
-        return await factory(config.database_url, secret_cipher=cipher)
-    except TypeError:
+    if not _accepts_secret_cipher(factory):
         _LOGGER.warning(
             "control plane factory does not accept a secret cipher; per-project "
             "credentials will be unavailable"
         )
         return await factory(config.database_url)
+    return await factory(config.database_url, secret_cipher=cipher)
+
+
+def _accepts_secret_cipher(factory: Any) -> bool:
+    """Whether `factory` takes a `secret_cipher` keyword.
+
+    A factory whose signature cannot be read (a Mock, a C callable) is assumed
+    to accept it: the production factory does, and guessing "no" would disable
+    encryption for the deployment rather than for the test that injected it.
+    """
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return True
+    if "secret_cipher" in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 
 
 def register_services(

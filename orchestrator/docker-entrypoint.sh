@@ -54,6 +54,7 @@ install_secret database_url LOOP_DATABASE_URL required
 install_secret initial_admin_password LOOP_INITIAL_ADMIN_PASSWORD required
 install_secret runner_registration_token RUNNER_REGISTRATION_TOKEN required
 install_secret github_token LOOP_GITHUB_TOKEN optional
+install_secret secret_key LOOP_SECRET_KEY optional
 
 chown loop:loop "$secret_dir"
 export LOOP_DATABASE_URL_FILE="$secret_dir/database_url"
@@ -63,6 +64,9 @@ export RUNNER_REGISTRATION_TOKEN_FILE="$secret_dir/runner_registration_token"
 # variable at a file that does not exist would turn "no token" into a crash.
 if [ -f "$secret_dir/github_token" ]; then
   export LOOP_GITHUB_TOKEN_FILE="$secret_dir/github_token"
+fi
+if [ -f "$secret_dir/secret_key" ]; then
+  export LOOP_SECRET_KEY_FILE="$secret_dir/secret_key"
 fi
 
 exec gosu loop python -m moirai.main "$@"

@@ -154,6 +154,58 @@ class SetProjectEnabledResponse(_message.Message):
     project: Project
     def __init__(self, project: _Optional[_Union[Project, _Mapping]] = ...) -> None: ...
 
+class SetProjectCredentialRequest(_message.Message):
+    __slots__ = ("project_id", "kind", "value")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    kind: str
+    value: str
+    def __init__(self, project_id: _Optional[str] = ..., kind: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+
+class ClearProjectCredentialRequest(_message.Message):
+    __slots__ = ("project_id", "kind")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    kind: str
+    def __init__(self, project_id: _Optional[str] = ..., kind: _Optional[str] = ...) -> None: ...
+
+class ListProjectCredentialsRequest(_message.Message):
+    __slots__ = ("project_id",)
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    def __init__(self, project_id: _Optional[str] = ...) -> None: ...
+
+class ProjectCredential(_message.Message):
+    __slots__ = ("kind", "created_at", "updated_at")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    kind: str
+    created_at: str
+    updated_at: str
+    def __init__(self, kind: _Optional[str] = ..., created_at: _Optional[str] = ..., updated_at: _Optional[str] = ...) -> None: ...
+
+class SetProjectCredentialResponse(_message.Message):
+    __slots__ = ("credentials",)
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    credentials: _containers.RepeatedCompositeFieldContainer[ProjectCredential]
+    def __init__(self, credentials: _Optional[_Iterable[_Union[ProjectCredential, _Mapping]]] = ...) -> None: ...
+
+class ClearProjectCredentialResponse(_message.Message):
+    __slots__ = ("credentials",)
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    credentials: _containers.RepeatedCompositeFieldContainer[ProjectCredential]
+    def __init__(self, credentials: _Optional[_Iterable[_Union[ProjectCredential, _Mapping]]] = ...) -> None: ...
+
+class ListProjectCredentialsResponse(_message.Message):
+    __slots__ = ("credentials",)
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    credentials: _containers.RepeatedCompositeFieldContainer[ProjectCredential]
+    def __init__(self, credentials: _Optional[_Iterable[_Union[ProjectCredential, _Mapping]]] = ...) -> None: ...
+
 class CreateRunnerRegistrationTokenRequest(_message.Message):
     __slots__ = ("allowed_labels",)
     ALLOWED_LABELS_FIELD_NUMBER: _ClassVar[int]

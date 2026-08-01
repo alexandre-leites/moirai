@@ -64,8 +64,15 @@ services:
       LOOP_INITIAL_ADMIN_PASSWORD: "${MOIRAI_ADMIN_PASSWORD:-Moirai-Local-1}"
       RUNNER_REGISTRATION_TOKEN: "${MOIRAI_RUNNER_TOKEN:-moirai-local-runner-registration-token}"
       # Optional. Without it the stack runs and the console works, but Moirai
-      # cannot read issues, clone, push or open pull requests.
+      # cannot read issues, clone, push or open pull requests. A project that
+      # configures its own credential in the console does not use this one.
       LOOP_GITHUB_TOKEN: "${MOIRAI_GITHUB_TOKEN-}"
+      # Encrypts per-project credentials at rest. Deliberately has no default:
+      # a key committed here would be public, and encrypting with it would be
+      # theatre. Without one the stack runs normally and only per-project
+      # credentials are refused, with a message naming this variable.
+      # Back it up -- lose it and every stored credential is unreadable.
+      LOOP_SECRET_KEY: "${MOIRAI_SECRET_KEY-}"
       # Seed project created on a fresh database. Set MOIRAI_SEED_PROJECT_NAME
       # to an empty string to turn seeding off.
       LOOP_SEED_PROJECT_NAME: "${MOIRAI_SEED_PROJECT_NAME-demo}"

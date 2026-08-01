@@ -8,9 +8,11 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: none — `main` is green at `238a9c4` (2026-08-01).
+- Active implementation: per-project credentials — stored encrypted and used for every
+  GitHub call made on a project's behalf. The rest of the dumb-runner plan (lease-fenced
+  secret resolution, control-stream TLS enforcement, SSH keys on the runner) is not started.
 - Last updated: 2026-08-01
-- Agent/session identifier: console-revamp / 2026-08-01
+- Agent/session identifier: per-project-credentials / 2026-08-01
 
 ## In Progress
 
@@ -18,6 +20,9 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
 
 ## Done
 
+- [x] Per-project GitHub credentials, encrypted at rest and used for that project's `gh`
+      calls (migration 015, `persistence/secrets.py`, `workflows/code_host_factory.py`,
+      three gRPC RPCs, three REST endpoints, console section). Details in `tasks/todo.md`.
 - [x] Replace the web console with the approved design package (phases C and D of
       `docs/design/web-console/tasks.md`)
   - Completed: 2026-08-01 (`acd7ad3` on `main`)
@@ -132,6 +137,33 @@ are fixed in `f15d6ef` and `238a9c4`, and run `30701717203` is green across all 
 
 ## Decisions
 
+- Decision: ship no default `LOOP_SECRET_KEY`
+  - Context: per-project credentials are encrypted with a key from deployment configuration.
+    A stack that "just works" from `docker compose up` argues for a default.
+  - Alternatives considered: a key committed to `compose.yaml`; generating one on first
+    start and persisting it to a volume.
+  - Reason: a committed key is public, so encrypting with it is theatre — and silent
+    theatre, which is worse than none. A generated key in a volume is real, but an operator
+    who deletes the volume loses every credential without ever having been told the key
+    existed.
+  - Consequences: the stack starts and runs normally without a key; only per-project
+    credentials are refused, with a 422 naming the variable and the command that generates
+    one. The key must be backed up — losing it makes stored credentials unopenable, and
+    they have to be entered again.
+
+- Decision: an unopenable credential is an error, not a fallback to the shared token
+  - Context: `ProjectCodeHostFactory` falls back to the deployment-wide runner when a
+    project has no credential. The same path could absorb a credential that fails to
+    decrypt (a rotated key, an altered row).
+  - Alternatives considered: log and fall back, so a project that used to work keeps
+    working.
+  - Reason: the fallback identity is the one that could not see the repository in the first
+    place. GitHub answers 404, and the operator goes looking for a permissions problem that
+    does not exist. Raising puts "stored secret could not be opened" in the project's sync
+    error instead.
+  - Consequences: rotating `LOOP_SECRET_KEY` without re-entering credentials stops sync for
+    the affected projects, visibly, rather than degrading them quietly.
+
 - Decision: omit console sections that have no data source rather than stubbing them
   - Context: the mockup shows an outcomes chart, circuit breakers, a System view and runner
     capacity meters; none has an endpoint (design tasks A7–A12).
@@ -156,10 +188,13 @@ are fixed in `f15d6ef` and `238a9c4`, and run `30701717203` is green across all 
 CI run `30701717203` on `238a9c4` — **all 12 jobs green**. This is the first CI run to
 complete on `main`; everything below was confirmed by it, not only locally.
 
-- Targeted tests: `web` — 187 vitest tests
-- Service tests: `api`; `runner` under `-race`; `orchestrator` — 519 tests
-- Postgres integration: 37 tests against a real database, and re-runnable — the suite used to
+- Targeted tests: `web` — 195 vitest tests
+- Service tests: `api`; `runner` under `-race`; `orchestrator` — 551 tests
+- Postgres integration: 47 tests against a real database, and re-runnable — the suite used to
   pass only against a virgin one
+- End to end on the built stack: credentials stored, replaced, removed and re-read through
+  nginx → api → gRPC → orchestrator; the plaintext appears in no database row and no
+  container log; a missing key is refused with a message naming the variable
 - Full repository tests: yes, via CI
 - Build: `build-web` and `go build`
 - Lint: `ruff` and `eslint` clean

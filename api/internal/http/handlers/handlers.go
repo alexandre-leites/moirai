@@ -27,6 +27,9 @@ func (h *ProjectHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/v1/projects", auth.RequireSession(http.HandlerFunc(h.listProjects)))
 	mux.Handle("POST /api/v1/projects", requireMutation(h.limiter, h.createProject))
 	mux.Handle("PUT /api/v1/projects/{project_id}", requireMutation(h.limiter, h.updateProject))
+	mux.Handle("GET /api/v1/projects/{project_id}/credentials", auth.RequireSession(http.HandlerFunc(h.listCredentials)))
+	mux.Handle("PUT /api/v1/projects/{project_id}/credentials/{kind}", requireMutation(h.limiter, h.setCredential))
+	mux.Handle("DELETE /api/v1/projects/{project_id}/credentials/{kind}", requireMutation(h.limiter, h.clearCredential))
 	mux.Handle("POST /api/v1/projects/{project_id}/enable", requireMutation(h.limiter, h.enableProject))
 	mux.Handle("POST /api/v1/projects/{project_id}/disable", requireMutation(h.limiter, h.disableProject))
 	mux.Handle("GET /api/v1/scheduler/metrics", auth.RequireSession(http.HandlerFunc(h.schedulerMetrics)))
@@ -136,6 +139,65 @@ func (h *ProjectHandlers) setProjectEnabled(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	apiserver.WriteJSON(w, http.StatusOK, projectPayload(resp.Project))
+}
+
+// Credential values travel inbound only. All three of these answer with the
+// same summary of what a project has configured, so a caller never has to ask
+// for a value back to know whether the write took effect -- and there is no
+// endpoint that would return one if they did.
+func (h *ProjectHandlers) listCredentials(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.ListProjectCredentials(requestContext(r), r.PathValue("project_id"))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, credentialsPayload(resp.GetCredentials()))
+}
+
+func (h *ProjectHandlers) setCredential(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Value) == "" {
+		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body",
+			"value is required; delete the credential to remove it")
+		return
+	}
+	resp, err := h.client.SetProjectCredential(
+		requestContext(r), r.PathValue("project_id"), r.PathValue("kind"), body.Value,
+	)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, credentialsPayload(resp.GetCredentials()))
+}
+
+func (h *ProjectHandlers) clearCredential(w http.ResponseWriter, r *http.Request) {
+	resp, err := h.client.ClearProjectCredential(
+		requestContext(r), r.PathValue("project_id"), r.PathValue("kind"),
+	)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	apiserver.WriteJSON(w, http.StatusOK, credentialsPayload(resp.GetCredentials()))
+}
+
+func credentialsPayload(credentials []*controlv1.ProjectCredential) map[string]any {
+	entries := make([]map[string]any, 0, len(credentials))
+	for _, credential := range credentials {
+		entries = append(entries, map[string]any{
+			"kind":      credential.GetKind(),
+			"createdAt": credential.GetCreatedAt(),
+			"updatedAt": credential.GetUpdatedAt(),
+		})
+	}
+	return map[string]any{"credentials": entries}
 }
 
 func projectPayload(p *controlv1.Project) map[string]any {

@@ -10,6 +10,9 @@ service ControlPlane {
   rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
   rpc UpdateProject(UpdateProjectRequest) returns (UpdateProjectResponse);
   rpc SetProjectEnabled(SetProjectEnabledRequest) returns (SetProjectEnabledResponse);
+  rpc SetProjectCredential(SetProjectCredentialRequest) returns (SetProjectCredentialResponse);
+  rpc ClearProjectCredential(ClearProjectCredentialRequest) returns (ClearProjectCredentialResponse);
+  rpc ListProjectCredentials(ListProjectCredentialsRequest) returns (ListProjectCredentialsResponse);
   rpc CreateRunnerRegistrationToken(CreateRunnerRegistrationTokenRequest) returns (CreateRunnerRegistrationTokenResponse);
   rpc ListRunnerRegistrationTokens(ListRunnerRegistrationTokensRequest) returns (ListRunnerRegistrationTokensResponse);
   rpc RevokeRunnerRegistrationToken(RevokeRunnerRegistrationTokenRequest) returns (RevokeRunnerRegistrationTokenResponse);
@@ -66,6 +69,31 @@ message UpdateProjectRequest { string project_id = 1; ProjectConfiguration proje
 message UpdateProjectResponse { Project project = 1; }
 message SetProjectEnabledRequest { string project_id = 1; bool enabled = 2; }
 message SetProjectEnabledResponse { Project project = 1; }
+
+// Per-project credentials. `value` travels only on the way in; nothing ever
+// returns one, which is why all three RPCs answer with the same summary
+// message describing what is configured rather than what it is.
+message SetProjectCredentialRequest {
+  string project_id = 1;
+  // "github_token" or "ssh_private_key".
+  string kind = 2;
+  string value = 3;
+}
+message ClearProjectCredentialRequest {
+  string project_id = 1;
+  string kind = 2;
+}
+message ListProjectCredentialsRequest { string project_id = 1; }
+message ProjectCredential {
+  string kind = 1;
+  string created_at = 2;
+  string updated_at = 3;
+}
+// One response type per RPC, each carrying the same summary: what the project
+// has configured, never a value.
+message SetProjectCredentialResponse { repeated ProjectCredential credentials = 1; }
+message ClearProjectCredentialResponse { repeated ProjectCredential credentials = 1; }
+message ListProjectCredentialsResponse { repeated ProjectCredential credentials = 1; }
 message CreateRunnerRegistrationTokenRequest { repeated string allowed_labels = 1; }
 message CreateRunnerRegistrationTokenResponse { string token = 1; string expires_at = 2; }
 message RunnerRegistrationToken {

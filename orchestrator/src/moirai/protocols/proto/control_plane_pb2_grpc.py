@@ -49,6 +49,21 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.SetProjectEnabledRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.SetProjectEnabledResponse.FromString,
                 _registered_method=True)
+        self.SetProjectCredential = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/SetProjectCredential',
+                request_serializer=proto_dot_control__plane__pb2.SetProjectCredentialRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.SetProjectCredentialResponse.FromString,
+                _registered_method=True)
+        self.ClearProjectCredential = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/ClearProjectCredential',
+                request_serializer=proto_dot_control__plane__pb2.ClearProjectCredentialRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ClearProjectCredentialResponse.FromString,
+                _registered_method=True)
+        self.ListProjectCredentials = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/ListProjectCredentials',
+                request_serializer=proto_dot_control__plane__pb2.ListProjectCredentialsRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ListProjectCredentialsResponse.FromString,
+                _registered_method=True)
         self.CreateRunnerRegistrationToken = channel.unary_unary(
                 '/loop.control.v1.ControlPlane/CreateRunnerRegistrationToken',
                 request_serializer=proto_dot_control__plane__pb2.CreateRunnerRegistrationTokenRequest.SerializeToString,
@@ -176,6 +191,24 @@ class ControlPlaneServicer:
         raise NotImplementedError('Method not implemented!')
 
     def SetProjectEnabled(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetProjectCredential(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ClearProjectCredential(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListProjectCredentials(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -320,6 +353,21 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.SetProjectEnabled,
                     request_deserializer=proto_dot_control__plane__pb2.SetProjectEnabledRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.SetProjectEnabledResponse.SerializeToString,
+            ),
+            'SetProjectCredential': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetProjectCredential,
+                    request_deserializer=proto_dot_control__plane__pb2.SetProjectCredentialRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.SetProjectCredentialResponse.SerializeToString,
+            ),
+            'ClearProjectCredential': grpc.unary_unary_rpc_method_handler(
+                    servicer.ClearProjectCredential,
+                    request_deserializer=proto_dot_control__plane__pb2.ClearProjectCredentialRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ClearProjectCredentialResponse.SerializeToString,
+            ),
+            'ListProjectCredentials': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListProjectCredentials,
+                    request_deserializer=proto_dot_control__plane__pb2.ListProjectCredentialsRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ListProjectCredentialsResponse.SerializeToString,
             ),
             'CreateRunnerRegistrationToken': grpc.unary_unary_rpc_method_handler(
                     servicer.CreateRunnerRegistrationToken,
@@ -596,6 +644,87 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/SetProjectEnabled',
             proto_dot_control__plane__pb2.SetProjectEnabledRequest.SerializeToString,
             proto_dot_control__plane__pb2.SetProjectEnabledResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SetProjectCredential(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/SetProjectCredential',
+            proto_dot_control__plane__pb2.SetProjectCredentialRequest.SerializeToString,
+            proto_dot_control__plane__pb2.SetProjectCredentialResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ClearProjectCredential(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/ClearProjectCredential',
+            proto_dot_control__plane__pb2.ClearProjectCredentialRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ClearProjectCredentialResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListProjectCredentials(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/ListProjectCredentials',
+            proto_dot_control__plane__pb2.ListProjectCredentialsRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ListProjectCredentialsResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -19,6 +19,43 @@ Both workflows now use GitHub-hosted runners; the self-hosted lines are commente
 place. The first run that executed failed six of nine jobs, every one a real defect, all
 fixed in `f15d6ef` and `238a9c4`.
 
+## Per-project credentials (2026-08-01)
+
+Prompted by a private project failing issue sync with nothing but "issue tracker failed".
+Two problems sat behind that: the deployment had one `LOOP_GITHUB_TOKEN` that could not see
+the repository, and the error did not say so.
+
+**Done.**
+
+- [x] Report *why* an issue sync failed, not just that it did (`services/issue_sync.py`).
+- [x] Encrypted credential storage: migration `015_project_credentials.sql`, AES-GCM in
+      `persistence/secrets.py`, keyed by `LOOP_SECRET_KEY` / `_FILE`. Write-only through
+      every layer — no API returns a value, and there is no protocol method that could.
+- [x] `ProjectCodeHostFactory` builds a per-project `SubprocessCommandRunner`, so `gh` runs
+      as the project's own identity. No credential falls back to the deployment-wide token;
+      an *unopenable* one raises, because falling back would reach GitHub as the wrong
+      identity and look like a permissions problem.
+- [x] gRPC `SetProjectCredential` / `ClearProjectCredential` / `ListProjectCredentials`,
+      admin-only and CSRF-guarded, each audited without the value.
+- [x] REST `GET /projects/{id}/credentials`, `PUT|DELETE /projects/{id}/credentials/{kind}`,
+      in `api/openapi.yaml`.
+- [x] Console: a credentials section per project reporting "set <age> ago" or the fallback,
+      with set / replace / remove. Admin-only; a viewer sees the state and no controls.
+- [x] `LOOP_SECRET_KEY` wired through `compose.yaml`, `compose.secrets.yaml`, `.env.example`
+      and the orchestrator entrypoint. Deliberately no default — see PROGRESS.md.
+
+**Verified.** Unit, integration (against real Postgres, twice, for migration idempotence)
+and end-to-end against the built stack: stored, replaced, removed and re-read through
+nginx → api → gRPC → orchestrator; the plaintext appears in no row and no container log;
+CSRF-less and unknown-kind writes refused; a missing key refused with a message naming the
+variable rather than written in the clear.
+
+**Not done — the rest of the dumb-runner plan.** `ResolveJobSecret` (lease-fenced), TLS
+enforcement on the control stream, the runner-side resolver, and SSH keys materialised to
+tmpfs with `GIT_SSH_COMMAND`. The SSH credential *kind* stores and round-trips today, but
+nothing consumes it yet: runners still resolve secrets from their own environment. Plan in
+`.claude/plans/drifting-sniffing-rain.md` (A2–A4).
+
 ## Platform review remediation (2026-07-29) — issues #88–#108
 
 Source: `docs/reviews/2026-07-29-platform-review.md` (findings F1–F16, competitor analysis,

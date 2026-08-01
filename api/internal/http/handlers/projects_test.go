@@ -28,6 +28,41 @@ type fakeControlPlane struct {
 	controlv1.UnimplementedControlPlaneServer
 	mu       sync.Mutex
 	projects map[string]*controlv1.Project
+	// What the last SetProjectCredential carried, so a test can assert the
+	// value reached the orchestrator without any response ever exposing it.
+	credentialWrites []credentialWrite
+	credentials      []*controlv1.ProjectCredential
+}
+
+type credentialWrite struct {
+	projectID string
+	kind      string
+	value     string
+}
+
+func (f *fakeControlPlane) SetProjectCredential(_ context.Context, request *controlv1.SetProjectCredentialRequest) (*controlv1.SetProjectCredentialResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.credentialWrites = append(f.credentialWrites, credentialWrite{
+		projectID: request.GetProjectId(), kind: request.GetKind(), value: request.GetValue(),
+	})
+	f.credentials = []*controlv1.ProjectCredential{
+		{Kind: request.GetKind(), CreatedAt: "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:00:00Z"},
+	}
+	return &controlv1.SetProjectCredentialResponse{Credentials: f.credentials}, nil
+}
+
+func (f *fakeControlPlane) ClearProjectCredential(_ context.Context, _ *controlv1.ClearProjectCredentialRequest) (*controlv1.ClearProjectCredentialResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.credentials = nil
+	return &controlv1.ClearProjectCredentialResponse{}, nil
+}
+
+func (f *fakeControlPlane) ListProjectCredentials(_ context.Context, _ *controlv1.ListProjectCredentialsRequest) (*controlv1.ListProjectCredentialsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &controlv1.ListProjectCredentialsResponse{Credentials: f.credentials}, nil
 }
 
 func newFakeControlPlane() *fakeControlPlane {
@@ -408,5 +443,76 @@ func TestRedactURLUserinfo(t *testing.T) {
 		if got := redactURLUserinfo(tc.in); got != tc.want {
 			t.Errorf("redactURLUserinfo(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A credential value travels inbound only. The handler must forward it, and no
+// response may carry it back -- not on the write, and not on any later read.
+func TestSetProjectCredentialForwardsTheValueAndReturnsOnlyASummary(t *testing.T) {
+	mux, fake := startProjectServer(t)
+	req := mutateRequest(t, http.MethodPut, "/api/v1/projects/p-1/credentials/github_token",
+		`{"value":"ghp_a-real-token"}`, "admin-session")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	fake.mu.Lock()
+	writes := append([]credentialWrite(nil), fake.credentialWrites...)
+	fake.mu.Unlock()
+	if len(writes) != 1 || writes[0].value != "ghp_a-real-token" {
+		t.Fatalf("orchestrator received %+v", writes)
+	}
+	if writes[0].projectID != "p-1" || writes[0].kind != "github_token" {
+		t.Fatalf("orchestrator received %+v", writes[0])
+	}
+	if strings.Contains(rec.Body.String(), "ghp_") {
+		t.Fatalf("response echoed the credential: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "github_token") {
+		t.Fatalf("response omitted the configured kind: %s", rec.Body.String())
+	}
+}
+
+func TestSetProjectCredentialRejectsAnEmptyValue(t *testing.T) {
+	// An empty value would read back as configured and then fail at the code
+	// host. Removing a credential is a DELETE, not an empty PUT.
+	mux, fake := startProjectServer(t)
+	req := mutateRequest(t, http.MethodPut, "/api/v1/projects/p-1/credentials/github_token",
+		`{"value":"   "}`, "admin-session")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	fake.mu.Lock()
+	writes := len(fake.credentialWrites)
+	fake.mu.Unlock()
+	if writes != 0 {
+		t.Fatal("an empty value was forwarded to the orchestrator")
+	}
+}
+
+func TestListProjectCredentialsReportsKindsWithoutValues(t *testing.T) {
+	mux, fake := startProjectServer(t)
+	fake.mu.Lock()
+	fake.credentials = []*controlv1.ProjectCredential{
+		{Kind: "ssh_private_key", CreatedAt: "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T09:00:00Z"},
+	}
+	fake.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/p-1/credentials", nil)
+	req.AddCookie(&http.Cookie{Name: "loop_session", Value: "admin-session"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "ssh_private_key") || !strings.Contains(body, "updatedAt") {
+		t.Fatalf("unexpected payload: %s", body)
 	}
 }

@@ -252,6 +252,87 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/projects/{project_id}/credentials:
+    get:
+      summary: Report which credentials a project has configured
+      description: |
+        Returns presence and timestamps only. A stored credential value is
+        never returned by this API — replacing it is the only way to change it.
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+      responses:
+        '200':
+          description: Configured credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectCredentialList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/projects/{project_id}/credentials/{kind}:
+    put:
+      summary: Store or replace one project credential
+      description: |
+        The value is encrypted at rest with the deployment's `LOOP_SECRET_KEY`.
+        Requests are rejected with 422 when no key is configured, because a
+        credential written without one could not be read back.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/CredentialKind'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCredentialValue'
+      responses:
+        '200':
+          description: Configured credentials after the write
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectCredentialList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      summary: Remove one project credential
+      description: |
+        The project falls back to the deployment-wide credential. Removing a
+        credential that is not configured succeeds.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+        - $ref: '#/components/parameters/CredentialKind'
+      responses:
+        '200':
+          description: Configured credentials after the removal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectCredentialList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/runner-tokens:
     get:
       summary: List runner registration tokens
@@ -614,6 +695,13 @@ components:
       in: path
       required: true
       schema: { type: string }
+    CredentialKind:
+      name: kind
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [github_token, ssh_private_key]
   responses:
     BadRequest:
       description: Malformed request
@@ -694,6 +782,35 @@ components:
         requiredRunnerLabels:
           type: array
           items: { type: string }
+    ProjectCredentialList:
+      type: object
+      required: [credentials]
+      properties:
+        credentials:
+          type: array
+          items: { $ref: '#/components/schemas/ProjectCredential' }
+    ProjectCredential:
+      type: object
+      required: [kind, createdAt, updatedAt]
+      description: >-
+        A credential this project has configured. The value is deliberately
+        absent: it is write-only through every layer of the system.
+      properties:
+        kind:
+          type: string
+          enum: [github_token, ssh_private_key]
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ProjectCredentialValue:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+          format: password
+          description: >-
+            The credential itself — a token, or PEM private-key material. Must
+            not be blank; use DELETE to remove a credential.
     RunnerToken:
       type: object
       required: [id, allowedLabels, expiresAt]
