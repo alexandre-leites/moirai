@@ -3,12 +3,12 @@
 ## Current Status
 
 - Overall status: MVP surface substantially complete — 34 of 35 roadmap items in
-  `tasks/todo.md` are done (three with caveats), 5 GitHub issues remain open (2 of them P1).
-  The blocking problem is not a feature: **CI has not completed a run on `main` in over a
-  week**, so nothing shipped in that period was independently verified.
-- Current phase: Implementation, with an infrastructure blocker taking precedence.
-- Active implementation: none — the console revamp completed and was pushed to `main` as
-  `acd7ad3` on 2026-08-01.
+  `tasks/todo.md` are done (three with caveats). #197 is fixed and can be closed; 4 issues
+  remain open.
+  **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
+  independently verified rather than merely believed.
+- Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
+- Active implementation: none — `main` is green at `238a9c4` (2026-08-01).
 - Last updated: 2026-08-01
 - Agent/session identifier: console-revamp / 2026-08-01
 
@@ -54,6 +54,28 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
   - Commands executed: `make proto-generate`, `make proto-check`, `go test ./...`,
     `make test-orchestrator`
 
+- [x] Get CI executing, then fix everything it found (closes #197)
+  - Completed: 2026-08-01 (`42aa47c`, `f15d6ef`, `238a9c4`)
+  - Relevant files: `.github/workflows/*.yml`, `orchestrator/src/moirai/grpc/control_plane.py`,
+    `orchestrator/src/moirai/persistence/control_plane.py`,
+    `orchestrator/src/moirai/{main,observability}.py`, `runner/internal/control/`,
+    `web/package.json`, `README.md`
+  - Behavior delivered: both workflows moved onto GitHub-hosted runners. The first run that
+    executed failed six of nine jobs, every one a real defect:
+    `_require_admin` never awaited `context.abort`, so the admin check did nothing and
+    `SetRunnerState` was open to any authenticated viewer (#197); `schedule()` had lost its
+    f-string prefix and sent `{...}` to Postgres, breaking every scheduling path;
+    a file named `flush_test_2.go` compiled a test into the production package and broke the
+    runner build; three tests had gone stale against correct product code; `react-router` sat
+    inside a high-severity advisory; and the smoke test's admin password failed the bootstrap
+    policy — as did the README's, so the documented quickstart could not boot.
+    Standing the stack up to verify that last one exposed a metrics loop that had been
+    failing every tick, leaving all four Prometheus gauges at zero.
+  - Validation performed: CI run `30701717203`, all 12 jobs green.
+  - Commands executed: `make lint`, `make typecheck`, `make test-orchestrator`,
+    `make test-web`, `go test -race ./...`, `make proto-check`,
+    `make test-postgres-integration` against a real Postgres, `docker compose up --wait`
+
 - [x] Reconcile `tasks/todo.md` and this file against the tracker and the working tree
   - Completed: 2026-08-01
   - Relevant files: `tasks/todo.md`, `PROGRESS.md`
@@ -67,21 +89,11 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
 
 ## Blocked
 
-- [ ] Continuous integration is not executing on `main`
-  - Reason: `ci.yml` targets `[self-hosted, linux]`. No runner appears to be picking jobs up.
-  - Evidence: the eleven most recent CI runs on `main` all ended `cancelled`; the run for
-    `acd7ad3` (2026-08-01 11:40Z) was still `queued` twenty minutes after creation. The only
-    `success` runs on the repository are Dependabot and Dependency Graph jobs, not CI. With
-    `concurrency.cancel-in-progress: true`, a run that never starts is cancelled by the next
-    push, which matches the pattern exactly.
-  - Attempts made: inspected run history and `ci.yml`; `gh api .../actions/runners` returns
-    404, so the runner registration could not be inspected with the available token.
-  - Required resolution: a human with repository admin access needs to confirm whether a
-    self-hosted runner is registered and online, and either bring one up or move `ci.yml` to
-    GitHub-hosted runners.
-  - Independent work still available: yes — everything under Pending Implementation. Run
-    `make test`, `make lint`, `make typecheck` and `make proto-check` locally in the
-    meantime, and do not treat a closed issue as evidence of working software.
+_Nothing is blocked._ The CI blocker recorded here earlier is resolved: `ci.yml` and
+`release.yml` moved off the self-hosted pool onto `ubuntu-latest` (the self-hosted
+declarations are commented out in place, one line above each replacement, so moving back is a
+one-line edit per job). The first run that actually executed failed six of nine jobs; those
+are fixed in `f15d6ef` and `238a9c4`, and run `30701717203` is green across all 12.
 
 ## Pending Implementation
 
@@ -97,15 +109,6 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
     the pipeline node executes them; a failing step blocks the workflow and is visible on
     workflow detail; an integration test covers a project whose pipeline fails.
 
-- [ ] #197 (P2) — enforce user role on runner and workflow mutations server-side
-  - Priority: next. Security-adjacent and currently misleading.
-  - Dependencies: none.
-  - Expected behavior: a `viewer` session receives 403 from every mutating endpoint. The
-    console already hides these controls, so this closes the gap between presentation and
-    enforcement.
-  - Definition of done: `test_runner_controls_require_admin_csrf_and_persist_actor` passes —
-    it is currently failing for exactly this reason.
-
 - [ ] #118 (P1) — Server-Sent Events end to end
   - Priority: after the two above.
   - Dependencies: none, but it replaces the interim polling in `web/src/poll.ts`, which was
@@ -116,18 +119,6 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
     `proxy_buffering off` for `/api/v1/events/` in `web/nginx.conf`.
 
 ## Quality Backlog
-
-- [ ] Fix the four pre-existing failures on `main`
-  - Category: correctness / CI hygiene
-  - Risk: low; all four are small and localized
-  - Expected benefit: a green local `make validate`, which is currently unreachable and
-    therefore hides new breakage
-  - Recommended timing: alongside whichever task next touches these files
-  - Detail: `test_metrics` (2 cases) expects a snapshot without the `scheduled_jobs` key the
-    code now returns; `test_runner_controls_require_admin_csrf_and_persist_actor` is #197;
-    one ruff error (`except asyncio.TimeoutError` → `except TimeoutError`) and two mypy
-    errors (`metrics_snapshot` missing from the `ControlPlane` protocol, an unawaited
-    coroutine), all in `orchestrator/src/moirai/grpc/control_plane.py`.
 
 - [ ] Retire the console's two client-side derivations
   - Category: correctness
@@ -162,30 +153,26 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
 
 ## Validation Status
 
-Recorded for the 2026-08-01 session only. **No CI run has confirmed any of this** — see
-Blocked.
+CI run `30701717203` on `238a9c4` — **all 12 jobs green**. This is the first CI run to
+complete on `main`; everything below was confirmed by it, not only locally.
 
-- Targeted tests: `web` — 187 vitest tests, all passing
-- Service tests: `api` — `go test ./...` passing; `orchestrator` — 518 tests, 3 failures, all
-  pre-existing and unrelated (verified by stashing the change set and re-running)
-- Full repository tests: not run (`make test` includes the runner suite, not exercised)
-- Build: `npm run build` and `go build ./...` pass
-- Lint: `eslint` clean; `ruff` has 1 pre-existing error
-- Type checks: `tsc --noEmit` clean; `mypy` has 2 pre-existing errors, down from 5
-- Database migrations: not run this session
-- Docker Compose: not run this session
-- End-to-end workflow: not run this session; the console was exercised against a stub API,
-  not a live orchestrator
+- Targeted tests: `web` — 187 vitest tests
+- Service tests: `api`; `runner` under `-race`; `orchestrator` — 519 tests
+- Postgres integration: 37 tests against a real database, and re-runnable — the suite used to
+  pass only against a virgin one
+- Full repository tests: yes, via CI
+- Build: `build-web` and `go build`
+- Lint: `ruff` and `eslint` clean
+- Type checks: `mypy` and `tsc --noEmit` clean
+- Database migrations: run by the integration job and by `compose-smoke`
+- Docker Compose: `compose-smoke` builds all four images, waits for health and probes both
+  readiness endpoints; also exercised locally
+- End-to-end workflow: not run — no agent has been driven through a real issue this session.
+  The console was checked against a live orchestrator (login, and every endpoint it reads),
+  which is short of a delivery.
+- Dependency audit: `govulncheck` and `npm audit --audit-level=high` both clean
 
 ## Known Issues
-
-- Issue: CI is not executing on `main`
-  - Severity: critical (process)
-  - Impact: nothing merged in the last week was independently verified. Two broken commits
-    reached `main` as a direct result — unresolved conflict markers in `web/src/workflows.tsx`
-    and a gutted `api/internal/http/handlers/workflows.go` that left the Go API uncompilable.
-  - Evidence: eleven consecutive `cancelled` runs; the newest run queued 20+ minutes.
-  - Suggested resolution: see Blocked.
 
 - Issue: the local pipeline gate passes by default
   - Severity: high
@@ -194,13 +181,6 @@ Blocked.
   - Evidence: `app.project_pipeline_steps` is read at
     `orchestrator/src/moirai/persistence/control_plane.py:1382` and written nowhere.
   - Suggested resolution: #114, first item under Pending Implementation.
-
-- Issue: role separation is presentation-only
-  - Severity: medium
-  - Impact: a `viewer` cannot see admin controls in the console but can still call the
-    endpoints directly. Do not describe roles as a security boundary until fixed.
-  - Evidence: #197; `test_runner_controls_require_admin_csrf_and_persist_actor` fails.
-  - Suggested resolution: #197, second item under Pending Implementation.
 
 ## Next Recommended Implementation
 

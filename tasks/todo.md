@@ -6,20 +6,18 @@ Reconciled against the GitHub issue tracker and the working tree. Of the 35 item
 **34 are done and one remains** (SSE, Phase 3). Three of the done items carry caveats — the
 pipeline gate, circuit-breaker visibility and scheduler metrics — noted in place.
 
-Two warnings about what a ticked box here means:
+One warning about what a ticked box here means: **a closed issue is not proof.** Two closed
+items shipped broken and were only caught by reading the code on 2026-08-01 —
+`web/src/workflows.tsx` carried unresolved conflict markers, and #206 cut
+`api/internal/http/handlers/workflows.go` to a stub while leaving its routes registered, so
+the Go API had not compiled for days. Both predate CI running.
 
-1. **CI has not completed a run on `main` in over a week.** Every recent run is `cancelled`
-   — eleven consecutive — and the run from this morning's push sat `queued` for 20+ minutes.
-   `ci.yml` targets `[self-hosted, linux]`; the pattern is consistent with no runner being
-   online to pick jobs up, so each run queues until the next push cancels it via
-   `cancel-in-progress`. Nothing below was gated by CI.
-2. **A closed issue is not proof.** Two closed items shipped broken and were only caught by
-   reading the code on 2026-08-01: `web/src/workflows.tsx` carried unresolved conflict
-   markers, and #206 cut `api/internal/http/handlers/workflows.go` to a stub while leaving
-   its routes registered, so the Go API had not compiled for days. Treat ticks as "the work
-   was attempted and the issue was closed", not "verified working".
-
-Restoring CI is the highest-value next action in this file, ahead of any feature.
+**CI now runs and is green** (run `30701717203`, all 12 jobs, commit `238a9c4`) — the first
+completed run on `main`. It had not executed for over a week because `ci.yml` targeted a
+self-hosted pool with nothing online, so every run queued until the next push cancelled it.
+Both workflows now use GitHub-hosted runners; the self-hosted lines are commented out in
+place. The first run that executed failed six of nine jobs, every one a real defect, all
+fixed in `f15d6ef` and `238a9c4`.
 
 ## Platform review remediation (2026-07-29) — issues #88–#108
 
@@ -74,12 +72,13 @@ then make failures visible, then finish MVP features, then harden.
   `web/src/api.test.ts`: 401 signs the user out, 403 raises without clearing the session.
 - [x] **Graceful runner shutdown + drain.** (#50; #148 later fixed a stranded drain flag)
 
-## Phase 2 — Make failure visible (testing & CI) — complete, but see the CI warning above
+## Phase 2 — Make failure visible (testing & CI) — complete
 
 - [x] **Real Postgres integration tests.** (#51) `make test-postgres-integration` exists and
   runs real migrations against `AsyncpgControlPlane`.
 - [x] **CI builds images + compose smoke test.** (#52) `build-web` and `compose-smoke` jobs
-  exist in `ci.yml`. They are not currently executing — see the status note above.
+  exist in `ci.yml` and both pass; `compose-smoke` builds all four images, waits for health
+  and probes the readiness endpoints.
 - [x] **Graph-level end-to-end test.** (#53)
 - [x] **Web test infrastructure.** (#54, #123) vitest + jsdom; `make test-web` runs
   `tsc --noEmit`, eslint and 187 tests, and is wired into `ci.yml`.
@@ -134,31 +133,23 @@ then make failures visible, then finish MVP features, then harden.
 
 ## Remaining — the whole open list
 
-Five open issues, two of them P1. In the order I would take them:
+Four open issues after #197, one of them P1. In the order I would take them:
 
-1. **Get CI executing again** (no issue filed). Not code. Every claim in this file is
-   currently ungated, and two broken commits reached `main` in the last week because of it.
-2. **#114 (P1) — project pipeline steps cannot be configured.** The deterministic gate that
+1. **#114 (P1) — project pipeline steps cannot be configured.** The deterministic gate that
    the product's core promise rests on ("an agent cannot declare success by itself") passes by
    default today. Needs a write path: schema/API/UI for `app.project_pipeline_steps`.
-3. **#197 (P2) — runner and workflow mutation controls ignore user role.** The console hides
-   admin controls from viewers, but the server does not refuse them, so role separation is
-   presentation-only and must not be described as a security boundary.
-4. **#118 (P1) — SSE.** See Phase 3 above.
-5. **#195 — scheduler summary metrics for the dashboard.**
-6. **#143 — flaky `TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected`.**
+2. **#118 (P1) — SSE.** See Phase 3 above.
+3. **#195 — scheduler summary metrics for the dashboard.** Half done: the orchestrator's
+   gauges were stuck at zero because the metrics loop failed on every tick, fixed in
+   `238a9c4`. What remains is surfacing the full set in the console.
+4. **#143 — flaky `TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconnected`.**
 
-Also outstanding, not filed as issues — pre-existing failures found on 2026-08-01 while
-working elsewhere in the tree:
+**#197 is fixed** (`f15d6ef`) and can be closed: `_require_admin` called
+`ServicerContext.abort` without awaiting it, so on `grpc.aio` the abort never ran and
+`SetRunnerState` accepted any authenticated viewer.
 
-- `test_metrics` (2 cases) expects a snapshot without the `scheduled_jobs` key the code now
-  returns.
-- `test_runner_controls_require_admin_csrf_and_persist_actor` expects a viewer to be
-  rejected; it is not. This is the test for #197.
-- One ruff error: `except asyncio.TimeoutError` should be `except TimeoutError` in
-  `orchestrator/src/moirai/grpc/control_plane.py`.
-- Two mypy errors in the same file: `metrics_snapshot` is missing from the `ControlPlane`
-  protocol, and one coroutine is never awaited.
+The four pre-existing failures listed here earlier — two `test_metrics` cases, the
+runner-controls role test, one ruff error and two mypy errors — are all fixed.
 
 ## Review
 
@@ -218,3 +209,40 @@ Reconciled this file and `PROGRESS.md` against the tracker and the working tree.
 Phases 0–4 was unticked despite 34 of 35 items having shipped, and `PROGRESS.md` still named
 a task merged three commits earlier as in progress. Neither file was a usable progress signal.
 The CI finding above came out of that reconciliation.
+
+### 2026-08-01 — CI restored, and the six failures it found
+
+`ci.yml` and `release.yml` targeted a self-hosted pool with nothing online, so every run
+queued until the next push cancelled it — eleven consecutive cancellations and no completed
+run on `main` for over a week. Both moved to GitHub-hosted runners, with the self-hosted
+declarations commented out one line above each replacement.
+
+The first run that actually executed failed six of nine jobs. Every one was a real defect,
+not a CI artefact:
+
+- `_require_admin` called `ServicerContext.abort` without awaiting it. On `grpc.aio` that
+  builds a coroutine and drops it, so the admin check did nothing and `SetRunnerState`
+  accepted any authenticated viewer (#197). The same defect was mypy's unused-coroutine
+  error and the failing runner-controls test.
+- `schedule()` had lost its f-string prefix in #205 and sent `WHERE {…}` to Postgres, so
+  every scheduling path raised a syntax error — 28 of 37 integration tests.
+- `flush_test_2.go` did not end in `_test.go`, so Go compiled a test into the production
+  package and broke the runner build and the vulnerability scan. It also redeclared a test
+  from `issue_152_test.go`; both were artefacts of #213 and #215 landing the same fix twice.
+- Three tests had gone stale against correct product code: the continuation prompt moved to
+  `.loop/prompt.md` in #185, `test_metrics` predated the `scheduled_jobs` gauge, and the
+  integration suite's developer result carried no agent result document, which #105 requires
+  as delivery evidence.
+- `react-router` 7.18.2 sat inside a high-severity advisory. Moved to `react-router` 8.3.0,
+  which is above the range; npm's own suggestion was a downgrade into five older advisories.
+- `compose-smoke` wrote an admin password the bootstrap policy rejects, so the orchestrator
+  refused to start. The README quickstart had the same defect.
+
+Verifying that last one against a live stack exposed a bug the smoke test cannot see, because
+the containers still go healthy: the metrics loop failed on every 15s tick, so all four
+Prometheus gauges stayed at zero for the life of every process. Two causes stacked — the loop
+started before the migrations it depends on, and `update_snapshot` read `scheduled_job_count`
+while the snapshot reports `scheduled_jobs`. Both fixed, with a test that reads gauge values
+back out of the registry.
+
+Run `30701717203` is green across all 12 jobs.
