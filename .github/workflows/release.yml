@@ -18,6 +18,16 @@
 # side effect of tagging.
 name: Release
 
+# Runner pool: this repository's jobs normally target a self-hosted pool. Those
+# declarations are commented out below rather than deleted, next to the
+# GitHub-hosted `ubuntu-latest` line that replaces each one, so the switch back
+# is a one-line edit per job.
+#
+# Why: no self-hosted runner was picking jobs up, so every CI run on main queued
+# until the next push cancelled it via `cancel-in-progress` -- eleven consecutive
+# cancelled runs, and nothing merged in that window was verified. Switched to
+# hosted runners on 2026-08-01 (fresh monthly Actions allowance).
+
 on:
   push:
     branches:
@@ -43,7 +53,8 @@ env:
 jobs:
   plan:
     name: Plan release
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.plan.outputs.version }}
       channel: ${{ steps.plan.outputs.channel }}
@@ -164,7 +175,8 @@ jobs:
   images:
     name: Build ${{ matrix.service }}
     needs: plan
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -268,7 +280,8 @@ jobs:
     name: Verify published manifests
     needs: [plan, images]
     if: needs.plan.outputs.push == 'true'
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
