@@ -98,20 +98,33 @@ def synchronize_issue(
 
 
 def reconcile_labels(
-    current: Iterable[str], desired: Iterable[str], *, managed_prefix: str
+    current: Iterable[str],
+    desired: Iterable[str],
+    *,
+    managed_prefix: str,
+    protected: Iterable[str] = (),
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Diff the agent-managed label namespace against the issue's labels.
 
     Removals are restricted to labels starting with ``managed_prefix`` so a
     reconciliation pass never deletes triage labels, user priority labels, or
     anything else a human applied to the issue.
+
+    ``protected`` names labels that live inside the managed prefix but are
+    nonetheless operator input rather than agent state. The ready label is the
+    one that matters: it is how a human says "work on this", and a run that
+    ended in a status with no desired labels used to take it away -- so a failed
+    run silently un-queued the issue, and re-applying the label by hand only had
+    it removed again on the next pass.
     """
     if not managed_prefix:
         raise ValueError("managed label prefix must not be empty")
     current_set = frozenset(current)
     desired_set = frozenset(desired)
+    protected_set = frozenset(protected)
     managed_current = frozenset(label for label in current_set if label.startswith(managed_prefix))
-    return tuple(sorted(desired_set - current_set)), tuple(sorted(managed_current - desired_set))
+    removable = managed_current - desired_set - protected_set
+    return tuple(sorted(desired_set - current_set)), tuple(sorted(removable))
 
 
 def _is_integer(value: str) -> bool:

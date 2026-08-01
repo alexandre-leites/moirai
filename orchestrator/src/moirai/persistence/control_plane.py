@@ -198,6 +198,12 @@ def _scheduling_conditions(issue: str, project: str, cooldown: str) -> str:
     """
     return (
         f"{issue}.eligible = true"
+        # `eligible` is a cached verdict from the last synchronisation; the
+        # state is the fact. Without this, a closed issue whose eligible flag
+        # had not yet been refreshed was schedulable -- and `list_queue` filters
+        # on state separately, so it would have been scheduled without ever
+        # having appeared in the queue an operator can see.
+        f" AND {issue}.state = 'open'"
         f" AND {project}.enabled = true"
         f" AND {_locked_condition(project)}"
         f" AND {_project_circuit_condition(project, cooldown)}"
@@ -446,6 +452,11 @@ class AsyncpgControlPlane:
         now: datetime,
     ) -> None:
         labels_json = json.dumps(sorted(labels), separators=(",", ":"))
+        # GitHub reports "OPEN"; every read in this file compares against
+        # 'open'. Normalising here rather than at each of those comparisons
+        # keeps one canonical spelling in the column, and matches what
+        # domain.issues.is_eligible already does with the same value.
+        state = state.strip().lower()
         await self._pool.execute(
             """
             INSERT INTO app.issues
@@ -633,7 +644,12 @@ class AsyncpgControlPlane:
                 "issue_count": int(record["issue_count"]),
                 "eligible_count": int(record["eligible_count"]),
                 "last_synced_at": record["last_synced_at"],
-                "consecutive_failures": int(record["consecutive_failures"]),
+                # LEFT JOIN: a project that has never synchronised has no
+                # issue_sync_state row, so this is NULL rather than 0. int(None)
+                # raised, which took down the whole sync-status view -- the one
+                # place an operator would look to find out why a project they
+                # had just added was not being picked up.
+                "consecutive_failures": int(record["consecutive_failures"] or 0),
                 "next_retry_at": record["next_retry_at"],
                 "last_error": record["last_error"],
                 "backing_off": bool(record["backing_off"]),

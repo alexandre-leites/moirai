@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from moirai.domain.issues import ExternalIssue
+from moirai.domain.issues import ExternalIssue, LabelPolicy, is_eligible
 from moirai.domain.models import Project
 from moirai.services.issue_sync import IssueSync, IssueSyncError
 
@@ -186,8 +186,14 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
         control_plane.issue_labels["issue-1"] = ["agent:ready"]
         await sync.reconcile_project_labels(Project("project-1", True))
         self.assertEqual(tracker.added, [("42", ["agent:human-approval", "agent:running"])])
-        self.assertEqual(tracker.removed, [("42", ["agent:ready"])])
-        self.assertEqual(control_plane.issue_labels["issue-1"], ["agent:human-approval", "agent:running"])
+        # The ready label stays: it is the operator's request, not a status this
+        # service owns. `agent:running` alongside it is what keeps the issue from
+        # being scheduled a second time.
+        self.assertEqual(tracker.removed, [])
+        self.assertEqual(
+            control_plane.issue_labels["issue-1"],
+            ["agent:human-approval", "agent:ready", "agent:running"],
+        )
 
     async def test_label_reconciliation_is_idempotent_after_persistence(self) -> None:
         sync, control_plane, tracker = self._sync()
@@ -227,10 +233,14 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
         ]
         await sync.reconcile_project_labels(Project("project-1", True))
         self.assertEqual(tracker.added, [("42", ["agent:running"])])
-        self.assertEqual(tracker.removed, [("42", ["agent:ready"])])
+        # Nothing is removed: the triage labels and the priority label are
+        # outside the managed namespace, and `agent:ready` is protected inside
+        # it. What this test exists to prove is that the four labels a human put
+        # on the issue all survive a reconciliation pass.
+        self.assertEqual(tracker.removed, [])
         self.assertEqual(
             control_plane.issue_labels["issue-42"],
-            ["agent-priority:5", "agent:running", "bug", "enhancement", "needs-design"],
+            ["agent-priority:5", "agent:ready", "agent:running", "bug", "enhancement", "needs-design"],
         )
 
     async def test_label_reconciliation_converges_on_the_newest_run_in_any_order(self) -> None:
@@ -265,8 +275,40 @@ class IssueSyncTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(control_plane.upserted[-1]["priority"], 10)
                 self.assertIn("bug", tracker._issues[0].labels)
                 self.assertIn("agent-priority:10", tracker._issues[0].labels)
-        self.assertEqual(tracker.removed, [("42", ["agent:ready"])])
+        self.assertEqual(tracker.removed, [])
         self.assertEqual(tracker.added, [("42", ["agent:running"])])
+
+    async def test_a_run_that_ended_badly_leaves_the_ready_label_alone(self) -> None:
+        """The reported bug: sync deleted the label that queues the issue.
+
+        A status the label mapping does not name -- `failed`, `cancelled` --
+        yields no desired labels, and reconciliation used to read that as
+        "remove every agent: label", taking `agent:ready` with it. The operator
+        re-applied it by hand and the next sync removed it again.
+        """
+        for status in ("failed", "cancelled"):
+            with self.subTest(status=status):
+                sync, control_plane, tracker = self._sync()
+                control_plane.active_workflows = [_workflow(status)]
+                control_plane.issue_labels["issue-42"] = ["agent:ready", "agent:running"]
+
+                await sync.reconcile_project_labels(Project("project-1", True))
+
+                self.assertEqual(tracker.removed, [("42", ["agent:running"])])
+                self.assertEqual(control_plane.issue_labels["issue-42"], ["agent:ready"])
+
+    async def test_a_failed_run_leaves_the_issue_eligible_to_be_retried(self) -> None:
+        # With `agent:ready` kept and `agent:running` gone, the issue satisfies
+        # the eligibility rule again rather than being silently un-queued.
+        sync, control_plane, _ = self._sync()
+        control_plane.active_workflows = [_workflow("failed")]
+        control_plane.issue_labels["issue-42"] = ["agent:ready", "agent:running"]
+
+        await sync.reconcile_project_labels(Project("project-1", True))
+
+        self.assertTrue(
+            is_eligible(control_plane.issue_labels["issue-42"], "open", LabelPolicy())
+        )
 
     async def test_sync_project_raises_on_tracker_failure(self) -> None:
         sync, _, _ = self._sync(tracker_fail=True)

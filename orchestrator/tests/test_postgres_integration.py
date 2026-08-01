@@ -2445,5 +2445,121 @@ class ResolveJobSecretIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class IssueStateNormalizationIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """An issue synchronised from GitHub must be visible to every reader.
+
+    The GitHub CLI reports state as "OPEN". It was stored verbatim while every
+    query compares against 'open', so a project whose issues had just
+    synchronised successfully showed "0/0" in the console, had an empty queue,
+    and contributed nothing to the queue-depth metric -- while `schedule()`,
+    which did not filter on state at all, could still pick the issue up.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._disable_seeded_projects)
+        await MigrationRunner(self.pool).run()
+        self.control_plane = AsyncpgControlPlane(self.pool)
+        self.project_id = await self._project()
+
+    async def _disable_seeded_projects(self) -> None:
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+
+    async def _project(self) -> str:
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        project = await self.control_plane.create_project(
+            f"issue-state-{uuid4().hex[:12]}",
+            "managed_clone",
+            "https://example.test/issue-state.git",
+            None,
+            "main",
+            {"linux"},
+            _NOW,
+        )
+        return str(project["id"])
+
+    async def _upsert(self, external_id: str, state: str, eligible: bool = True) -> None:
+        await self.control_plane.upsert_issue(
+            project_id=self.project_id,
+            external_id=external_id,
+            title="An issue the console must be able to count",
+            body="",
+            state=state,
+            labels=["agent:ready"],
+            priority=100,
+            eligible=eligible,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+
+    async def test_the_state_github_reports_is_stored_canonically(self) -> None:
+        await self._upsert("1", "OPEN")
+        self.assertEqual(
+            await self.pool.fetchval(
+                "SELECT state FROM app.issues WHERE project_id = $1", UUID(self.project_id)
+            ),
+            "open",
+        )
+
+    async def test_an_issue_synced_as_OPEN_is_counted_as_eligible(self) -> None:
+        # This is the reported symptom: four issues synchronised, console "0/0".
+        await self._upsert("1", "OPEN")
+        entry = next(
+            e for e in await self.control_plane.issue_sync_status(_NOW)
+            if e["project_id"] == self.project_id
+        )
+        self.assertEqual(entry["issue_count"], 1)
+        self.assertEqual(entry["eligible_count"], 1)
+
+    async def test_an_issue_synced_as_OPEN_reaches_the_queue(self) -> None:
+        await self._upsert("1", "OPEN")
+        await self.pool.execute(
+            "UPDATE app.projects SET enabled = true WHERE id = $1", UUID(self.project_id)
+        )
+        queued = [
+            entry for entry in await self.control_plane.list_queue(_NOW, 50)
+            if entry["project_id"] == self.project_id
+        ]
+        self.assertEqual(len(queued), 1)
+
+    async def test_a_closed_issue_is_not_scheduled_even_if_eligible_is_stale(self) -> None:
+        # `eligible` is a cached verdict from the last sync; the state is the
+        # fact. Scheduling on the cache alone would act on a closed issue.
+        await self._upsert("1", "CLOSED", eligible=True)
+        await self.pool.execute(
+            "UPDATE app.projects SET enabled = true WHERE id = $1", UUID(self.project_id)
+        )
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        self.assertIsNone(scheduled)
+
+    async def test_a_project_that_has_never_synced_does_not_break_the_status_view(self) -> None:
+        # No issue_sync_state row means a NULL failure count from the LEFT JOIN.
+        # int(None) raised, taking down the one view an operator would consult
+        # to find out why a project they just added is not being picked up.
+        entry = next(
+            e for e in await self.control_plane.issue_sync_status(_NOW)
+            if e["project_id"] == self.project_id
+        )
+        self.assertEqual(entry["consecutive_failures"], 0)
+        self.assertIsNone(entry["last_synced_at"])
+        self.assertFalse(entry["backing_off"])
+
+    async def test_mixed_case_from_any_code_host_normalises(self) -> None:
+        for spelling in ("Open", " OPEN ", "open"):
+            await self._upsert("1", spelling)
+            self.assertEqual(
+                await self.pool.fetchval(
+                    "SELECT state FROM app.issues WHERE project_id = $1", UUID(self.project_id)
+                ),
+                "open",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

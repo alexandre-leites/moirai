@@ -2,6 +2,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from moirai.domain import ExternalIssue, LabelPolicy, reconcile_labels, synchronize_issue
+from moirai.domain.issues import is_eligible
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -90,3 +91,62 @@ class IssueSynchronizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadyLabelIsOperatorInputTests(unittest.TestCase):
+    """`agent:ready` lives inside the managed prefix but is not agent state.
+
+    A run that ends in a status with no desired labels -- `failed`, `cancelled`,
+    or anything the mapping does not know -- used to have reconciliation strip
+    every `agent:` label, including the one a human applied to ask for the work.
+    Re-applying it by hand only had it removed again on the next sync.
+    """
+
+    def test_reconciliation_never_removes_the_ready_label(self) -> None:
+        policy = LabelPolicy()
+        _, remove = reconcile_labels(
+            (policy.ready, policy.running, "bug"),
+            (),
+            managed_prefix=policy.managed_prefix,
+            protected=(policy.ready,),
+        )
+        self.assertEqual(remove, (policy.running,))
+
+    def test_a_protected_label_is_still_added_when_desired(self) -> None:
+        policy = LabelPolicy()
+        add, remove = reconcile_labels(
+            (), (policy.ready,), managed_prefix=policy.managed_prefix, protected=(policy.ready,)
+        )
+        self.assertEqual(add, (policy.ready,))
+        self.assertEqual(remove, ())
+
+    def test_protecting_one_label_does_not_protect_the_rest_of_the_namespace(self) -> None:
+        policy = LabelPolicy()
+        _, remove = reconcile_labels(
+            (policy.ready, policy.running, policy.blocked, policy.delivered),
+            (),
+            managed_prefix=policy.managed_prefix,
+            protected=(policy.ready,),
+        )
+        self.assertEqual(remove, (policy.blocked, policy.delivered, policy.running))
+
+    def test_labels_outside_the_namespace_are_still_never_touched(self) -> None:
+        policy = LabelPolicy()
+        _, remove = reconcile_labels(
+            ("bug", "agent-priority:100", policy.running),
+            (),
+            managed_prefix=policy.managed_prefix,
+            protected=(policy.ready,),
+        )
+        self.assertEqual(remove, (policy.running,))
+
+    def test_an_issue_keeps_its_ready_label_through_a_failed_run(self) -> None:
+        # End to end on the domain rule: after the labels a failed run leaves
+        # behind, the issue is eligible again rather than silently un-queued.
+        policy = LabelPolicy()
+        current = (policy.ready, policy.running)
+        _, remove = reconcile_labels(
+            current, (), managed_prefix=policy.managed_prefix, protected=(policy.ready,)
+        )
+        remaining = tuple(label for label in current if label not in remove)
+        self.assertTrue(is_eligible(remaining, "open", policy))

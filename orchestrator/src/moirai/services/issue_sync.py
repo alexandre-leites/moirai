@@ -268,7 +268,13 @@ class IssueSync:
             current_labels = await _await(self._control_plane.get_issue_labels(workflow["issue_id"]))
             desired_labels = _desired_labels_for_workflow(workflow, self._label_policy)
             to_add, to_remove = reconcile_labels(
-                current_labels, desired_labels, managed_prefix=self._label_policy.managed_prefix
+                current_labels,
+                desired_labels,
+                managed_prefix=self._label_policy.managed_prefix,
+                # The ready label is the operator's request, not a status this
+                # service owns. Removing it on a run that ended badly deletes
+                # the only thing that makes the issue eligible again.
+                protected=(self._label_policy.ready,),
             )
             if not to_add and not to_remove:
                 continue
