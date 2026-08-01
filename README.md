@@ -11,96 +11,72 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 - `proto/` contains the gRPC contracts; `api/openapi.yaml` is the maintained HTTP contract.
 - `docs/design/web-console/` is the approved management-console design package: benchmark mockup, UI specification, and implementation task breakdown.
 
-## Quick start — the `local` stack
-
-One file, nothing to prepare: [`compose.local.yaml`](compose.local.yaml) pulls the published
-images and carries a working default for every value, so it starts unattended and can be pasted
-straight into Portainer (**Stacks → Add stack → Web editor**).
+## Quick start
 
 ```bash
-docker compose -f compose.local.yaml up -d
+docker compose up -d
 ```
-
-> Do **not** deploy [`compose.ghcr.yaml`](compose.ghcr.yaml) on its own. It is an overlay that
-> only replaces `build:` with `image:`; alone it defines no database, environment or secrets, and
-> every service fails at startup. Layer it on `compose.yaml`, or use `compose.local.yaml`.
 
 Then open <http://localhost:3000> and sign in as `admin` / `Moirai-Local-1`.
 
-**You do not need a GitHub token to bring it up.** The stack runs, the console works, and you
-can sign in and look around without one. Moirai just cannot do any *work* without it — reading
-issues, cloning, pushing and opening pull requests all happen as you — so set
-`MOIRAI_GITHUB_TOKEN` (scopes: `repo`, `workflow`) when you want it to actually run something.
-In Portainer that goes under **Environment variables** on the stack form.
+That is the whole installation. `compose.yaml` is complete and self-contained: it pulls the
+published images, brings up all five services in the right order, and every setting has a working
+default, so nothing has to be prepared first — no `.env`, no `secrets/`, no build step. Copy
+[`.env.example`](.env.example) to `.env` when you want to change something; it documents every
+knob and its default.
 
-Everything else is optional and documented at the top of the file: `MOIRAI_ADMIN_PASSWORD`,
-`MOIRAI_POSTGRES_PASSWORD`, `MOIRAI_WEB_PORT`, `MOIRAI_RUNNER_LABELS`, `MOIRAI_RUNNER_CAPACITY`
-and the seed-project settings.
+In **Portainer**: *Stacks → Add stack → Web editor*, paste `compose.yaml`, and put any overrides
+under *Environment variables*. The repository is private, so the packages are too — add
+credentials for `ghcr.io` first under *Registries → Add registry → Custom*, or every pull fails
+with `403 Forbidden`.
 
-Only port 3000 is published — nginx proxies `/api/` to the API over an internal network, so no
-other port needs exposing. That makes it work unchanged on a remote Portainer host.
+**You do not need a GitHub token to bring it up.** The stack runs and the console works without
+one. Moirai just cannot do any *work* — reading issues, cloning, pushing and opening pull requests
+all happen as you — so set `MOIRAI_GITHUB_TOKEN` (scopes `repo`, `workflow`) when you want it to
+run something.
 
-**This file is for a trusted, private host.** Its passwords have defaults, which means they are
-public knowledge, and the console is plain HTTP. Change them if the host is shared, and do not
-expose it to the internet. For anything else use the hardened stack below, which keeps every
-secret in a file and binds the API to loopback.
+Only port 3000 is published; nginx proxies `/api/` to the API over an internal network. That is
+what lets the same file work unchanged against a remote Portainer host.
 
-## Hardened stack
+Startup order is enforced by health checks rather than by timing: postgres has to report ready
+before the orchestrator starts, and the orchestrator has to report its database reachable and
+migrations applied before the API and runner do. `docker compose up --wait` returns only once all
+five are healthy.
 
-Prerequisites: Docker Engine with the Compose plugin and a GitHub token that can access the repository you intend to automate.
+### Two overlays
 
 ```bash
-cp .env.example .env
-mkdir -p secrets
-printf '%s\n' 'choose-a-strong-postgres-password' > secrets/postgres_password
-printf '%s\n' 'postgresql+asyncpg://loop:choose-a-strong-postgres-password@postgres:5432/loop' > secrets/database_url
-printf '%s\n' 'Choose-A-Strong-Admin-Password-1' > secrets/initial_admin_password
-printf '%s\n' 'github-token-with-repo-and-workflow-scopes' > secrets/github_token
-openssl rand -hex 32 > secrets/runner_registration_token
-chmod 600 secrets/*
-docker compose up --build -d
-docker compose ps
-curl --fail http://localhost:3000/
-curl --fail http://localhost:8080/ready
+# build the images from this checkout instead of pulling them
+docker compose -f compose.yaml -f compose.build.yaml up --build -d
+
+# read every secret from a file under ./secrets/ instead of the environment
+docker compose -f compose.yaml -f compose.secrets.yaml up -d
 ```
 
-The admin password is checked on first boot: at least 8 characters with a digit, a capital, a
-lowercase letter and a symbol. A password that fails the policy stops the orchestrator from
-starting, and Compose reports it as an unhealthy container rather than a bad password.
+Environment values are visible to `docker inspect` and to anything that renders a container's
+configuration, Portainer's UI included. [`compose.secrets.yaml`](compose.secrets.yaml) moves them
+into files; its header lists the five it expects. It needs files on the Docker host, so it suits a
+machine you have a shell on rather than a pasted Portainer stack.
 
-`docker compose ps` reports every service as healthy once startup completes. The API port is bound to loopback for local diagnostics; use the web endpoint on port 3000 for normal browser access. Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to remove local database and runner data.
+**The defaults are public knowledge and the console is plain HTTP.** That is fine on a private
+host and nowhere else: change `MOIRAI_ADMIN_PASSWORD` and `MOIRAI_POSTGRES_PASSWORD` if anyone
+else can reach it, put it behind TLS before exposing it, and set `MOIRAI_COOKIE_SECURE=true` when
+you do.
 
-That is the whole installation: Compose builds `orchestrator/`, `api/`, `runner/`, and `web/` from this checkout, so no language toolchain has to be installed on the host. Every service image runs its process as an unprivileged user, drops all Linux capabilities, and sets `no-new-privileges`.
+## Published images
 
-Compose reads passwords, tokens, and registration credentials only from the files in `secrets/`. Do not put their values in `.env` or shell environment variables. The `.env` file contains non-secret configuration only; its `${...}` values are the variables Compose reads.
+`v0.1.0` is published: `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}` at `0.1.0`,
+`0.1`, `0`, `latest` and `sha-<short sha>`, each a `linux/amd64` + `linux/arm64` manifest list.
 
-`secrets/github_token` is mounted into both the orchestrator and the runner. The orchestrator uses it for issue synchronization and pull requests; the runner uses it to authenticate `git clone`, `git fetch`, and `git push` for the repositories it works on. A task packet only names the credential it needs, and the runner resolves the value locally, so the token never travels over the control stream. `LOOP_RUNNER_ALLOWED_ENVIRONMENT` must list `GITHUB_TOKEN` for that resolution to be permitted; a packet naming a variable that is not allowed or not configured fails the execution instead of running unauthenticated.
+`compose.yaml` pulls `latest` by default. Pin `MOIRAI_IMAGE_TAG=0.1.0` for anything reproducible;
+`latest` moves with every release. `MOIRAI_IMAGE_PREFIX` points the stack at a fork or mirror.
 
-## Running published images
-
-`v0.1.0` is published: all four images exist at `0.1.0`, `0.1`, `0`, `latest` and
-`sha-f62d553`, each a `linux/amd64` + `linux/arm64` manifest list.
-
-The repository is private, so the packages are too. Pulling needs a token with `read:packages`:
+The packages inherit the repository's visibility, so while it is private a pull needs a token with
+`read:packages`:
 
 ```bash
 echo "$GHCR_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
 ```
-
-In Portainer, add the same credential under **Registries → Add registry → Custom**
-(`ghcr.io`) before deploying the stack, or every image pull fails with `403 Forbidden`.
-
-The same stack runs from the images published to GitHub Container Registry, without building anything. `compose.ghcr.yaml` replaces the four `build:` sections with `image:` references and changes nothing else — same networks, secrets, healthchecks, and capability drops.
-
-```bash
-# secrets/ and .env are prepared exactly as above
-docker login ghcr.io          # required while the repository is private
-export MOIRAI_IMAGE_TAG=1.4.0 # defaults to latest, which moves
-docker compose -f compose.yaml -f compose.ghcr.yaml pull
-docker compose -f compose.yaml -f compose.ghcr.yaml up --detach --wait
-```
-
-The images are `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}`, each a `linux/amd64` + `linux/arm64` manifest list. `MOIRAI_IMAGE_PREFIX` overrides the registry and namespace for a fork or mirror.
 
 ## Releases
 

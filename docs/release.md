@@ -17,7 +17,7 @@ pushes an image.
 The names are `ghcr.io/<owner>/<repo>/<service>`, derived at runtime from
 `github.repository`, so a fork publishes under its own owner without editing the
 workflow. (A fork consuming its own images does have to set
-`MOIRAI_IMAGE_PREFIX`; `compose.ghcr.yaml` cannot read `github.repository`.)
+`MOIRAI_IMAGE_PREFIX`; Compose cannot read `github.repository`.)
 The nested form was chosen over a flat `moirai-<service>` because the
 repository is a monorepo of co-released services: nesting keeps all four
 packages grouped under the repository they come from, and leaves the owner's
@@ -151,19 +151,10 @@ layers.
 
 ## Running the published images
 
-See [`compose.ghcr.yaml`](../compose.ghcr.yaml). It replaces the four `build:`
-sections in `compose.yaml` with `image:` references and changes nothing else --
-same networks, secrets, healthchecks, and capability drops.
-
-```bash
-export MOIRAI_IMAGE_TAG=1.4.0
-docker compose -f compose.yaml -f compose.ghcr.yaml pull
-docker compose -f compose.yaml -f compose.ghcr.yaml up --detach --wait
-```
-
-`MOIRAI_IMAGE_TAG` defaults to `latest`, which moves; pin an exact version or a
-`sha-<short sha>` tag for anything reproducible. `MOIRAI_IMAGE_PREFIX` overrides
-the registry and namespace, for a fork or a mirror.
+`compose.yaml` pulls the published images by default, so consuming a release is just
+`docker compose up -d`. `MOIRAI_IMAGE_TAG` selects the version (`latest` by
+default, which moves) and `MOIRAI_IMAGE_PREFIX` points at a fork or mirror.
+Building from the checkout instead is the `compose.build.yaml` overlay.
 
 ## Credentials
 

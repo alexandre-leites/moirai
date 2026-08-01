@@ -1,0 +1,27 @@
+# Build the four images from this checkout instead of pulling them from GHCR.
+#
+#   docker compose -f compose.yaml -f compose.build.yaml up --build -d
+#
+# The `image:` names from compose.yaml are kept, so a build tags the result
+# under the same reference the default stack would have pulled. Everything else
+# -- services, environment, networks, healthchecks, capability drops -- comes
+# from compose.yaml unchanged.
+
+services:
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+
+  web:
+    build: ./web
+
+  runner:
+    build:
+      context: .
+      dockerfile: runner/Dockerfile

@@ -1,3 +1,29 @@
+# Moirai — the whole stack, ready to run.
+#
+#   docker compose up -d
+#
+# Nothing has to be prepared: every setting has a working default, so this comes
+# up on a clean machine with no .env, no secrets directory, and no build step.
+# Copy .env.example to .env when you want to change something.
+#
+# In Portainer: Stacks -> Add stack -> Web editor, paste this file, and put any
+# overrides under "Environment variables". The images come from GHCR, so the
+# Docker host needs credentials for ghcr.io while this repository is private
+# (Registries -> Add registry -> Custom).
+#
+# Two optional overlays:
+#
+#   -f compose.yaml -f compose.build.yaml    build the images from this checkout
+#   -f compose.yaml -f compose.secrets.yaml  read secrets from ./secrets/ files
+#
+# ---------------------------------------------------------------------------
+# The defaults below are public knowledge, and the console is served over plain
+# HTTP. That is fine on a private host and nowhere else: change
+# MOIRAI_ADMIN_PASSWORD and MOIRAI_POSTGRES_PASSWORD if anyone else can reach
+# it, and put it behind TLS before exposing it. compose.secrets.yaml moves every
+# secret out of the environment and into files.
+# ---------------------------------------------------------------------------
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -5,126 +31,141 @@ services:
     environment:
       POSTGRES_DB: loop
       POSTGRES_USER: loop
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets: [postgres_password]
+      POSTGRES_PASSWORD: "${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}"
     volumes: [postgres-data:/var/lib/postgresql/data]
     networks: [database]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, DAC_READ_SEARCH, FOWNER, SETGID, SETUID]
+    # Everything downstream waits on this, so it is what makes the start order
+    # hold: the orchestrator never runs a migration against a database that is
+    # still initialising.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U loop -d loop"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 12
+      start_period: 20s
 
   orchestrator:
-    build:
-      context: ./orchestrator
-      dockerfile: Dockerfile
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/orchestrator:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      LOOP_DATABASE_URL_FILE: /run/secrets/database_url
       LOOP_GRPC_BIND: 0.0.0.0:50051
-      LOOP_INITIAL_ADMIN_USERNAME: "${LOOP_INITIAL_ADMIN_USERNAME:-admin}"
-      LOOP_INITIAL_ADMIN_PASSWORD_FILE: /run/secrets/initial_admin_password
-      LOOP_GITHUB_TOKEN_FILE: /run/secrets/github_token
-      RUNNER_REGISTRATION_TOKEN_FILE: /run/secrets/runner_registration_token
-      # `-` and not `:-`: an empty LOOP_SEED_PROJECT_NAME in .env is the documented
-      # way to turn seed-project bootstrap off, so it must survive substitution.
-      LOOP_SEED_PROJECT_NAME: "${LOOP_SEED_PROJECT_NAME-demo}"
-      LOOP_SEED_PROJECT_REPOSITORY_URL: "${LOOP_SEED_PROJECT_REPOSITORY_URL}"
-      LOOP_SEED_TOKEN_LABELS: "${LOOP_SEED_TOKEN_LABELS:-linux}"
-      LOOP_SEED_ISSUE_TITLE: "${LOOP_SEED_ISSUE_TITLE:-}"
-      LOOP_SEED_ISSUE_BODY: "${LOOP_SEED_ISSUE_BODY:-}"
-    secrets: [database_url, initial_admin_password, github_token, runner_registration_token]
+      # The entrypoint writes each secret into a tmpfs file the unprivileged
+      # user can read and unsets the variable, so none reaches the server
+      # process. They are still visible to `docker inspect`; compose.secrets.yaml
+      # is the overlay that avoids that.
+      LOOP_DATABASE_URL: "postgresql+asyncpg://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop"
+      LOOP_INITIAL_ADMIN_USERNAME: "${MOIRAI_ADMIN_USERNAME:-admin}"
+      # At least 8 characters with a digit, a capital, a lowercase and a symbol.
+      # A password that fails the policy stops the orchestrator from starting,
+      # which Compose can only report as an unhealthy container.
+      LOOP_INITIAL_ADMIN_PASSWORD: "${MOIRAI_ADMIN_PASSWORD:-Moirai-Local-1}"
+      RUNNER_REGISTRATION_TOKEN: "${MOIRAI_RUNNER_TOKEN:-moirai-local-runner-registration-token}"
+      # Optional. Without it the stack runs and the console works, but Moirai
+      # cannot read issues, clone, push or open pull requests.
+      LOOP_GITHUB_TOKEN: "${MOIRAI_GITHUB_TOKEN-}"
+      # Seed project created on a fresh database. Set MOIRAI_SEED_PROJECT_NAME
+      # to an empty string to turn seeding off.
+      LOOP_SEED_PROJECT_NAME: "${MOIRAI_SEED_PROJECT_NAME-demo}"
+      LOOP_SEED_PROJECT_REPOSITORY_URL: "${MOIRAI_SEED_PROJECT_REPOSITORY_URL-}"
+      LOOP_SEED_TOKEN_LABELS: "${MOIRAI_RUNNER_LABELS:-linux}"
+      LOOP_SEED_ISSUE_TITLE: "${MOIRAI_SEED_ISSUE_TITLE-}"
+      LOOP_SEED_ISSUE_BODY: "${MOIRAI_SEED_ISSUE_BODY-}"
     depends_on:
       postgres: {condition: service_healthy}
     networks: [database, control]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    # Reports healthy only once the database is reachable and migrations have
+    # run, which is what the api and runner below actually need.
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json')); sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else 1)\""]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 12
+      start_period: 60s
 
   api:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/api:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
-      LOOP_API_COOKIE_SECURE: "false"
+      # The console is plain HTTP here, so the session cookie cannot carry
+      # Secure or the browser refuses to store it. Set this to "true" once the
+      # stack is behind TLS.
+      LOOP_API_COOKIE_SECURE: "${MOIRAI_COOKIE_SECURE:-false}"
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]
-    ports: ["127.0.0.1:8080:8080"]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/ready || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 15s
+      retries: 12
+      start_period: 20s
 
   web:
-    build: ./web
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/web:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       api: {condition: service_healthy}
     networks: [public]
-    ports: ["3000:8080"]
+    # The only published port. nginx proxies /api/ to the api service over an
+    # internal network, so nothing else needs exposing -- which is what lets
+    # this work unchanged against a remote Portainer host.
+    ports: ["${MOIRAI_WEB_PORT:-3000}:8080"]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 12
       start_period: 15s
 
   runner:
-    build:
-      context: .
-      dockerfile: runner/Dockerfile
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/runner:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
-      LOOP_RUNNER_REGISTRATION_TOKEN_FILE: /run/secrets/runner_registration_token
-      LOOP_RUNNER_NAME: "${LOOP_RUNNER_NAME:-runner-1}"
-      LOOP_RUNNER_LABELS: "${LOOP_RUNNER_LABELS:-linux}"
-      LOOP_RUNNER_CAPACITY: "${LOOP_RUNNER_CAPACITY:-1}"
-      LOOP_RUNNER_ALLOWED_ENVIRONMENT: "${LOOP_RUNNER_ALLOWED_ENVIRONMENT:-GITHUB_TOKEN}"
-      GITHUB_TOKEN_FILE: /run/secrets/github_token
-      LOOP_RUNNER_AGENT_ARGUMENTS: "--model,opencode/deepseek-v4-flash-free,--auto"
-    secrets: [runner_registration_token, github_token]
-    read_only: true
-    tmpfs:
-      - /run:mode=0755
+      # Written to tmpfs and unset by the entrypoint before the runner starts,
+      # so it never reaches the runner process, let alone an agent it spawns.
+      # Must match the orchestrator's RUNNER_REGISTRATION_TOKEN above.
+      LOOP_RUNNER_REGISTRATION_TOKEN: "${MOIRAI_RUNNER_TOKEN:-moirai-local-runner-registration-token}"
+      LOOP_RUNNER_NAME: "${MOIRAI_RUNNER_NAME:-runner-1}"
+      LOOP_RUNNER_LABELS: "${MOIRAI_RUNNER_LABELS:-linux}"
+      LOOP_RUNNER_CAPACITY: "${MOIRAI_RUNNER_CAPACITY:-1}"
+      # Which task-packet environment requests the runner will honour.
+      # GITHUB_TOKEN is required for managed clones and anything that pushes.
+      LOOP_RUNNER_ALLOWED_ENVIRONMENT: GITHUB_TOKEN
+      GITHUB_TOKEN: "${MOIRAI_GITHUB_TOKEN-}"
+      LOOP_RUNNER_AGENT_ARGUMENTS: "${MOIRAI_AGENT_ARGUMENTS:---model,opencode/deepseek-v4-flash-free,--auto}"
     depends_on:
       orchestrator: {condition: service_healthy}
     networks: [control, public]
     volumes: [runner-data:/data]
+    read_only: true
+    tmpfs:
+      - /run:mode=0755
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
     healthcheck:
       test: ["CMD", "/runner", "live"]
-      interval: 15s
+      interval: 10s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 12
+      start_period: 40s
     deploy:
       resources:
         limits:
-          cpus: "2"
-          memory: 4g
+          cpus: "${MOIRAI_RUNNER_CPUS:-2}"
+          memory: "${MOIRAI_RUNNER_MEMORY:-4g}"
 
 networks:
   database: {internal: true}
@@ -134,15 +175,3 @@ networks:
 volumes:
   postgres-data: {}
   runner-data: {}
-
-secrets:
-  postgres_password:
-    file: ./secrets/postgres_password
-  database_url:
-    file: ./secrets/database_url
-  initial_admin_password:
-    file: ./secrets/initial_admin_password
-  github_token:
-    file: ./secrets/github_token
-  runner_registration_token:
-    file: ./secrets/runner_registration_token
