@@ -209,9 +209,18 @@ jobs:
 
       # Only the runtime stages of the images are emulated: the Go builders and
       # the web bundle build run on the native build platform and cross-compile.
+      #
+      # QEMU is pinned rather than floating on `latest`. The runner image's
+      # runtime stage runs opencode's npm postinstall, which executes a
+      # Bun-built arm64 binary; under the emulator the action was resolving,
+      # that binary died with SIGILL (exit 132) every time, while the same build
+      # succeeds under qemu-v9.2.2. `cache-image: false` stops a previously
+      # cached binfmt layer from silently reintroducing the older emulator.
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
         with:
           platforms: arm64
+          image: tonistiigi/binfmt:qemu-v9.2.2
+          cache-image: false
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
