@@ -1,167 +1,163 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
-import type { ApiClient, Workflow } from "./api";
-import { useIsAdmin } from "./auth";
+// Workflow list (specification.md §5.3). Filter and search live in the query
+// string, so an operator can link a colleague straight at what they are looking at.
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import type { Workflow } from "./api";
+import { useConsoleData } from "./console-data";
+import { ATTEMPT_BUDGETS, NEEDS_ATTENTION_STATUSES, isTerminal } from "./status";
+import {
+  Age, Card, Empty, ErrorBlock, FilterChips, Meter, RowLink, Skeleton, StatusPill, TableWrap,
+} from "./ui";
+import { PhaseThread } from "./ui/thread";
 
-const AWAITING_APPROVAL_STATUS = "waiting_human";
-const TERMINAL_STATUSES = new Set(["blocked", "failed", "cancelled"]);
+const FILTERS = [
+  ["active", "Active"],
+  ["needs_you", "Needs you"],
+  ["terminal", "Terminal"],
+  ["all", "All"],
+] as const;
 
-export function WorkflowsPage({ api }: { api: ApiClient }) {
-  const isAdmin = useIsAdmin();
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
-  const [projectNames, setProjectNames] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
-  const [pendingId, setPendingId] = useState<string | null>(null);
-  const [reasonByID, setReasonByID] = useState<Record<string, string>>({});
-  const [error, setError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+type Filter = (typeof FILTERS)[number][0];
+
+const isFilter = (value: string | null): value is Filter =>
+  FILTERS.some(([key]) => key === value);
+
+export function matchesFilter(workflow: Workflow, filter: Filter): boolean {
+  switch (filter) {
+    case "active": return !isTerminal(workflow.status);
+    case "needs_you": return NEEDS_ATTENTION_STATUSES.has(workflow.status);
+    case "terminal": return isTerminal(workflow.status);
+    case "all": return true;
+  }
+}
+
+/** Search covers what an operator has in hand: an issue, a branch, or a PR. */
+export function matchesQuery(workflow: Workflow, projectName: string, query: string): boolean {
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return [
+    projectName,
+    workflow.issueExternalId,
+    workflow.issueTitle,
+    workflow.branchName,
+    workflow.pullRequestExternalId,
+  ].some((field) => field?.toLowerCase().includes(needle));
+}
+
+export function WorkflowsPage() {
+  const navigate = useNavigate();
+  const { data, error, loading, refresh, projectName } = useConsoleData();
+  const [params, setParams] = useSearchParams();
+
+  const filter: Filter = isFilter(params.get("filter")) ? (params.get("filter") as Filter) : "active";
+  const query = params.get("q") ?? "";
+  // The box stays responsive while the URL — and therefore the filtering — lags
+  // behind by a beat, so typing never feels like it stutters.
+  const [draft, setDraft] = useState(query);
+
+  useEffect(() => { setDraft(query); }, [query]);
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    Promise.all([api.listWorkflows(ctrl.signal), api.listProjects(ctrl.signal)])
-      .then(([loadedWorkflows, projects]) => {
-        setWorkflows(loadedWorkflows);
-        setProjectNames(Object.fromEntries(projects.map((project) => [project.id, project.name])));
-      })
-      .catch((err: unknown) => {
-        if (!ctrl.signal.aborted) setLoadError(err instanceof Error ? err.message : "Could not load workflows.");
-      })
-      .finally(() => {
-        if (!ctrl.signal.aborted) setLoading(false);
-      });
-    return () => ctrl.abort();
-  }, [api]);
+    if (draft === query) return;
+    const timer = setTimeout(() => {
+      setParams((current) => {
+        const next = new URLSearchParams(current);
+        if (draft) next.set("q", draft);
+        else next.delete("q");
+        return next;
+      }, { replace: true });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [draft, query, setParams]);
 
-  async function control(id: string, action: "retry" | "cancel" | "block") {
-    if (!isAdmin) return; // ponytail: backend is security boundary, ui safety only
-    const reason = reasonByID[id] ?? "";
-    if (action === "block" && !reason.trim()) {
-      setError("A blocking reason is required.");
-      return;
-    }
-    setPendingId(id);
-    setError(null);
-    try {
-      const updated = action === "retry"
-        ? await api.retryWorkflow(id, reason)
-        : action === "cancel"
-          ? await api.cancelWorkflow(id, reason)
-          : await api.blockWorkflow(id, reason);
-      setWorkflows((current) => current.map((w) => (w.id === id ? updated : w)));
-    } catch {
-      setError(`Could not ${action} the workflow. Please try again.`);
-    } finally {
-      setPendingId(null);
-    }
-  }
+  const rows = useMemo(() => {
+    const workflows = data?.workflows ?? [];
+    return workflows.filter(
+      (workflow) => matchesFilter(workflow, filter) && matchesQuery(workflow, projectName(workflow.projectId), query)
+    );
+  }, [data, filter, query, projectName]);
 
-  async function decide(id: string, decision: "approved" | "changes_requested") {
-    if (!isAdmin) return; // ponytail: backend is security boundary, ui safety only
-    setPendingId(id);
-    setError(null);
-    try {
-      const updated = await api.submitWorkflowDecision(id, decision);
-      setWorkflows((current) => current.map((w) => (w.id === id ? updated : w)));
-    } catch {
-      setError("Could not submit the decision. Please try again.");
-    } finally {
-      setPendingId(null);
-    }
-  }
-
-  if (loading) return <p>Loading workflows...</p>;
-  if (loadError) return <p className="error" role="alert">Could not load workflows: {loadError}</p>;
+  const setFilter = (next: Filter) => {
+    setParams((current) => {
+      const params = new URLSearchParams(current);
+      params.set("filter", next);
+      return params;
+    });
+  };
 
   return (
     <div>
       <div className="view-head"><h1>Workflows</h1></div>
-      <p className="view-sub">Durable workflow state, phase progress, and operator controls.</p>
-      {error && <p className="error">{error}</p>}
-      {workflows.length === 0 ? <p className="empty-state">No active workflows or recorded runs yet.</p> : (
-<<<<<<< HEAD
-        <table>
-          <thead><tr><th>ID</th><th>Project</th><th>Status</th><th>Phase</th><th>Approval</th><th>Controls</th></tr></thead>
-          <tbody>
-            {workflows.map((w) => (
-              <tr key={w.id}>
-                <td className="mono"><Link to={`/workflows/${w.id}`}>{w.id.slice(0, 12)}</Link></td>
-                <td>{projectNames[w.projectId] ?? w.projectId}</td>
-                <td>{w.status}</td>
-                <td>{w.phase}</td>
-                <td>
-                  {w.status === AWAITING_APPROVAL_STATUS && (
-                    <span className="workflow-decision-actions">
-                      <button disabled={!isAdmin || pendingId === w.id} onClick={() => decide(w.id, "approved")}>Approve</button>
-                      <button disabled={!isAdmin || pendingId === w.id} onClick={() => decide(w.id, "changes_requested")}>Request changes</button>
-                    </span>
-                  )}
-                </td>
-                <td>
-                  {isAdmin && (
-                    TERMINAL_STATUSES.has(w.status) ? (
-                      <button disabled={pendingId === w.id} onClick={() => control(w.id, "retry")}>Retry</button>
-                    ) : w.status !== "completed" ? (
-                      <span className="workflow-decision-actions">
-                        <input
-                          aria-label={`Reason for ${w.id}`}
-                          value={reasonByID[w.id] ?? ""}
-                          onChange={(event) => setReasonByID((current) => ({ ...current, [w.id]: event.target.value }))}
-                        />
-                        <button disabled={pendingId === w.id} onClick={() => control(w.id, "cancel")}>Cancel</button>
-                        <button disabled={pendingId === w.id} onClick={() => control(w.id, "block")}>Block</button>
-                      </span>
-                    ) : null
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-=======
-          <table>
-            <thead><tr><th>ID</th><th>Project</th><th>Issue</th><th>Status</th><th>Phase</th><th>Progress</th><th>Approval</th><th>Controls</th></tr></thead>
-            <tbody>
-              {workflows.map((w) => (
-                <tr key={w.id}>
-                  <td className="mono"><Link to={`/workflows/${w.id}`}>{w.id.slice(0, 12)}</Link></td>
-                  <td>{projectNames[w.projectId] ?? w.projectId}</td>
-                  <td>
-                    <span className="mono" title={w.issueTitle}>{w.issueExternalId}</span>
-                    {w.pullRequestUrl && <a href={w.pullRequestUrl} target="_blank" rel="noreferrer">PR</a>}
-                  </td>
-                  <td>{w.status}</td>
-                  <td>{w.phase}</td>
-                  <td>{w.planningAttempts + w.implementationAttempts}</td>
-                  <td>
-                    {isAdmin && w.status === AWAITING_APPROVAL_STATUS ? (
-                      <span className="workflow-decision-actions">
-                        <button disabled={pendingId === w.id} onClick={() => decide(w.id, "approved")}>Approve</button>
-                        <button disabled={pendingId === w.id} onClick={() => decide(w.id, "changes_requested")}>Request changes</button>
-                      </span>
-                    ) : null}
-                  </td>
-                  <td>
-                    {isAdmin && (
-                      TERMINAL_STATUSES.has(w.status) ? (
-                        <button disabled={pendingId === w.id} onClick={() => control(w.id, "retry")}>Retry</button>
-                      ) : w.status !== "completed" ? (
-                        <span className="workflow-decision-actions">
-                          <input
-                            aria-label={`Reason for ${w.id}`}
-                            value={reasonByID[w.id] ?? ""}
-                            onChange={(event) => setReasonByID((current) => ({ ...current, [w.id]: event.target.value }))}
-                          />
-                          <button disabled={pendingId === w.id} onClick={() => control(w.id, "cancel")}>Cancel</button>
-                          <button disabled={pendingId === w.id} onClick={() => control(w.id, "block")}>Block</button>
-                        </span>
-                      ) : null
-                    )}
-                  </td>
+      <p className="view-sub">
+        Every thread the orchestrator has spun — open one for phases, attempts, events, and controls.
+      </p>
+
+      <div className="filters" role="group" aria-label="Filter workflows">
+        <FilterChips options={FILTERS} value={filter} onChange={setFilter} label="Workflow filter" />
+        <span className="gap" />
+        <input
+          className="search"
+          type="search"
+          value={draft}
+          placeholder="Search issue, branch, PR…"
+          aria-label="Search workflows"
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      </div>
+
+      {error && data && <ErrorBlock title="Showing the last good snapshot — the refresh failed." detail={error} onRetry={refresh} />}
+      {error && !data && <ErrorBlock title="Workflows could not be loaded." detail={error} onRetry={refresh} />}
+      {loading && !data && <Skeleton cards={1} />}
+
+      {data && (
+        <Card>
+          <TableWrap>
+            <table>
+              <thead>
+                <tr>
+                  <th>Issue</th><th>Status</th><th>Thread</th><th>Attempts</th>
+                  <th>Branch</th><th>PR</th><th>Updated</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
->>>>>>> origin/main
+              </thead>
+              <tbody>
+                {rows.length === 0 ? (
+                  <tr><td colSpan={7}><Empty>No workflows match this filter.</Empty></td></tr>
+                ) : rows.map((workflow) => (
+                  <RowLink
+                    key={workflow.id}
+                    onOpen={() => navigate(`/workflows/${workflow.id}`)}
+                    label={`Open workflow for ${projectName(workflow.projectId)} issue ${workflow.issueExternalId}`}
+                  >
+                    <td>
+                      <b>{projectName(workflow.projectId)} {workflow.issueExternalId}</b>
+                      <div className="t2 cell-title">{workflow.issueTitle}</div>
+                    </td>
+                    <td><StatusPill status={workflow.status} /></td>
+                    <td><PhaseThread workflow={workflow} mini /></td>
+                    <td>
+                      <Meter used={workflow.totalAgentExecutions} budget={ATTEMPT_BUDGETS.totalExecutions} label="Total executions" />
+                    </td>
+                    <td className="num t2">{workflow.branchName || "—"}</td>
+                    <td>
+                      {workflow.pullRequestUrl ? (
+                        <a
+                          className="num"
+                          href={workflow.pullRequestUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          #{workflow.pullRequestExternalId || "PR"}
+                        </a>
+                      ) : <span className="t2">—</span>}
+                    </td>
+                    <td className="t2 nowrap"><Age timestamp={workflow.updatedAt} /></td>
+                  </RowLink>
+                ))}
+              </tbody>
+            </table>
+          </TableWrap>
+        </Card>
       )}
     </div>
   );

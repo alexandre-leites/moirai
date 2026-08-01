@@ -170,4 +170,52 @@ make failures visible, then finish MVP features, then harden.
 
 ## Review
 
-_To be filled in as phases complete._
+### 2026-08-01 — Console revamp (design package phases C, D, plus the backend it needed)
+
+Replaced the ad-hoc `web/src/` SPA with the approved console from
+`docs/design/web-console/`. Two blockers on `main` had to be cleared first — both were
+pre-existing breakage, not part of the design work:
+
+- `web/src/workflows.tsx` still carried `<<<<<<< HEAD` conflict markers and
+  `web/src/runners.tsx` had corrupted JSX, so `tsc` failed and the app did not build.
+- Commit `9312ee5` (#206) cut `api/internal/http/handlers/workflows.go` from 224 lines to a
+  31-line stub, deleting `get`, `listEvents`, `submitDecision`, `retry`, `cancel` and `block`
+  while leaving their routes registered, and pointing its imports at a module path that does
+  not exist. The Go API did not compile, and `queue.go` lost the `queryInt64` helper with it.
+
+**Backend (the minimum the console needed to be real).** Restored the workflow handlers.
+Widened the workflow list to the same projection as the detail read — `list_workflows` now
+shares `get_workflow`'s query, `ListWorkflows` maps it with `_workflow_detail_message`, and
+the Go handler emits the full payload — so the list, the overview and the phase threads read
+issue titles, pull requests, attempts and timestamps without a request per row. Added
+`total_agent_executions` to the proto `Workflow` message (the only attempt counter missing
+from the wire) and regenerated. `make proto-check` was already failing on `main` because the
+committed Go stubs predated `GetSchedulerMetrics`; regenerating fixed that too, and three of
+the five pre-existing mypy errors with it.
+
+**Console.** Token sheet and component library ported from the mockup, the phase thread in
+both variants, a polling data layer that hides the transport from views, and the six views
+the current API can answer honestly: overview, queue, workflow list, workflow detail,
+runners (with registration tokens folded in), and projects. Sidebar counts are live, the
+drawer is focus-trapped, routes set the document title, unknown routes 404.
+
+**Left out on purpose,** because no endpoint serves them and a placeholder that looks like a
+reading is worse than an absent one: the 14-day outcomes chart and sparkline (A9), circuits
+(A7, B5), the System view (A8, A10), runner capacity and reserved offers (A12), queue
+waiting age and richer hold reasons (A5), merge method in the decision panel (A11), SSE
+(E1). `web/README.md` carries the same table.
+
+**Two derivations to retire.** Gate state and thread position are derived from the attempt
+counters and the pull request, because `current_phase` is overwritten with `blocked`/`failed`
+when a run ends badly; event sentences are rendered client-side from `event_type`. Both are
+isolated in `web/src/status.ts` and documented there, and tasks A2 and A3 replace them.
+
+**Verified.** `go build ./... && go test ./...`, `make test-orchestrator` (no new failures),
+`make proto-check`, `make test-web` (176 tests, `tsc --noEmit`, eslint), `npm run build`, and
+a walk through every route in both themes and at narrow width against a stub API.
+
+**Still red on `main`, untouched here** (unrelated to this work): `test_metrics` expects a
+`scheduled_jobs` key the snapshot now returns, `test_runner_controls_require_admin_csrf_and_
+persist_actor` expects a viewer rejection that does not happen, one ruff error
+(`asyncio.TimeoutError` alias in `grpc/control_plane.py`), and two mypy errors
+(`metrics_snapshot` missing from the `ControlPlane` protocol, an unawaited coroutine).

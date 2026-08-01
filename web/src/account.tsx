@@ -51,41 +51,42 @@ export function AccountPage({ api }: { api: ApiClient }) {
 
   return (
     <section>
-      <div className="view-head"><h1>Account</h1><span className="crumb">Control plane</span></div>
+      <div className="view-head"><h1>Account</h1></div>
       <p className="view-sub">Update your display name, email, or password.</p>
-      <form onSubmit={handleSubmit} className="account-form">
-        {error && <p className="error" role="alert">{error}</p>}
-        {saved && <p className="notice" role="status">Account updated.</p>}
-        <label>
-          Username
-          <input type="text" value={state?.username ?? ""} disabled />
-        </label>
-        <label>
-          Display name
-          <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" disabled={saving} />
-        </label>
-        <label>
-          Email
-          <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} autoComplete="email" disabled={saving} />
-        </label>
-        <div className="form-divider">Change password</div>
-        <label>
-          Current password
-          <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" disabled={saving} />
-        </label>
-        <label>
-          New password
-          <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" disabled={saving} />
-        </label>
-        <label>
-          Confirm new password
-          <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" disabled={saving} />
-        </label>
-        <button type="submit" disabled={saving} aria-busy={saving}>
-          {saving && <span className="spinner" aria-hidden="true" />}
-          {saving ? "Saving..." : "Save changes"}
-        </button>
-      </form>
+      <div className="card narrow">
+        <form onSubmit={handleSubmit} className="card-b">
+          {error && <div className="error-block" role="alert">{error}</div>}
+          {saved && <div className="notice" role="status">Account updated.</div>}
+          <label className="field">
+            Username
+            <input type="text" value={state?.username ?? ""} disabled />
+          </label>
+          <label className="field">
+            Display name
+            <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} autoComplete="name" disabled={saving} />
+          </label>
+          <label className="field">
+            Email
+            <input type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} autoComplete="email" disabled={saving} />
+          </label>
+          <div className="form-divider">Change password</div>
+          <label className="field">
+            Current password
+            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} autoComplete="current-password" disabled={saving} />
+          </label>
+          <label className="field">
+            New password
+            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} autoComplete="new-password" disabled={saving} />
+          </label>
+          <label className="field">
+            Confirm new password
+            <input type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} autoComplete="new-password" disabled={saving} />
+          </label>
+          <button type="submit" className="btn primary" disabled={saving} aria-busy={saving}>
+            {saving ? "Saving…" : "Save changes"}
+          </button>
+        </form>
+      </div>
     </section>
   );
 }

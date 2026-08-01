@@ -1,79 +1,72 @@
 // @vitest-environment jsdom
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-import type { Root } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ApiClient, QueueEntry } from "./api";
 import { QueuePage } from "./queue";
-
-(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-
-const mounted: Array<{ root: Root; container: HTMLElement }> = [];
-
-async function unmountAll(): Promise<void> {
-  for (const { root, container } of mounted.splice(0)) {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-}
+import { button, unmountAll } from "./test-dom";
+import { NOW, VIEWER, mountView, queueEntry, stubApi } from "./test-console";
 
 afterEach(unmountAll);
 
-function entry(overrides: Partial<QueueEntry> = {}): QueueEntry {
-  return {
-    projectId: "00000000-0000-0000-0000-000000000001",
-    projectName: "Alpha",
-    externalId: "42",
-    title: "Implement queue",
-    priority: 100,
-    blockedReason: "",
-    ...overrides,
-  };
-}
-
-/** Minimal ApiClient stub: the page only ever calls listQueue. */
-function stubApi(listQueue: ApiClient["listQueue"]): ApiClient {
-  return { listQueue } as unknown as ApiClient;
-}
-
-async function mount(api: ApiClient): Promise<HTMLElement> {
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  const root = createRoot(container);
-  mounted.push({ root, container });
-  await act(async () => {
-    root.render(<QueuePage api={api} />);
-  });
-  return container;
-}
-
 describe("QueuePage", () => {
-  it("renders the entries it loaded and maps blocked reasons", async () => {
-    const container = await mount(stubApi(async () => [
-      entry(),
-      entry({ projectName: "Beta", externalId: "7", title: "Lower priority", priority: 10, blockedReason: "no_matching_runner" }),
-    ]));
-    expect(container.querySelector("table")).not.toBeNull();
-    expect(container.textContent).toContain("Implement queue");
-    expect(container.textContent).toContain("100");
-    expect(container.textContent).toContain("No matching runner available");
+  it("numbers the queue in scheduler order and says why each issue is held", async () => {
+    const api = stubApi({
+      listQueue: async () => [
+        queueEntry({ externalId: "#62", priority: 8, blockedReason: "project_circuit_open" }),
+        queueEntry({ externalId: "#104", priority: 5, blockedReason: "project_locked" }),
+        queueEntry({ externalId: "#105", priority: 1, blockedReason: "" }),
+      ],
+    });
+    const container = await mountView(<QueuePage api={api} />, api);
+
+    // The first table is the queue; the second is the issue-sync card below it.
+    const rows = container.querySelectorAll("table")[0].querySelectorAll("tbody tr");
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain("P8");
+    expect(rows[0].textContent).toContain("Project circuit open");
+    expect(rows[1].textContent).toContain("Project busy");
+    expect(rows[2].textContent).toContain("Next to schedule");
   });
 
-  it("shows a plain blocked reason when it is not one of the known keys", async () => {
-    const container = await mount(stubApi(async () => [entry({ blockedReason: "project_locked" })]));
-    expect(container.textContent).toContain("Project has an active workflow");
-  });
-
-  it("shows the empty state when no entries are waiting", async () => {
-    const container = await mount(stubApi(async () => []));
-    expect(container.querySelector("table")).toBeNull();
+  it("shows the empty state when nothing is waiting", async () => {
+    const api = stubApi();
+    const container = await mountView(<QueuePage api={api} />, api);
     expect(container.textContent).toContain("The queue is empty");
   });
 
-  it("surfaces a load error", async () => {
-    const container = await mount(stubApi(async () => {
-      throw new Error("boom");
-    }));
-    expect(container.textContent).toContain("Could not load the queue");
+  it("surfaces a load failure instead of an empty queue", async () => {
+    const api = stubApi({ listQueue: async () => { throw new Error("orchestrator unreachable"); } });
+    const container = await mountView(<QueuePage api={api} />, api);
+    expect(container.textContent).toContain("orchestrator unreachable");
+    expect(container.textContent).not.toContain("The queue is empty");
+  });
+
+  it("reports issue-sync backoff with its error and next retry", async () => {
+    const api = stubApi({
+      issueSyncStatus: async () => [
+        {
+          projectId: "p1", projectName: "atlas-web", enabled: true, issueCount: 12, eligibleCount: 3,
+          lastSyncedAt: NOW, consecutiveFailures: 3, nextRetryAt: NOW,
+          lastError: "gh: HTTP 502 from api.github.com", backingOff: true,
+        },
+        {
+          projectId: "p2", projectName: "chronos", enabled: false, issueCount: 0, eligibleCount: 0,
+          consecutiveFailures: 0, backingOff: false,
+        },
+      ],
+    });
+    const container = await mountView(<QueuePage api={api} />, api);
+
+    expect(container.textContent).toContain("Backing off");
+    expect(container.textContent).toContain("gh: HTTP 502 from api.github.com");
+    expect(container.textContent).toContain("Project paused");
+  });
+
+  it("offers Sync now to an admin and hides it from a viewer", async () => {
+    const admin = stubApi();
+    const adminView = await mountView(<QueuePage api={admin} />, admin);
+    expect(button(adminView, /Sync now/)).toBeTruthy();
+
+    const viewer = stubApi({ me: async () => VIEWER });
+    const viewerView = await mountView(<QueuePage api={viewer} />, viewer);
+    expect(viewerView.textContent).not.toContain("Sync now");
   });
 });

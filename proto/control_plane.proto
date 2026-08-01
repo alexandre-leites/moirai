@@ -100,6 +100,10 @@ message Workflow {
   int32 review_cycles = 16;
   string created_at = 17;
   string updated_at = 18;
+  // Agent executions spent across every role. This is the counter the console's
+  // total-attempt meter is measured against; its cap lives in
+  // orchestrator/src/moirai/workflows/policy.py (RetryBudget).
+  int32 total_agent_executions = 19;
 }
 message ListWorkflowsResponse { repeated Workflow workflows = 1; }
 message GetWorkflowRequest { string workflow_run_id = 1; }

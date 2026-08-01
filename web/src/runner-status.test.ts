@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ApiError, createApiClient } from "./api";
-import type { ApiClient, Runner } from "./api";
+import type { Runner } from "./api";
 import {
   countOnline,
   describeHeartbeat,
   describeLoadError,
   describeRunnerStatus,
   formatAge,
-  loadRunners,
   STALE_AFTER_MS,
 } from "./runner-status";
 
@@ -162,23 +161,9 @@ describe("describeLoadError", () => {
 
   it("falls back for network failures and for values that are not errors", () => {
     expect(describeLoadError(new TypeError("Failed to fetch"))).toBe("Failed to fetch");
-    expect(describeLoadError("nope")).toBe("The runner fleet could not be loaded.");
-  });
-});
-
-describe("loadRunners", () => {
-  it("returns the fleet on success", async () => {
-    const api = { listRunners: async () => [runner()] } as unknown as ApiClient;
-    expect(await loadRunners(api)).toEqual({ kind: "ready", runners: [runner()] });
-  });
-
-  it("turns a failure into an error result instead of rejecting or returning an empty fleet", async () => {
-    const api = {
-      listRunners: async () => {
-        throw new ApiError(500, "orchestrator unavailable");
-      },
-    } as unknown as ApiClient;
-    expect(await loadRunners(api)).toEqual({ kind: "error", message: "orchestrator unavailable" });
+    expect(describeLoadError({ unexpected: true })).toBe("The control plane could not be reached.");
+    expect(describeLoadError({ unexpected: true }, "The fleet could not be loaded."))
+      .toBe("The fleet could not be loaded.");
   });
 });
 

@@ -42,6 +42,7 @@ const (
 	ControlPlane_RetryWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/RetryWorkflow"
 	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
 	ControlPlane_BlockWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/BlockWorkflow"
+	ControlPlane_GetSchedulerMetrics_FullMethodName           = "/loop.control.v1.ControlPlane/GetSchedulerMetrics"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -71,6 +72,7 @@ type ControlPlaneClient interface {
 	RetryWorkflow(ctx context.Context, in *RetryWorkflowRequest, opts ...grpc.CallOption) (*RetryWorkflowResponse, error)
 	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
 	BlockWorkflow(ctx context.Context, in *BlockWorkflowRequest, opts ...grpc.CallOption) (*BlockWorkflowResponse, error)
+	GetSchedulerMetrics(ctx context.Context, in *GetSchedulerMetricsRequest, opts ...grpc.CallOption) (*GetSchedulerMetricsResponse, error)
 }
 
 type controlPlaneClient struct {
@@ -311,6 +313,16 @@ func (c *controlPlaneClient) BlockWorkflow(ctx context.Context, in *BlockWorkflo
 	return out, nil
 }
 
+func (c *controlPlaneClient) GetSchedulerMetrics(ctx context.Context, in *GetSchedulerMetricsRequest, opts ...grpc.CallOption) (*GetSchedulerMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSchedulerMetricsResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_GetSchedulerMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -338,6 +350,7 @@ type ControlPlaneServer interface {
 	RetryWorkflow(context.Context, *RetryWorkflowRequest) (*RetryWorkflowResponse, error)
 	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
 	BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error)
+	GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -416,6 +429,9 @@ func (UnimplementedControlPlaneServer) CancelWorkflow(context.Context, *CancelWo
 }
 func (UnimplementedControlPlaneServer) BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BlockWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSchedulerMetrics not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -852,6 +868,24 @@ func _ControlPlane_BlockWorkflow_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_GetSchedulerMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSchedulerMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).GetSchedulerMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_GetSchedulerMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).GetSchedulerMetrics(ctx, req.(*GetSchedulerMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -950,6 +984,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BlockWorkflow",
 			Handler:    _ControlPlane_BlockWorkflow_Handler,
+		},
+		{
+			MethodName: "GetSchedulerMetrics",
+			Handler:    _ControlPlane_GetSchedulerMetrics_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

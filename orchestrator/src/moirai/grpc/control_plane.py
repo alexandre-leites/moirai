@@ -18,7 +18,6 @@ from moirai.grpc.protocol import (
     RunnerRecord,
     WorkflowDetailRecord,
     WorkflowEventRecord,
-    WorkflowRecord,
 )
 from moirai.persistence.authentication import AuthenticatedSession
 from proto import control_plane_pb2, control_plane_pb2_grpc
@@ -290,7 +289,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         except NotImplementedError:
             await context.abort(grpc.StatusCode.UNIMPLEMENTED, "workflows are unavailable")
         return control_plane_pb2.ListWorkflowsResponse(
-            workflows=[_workflow_message(workflow) for workflow in workflows]
+            workflows=[_workflow_detail_message(workflow) for workflow in workflows]
         )
 
     async def GetWorkflow(
@@ -669,15 +668,6 @@ def _issue_sync_status_message(entry: IssueSyncStatusRecord) -> control_plane_pb
     )
 
 
-def _workflow_message(workflow: WorkflowRecord) -> control_plane_pb2.Workflow:
-    return control_plane_pb2.Workflow(
-        id=workflow["id"],
-        project_id=workflow["project_id"],
-        status=workflow["status"],
-        phase=workflow["phase"],
-    )
-
-
 def _workflow_detail_message(workflow: WorkflowDetailRecord) -> control_plane_pb2.Workflow:
     return control_plane_pb2.Workflow(
         id=workflow["id"],
@@ -696,6 +686,7 @@ def _workflow_detail_message(workflow: WorkflowDetailRecord) -> control_plane_pb
         pipeline_repair_attempts=workflow["pipeline_repair_attempts"],
         ci_repair_attempts=workflow["ci_repair_attempts"],
         review_cycles=workflow["review_cycles"],
+        total_agent_executions=workflow["total_agent_executions"],
         created_at=workflow["created_at"].isoformat(),
         updated_at=workflow["updated_at"].isoformat(),
     )

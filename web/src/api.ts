@@ -1,4 +1,14 @@
+// Typed client for the Go management API (`/api/v1`), which proxies the
+// orchestrator's gRPC control plane. Response shapes mirror api/openapi.yaml;
+// errors are RFC-7807 problem+json.
+
 export type HealthStatus = "healthy" | "unhealthy";
+
+/** `GET /api/v1/health` — the API's own view of the control plane. */
+export type Health = {
+  status: string;
+  orchestrator: string;
+};
 
 // Mirrors the `Project` schema in api/openapi.yaml, served by
 // GET /api/v1/projects (api/internal/http/handlers/handlers.go). All
@@ -17,29 +27,45 @@ export type Project = {
   requiredRunnerLabels: string[];
 };
 
+type ProjectPayload = Omit<Project, "requiredRunnerLabels"> & { requiredRunnerLabels: string[] | null };
+
+/**
+ * One workflow run. `GET /api/v1/workflows` and `GET /api/v1/workflows/{id}`
+ * answer with this same shape, so the list view needs no per-row detail fetch.
+ *
+ * `status` is the scheduling lifecycle and `phase` the graph node the run
+ * committed to; they agree most of the time but diverge while a job is being
+ * placed or recovered. See "Run status versus run phase" in orchestrator/README.md.
+ */
 export type Workflow = {
   id: string;
   projectId: string;
   status: string;
   phase: string;
-};
-
-export type WorkflowDetail = Workflow & {
   issueExternalId: string;
   issueTitle: string;
   branchName: string;
-  pullRequestExternalId?: string;
-  pullRequestUrl?: string;
-  pullRequestState?: string;
-  blockingReason?: string;
+  pullRequestExternalId: string;
+  pullRequestUrl: string;
+  pullRequestState: string;
+  blockingReason: string;
   planningAttempts: number;
   implementationAttempts: number;
   pipelineRepairAttempts: number;
   ciRepairAttempts: number;
   reviewCycles: number;
+  totalAgentExecutions: number;
   createdAt: string;
   updatedAt: string;
 };
+
+/**
+ * What the control endpoints (retry/cancel/block/decision) answer with. Those
+ * responses are built from the resumed graph state rather than a row read, so
+ * only the lifecycle fields are populated — see workflowPayload in
+ * api/internal/http/handlers/workflows.go.
+ */
+export type WorkflowLifecycle = Pick<Workflow, "id" | "projectId" | "status" | "phase">;
 
 export type WorkflowEvent = {
   id: string;
@@ -51,6 +77,12 @@ export type WorkflowEvent = {
 export type WorkflowEventsPage = {
   events: WorkflowEvent[];
   nextCursor?: string;
+};
+
+/** `cursor` pages backwards through history; `limit` caps one page (max 100). */
+export type EventPageOptions = {
+  cursor?: string;
+  limit?: number;
 };
 
 // Mirrors the `Runner` schema in api/openapi.yaml, served by
@@ -83,6 +115,8 @@ export type RunnerToken = {
   revokedAt?: string;
 };
 
+type RunnerTokenPayload = Omit<RunnerToken, "allowedLabels"> & { allowedLabels: string[] | null };
+
 export type CreatedToken = {
   token: string;
   expiresAt: string;
@@ -96,6 +130,50 @@ export type CurrentUser = {
   displayName: string;
 };
 
+export type QueueEntry = {
+  projectId: string;
+  projectName: string;
+  externalId: string;
+  title: string;
+  priority: number;
+  blockedReason: string;
+};
+
+/** `GET /api/v1/sync/status` — per-project issue synchronization state. */
+export type IssueSyncStatus = {
+  projectId: string;
+  projectName: string;
+  enabled: boolean;
+  issueCount: number;
+  eligibleCount: number;
+  lastSyncedAt?: string;
+  consecutiveFailures: number;
+  nextRetryAt?: string;
+  lastError?: string;
+  backingOff: boolean;
+};
+
+export type SyncResult = {
+  projectId: string;
+  syncedIssues: number;
+  error?: string;
+};
+
+export type SchedulerMetrics = {
+  queueDepth: number;
+  activeWorkflows: number;
+  scheduledJobs: number;
+};
+
+export type ProjectConfiguration = {
+  name: string;
+  repositoryMode: string;
+  repositoryUrl?: string;
+  localRepositoryPath?: string;
+  defaultBranch: string;
+  requiredRunnerLabels?: string[];
+};
+
 export class ApiError extends Error {
   status: number;
   detail?: string;
@@ -106,6 +184,11 @@ export class ApiError extends Error {
     this.status = status;
     this.detail = detail;
   }
+
+  /** 403 means "signed in, but not allowed" — the caller stays where it is. */
+  get isForbidden(): boolean {
+    return this.status === 403;
+  }
 }
 
 type FetchFn = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -114,9 +197,13 @@ export type ApiClient = {
   // Registers a callback invoked whenever a request comes back 401 Unauthorized,
   // so callers (AuthProvider) can treat "session gone" uniformly instead of every
   // page having to interpret a thrown ApiError itself. Pass null to unregister.
+  //
+  // 403 is deliberately not routed here: a viewer who clicks an admin-only
+  // control has a perfectly good session and must not be signed out for it
+  // (specification.md §3.2).
   setUnauthorizedHandler(handler: (() => void) | null): void;
 
-  health(signal?: AbortSignal): Promise<HealthStatus>;
+  health(signal?: AbortSignal): Promise<Health>;
 
   login(username: string, password: string): Promise<{ userId: string }>;
   logout(): Promise<void>;
@@ -129,22 +216,8 @@ export type ApiClient = {
   }): Promise<CurrentUser>;
 
   listProjects(signal?: AbortSignal): Promise<Project[]>;
-  createProject(data: {
-    name: string;
-    repositoryMode: string;
-    repositoryUrl?: string;
-    localRepositoryPath?: string;
-    defaultBranch: string;
-    requiredRunnerLabels?: string[];
-  }): Promise<Project>;
-  updateProject(id: string, data: {
-    name: string;
-    repositoryMode: string;
-    repositoryUrl?: string;
-    localRepositoryPath?: string;
-    defaultBranch: string;
-    requiredRunnerLabels?: string[];
-  }): Promise<Project>;
+  createProject(data: ProjectConfiguration): Promise<Project>;
+  updateProject(id: string, data: ProjectConfiguration): Promise<Project>;
   setProjectEnabled(id: string, enabled: boolean): Promise<Project>;
 
   listRunners(signal?: AbortSignal): Promise<Runner[]>;
@@ -155,19 +228,20 @@ export type ApiClient = {
   revokeToken(id: string): Promise<void>;
 
   listWorkflows(signal?: AbortSignal): Promise<Workflow[]>;
-  getWorkflow(id: string, signal?: AbortSignal): Promise<WorkflowDetail>;
-  listWorkflowEvents(id: string, cursor?: string, signal?: AbortSignal): Promise<WorkflowEventsPage>;
-  submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<Workflow>;
-  retryWorkflow(id: string, reason?: string): Promise<Workflow>;
-  cancelWorkflow(id: string, reason?: string): Promise<Workflow>;
-  blockWorkflow(id: string, reason: string): Promise<Workflow>;
+  getWorkflow(id: string, signal?: AbortSignal): Promise<Workflow>;
+  listWorkflowEvents(id: string, options?: EventPageOptions, signal?: AbortSignal): Promise<WorkflowEventsPage>;
+  submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<WorkflowLifecycle>;
+  retryWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle>;
+  cancelWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle>;
+  blockWorkflow(id: string, reason: string): Promise<WorkflowLifecycle>;
 
   listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]>;
+  schedulerMetrics(signal?: AbortSignal): Promise<SchedulerMetrics>;
 
-  issueSyncStatus(signal?: AbortSignal): Promise<any[]>;
+  issueSyncStatus(signal?: AbortSignal): Promise<IssueSyncStatus[]>;
   // Runs an issue-synchronization pass now. projectId is optional; when given
   // only that project syncs, otherwise every enabled project syncs.
-  syncNow(projectId?: string): Promise<any[]>;
+  syncNow(projectId?: string): Promise<SyncResult[]>;
 };
 
 // CSRF_COOKIE_NAME must match auth.CSRFCookieName in api/internal/auth/session.go —
@@ -190,41 +264,69 @@ function csrfHeaders(): Record<string, string> {
 
 export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
   let unauthorizedHandler: (() => void) | null = null;
-  const json = async (res: Response) => {
-    if (!res.ok) {
-      if (res.status === 401) unauthorizedHandler?.();
-      let title = `request failed: ${res.status}`;
-      let detail: string | undefined;
-      try {
-        const body = await res.json();
-        if (body && typeof body === "object") {
-          if (typeof body.title === "string") title = body.title;
-          if (typeof body.detail === "string" && body.detail) detail = body.detail;
-        }
-      } catch {
-        // Response body was not JSON (or was empty) — fall back to the generic message.
+
+  /** Turns a non-2xx response into an ApiError carrying its problem+json detail. */
+  const failure = async (res: Response): Promise<ApiError> => {
+    if (res.status === 401) unauthorizedHandler?.();
+    let title = `request failed: ${res.status}`;
+    let detail: string | undefined;
+    try {
+      const body = await res.json();
+      if (body && typeof body === "object") {
+        if (typeof body.title === "string" && body.title) title = body.title;
+        if (typeof body.detail === "string" && body.detail) detail = body.detail;
       }
-      throw new ApiError(res.status, detail ? `${title}: ${detail}` : title, detail);
+    } catch {
+      // Response body was not JSON (or was empty) — fall back to the generic message.
     }
+    return new ApiError(res.status, detail ? `${title}: ${detail}` : title, detail);
+  };
+
+  const json = async (res: Response) => {
+    if (!res.ok) throw await failure(res);
     return res.json();
   };
-  const controlWorkflow = async (id: string, action: "retry" | "cancel" | "block", reason?: string): Promise<Workflow> => {
-    const res = await fetchClient(`/api/v1/workflows/${id}/${action}`, {
+
+  const get = async (path: string, signal?: AbortSignal) =>
+    json(await fetchClient(path, { signal, credentials: "include" }));
+
+  const post = async (path: string, body?: unknown) =>
+    json(await fetchClient(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...csrfHeaders() },
+      headers: body === undefined ? csrfHeaders() : { "Content-Type": "application/json", ...csrfHeaders() },
       credentials: "include",
-      body: JSON.stringify({ reason: reason ?? "" }),
-    });
-    return json(res);
-  };
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }));
+
+  const controlWorkflow = async (
+    id: string,
+    action: "retry" | "cancel" | "block",
+    reason?: string
+  ): Promise<WorkflowLifecycle> =>
+    post(`/api/v1/workflows/${encodeURIComponent(id)}/${action}`, { reason: reason ?? "" });
+
   return {
     setUnauthorizedHandler(handler: (() => void) | null): void {
       unauthorizedHandler = handler;
     },
 
-    async health(signal?: AbortSignal): Promise<HealthStatus> {
+    // A degraded control plane answers 503 with the very body this view needs
+    // ("degraded" / "unreachable"), so the status code is not a reason to throw
+    // it away — see the /health handler in api/internal/http/server.go. Only a
+    // response with no usable body reports unreachable on its own.
+    async health(signal?: AbortSignal): Promise<Health> {
       const res = await fetchClient("/api/v1/health", { signal });
-      return res.ok ? "healthy" : "unhealthy";
+      try {
+        const body: Partial<Health> = await res.json();
+        if (typeof body?.status === "string" && typeof body?.orchestrator === "string") {
+          return { status: body.status, orchestrator: body.orchestrator };
+        }
+      } catch {
+        // Not JSON: fall through to the status-code reading below.
+      }
+      return res.ok
+        ? { status: "healthy", orchestrator: "reachable" }
+        : { status: "degraded", orchestrator: "unreachable" };
     },
 
     async login(username: string, password: string): Promise<{ userId: string }> {
@@ -245,8 +347,7 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
     },
 
     async me(signal?: AbortSignal): Promise<CurrentUser> {
-      const res = await fetchClient("/api/v1/auth/me", { signal, credentials: "include" });
-      return json(res);
+      return get("/api/v1/auth/me", signal);
     },
 
     async updateAccount(data: {
@@ -265,61 +366,32 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
     },
 
     async listProjects(signal?: AbortSignal): Promise<Project[]> {
-      const res = await fetchClient("/api/v1/projects", { signal, credentials: "include" });
-      const body: { projects: Project[] } = await json(res);
-      return body.projects;
+      const body: { projects?: ProjectPayload[] } = await get("/api/v1/projects", signal);
+      if (!Array.isArray(body.projects)) throw new Error("The project list response was malformed.");
+      return body.projects.map(normalizeProject);
     },
 
-    async createProject(data: {
-      name: string;
-      repositoryMode: string;
-      repositoryUrl?: string;
-      localRepositoryPath?: string;
-      defaultBranch: string;
-      requiredRunnerLabels?: string[];
-    }): Promise<Project> {
-      const res = await fetchClient("/api/v1/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...csrfHeaders() },
-        credentials: "include",
-        body: JSON.stringify(data),
-      });
-      const body: Project = await json(res);
-      return body;
+    async createProject(data: ProjectConfiguration): Promise<Project> {
+      return normalizeProject(await post("/api/v1/projects", data));
     },
 
-    async updateProject(id: string, data: {
-      name: string;
-      repositoryMode: string;
-      repositoryUrl?: string;
-      localRepositoryPath?: string;
-      defaultBranch: string;
-      requiredRunnerLabels?: string[];
-    }): Promise<Project> {
-      const res = await fetchClient(`/api/v1/projects/${id}`, {
+    async updateProject(id: string, data: ProjectConfiguration): Promise<Project> {
+      const res = await fetchClient(`/api/v1/projects/${encodeURIComponent(id)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...csrfHeaders() },
         credentials: "include",
         body: JSON.stringify(data),
       });
-      const body: Project = await json(res);
-      return body;
+      return normalizeProject(await json(res));
     },
 
     async setProjectEnabled(id: string, enabled: boolean): Promise<Project> {
       const endpoint = enabled ? "enable" : "disable";
-      const res = await fetchClient(`/api/v1/projects/${id}/${endpoint}`, {
-        method: "POST",
-        headers: { ...csrfHeaders() },
-        credentials: "include",
-      });
-      const body: Project = await json(res);
-      return body;
+      return normalizeProject(await post(`/api/v1/projects/${encodeURIComponent(id)}/${endpoint}`));
     },
 
     async listRunners(signal?: AbortSignal): Promise<Runner[]> {
-      const res = await fetchClient("/api/v1/runners", { signal, credentials: "include" });
-      const body: { runners?: RunnerPayload[] } = await json(res);
+      const body: { runners?: RunnerPayload[] } = await get("/api/v1/runners", signal);
       // `runners` is required by the OpenAPI schema. If it is missing the
       // response is not the one we asked for, and returning [] here would
       // render the "no runner is registered" empty state for what is really a
@@ -334,118 +406,92 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
 
     async setRunnerState(id: string, state: "drain" | "enable" | "revoke"): Promise<Runner> {
       const action = state === "enable" ? "undrain" : state;
-      const res = await fetchClient(`/api/v1/runners/${id}/${action}`, {
-        method: "POST",
-        headers: csrfHeaders(),
-        credentials: "include",
-      });
-      const runner: RunnerPayload = await json(res);
+      const runner: RunnerPayload = await post(`/api/v1/runners/${encodeURIComponent(id)}/${action}`);
       return { ...runner, labels: runner.labels ?? [] };
     },
 
     async listTokens(signal?: AbortSignal): Promise<RunnerToken[]> {
-      const res = await fetchClient("/api/v1/runner-tokens", { signal, credentials: "include" });
-      const body: { tokens: RunnerToken[] } = await json(res);
-      return body.tokens;
+      const body: { tokens?: RunnerTokenPayload[] } = await get("/api/v1/runner-tokens", signal);
+      if (!Array.isArray(body.tokens)) throw new Error("The token list response was malformed.");
+      return body.tokens.map((token) => ({ ...token, allowedLabels: token.allowedLabels ?? [] }));
     },
 
     async createToken(allowedLabels?: string[]): Promise<CreatedToken> {
-      const res = await fetchClient("/api/v1/runner-tokens", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...csrfHeaders() },
-        credentials: "include",
-        body: JSON.stringify({ allowedLabels: allowedLabels ?? [] }),
-      });
-      return json(res);
+      return post("/api/v1/runner-tokens", { allowedLabels: allowedLabels ?? [] });
     },
 
     async revokeToken(id: string): Promise<void> {
-      const res = await fetchClient(`/api/v1/runner-tokens/${id}`, {
+      const res = await fetchClient(`/api/v1/runner-tokens/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: { ...csrfHeaders() },
         credentials: "include",
       });
-      if (!res.ok) {
-        if (res.status === 401) unauthorizedHandler?.();
-        let title = `request failed: ${res.status}`;
-        let detail: string | undefined;
-        try {
-          const body = await res.json();
-          if (body && typeof body === "object") {
-            if (typeof body.title === "string") title = body.title;
-            if (typeof body.detail === "string" && body.detail) detail = body.detail;
-          }
-        } catch {
-          // Response body was not JSON — fall back to the generic message.
-        }
-        throw new ApiError(res.status, detail ? `${title}: ${detail}` : title, detail);
-      }
+      // 204 with no body: there is nothing to parse, only a status to check.
+      if (!res.ok) throw await failure(res);
     },
 
     async listWorkflows(signal?: AbortSignal): Promise<Workflow[]> {
-      const res = await fetchClient("/api/v1/workflows", { signal, credentials: "include" });
-      const body: { workflows: Workflow[] } = await json(res);
+      const body: { workflows?: Workflow[] } = await get("/api/v1/workflows", signal);
+      if (!Array.isArray(body.workflows)) throw new Error("The workflow list response was malformed.");
       return body.workflows;
     },
 
-    async getWorkflow(id: string, signal?: AbortSignal): Promise<WorkflowDetail> {
-      const res = await fetchClient(`/api/v1/workflows/${encodeURIComponent(id)}`, { signal, credentials: "include" });
-      return json(res);
+    async getWorkflow(id: string, signal?: AbortSignal): Promise<Workflow> {
+      return get(`/api/v1/workflows/${encodeURIComponent(id)}`, signal);
     },
 
-    async listWorkflowEvents(id: string, cursor?: string, signal?: AbortSignal): Promise<WorkflowEventsPage> {
-      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-      const res = await fetchClient(`/api/v1/workflows/${encodeURIComponent(id)}/events${query}`, {
-        signal,
-        credentials: "include",
-      });
-      return json(res);
+    async listWorkflowEvents(id: string, options: EventPageOptions = {}, signal?: AbortSignal): Promise<WorkflowEventsPage> {
+      const query = new URLSearchParams();
+      if (options.cursor) query.set("cursor", options.cursor);
+      if (options.limit) query.set("limit", String(options.limit));
+      const suffix = query.size > 0 ? `?${query}` : "";
+      return get(`/api/v1/workflows/${encodeURIComponent(id)}/events${suffix}`, signal);
     },
 
     async submitWorkflowDecision(
       id: string,
       decision: "approved" | "changes_requested",
       comment?: string
-    ): Promise<Workflow> {
-      const res = await fetchClient(`/api/v1/workflows/${id}/decision`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...csrfHeaders() },
-        credentials: "include",
-        body: JSON.stringify({ decision, comment: comment ?? "" }),
-      });
-      return json(res);
+    ): Promise<WorkflowLifecycle> {
+      return post(`/api/v1/workflows/${encodeURIComponent(id)}/decision`, { decision, comment: comment ?? "" });
     },
 
-    async retryWorkflow(id: string, reason?: string): Promise<Workflow> {
+    async retryWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle> {
       return controlWorkflow(id, "retry", reason);
     },
 
-    async cancelWorkflow(id: string, reason?: string): Promise<Workflow> {
+    async cancelWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle> {
       return controlWorkflow(id, "cancel", reason);
     },
 
-    async blockWorkflow(id: string, reason: string): Promise<Workflow> {
+    async blockWorkflow(id: string, reason: string): Promise<WorkflowLifecycle> {
       return controlWorkflow(id, "block", reason);
     },
 
-    // --- Queue -----------------------------------------------------------------
-
     async listQueue(signal?: AbortSignal, limit?: number): Promise<QueueEntry[]> {
       const query = limit ? `?limit=${limit}` : "";
-      const res = await fetchClient(`/api/v1/queue${query}`, { signal, credentials: "include" });
-      const body: { entries: QueueEntry[] } = await json(res);
+      const body: { entries?: QueueEntry[] } = await get(`/api/v1/queue${query}`, signal);
+      if (!Array.isArray(body.entries)) throw new Error("The queue response was malformed.");
       return body.entries;
     },
-    async issueSyncStatus(signal?: AbortSignal): Promise<any[]> { return []; },
-    async syncNow(projectId?: string): Promise<any[]> { return []; },
+
+    async schedulerMetrics(signal?: AbortSignal): Promise<SchedulerMetrics> {
+      return get("/api/v1/scheduler/metrics", signal);
+    },
+
+    async issueSyncStatus(signal?: AbortSignal): Promise<IssueSyncStatus[]> {
+      const body: { entries?: IssueSyncStatus[] } = await get("/api/v1/sync/status", signal);
+      if (!Array.isArray(body.entries)) throw new Error("The issue sync response was malformed.");
+      return body.entries;
+    },
+
+    async syncNow(projectId?: string): Promise<SyncResult[]> {
+      const body: { results?: SyncResult[] } = await post("/api/v1/sync", projectId ? { projectId } : {});
+      return body.results ?? [];
+    },
   };
 }
 
-export type QueueEntry = {
-  projectId: string;
-  projectName: string;
-  externalId: string;
-  title: string;
-  priority: number;
-  blockedReason: string;
-};
+function normalizeProject(project: ProjectPayload): Project {
+  return { ...project, requiredRunnerLabels: project.requiredRunnerLabels ?? [] };
+}

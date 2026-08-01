@@ -129,6 +129,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.BlockWorkflowRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.BlockWorkflowResponse.FromString,
                 _registered_method=True)
+        self.GetSchedulerMetrics = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/GetSchedulerMetrics',
+                request_serializer=proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServicer:
@@ -272,6 +277,12 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetSchedulerMetrics(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -389,6 +400,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.BlockWorkflow,
                     request_deserializer=proto_dot_control__plane__pb2.BlockWorkflowRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.BlockWorkflowResponse.SerializeToString,
+            ),
+            'GetSchedulerMetrics': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSchedulerMetrics,
+                    request_deserializer=proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1012,6 +1028,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/BlockWorkflow',
             proto_dot_control__plane__pb2.BlockWorkflowRequest.SerializeToString,
             proto_dot_control__plane__pb2.BlockWorkflowResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSchedulerMetrics(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/GetSchedulerMetrics',
+            proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.SerializeToString,
+            proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.FromString,
             options,
             channel_credentials,
             insecure,

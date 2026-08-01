@@ -1,286 +1,124 @@
 // @vitest-environment jsdom
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-import type { Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
-import type { ApiClient, Runner } from "./api";
 import { RunnersPage } from "./runners";
-import { POLL_INTERVAL_MS } from "./runner-status";
-
-(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-
-const mounted: Array<{ root: Root; container: HTMLElement }> = [];
-
-async function unmountAll(): Promise<void> {
-  for (const { root, container } of mounted.splice(0)) {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-}
+import { button, buttons, click, field, unmountAll, typeInto } from "./test-dom";
+import { NOW, VIEWER, mountView, runner, stubApi, token } from "./test-console";
 
 afterEach(unmountAll);
 
-function fleet(overrides: Partial<Runner> = {}): Runner {
-  return {
-    id: "aabbccdd-1111-2222-3333-444444444444",
-    name: "runner-a",
-    enabled: true,
-    draining: false,
-    status: "online",
-    labels: ["linux"],
-    lastSeenAt: new Date().toISOString(),
-    ...overrides,
-  };
-}
-
-/** Minimal ApiClient stub: the page only ever calls listRunners. */
-function stubApi(listRunners: ApiClient["listRunners"]): ApiClient {
-  return { listRunners } as unknown as ApiClient;
-}
-
-async function mount(api: ApiClient): Promise<HTMLElement> {
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  const root = createRoot(container);
-  mounted.push({ root, container });
-  await act(async () => {
-    root.render(<RunnersPage api={api} />);
-  });
-  return container;
-}
-
-function click(container: HTMLElement, label: RegExp): Promise<void> {
-  const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
-    label.test(candidate.textContent ?? "")
-  );
-  if (!button) throw new Error(`no button matching ${label} on screen`);
-  return act(async () => {
-    button.click();
-  });
-}
+const HOURS_AGO = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
 
 describe("RunnersPage", () => {
-  it("renders the fleet it loaded", async () => {
-    const container = await mount(stubApi(async () => [fleet()]));
-    expect(container.querySelector("table")).not.toBeNull();
-    expect(container.textContent).toContain("runner-a");
+  it("shows a card per runner with its heartbeat, labels and offer eligibility", async () => {
+    const api = stubApi({ listRunners: async () => [runner(), runner({ id: "r2", name: "loom-02", draining: true })] });
+    const container = await mountView(<RunnersPage api={api} />, api);
+
+    expect(container.textContent).toContain("loom-01");
     expect(container.textContent).toContain("Online");
+    expect(container.textContent).toContain("Draining");
+    expect(container.textContent).toContain("docker");
+    expect(container.textContent).toContain("finishes its current work");
   });
 
-  it("shows the failure instead of an empty table when the load fails", async () => {
-    const container = await mount(
-      stubApi(async () => {
-        throw new ApiError(503, "orchestrator unavailable", "connection refused");
-      })
-    );
-    expect(container.querySelector('[role="alert"]')).not.toBeNull();
-    expect(container.textContent).toContain("could not be loaded");
-    expect(container.textContent).toContain("orchestrator unavailable");
-    expect(container.querySelector("table")).toBeNull();
-    expect(container.textContent).not.toContain("No runner is registered.");
-    expect(container.textContent).not.toContain("Loading runners");
+  it("reports a runner whose heartbeat has gone quiet as stale, not online", async () => {
+    const api = stubApi({ listRunners: async () => [runner({ lastSeenAt: HOURS_AGO })] });
+    const container = await mountView(<RunnersPage api={api} />, api);
+    expect(container.textContent).toContain("Stale");
+    expect(container.textContent).not.toContain("Online");
   });
 
-  it("shows the failure when the fetch never reaches the API at all", async () => {
-    const container = await mount(
-      stubApi(async () => {
-        throw new TypeError("Failed to fetch");
-      })
-    );
-    expect(container.querySelector('[role="alert"]')).not.toBeNull();
-    expect(container.textContent).toContain("Failed to fetch");
-    expect(container.querySelector("table")).toBeNull();
+  it("invites the operator to issue a token when the fleet is empty", async () => {
+    const api = stubApi();
+    const container = await mountView(<RunnersPage api={api} />, api);
+    expect(container.textContent).toContain("No runner is registered");
   });
 
-  it("shows the empty state, not a failure, when the fleet is genuinely empty", async () => {
-    const container = await mount(stubApi(async () => []));
-    expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).toContain("No runner is registered.");
+  it("surfaces a load failure instead of the empty fleet copy", async () => {
+    const api = stubApi({ listRunners: async () => { throw new Error("orchestrator unreachable"); } });
+    const container = await mountView(<RunnersPage api={api} />, api);
+    expect(container.textContent).toContain("orchestrator unreachable");
+    expect(container.textContent).not.toContain("No runner is registered");
   });
 
-  it("recovers when a retry succeeds", async () => {
-    let attempt = 0;
-    const container = await mount(
-      stubApi(async () => {
-        attempt += 1;
-        if (attempt === 1) throw new ApiError(503, "orchestrator unavailable");
-        return [fleet()];
-      })
-    );
-    expect(container.querySelector("table")).toBeNull();
-    await click(container, /^Retry$/);
-    expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).toContain("runner-a");
+  it("drains a runner and reports what draining means", async () => {
+    const setRunnerState = vi.fn(async () => runner({ draining: true }));
+    const api = stubApi({ listRunners: async () => [runner()], setRunnerState });
+    const container = await mountView(<RunnersPage api={api} />, api);
+
+    await click(button(container, /^Drain$/));
+    expect(setRunnerState).toHaveBeenCalledWith(runner().id, "drain");
+    expect(container.textContent).toContain("then accepts no offers");
   });
 
-  it("keeps the last known fleet on screen when a refresh fails, and says so", async () => {
-    let attempt = 0;
-    const container = await mount(
-      stubApi(async () => {
-        attempt += 1;
-        if (attempt === 1) return [fleet()];
-        throw new ApiError(503, "orchestrator unavailable");
-      })
-    );
-    expect(container.textContent).toContain("runner-a");
-    await click(container, /^Refresh/);
-    expect(container.querySelector('[role="alert"]')).not.toBeNull();
-    expect(container.textContent).toContain("may be out of date");
-    expect(container.textContent).toContain("runner-a");
+  it("names the consequence before revoking a runner", async () => {
+    const setRunnerState = vi.fn(async () => runner());
+    const api = stubApi({ listRunners: async () => [runner()], setRunnerState });
+    const container = await mountView(<RunnersPage api={api} />, api);
+
+    await click(button(container, /^Revoke$/));
+    expect(document.querySelector(".modal")?.textContent).toContain("credential is invalidated");
+    expect(setRunnerState).not.toHaveBeenCalled();
+
+    await click(button(document.body, /^Revoke runner$/));
+    expect(setRunnerState).toHaveBeenCalledWith(runner().id, "revoke");
   });
 
-  it("marks a runner that has stopped heartbeating as stale", async () => {
-    const container = await mount(
-      stubApi(async () => [
-        fleet({ id: "aaaa1111-0000-0000-0000-000000000001", name: "fresh" }),
-        fleet({
-          id: "bbbb2222-0000-0000-0000-000000000002",
-          name: "gone",
-          lastSeenAt: new Date(Date.now() - 10 * 60_000 - 5_000).toISOString(),
-        }),
-      ])
-    );
-    const rows = Array.from(container.querySelectorAll("tbody tr"));
-    expect(rows).toHaveLength(2);
-    const fresh = rows.find((row) => row.textContent?.includes("fresh"));
-    const gone = rows.find((row) => row.textContent?.includes("gone"));
-    expect(fresh?.className).not.toContain("runner-row--stale");
-    expect(fresh?.textContent).not.toContain("Stale");
-    expect(gone?.className).toContain("runner-row--stale");
-    expect(gone?.textContent).toContain("Stale");
-    expect(gone?.textContent).toContain("10m ago");
-    expect(container.textContent).toContain("1/2 online");
+  it("hides every mutating control from a viewer", async () => {
+    const api = stubApi({ me: async () => VIEWER, listRunners: async () => [runner()], listTokens: async () => [token()] });
+    const container = await mountView(<RunnersPage api={api} />, api);
+
+    expect(buttons(container, /Drain|Revoke|New token/)).toHaveLength(0);
+    expect(container.textContent).toContain("loom-01");
   });
 
-  it("does not let an abandoned request overwrite a newer one", async () => {
-    const pending: Array<(runners: Runner[]) => void> = [];
-    const container = await mount(
-      stubApi(
-        () =>
-          new Promise<Runner[]>((resolve) => {
-            pending.push(resolve);
-          })
-      )
-    );
-    expect(container.textContent).toContain("Loading runners");
-
-    // Refresh abandons request #1 and starts #2.
-    await click(container, /^Refresh/);
-    expect(pending).toHaveLength(2);
-
-    await act(async () => pending[1]([fleet({ name: "current" })]));
-    expect(container.textContent).toContain("current");
-
-    // The abandoned request now answers, with the older snapshot.
-    await act(async () => pending[0]([fleet({ name: "outdated" })]));
-    expect(container.textContent).toContain("current");
-    expect(container.textContent).not.toContain("outdated");
-  });
-
-  it("measures heartbeat age from when the orchestrator was asked, not when it answered", async () => {
-    vi.useFakeTimers();
-    try {
-      let resolveRequest: ((runners: Runner[]) => void) | null = null;
-      // The runner beat 8s before the page asked; the answer takes 35s to
-      // arrive. Measuring from arrival would report it 43s old — past the
-      // 30s budget — and paint a healthy runner stale.
-      const lastSeenAt = new Date(Date.now() - 8_000).toISOString();
-      const container = await mount(
-        stubApi(
-          () =>
-            new Promise<Runner[]>((resolve) => {
-              resolveRequest = resolve;
-            })
-        )
-      );
-      await act(async () => {
-        vi.advanceTimersByTime(35_000);
-      });
-      await act(async () => resolveRequest?.([fleet({ lastSeenAt })]));
-
-      expect(container.querySelector("tbody tr")?.className).not.toContain("runner-row--stale");
-      expect(container.textContent).toContain("8s ago");
-    } finally {
-      vi.useRealTimers();
-    }
+  it("says a viewer needs the admin role rather than signing them out", async () => {
+    const api = stubApi({
+      listRunners: async () => [runner()],
+      setRunnerState: async () => { throw new ApiError(403, "Forbidden"); },
+    });
+    const container = await mountView(<RunnersPage api={api} />, api);
+    await click(button(container, /^Drain$/));
+    expect(container.textContent).toContain("You need the admin role for that");
   });
 });
 
-describe("RunnersPage polling", () => {
-  afterEach(() => {
-    vi.useRealTimers();
+describe("registration tokens", () => {
+  it("lists tokens with their state and offers a revoke only for live ones", async () => {
+    const api = stubApi({
+      listTokens: async () => [
+        token({ id: "tok-live" }),
+        token({ id: "tok-used", usedAt: NOW }),
+        token({ id: "tok-gone", revokedAt: NOW }),
+      ],
+    });
+    const container = await mountView(<RunnersPage api={api} />, api);
+
+    expect(container.textContent).toContain("consumed");
+    expect(container.textContent).toContain("revoked");
+    expect(buttons(container, /^Revoke$/).filter((btn) => btn.closest("td"))).toHaveLength(1);
   });
 
-  it("refreshes on the poll interval while the tab is visible", async () => {
-    vi.useFakeTimers();
-    let calls = 0;
-    await mount(
-      stubApi(async () => {
-        calls += 1;
-        return [fleet()];
-      })
-    );
-    expect(calls).toBe(1);
-    await act(async () => {
-      vi.advanceTimersByTime(POLL_INTERVAL_MS);
-    });
-    expect(calls).toBe(2);
+  it("shows a created token once, with a copy button and the warning", async () => {
+    const createToken = vi.fn(async () => ({ token: "moi_secret_value", expiresAt: NOW }));
+    const api = stubApi({ createToken });
+    const container = await mountView(<RunnersPage api={api} />, api);
+
+    await click(button(container, /New token/));
+    await typeInto(field(document.body, /Allowed labels/), "go, docker");
+    await click(button(document.body, /Create token/));
+
+    expect(createToken).toHaveBeenCalledWith(["go", "docker"]);
+    const modal = document.querySelector(".modal")!;
+    expect(modal.textContent).toContain("moi_secret_value");
+    expect(modal.textContent).toContain("shown only once");
+    expect(button(modal, /Copy/)).toBeTruthy();
   });
 
-  it("pauses polling while the tab is hidden", async () => {
-    vi.useFakeTimers();
-    let calls = 0;
-    await mount(
-      stubApi(async () => {
-        calls += 1;
-        return [fleet()];
-      })
-    );
-    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
-    try {
-      await act(async () => {
-        vi.advanceTimersByTime(POLL_INTERVAL_MS * 3);
-      });
-      expect(calls).toBe(1);
-    } finally {
-      hidden.mockRestore();
-    }
-    await act(async () => {
-      document.dispatchEvent(new Event("visibilitychange"));
-    });
-    expect(calls).toBe(2);
-  });
-
-  it("never stacks requests when the orchestrator is slow to answer", async () => {
-    vi.useFakeTimers();
-    let calls = 0;
-    await mount(
-      stubApi(() => {
-        calls += 1;
-        return new Promise<Runner[]>(() => undefined);
-      })
-    );
-    await act(async () => {
-      vi.advanceTimersByTime(POLL_INTERVAL_MS * 5);
-    });
-    expect(calls).toBe(1);
-  });
-
-  it("stops polling once the page is unmounted", async () => {
-    vi.useFakeTimers();
-    let calls = 0;
-    await mount(
-      stubApi(async () => {
-        calls += 1;
-        return [fleet()];
-      })
-    );
-    await unmountAll();
-    await act(async () => {
-      vi.advanceTimersByTime(POLL_INTERVAL_MS * 5);
-      document.dispatchEvent(new Event("visibilitychange"));
-    });
-    expect(calls).toBe(1);
+  it("keeps showing tokens when the list request fails, with the reason", async () => {
+    const api = stubApi({ listTokens: async () => { throw new Error("tokens unavailable"); } });
+    const container = await mountView(<RunnersPage api={api} />, api);
+    expect(container.textContent).toContain("tokens unavailable");
+    expect(container.textContent).not.toContain("No registration token is outstanding");
   });
 });

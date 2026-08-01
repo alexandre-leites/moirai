@@ -48,7 +48,6 @@ if TYPE_CHECKING:
         RunnerRecord,
         WorkflowDetailRecord,
         WorkflowEventRecord,
-        WorkflowRecord,
     )
 from moirai.workflows.runner_events import (
     WorkflowTransition,
@@ -921,35 +920,26 @@ class AsyncpgControlPlane:
             raise AuthenticationError("runner is inactive")
         return _runner(updated, connected=True, healthy=True)
 
-    async def list_workflows(self) -> list[WorkflowRecord]:
+    async def list_workflows(self) -> list[WorkflowDetailRecord]:
+        # Same projection as get_workflow below: the management console renders
+        # issue titles, pull requests and attempt budgets straight from the list,
+        # and fetching them per row would be one request per workflow.
         records = await self._pool.fetch(
             """
-            SELECT wr.id, wr.project_id, wr.status, wr.current_phase,
-                   wr.pull_request_external_id, wr.pull_request_url, wr.blocking_reason,
-                   wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts,
-                   wr.review_cycles, wr.ci_repair_attempts, wr.total_agent_executions
+            SELECT wr.id, wr.project_id, wr.status, wr.current_phase, i.external_id AS issue_external_id,
+                   i.title AS issue_title, wr.branch_name,
+                   COALESCE(pr.external_id, wr.pull_request_external_id) AS pull_request_external_id,
+                   COALESCE(pr.url, wr.pull_request_url) AS pull_request_url, pr.state AS pull_request_state,
+                   wr.blocking_reason, wr.planning_attempts, wr.implementation_attempts,
+                   wr.pipeline_repair_attempts, wr.review_cycles, wr.ci_repair_attempts,
+                   wr.total_agent_executions, wr.created_at, wr.updated_at
             FROM app.workflow_runs AS wr
+            JOIN app.issues AS i ON i.id = wr.issue_id
+            LEFT JOIN app.pull_requests AS pr ON pr.workflow_run_id = wr.id
             ORDER BY wr.created_at DESC, wr.id ASC
             """
         )
-        return [
-            {
-                "id": str(record["id"]),
-                "project_id": str(record["project_id"]),
-                "status": str(record["status"]),
-                "phase": str(record["current_phase"]),
-                "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
-                "pull_request_url": _optional_text(record["pull_request_url"]),
-                "blocking_reason": _optional_text(record["blocking_reason"]),
-                "planning_attempts": int(record["planning_attempts"]),
-                "implementation_attempts": int(record["implementation_attempts"]),
-                "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
-                "review_cycles": int(record["review_cycles"]),
-                "ci_repair_attempts": int(record["ci_repair_attempts"]),
-                "total_agent_executions": int(record["total_agent_executions"]),
-            }
-            for record in records
-        ]
+        return [_workflow_detail_record(record) for record in records]
 
     async def get_workflow(self, workflow_run_id: str) -> WorkflowDetailRecord | None:
         record = await self._pool.fetchrow(
@@ -970,27 +960,7 @@ class AsyncpgControlPlane:
         )
         if record is None:
             return None
-        return {
-            "id": str(record["id"]),
-            "project_id": str(record["project_id"]),
-            "status": str(record["status"]),
-            "phase": str(record["current_phase"]),
-            "issue_external_id": str(record["issue_external_id"]),
-            "issue_title": str(record["issue_title"]),
-            "branch_name": _optional_text(record["branch_name"]),
-            "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
-            "pull_request_url": _optional_text(record["pull_request_url"]),
-            "pull_request_state": _optional_text(record["pull_request_state"]),
-            "blocking_reason": _optional_text(record["blocking_reason"]),
-            "planning_attempts": int(record["planning_attempts"]),
-            "implementation_attempts": int(record["implementation_attempts"]),
-            "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
-            "review_cycles": int(record["review_cycles"]),
-            "ci_repair_attempts": int(record["ci_repair_attempts"]),
-            "total_agent_executions": int(record["total_agent_executions"]),
-            "created_at": record["created_at"],
-            "updated_at": record["updated_at"],
-        }
+        return _workflow_detail_record(record)
 
     async def list_workflow_events(
         self, workflow_run_id: str, after_id: int, limit: int
@@ -3308,6 +3278,31 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _workflow_detail_record(record: Any) -> WorkflowDetailRecord:
+    """Maps one row of the workflow-run projection shared by list and get."""
+    return {
+        "id": str(record["id"]),
+        "project_id": str(record["project_id"]),
+        "status": str(record["status"]),
+        "phase": str(record["current_phase"]),
+        "issue_external_id": str(record["issue_external_id"]),
+        "issue_title": str(record["issue_title"]),
+        "branch_name": _optional_text(record["branch_name"]),
+        "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
+        "pull_request_url": _optional_text(record["pull_request_url"]),
+        "pull_request_state": _optional_text(record["pull_request_state"]),
+        "blocking_reason": _optional_text(record["blocking_reason"]),
+        "planning_attempts": int(record["planning_attempts"]),
+        "implementation_attempts": int(record["implementation_attempts"]),
+        "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
+        "review_cycles": int(record["review_cycles"]),
+        "ci_repair_attempts": int(record["ci_repair_attempts"]),
+        "total_agent_executions": int(record["total_agent_executions"]),
+        "created_at": record["created_at"],
+        "updated_at": record["updated_at"],
+    }
 
 
 def _text_list(value: Any) -> tuple[str, ...]:

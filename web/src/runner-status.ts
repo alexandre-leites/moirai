@@ -1,4 +1,4 @@
-import type { ApiClient, Runner } from "./api";
+import type { Runner } from "./api";
 import { ApiError } from "./api";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -26,10 +26,6 @@ export const HEARTBEAT_INTERVAL_MS = configuredHeartbeatIntervalMs();
 export const MISSED_HEARTBEATS_BEFORE_STALE = 3;
 export const STALE_AFTER_MS = MISSED_HEARTBEATS_BEFORE_STALE * HEARTBEAT_INTERVAL_MS;
 
-// Interim refresh cadence for views, per specification §4.5 ("every view polls
-// its endpoints on a 10s interval while visible"), until SSE ships.
-export const POLL_INTERVAL_MS = 10_000;
-
 export type PillVariant = "ok" | "warn" | "bad" | "idle";
 
 export type RunnerStatus = {
@@ -45,10 +41,6 @@ export type HeartbeatAge = {
   /** True when the runner missed its heartbeat budget, never reported, or reported garbage. */
   stale: boolean;
 };
-
-export type RunnersResult =
-  | { kind: "ready"; runners: Runner[] }
-  | { kind: "error"; message: string };
 
 /**
  * Renders an elapsed duration the way an operator reads it. Negative ages
@@ -144,24 +136,13 @@ export function countOnline(runners: Runner[], nowMs: number): number {
  * anything the API answered; 401 and 403 get their own copy because the generic
  * problem titles ("Unauthorized") do not tell an operator what to do next.
  */
-export function describeLoadError(error: unknown): string {
+export function describeLoadError(error: unknown, fallback = "The control plane could not be reached."): string {
   if (error instanceof ApiError) {
-    if (error.status === 401) return "Your session has expired. Sign in again to see the runner fleet.";
-    if (error.status === 403) return "Your account is not allowed to see the runner fleet.";
+    if (error.status === 401) return "Your session has expired. Sign in again.";
+    if (error.status === 403) return "Your account is not allowed to see this.";
     return error.message;
   }
   if (error instanceof Error && error.message) return error.message;
-  return "The runner fleet could not be loaded.";
-}
-
-/**
- * Loads the fleet and never rejects: a failure becomes an `error` result the
- * view renders, so a fetch failure can never be mistaken for an empty fleet.
- */
-export async function loadRunners(api: ApiClient, signal?: AbortSignal): Promise<RunnersResult> {
-  try {
-    return { kind: "ready", runners: await api.listRunners(signal) };
-  } catch (error) {
-    return { kind: "error", message: describeLoadError(error) };
-  }
+  if (typeof error === "string" && error) return error;
+  return fallback;
 }

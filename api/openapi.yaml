@@ -440,6 +440,11 @@ paths:
   /api/v1/workflows:
     get:
       summary: List workflows
+      description: |
+        Every row carries the same fields as `GET /api/v1/workflows/{workflow_id}`.
+        The console renders issue titles, pull requests and attempt budgets in the
+        list, the overview and the phase threads; a summary shape would cost one
+        detail request per workflow.
       security:
         - sessionCookie: []
       responses:
@@ -454,7 +459,7 @@ paths:
                   workflows:
                     type: array
                     items:
-                      $ref: '#/components/schemas/Workflow'
+                      $ref: '#/components/schemas/WorkflowDetail'
         '401':
           $ref: '#/components/responses/Unauthorized'
   /api/v1/workflows/{workflow_id}:
@@ -756,7 +761,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/Workflow'
         - type: object
-          required: [issueExternalId, issueTitle, branchName, planningAttempts, implementationAttempts, pipelineRepairAttempts, ciRepairAttempts, reviewCycles, createdAt, updatedAt]
+          required: [issueExternalId, issueTitle, branchName, planningAttempts, implementationAttempts, pipelineRepairAttempts, ciRepairAttempts, reviewCycles, totalAgentExecutions, createdAt, updatedAt]
           properties:
             issueExternalId: { type: string }
             issueTitle: { type: string }
@@ -770,6 +775,12 @@ components:
             pipelineRepairAttempts: { type: integer, minimum: 0 }
             ciRepairAttempts: { type: integer, minimum: 0 }
             reviewCycles: { type: integer, minimum: 0 }
+            totalAgentExecutions:
+              type: integer
+              minimum: 0
+              description: >-
+                Agent executions spent across every role. The cap it is measured
+                against lives in the orchestrator's RetryBudget.
             createdAt: { type: string, format: date-time }
             updatedAt: { type: string, format: date-time }
     WorkflowEvent:
