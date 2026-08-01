@@ -70,6 +70,13 @@ compose-overlays:
 	test "$$(docker compose -f compose.yaml -f compose.tls.yaml config | grep -c 'LOOP_ORCHESTRATOR_TLS: "true"')" = 2
 	docker compose -f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml config --quiet
 
+# Executable specification of the release trigger -> image tag mapping.
+# release.yml runs this script directly before deriving a version, so a release
+# is gated on it either way; this target is what makes `make validate` -- and a
+# developer checking before they cut one -- run the same specification.
+test-release-tags:
+	sh scripts/release-version_test.sh
+
 proto-lint:
 	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) lint
 

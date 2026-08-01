@@ -123,27 +123,31 @@ architectures and pushes nothing.
 
 ## Runners
 
-The release workflow runs on the same `[self-hosted, linux]` pool as CI.
+The release workflow runs on GitHub-hosted `ubuntu-latest`, the same as CI. The
+`[self-hosted, linux]` lines are kept commented out beside each `runs-on` so the
+pool can be switched back in one edit.
 
-The repository is private, so GitHub-hosted minutes are billable and
-GitHub-hosted arm64 runners are not free either; the self-hosted pool already
-builds and boots the whole Compose stack in CI, so it is the cheaper and more
-consistent choice. The workflow also deliberately uses no `actions/setup-*`
-step -- it needs Docker and nothing else.
+That is a change from the original design, which used a self-hosted pool because
+the repository is private and GitHub-hosted minutes are billable. The pool had
+nothing online, so every queued run was cancelled by the next push and neither
+workflow had executed for over a week. Hosted runners are the cheaper trade while
+that is true: a release that does not run is worth less than the minutes it saves.
 
-Prerequisites on the self-hosted runner, which this repository cannot install
-for you:
+The workflow deliberately uses no `actions/setup-*` step -- it needs Docker and
+nothing else. On a self-hosted runner that means:
 
 - Docker Engine (already required by the CI `compose-smoke` job).
 - Permission to run privileged containers. `docker/setup-qemu-action` registers
   the aarch64 emulator by running `tonistiigi/binfmt` with `--privileged`. If it
   cannot, the workflow fails at that step rather than publishing an amd64-only
-  image.
+  image. The image is pinned to `qemu-v9.2.2`: a later build of it crashed
+  `npm install` under arm64 emulation with SIGILL, which presents as an
+  unexplained failure inside the web image's runtime stage.
 - Outbound network access to `ghcr.io`, plus the package registries the images
   build from (Debian, Alpine, npm, PyPI, and the GitHub CLI release archive).
 
-`docker/setup-buildx-action` downloads buildx itself, so the runner does not
-need the buildx plugin preinstalled.
+`docker/setup-buildx-action` downloads buildx itself, so no runner needs the
+buildx plugin preinstalled.
 
 Layer cache is stored in the GitHub Actions cache, scoped per service
 (`type=gha,scope=release-<service>`), so a release reuses the previous release's
