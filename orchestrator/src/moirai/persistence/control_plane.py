@@ -1520,7 +1520,7 @@ class AsyncpgControlPlane:
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 candidate = await connection.fetchrow(
-                    """
+                    f"""
                     SELECT i.id AS issue_id, i.project_id, i.provider, i.external_id, i.priority,
                            i.external_created_at, i.last_synced_at,
                            p.enabled, p.configuration, r.id AS runner_id, r.labels,

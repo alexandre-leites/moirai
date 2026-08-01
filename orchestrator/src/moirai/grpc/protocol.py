@@ -198,6 +198,10 @@ class ControlPlane(Protocol):
 
     async def issue_sync_status(self, now: datetime) -> list[IssueSyncStatusRecord]: ...
 
+    # Scheduler gauges for GetSchedulerMetrics: queue depth, active workflows,
+    # scheduled jobs and the oldest runner heartbeat age.
+    async def metrics_snapshot(self, now: datetime) -> dict[str, float]: ...
+
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 
     async def append_audit(

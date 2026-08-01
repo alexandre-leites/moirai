@@ -41,6 +41,11 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_control_plane_persists_project_runner_issue_and_lease_lifecycle(self) -> None:
         control_plane = AsyncpgControlPlane(self.pool)
         suffix = uuid4().hex
+        # schedule() picks one online runner ordered by id, so a runner this
+        # suite left online in an earlier run would be assigned the job instead
+        # of the one registered below and the assertion would fail against every
+        # database but a virgin one.
+        await self._retire_leftover_runners()
         project = await control_plane.create_project(
             f"integration-{suffix}",
             "managed_clone",
@@ -147,6 +152,16 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([run["issue_id"] for run in runs], sorted(str(run["issue_id"]) for run in runs))
         self.assertEqual(runs, await control_plane.list_latest_workflow_runs_for_project(project_id))
 
+    async def _retire_leftover_runners(self) -> None:
+        """Takes every runner this database still reports online offline.
+
+        Runners outlive the tests that register them — they belong to no
+        project, so the per-project cleanups below never touch them. Marking
+        them offline is enough to keep them out of `schedule()`, and is safer
+        than deleting rows that jobs and leases still reference.
+        """
+        await self.pool.execute("UPDATE app.runners SET status = 'offline' WHERE status = 'online'")
+
     async def _delete_project(self, project_id: str) -> None:
         for table in ("workflow_runs", "issues"):
             await self.pool.execute(f"DELETE FROM app.{table} WHERE project_id = $1", UUID(project_id))
@@ -229,6 +244,11 @@ class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         from moirai.persistence.authentication import _hash_token
 
         other_session_id = uuid4()
+        # app.user_sessions.token_hash is globally unique, so a literal token
+        # here would collide with the row a previous run of this test left
+        # behind and the suite could only ever pass against a virgin database.
+        other_session_token = f"other-session-token-{other_session_id.hex}"
+        other_csrf_token = f"other-csrf-token-{other_session_id.hex}"
         await self.pool.execute(
             """
             INSERT INTO app.user_sessions
@@ -237,8 +257,8 @@ class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
             """,
             other_session_id,
             UUID(self.credentials.user_id),
-            _hash_token("other-session-token"),
-            _hash_token("other-csrf-token"),
+            _hash_token(other_session_token),
+            _hash_token(other_csrf_token),
             _NOW,
             _NOW + timedelta(hours=1),
         )
@@ -259,7 +279,7 @@ class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.email, "admin@example.com")
         with self.assertRaises(AuthenticationError):
             await self.authentication.validate_session(
-                "other-session-token", "other-csrf-token", _NOW + timedelta(minutes=2), True
+                other_session_token, other_csrf_token, _NOW + timedelta(minutes=2), True
             )
 
     async def test_update_account_rejects_a_wrong_current_password(self) -> None:
@@ -941,7 +961,15 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self, job_id: str, runner_id: str, request_id: str, on_transition: Any = None
     ) -> None:
         """A successful developer execution, reported the way the runner does:
-        `started`, then `completed` with the files it changed."""
+        `started`, then `completed` with the files it changed.
+
+        The `result` document is what makes this a *delivery*. Since issue #105
+        the orchestrator will not advance a run on an exit code alone: a
+        terminal event whose agent result is missing or invalid, or that
+        reports no changed files or outstanding `remainingWork`, is recorded as
+        a non-delivery and the run holds its phase. Omitting it here would test
+        that guard rather than the transition.
+        """
         from moirai.domain.models import ExecutionEvent
 
         generation = int(
@@ -949,12 +977,27 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT lease_generation FROM app.jobs WHERE id = $1", UUID(job_id)
             )
         )
+        result = {
+            "protocolVersion": "1.0",
+            "executionId": f"{request_id}-implement",
+            "status": "completed",
+            "summary": "implemented the requested change",
+            "changedFiles": ["src/main.py"],
+            "commandsRun": ["make test"],
+            "remainingWork": [],
+            "knownLimitations": [],
+        }
         for sequence, event_type, payload in (
             (1, "started", {}),
             (
                 2,
                 "completed",
-                {"exitCode": 0, "changedFiles": ["src/main.py"], "commandsRun": ["make test"]},
+                {
+                    "exitCode": 0,
+                    "changedFiles": ["src/main.py"],
+                    "commandsRun": ["make test"],
+                    "result": result,
+                },
             ),
         ):
             await self.control_plane.accept_event(
