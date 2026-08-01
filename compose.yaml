@@ -91,7 +91,10 @@ services:
       LOOP_SEED_ISSUE_BODY: "${MOIRAI_SEED_ISSUE_BODY-}"
     depends_on:
       postgres: {condition: service_healthy}
-    networks: [database, control]
+    # `egress` is not optional: issue sync, pull requests, check polling and
+    # merges all call api.github.com from here. Without it every project reports
+    # "error connecting to api.github.com" and retries forever.
+    networks: [database, control, egress]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -171,7 +174,9 @@ services:
       LOOP_RUNNER_AGENT_ARGUMENTS: "${MOIRAI_AGENT_ARGUMENTS:---model,opencode/deepseek-v4-flash-free,--auto}"
     depends_on:
       orchestrator: {condition: service_healthy}
-    networks: [control, public]
+    # Clones, fetches and pushes, and the agent calls its model provider, so
+    # this needs the internet. Nothing on the console network needs to reach it.
+    networks: [control, egress]
     volumes: [runner-data:/data]
     read_only: true
     tmpfs:
@@ -192,8 +197,19 @@ services:
           memory: "${MOIRAI_RUNNER_MEMORY:-4g}"
 
 networks:
+  # No route off the host. Nothing on these two needs one, and a compromised
+  # service on them cannot call home.
   database: {internal: true}
   control: {internal: true}
+  # Reaches the internet. Moirai acts on GitHub as you -- reading issues,
+  # cloning, pushing, opening and merging pull requests -- so the two services
+  # that do that have to get out.
+  #
+  # This is separate from `public` so that "needs the internet" and "is part of
+  # the console's published surface" stay different things: the orchestrator
+  # gets egress without becoming reachable from the web container.
+  egress: {}
+  # The console. web publishes a port to the host and proxies /api/ to api.
   public: {}
 
 volumes:
