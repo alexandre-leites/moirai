@@ -91,7 +91,10 @@ func (r *SecretResolver) writeKey(jobID, name, value string) (string, error) {
 		return "", errors.New("no key directory is configured for file-delivered secrets")
 	}
 	if err := os.MkdirAll(r.KeyDirectory, 0o700); err != nil {
-		return "", fmt.Errorf("create key directory: %w", err)
+		// Names the directory: "mkdir /run/moirai: permission denied" alone sent
+		// an operator looking through a whole container for which path and whose
+		// ownership was meant.
+		return "", fmt.Errorf("create key directory %s: %w", r.KeyDirectory, err)
 	}
 	path := filepath.Join(r.KeyDirectory, jobID+"."+name)
 	// O_EXCL would fail a retry of the same job; truncating is correct here
@@ -114,6 +117,31 @@ func ensureTrailingNewline(value string) string {
 		return value
 	}
 	return value + "\n"
+}
+
+// EnsureKeyDirectory checks at startup that a file-delivered secret will have
+// somewhere to land.
+//
+// Without it the first thing to discover an unwritable directory was a job
+// already in flight, which failed as "create key directory: mkdir /run/moirai:
+// permission denied" after the offer had been accepted -- and then again on
+// every retry, until the project's circuit opened. The condition is fixed at
+// startup and cannot fix itself, so it belongs at startup.
+func (r *SecretResolver) EnsureKeyDirectory() error {
+	if r == nil || r.KeyDirectory == "" {
+		return nil
+	}
+	if err := os.MkdirAll(r.KeyDirectory, 0o700); err != nil {
+		return fmt.Errorf("create key directory %s: %w", r.KeyDirectory, err)
+	}
+	// Creatable is not the same as writable: the directory may already exist
+	// and belong to someone else, which is exactly the case in a container
+	// whose entrypoint forgot to hand it over before dropping privileges.
+	probe := filepath.Join(r.KeyDirectory, ".writable")
+	if err := os.WriteFile(probe, []byte{}, 0o600); err != nil {
+		return fmt.Errorf("key directory %s is not writable by this runner: %w", r.KeyDirectory, err)
+	}
+	return os.Remove(probe)
 }
 
 // DiscardJobKeys removes any key files written for a job. Called when the job

@@ -155,3 +155,62 @@ func resolveKey(t *testing.T, resolver *SecretResolver, jobID string) (string, s
 	_, path, err := resolver.Resolve(context.Background(), jobID, 1, "GIT_SSH_KEY")
 	return path, "", err
 }
+
+func TestEnsureKeyDirectoryCreatesItWhenMissing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "moirai", "keys")
+	resolver := NewSecretResolver(&secretClient{}, Identity{RunnerID: "r", Credential: "c"}, dir)
+
+	if err := resolver.EnsureKeyDirectory(); err != nil {
+		t.Fatalf("EnsureKeyDirectory() = %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("directory was not created: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("the writability probe was left behind: %d entries", len(entries))
+	}
+}
+
+// The shipped failure: /run is a root-owned tmpfs, the runner is unprivileged,
+// and nothing noticed until a job was already in flight.
+func TestEnsureKeyDirectoryFailsWhenItCannotBeWritten(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	resolver := NewSecretResolver(&secretClient{}, Identity{RunnerID: "r", Credential: "c"},
+		filepath.Join(parent, "keys"))
+
+	err := resolver.EnsureKeyDirectory()
+	if err == nil {
+		t.Fatal("EnsureKeyDirectory() succeeded on an unwritable parent")
+	}
+	// The operator has to be told which directory, or the message sends them
+	// looking through the whole container.
+	if !strings.Contains(err.Error(), filepath.Join(parent, "keys")) {
+		t.Fatalf("error = %q, want it to name the directory", err)
+	}
+}
+
+func TestEnsureKeyDirectoryRejectsADirectoryOwnedByAnother(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
+	dir := filepath.Join(t.TempDir(), "keys")
+	if err := os.MkdirAll(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	resolver := NewSecretResolver(&secretClient{}, Identity{RunnerID: "r", Credential: "c"}, dir)
+
+	// Exists and MkdirAll succeeds, but nothing can be written into it -- which
+	// is precisely the container case the probe exists to catch.
+	if err := resolver.EnsureKeyDirectory(); err == nil {
+		t.Fatal("EnsureKeyDirectory() accepted a directory it cannot write to")
+	}
+}

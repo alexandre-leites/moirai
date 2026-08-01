@@ -263,6 +263,14 @@ func run(ctx context.Context) error {
 	// crash mid-job leaves a private key on the tmpfs, and the next execution
 	// must not inherit one it was never granted.
 	secrets := control.NewSecretResolver(service, identity, settings.KeyDir)
+	// Reported at startup rather than discovered midway through the first job
+	// that needs a key -- but not fatal. A deployment that never uses
+	// file-delivered secrets (no TLS, or no project with an SSH key) works
+	// perfectly well without this directory, and refusing to start would take
+	// those runners down for a feature they do not use.
+	if err := secrets.EnsureKeyDirectory(); err != nil {
+		slog.Warn("job key directory is unusable; a project with an SSH key will fail on this runner", "error", err)
+	}
 	if err := secrets.DiscardJobKeys(""); err != nil {
 		return fmt.Errorf("clear leftover job keys: %w", err)
 	}
