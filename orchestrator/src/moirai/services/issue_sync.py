@@ -20,6 +20,16 @@ async def _await(value: Any) -> Any:
     return value
 
 
+def _cause(error: BaseException) -> str:
+    """The failure reason for an operator, from the exception being wrapped.
+
+    Falls back to the class name: an exception raised with no message renders as
+    the empty string, which would leave a message ending in a bare colon.
+    """
+    detail = str(error).strip()
+    return detail or type(error).__name__
+
+
 class IssueSyncError(RuntimeError):
     pass
 
@@ -82,15 +92,28 @@ class IssueSync:
                 self._retry_after[project_id] = retry_after
 
     async def sync_project(self, project: Project, now: datetime) -> int:
-        tracker = self._issue_tracker_factory(project)
+        # The factory may be async: resolving a project's own GitHub
+        # credential is a database read. `_await` passes a plain tracker
+        # straight through, so synchronous factories are unaffected.
+        tracker = await _await(self._issue_tracker_factory(project))
         try:
             external_issues = await asyncio.wait_for(
                 _await(tracker.list_open_issues()), timeout=self._sync_timeout_seconds
             )
         except TimeoutError as error:
-            raise IssueSyncError(f"issue tracker timed out for project {project.id}") from error
+            raise IssueSyncError(
+                f"issue tracker timed out for project {project.id} "
+                f"after {self._sync_timeout_seconds:g}s"
+            ) from error
         except Exception as error:
-            raise IssueSyncError(f"issue tracker failed for project {project.id}") from error
+            # The cause is the whole diagnosis and it is the only place the
+            # reason exists: GitHubCliError carries the CLI's own stderr,
+            # already redacted. `str(error)` here becomes issue_sync_state's
+            # last_error, which is what the console shows an operator -- without
+            # it they see "issue tracker failed" and have nowhere to go.
+            raise IssueSyncError(
+                f"issue tracker failed for project {project.id}: {_cause(error)}"
+            ) from error
 
         seen_external_ids: list[str] = []
         for external in external_issues:
@@ -119,7 +142,9 @@ class IssueSync:
                     )
                 )
             except Exception as error:
-                raise IssueSyncError(f"issue persistence failed for project {project.id}") from error
+                raise IssueSyncError(
+                    f"issue persistence failed for project {project.id}: {_cause(error)}"
+                ) from error
             seen_external_ids.append(external.external_id)
 
         mark_missing = getattr(self._control_plane, "mark_missing_issues_ineligible", None)
@@ -127,7 +152,9 @@ class IssueSync:
             try:
                 await _await(mark_missing(project.id, seen_external_ids, now))
             except Exception as error:
-                raise IssueSyncError(f"issue reconciliation failed for project {project.id}") from error
+                raise IssueSyncError(
+                    f"issue reconciliation failed for project {project.id}: {_cause(error)}"
+                ) from error
         return len(seen_external_ids)
 
     async def sync_all_projects(self, now: datetime) -> dict[str, int | str]:
@@ -230,7 +257,10 @@ class IssueSync:
             await _await(record_failure(project_id, failures, retry_at, str(error), now))
 
     async def reconcile_project_labels(self, project: Project) -> None:
-        tracker = self._issue_tracker_factory(project)
+        # The factory may be async: resolving a project's own GitHub
+        # credential is a database read. `_await` passes a plain tracker
+        # straight through, so synchronous factories are unaffected.
+        tracker = await _await(self._issue_tracker_factory(project))
         workflow_runs = await _await(
             self._control_plane.list_latest_workflow_runs_for_project(project.id)
         )
@@ -238,7 +268,13 @@ class IssueSync:
             current_labels = await _await(self._control_plane.get_issue_labels(workflow["issue_id"]))
             desired_labels = _desired_labels_for_workflow(workflow, self._label_policy)
             to_add, to_remove = reconcile_labels(
-                current_labels, desired_labels, managed_prefix=self._label_policy.managed_prefix
+                current_labels,
+                desired_labels,
+                managed_prefix=self._label_policy.managed_prefix,
+                # The ready label is the operator's request, not a status this
+                # service owns. Removing it on a run that ended badly deletes
+                # the only thing that makes the issue eligible again.
+                protected=(self._label_policy.ready,),
             )
             if not to_add and not to_remove:
                 continue

@@ -106,19 +106,32 @@ export function form(container: ParentNode): HTMLFormElement {
  * a plain assignment updates the DOM but never reaches `onChange` and the
  * controlled component immediately paints the old value back.
  */
-function setNativeValue(node: HTMLInputElement | HTMLSelectElement, value: string): void {
-  const prototype = node instanceof HTMLSelectElement ? HTMLSelectElement : HTMLInputElement;
+type ValueNode = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+
+function setNativeValue(node: ValueNode, value: string): void {
+  const prototype = node instanceof HTMLSelectElement
+    ? HTMLSelectElement
+    : node instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement
+      : HTMLInputElement;
   const setter = Object.getOwnPropertyDescriptor(prototype.prototype, "value")?.set;
   if (!setter) throw new Error(`${prototype.name}.prototype.value has no setter`);
   setter.call(node, value);
 }
 
-/** Types `value` into a controlled `<input>` the way a keystroke would. */
-export function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+/** Types `value` into a controlled `<input>` or `<textarea>` as a keystroke would. */
+export function typeInto(input: HTMLInputElement | HTMLTextAreaElement, value: string): Promise<void> {
   return act(async () => {
     setNativeValue(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
+}
+
+/** The `<textarea>` labelled by `aria-label`. */
+export function textarea(container: ParentNode, label: string): HTMLTextAreaElement {
+  const found = container.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
+  if (!found) throw new Error(`no textarea labelled "${label}"`);
+  return found;
 }
 
 /** Picks `value` in a controlled `<select>`. */

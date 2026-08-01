@@ -158,15 +158,16 @@ class AsyncpgAuthentication:
                 if user is None or not bool(user["enabled"]) or not password_valid:
                     raise AuthenticationError("login was rejected")
                 credentials = self._new_session(str(user["id"]), now)
-                await connection.execute(
-                    """
-                    UPDATE app.user_sessions
-                    SET revoked_at = $2
-                    WHERE user_id = $1 AND revoked_at IS NULL
-                    """,
-                    user["id"],
-                    now,
-                )
+                # Signing in does not disturb sessions already open. Revoking
+                # them made one account usable from one place at a time: a
+                # second browser, a phone, or a script hitting the API silently
+                # signed the first one out, with nothing to say why.
+                #
+                # Revocation still belongs on a *password change*, where it is
+                # the point -- see update_account, which takes keep_session_id
+                # so the session doing the changing survives and every other one
+                # is cut. That is the case where "log everyone else out" is what
+                # the user asked for.
                 await connection.execute(
                     """
                     INSERT INTO app.user_sessions

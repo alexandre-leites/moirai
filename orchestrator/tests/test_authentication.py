@@ -208,19 +208,41 @@ class AuthenticationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called_password, "whatever password")
         self.assertNotEqual(called_hash, "")
 
-    async def test_login_revokes_the_previous_session_for_the_user(self) -> None:
+    async def test_signing_in_again_leaves_the_first_session_working(self) -> None:
+        """One account, several places at once.
+
+        Login used to revoke every other live session for the user, so a second
+        browser, a phone, or a script calling the API silently signed the first
+        one out with nothing to say why. Revocation belongs on a password
+        change, which is the case below.
+        """
         first = await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)
         second = await self.authentication.login(
             "admin", "Correct horse battery staple 9!", NOW + timedelta(minutes=1)
         )
-        with self.assertRaises(AuthenticationError):
-            await self.authentication.validate_session(
-                first.session_token, first.csrf_token, NOW + timedelta(minutes=2), True
+        later = NOW + timedelta(minutes=2)
+
+        for credentials in (first, second):
+            session = await self.authentication.validate_session(
+                credentials.session_token, credentials.csrf_token, later, True
             )
-        session = await self.authentication.validate_session(
-            second.session_token, second.csrf_token, NOW + timedelta(minutes=2), True
-        )
-        self.assertEqual(session.user_id, USER_ID)
+            self.assertEqual(session.user_id, USER_ID)
+        self.assertNotEqual(first.session_token, second.session_token)
+        self.assertNotEqual(first.csrf_token, second.csrf_token)
+
+    async def test_a_third_sign_in_still_leaves_the_earlier_two_working(self) -> None:
+        sessions = [
+            await self.authentication.login(
+                "admin", "Correct horse battery staple 9!", NOW + timedelta(minutes=i)
+            )
+            for i in range(3)
+        ]
+        later = NOW + timedelta(minutes=10)
+        for credentials in sessions:
+            session = await self.authentication.validate_session(
+                credentials.session_token, credentials.csrf_token, later, True
+            )
+            self.assertEqual(session.user_id, USER_ID)
 
     async def test_session_requires_matching_csrf_and_honors_expiry(self) -> None:
         credentials = await self.authentication.login("admin", "Correct horse battery staple 9!", NOW)

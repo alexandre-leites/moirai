@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -258,18 +259,69 @@ async def _run_retention_reaper(
             pass
 
 
+async def _connect_control_plane(factory: Any, config: OrchestratorConfig) -> Any:
+    """Connects the control plane, with the credential cipher when one is configured.
+
+    The key is optional: a deployment that stores no per-project credentials
+    never needs one. A misconfigured one is not optional -- it raises here,
+    during startup, rather than at the first credential write.
+
+    The cipher is passed only when the factory declares the parameter, so an
+    injected test factory taking just a database URL keeps working. The check is
+    on the signature rather than on a caught TypeError: retrying without the
+    cipher after *any* TypeError would turn an unrelated bug inside the factory
+    into a deployment that silently stores nothing encrypted.
+    """
+    cipher = None
+    if config.secret_key:
+        from moirai.persistence.secrets import SecretCipher
+
+        cipher = SecretCipher.from_configured_key(config.secret_key)
+    if cipher is None:
+        return await factory(config.database_url)
+    if not _accepts_secret_cipher(factory):
+        _LOGGER.warning(
+            "control plane factory does not accept a secret cipher; per-project "
+            "credentials will be unavailable"
+        )
+        return await factory(config.database_url)
+    return await factory(config.database_url, secret_cipher=cipher)
+
+
+def _accepts_secret_cipher(factory: Any) -> bool:
+    """Whether `factory` takes a `secret_cipher` keyword.
+
+    A factory whose signature cannot be read (a Mock, a C callable) is assumed
+    to accept it: the production factory does, and guessing "no" would disable
+    encryption for the deployment rather than for the test that injected it.
+    """
+    try:
+        parameters = inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        return True
+    if "secret_cipher" in parameters:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+
+
 def register_services(
     server: Any,
     control_plane: Any,
     now: Callable[[], Any] | None = None,
     workflow_runtime: Any | None = None,
     issue_sync: Any | None = None,
+    secure_channel: bool = False,
 ) -> RunnerControlService:
     from moirai.grpc.control_plane import ControlPlaneService
     from moirai.grpc.runner_control import RunnerControlService
     from proto import control_plane_pb2_grpc, runner_control_pb2_grpc
 
-    runner_service = RunnerControlService(control_plane, now=now, workflow_runtime=workflow_runtime)
+    # secure_channel gates ResolveJobSecret, the one RPC that sends credential
+    # material outward. It defaults to false so a caller that does not pass it
+    # gets the safe answer rather than the convenient one.
+    runner_service = RunnerControlService(
+        control_plane, now=now, workflow_runtime=workflow_runtime, secure_channel=secure_channel
+    )
     control_plane_pb2_grpc.add_ControlPlaneServicer_to_server(
         ControlPlaneService(
             control_plane,
@@ -359,7 +411,7 @@ async def serve(
     metrics.update()
     shutdown = stop_event or asyncio.Event()
     factory = control_plane_factory or AsyncpgControlPlane.connect
-    control_plane = await factory(active_config.database_url)
+    control_plane = await _connect_control_plane(factory, active_config)
     health = HealthState()
     server = grpc.aio.server(interceptors=(CorrelationLoggingInterceptor(),))
     workflow_runtime: Any | None = None
@@ -374,12 +426,17 @@ async def serve(
     supports_durability = isinstance(control_plane, AsyncpgControlPlane)
     if supports_durability:
         pool = control_plane.pool
-        metrics_task = asyncio.create_task(_metrics_loop(control_plane, metrics, shutdown))
 
         from moirai.persistence.migrations import MigrationRunner
         migrations = await MigrationRunner(pool).run()
         if migrations:
             _LOGGER.info("applied migrations", extra={"migrations": migrations})
+
+        # After the migrations, not before: the pool opens a connection eagerly,
+        # and a metrics query prepared on it against a schema that does not exist
+        # yet fails -- and kept failing every tick thereafter, so the gauges the
+        # console reads stayed at zero for the life of the process.
+        metrics_task = asyncio.create_task(_metrics_loop(control_plane, metrics, shutdown))
 
         await _bootstrap_initial_setup(pool)
         await _seed_issue_if_needed(pool)
@@ -399,7 +456,17 @@ async def serve(
                 await verify_gh_ready(github_runner)
             except GitHubCliUnavailableError:
                 _LOGGER.warning("GitHub CLI is not authenticated; issue sync and code host operations will fail")
-        code_hosts = ProjectCodeHostFactory(pool, command_runner=github_runner)
+        # Per-project credentials, where a project has one; the shared runner
+        # built from LOOP_GITHUB_TOKEN otherwise.
+        read_project_token = getattr(control_plane, "project_credential", None)
+        credential_reader = (
+            (lambda project_id: read_project_token(project_id, "github_token"))
+            if read_project_token is not None
+            else None
+        )
+        code_hosts = ProjectCodeHostFactory(
+            pool, command_runner=github_runner, credential_reader=credential_reader
+        )
         checkpointer = await _build_checkpointer(active_config.database_url)
         health.mark_checkpointer(checkpointer is not None)
         workflow_runtime = build_persisted_runtime(
@@ -409,13 +476,24 @@ async def serve(
             issue_tracker_factory=code_hosts.issue_tracker,
         )
 
-        issue_sync = IssueSync(
-            control_plane, lambda project: github_issue_tracker_for_project(project, github_runner)
-        )
+        # Routed through the same factory as the code host so issue sync uses a
+        # project's own credential too -- it is the first thing to touch a
+        # private repository, and the first thing to fail without one.
+        async def _tracker_for(project: Any) -> Any:
+            tracker = await code_hosts.issue_tracker(project.id)
+            if tracker is not None:
+                return tracker
+            return github_issue_tracker_for_project(project, github_runner)
+
+        issue_sync = IssueSync(control_plane, _tracker_for)
         await issue_sync.restore_retry_state(datetime.now(UTC))
 
         runner_service = register_services(
-            server, control_plane, workflow_runtime=workflow_runtime, issue_sync=issue_sync
+            server,
+            control_plane,
+            workflow_runtime=workflow_runtime,
+            issue_sync=issue_sync,
+            secure_channel=active_config.grpc_tls_cert_file is not None,
         )
 
         scheduler = Scheduler(
@@ -438,10 +516,6 @@ async def serve(
             lambda task: _log_unexpected_completion("scheduler", health, shutdown, task)
         )
 
-        issue_sync = IssueSync(
-            control_plane, lambda project: github_issue_tracker_for_project(project, github_runner)
-        )
-        await issue_sync.restore_retry_state(datetime.now(UTC))
         issue_sync_task = asyncio.create_task(
             issue_sync.run(
                 shutdown, lambda: datetime.now(UTC), timedelta(minutes=1), on_run=health.mark_issue_sync_run
@@ -478,7 +552,9 @@ async def serve(
             "control plane implementation does not support durability features "
             "(migrations, workflow checkpointing, scheduling, issue sync) — running in reduced capacity"
         )
-        register_services(server, control_plane)
+        register_services(
+            server, control_plane, secure_channel=active_config.grpc_tls_cert_file is not None
+        )
     port = _bind_grpc_endpoint(server, active_config)
     if port == 0:
         shutdown.set()

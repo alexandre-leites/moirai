@@ -1,0 +1,77 @@
+# Encrypt the control stream between the orchestrator and the runner.
+#
+#   docker compose -f compose.yaml -f compose.tls.yaml up -d
+#
+# Why you would: without it the orchestrator refuses to hand a runner a
+# project's credential, because the value would cross the network in the clear.
+# The stack works fine without this overlay -- runners just fall back to the
+# GITHUB_TOKEN configured on them, which is the same credential for every
+# project. Per-project credentials on the *orchestrator* side (issue sync,
+# pull requests, merges) need no TLS and work either way.
+#
+# The certificate is generated on first start into a shared volume and reused
+# afterwards. It is self-signed and names only "orchestrator", the service name
+# on the internal network -- which is the only name anything dials it by. That
+# is enough for the runner to verify it against the same CA file, and it is why
+# this needs no certificate authority and no files on the host.
+#
+# For a deployment where the orchestrator is reachable from outside this
+# network, replace the generator with your own certificate: mount it at
+# /tls/server.crt and /tls/server.key and point MOIRAI_TLS_CA at its CA.
+
+services:
+  # Runs once before the orchestrator, then exits. The orchestrator and runner
+  # both wait for it to complete, so neither can start against a half-written
+  # certificate.
+  tls-init:
+    image: alpine/openssl:3.3.2
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -s /tls/server.crt ] && [ -s /tls/server.key ]; then
+          echo "tls-init: reusing the existing certificate"
+          exit 0
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -subj "/CN=orchestrator" \
+          -addext "subjectAltName=DNS:orchestrator,DNS:localhost,IP:127.0.0.1" \
+          -keyout /tls/server.key -out /tls/server.crt
+        # The runner verifies against the certificate itself: it is its own CA.
+        cp /tls/server.crt /tls/ca.crt
+        chmod 0644 /tls/server.crt /tls/ca.crt
+        # The orchestrator runs as an unprivileged user and has to read the key.
+        chmod 0644 /tls/server.key
+        echo "tls-init: generated a self-signed certificate for CN=orchestrator"
+    volumes: [tls:/tls]
+    networks: [control]
+
+  orchestrator:
+    environment:
+      LOOP_GRPC_TLS_CERT_FILE: /tls/server.crt
+      LOOP_GRPC_TLS_KEY_FILE: /tls/server.key
+    volumes: [tls:/tls:ro]
+    depends_on:
+      postgres: {condition: service_healthy}
+      tls-init: {condition: service_completed_successfully}
+
+  api:
+    environment:
+      LOOP_ORCHESTRATOR_TLS: "true"
+      LOOP_ORCHESTRATOR_TLS_CA_FILE: /tls/ca.crt
+      LOOP_ORCHESTRATOR_TLS_SERVER_NAME: orchestrator
+    volumes: [tls:/tls:ro]
+
+  runner:
+    environment:
+      LOOP_ORCHESTRATOR_TLS: "true"
+      LOOP_ORCHESTRATOR_TLS_CA_FILE: /tls/ca.crt
+      LOOP_ORCHESTRATOR_TLS_SERVER_NAME: orchestrator
+    volumes:
+      - runner-data:/data
+      - tls:/tls:ro
+
+volumes:
+  tls:
+    name: moirai_tls

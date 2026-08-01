@@ -1,141 +1,173 @@
 // @vitest-environment jsdom
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, describe, expect, it } from "vitest";
-import type { ApiClient, WorkflowDetail, WorkflowEventsPage } from "./api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ApiClient } from "./api";
+import { ApiError } from "./api";
 import { WorkflowDetailPage } from "./workflow-detail";
-import { button, click, deferred, mount, unmountAll } from "./test-dom";
+import { button, buttons, click, textarea, typeInto, unmountAll } from "./test-dom";
+import { NOW, VIEWER, event, mountView, project, stubApi, workflow } from "./test-console";
 
 afterEach(unmountAll);
 
-const WORKFLOW_ID = "11111111-2222-3333-4444-555555555555";
+const AT = { route: "/workflows/wf-1", path: "/workflows/:workflowId" };
 
-function workflow(overrides: Partial<WorkflowDetail> = {}): WorkflowDetail {
-  return {
-    id: WORKFLOW_ID,
-    projectId: "project-1",
-    status: "blocked",
-    phase: "repairing",
-    issueExternalId: "117",
-    issueTitle: "Show workflow detail",
-    branchName: "agent/117/workflow-detail",
-    pullRequestExternalId: "42",
-    pullRequestUrl: "https://github.com/acme/repo/pull/42",
-    pullRequestState: "open",
-    blockingReason: "retry budget exhausted",
-    planningAttempts: 1,
-    implementationAttempts: 2,
-    pipelineRepairAttempts: 3,
-    ciRepairAttempts: 4,
-    reviewCycles: 5,
-    createdAt: "2026-07-30T00:00:00Z",
-    updatedAt: "2026-07-30T00:01:00Z",
-    ...overrides,
-  };
-}
-
-function eventsPage(overrides: Partial<WorkflowEventsPage> = {}): WorkflowEventsPage {
-  return {
-    events: [{
-      id: "event-1",
-      type: "log",
-      createdAt: "2026-07-30T00:01:00Z",
-      payload: { payload: { message: "agent output\nsecond line" } },
-    }],
-    ...overrides,
-  };
-}
-
-function page(api: ApiClient) {
-  return (
-    <MemoryRouter initialEntries={[`/workflows/${WORKFLOW_ID}`]}>
-      <Routes><Route path="/workflows/:workflowId" element={<WorkflowDetailPage api={api} />} /></Routes>
-    </MemoryRouter>
-  );
-}
-
-function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
-  return {
-    getWorkflow: async () => workflow(),
-    listWorkflowEvents: async () => eventsPage(),
-    ...overrides,
-  } as ApiClient;
-}
+const mountDetail = (api: ApiClient) => mountView(<WorkflowDetailPage api={api} />, api, AT);
 
 describe("WorkflowDetailPage", () => {
-  it("renders workflow state, attempts, pull request, and log output", async () => {
-    const container = await mount(page(stubApi()));
-
-    expect(container.textContent).toContain("117: Show workflow detail");
-    expect(container.textContent).toContain("blocked");
-    expect(container.textContent).toContain("repairing");
-    expect(container.textContent).toContain("agent/117/workflow-detail");
-    expect(container.textContent).toContain("retry budget exhausted");
-    expect(container.textContent).toContain("Planning");
-    expect(container.textContent).toContain("5");
-    expect(container.querySelector('a[href="https://github.com/acme/repo/pull/42"]')).not.toBeNull();
-    expect(container.querySelector("pre")?.textContent).toBe("agent output\nsecond line");
-  });
-
-  it("says when no pull request or events exist", async () => {
-    const container = await mount(page(stubApi({
-      getWorkflow: async () => workflow({ pullRequestUrl: undefined }),
-      listWorkflowEvents: async () => eventsPage({ events: [] }),
-    })));
-
-    expect(container.textContent).toContain("No pull request has been created.");
-    expect(container.textContent).toContain("No runner events have been recorded.");
-  });
-
-  it("renders timeline events newest first", async () => {
-    const container = await mount(page(stubApi({
-      listWorkflowEvents: async () => eventsPage({ events: [
-        { id: "old", type: "started", createdAt: "2026-07-30T00:00:00Z", payload: {} },
-        { id: "new", type: "completed", createdAt: "2026-07-30T00:01:00Z", payload: {} },
-      ] }),
-    })));
-
-    expect(Array.from(container.querySelectorAll(".workflow-timeline-event")).map((event) => event.textContent)).toEqual([
-      expect.stringContaining("completed"),
-      expect.stringContaining("started"),
-    ]);
-  });
-
-  it("loads older events with the returned cursor", async () => {
-    const cursors: Array<string | undefined> = [];
+  it("heads the view with the project, issue and status, and draws the full thread", async () => {
     const api = stubApi({
-      listWorkflowEvents: async (_id, cursor) => {
-        cursors.push(cursor);
-        return cursor
-          ? eventsPage({ events: [{ id: "event-0", type: "started", createdAt: "2026-07-29T23:59:00Z", payload: {} }] })
-          : eventsPage({ nextCursor: "event-1" });
-      },
+      listProjects: async () => [project({ id: "project-1", name: "moirai" })],
+      getWorkflow: async () => workflow({ status: "ai_review", reviewCycles: 1 }),
     });
-    const container = await mount(page(api));
+    const container = await mountDetail(api);
+
+    expect(container.querySelector("h1")?.textContent).toBe("moirai #103");
+    expect(container.textContent).toContain("AI review");
+    expect(container.querySelector(".threadline")).not.toBeNull();
+    expect(container.textContent).toContain("spun");
+  });
+
+  it("shows the blocking reason in a banner when a run is blocked", async () => {
+    const api = stubApi({
+      getWorkflow: async () => workflow({ status: "blocked", blockingReason: "Non-progress: 4 identical outcomes" }),
+    });
+    const container = await mountDetail(api);
+
+    const banner = container.querySelector(".banner")!;
+    expect(banner.textContent).toContain("Blocked.");
+    expect(banner.textContent).toContain("Non-progress: 4 identical outcomes");
+    expect(button(container, /Retry with fresh context/)).toBeTruthy();
+  });
+
+  it("shows a failure banner with a retry for a failed run", async () => {
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "failed", blockingReason: "Offer expired" }) });
+    const container = await mountDetail(api);
+    expect(container.querySelector(".banner")?.textContent).toContain("Failed.");
+    expect(button(container, /Retry workflow/)).toBeTruthy();
+  });
+
+  it("posts the decision and its comment when the gate is approved", async () => {
+    const submitWorkflowDecision = vi.fn(async () => workflow({ status: "merging" }));
+    const api = stubApi({
+      getWorkflow: async () => workflow({ status: "waiting_human", pullRequestUrl: "https://example.test/pull/112", pullRequestExternalId: "112" }),
+      submitWorkflowDecision,
+    });
+    const container = await mountDetail(api);
+
+    expect(container.textContent).toContain("Your decision gates the merge");
+    await typeInto(textarea(container, "Decision comment"), "looks right, merging");
+    await click(button(container, /Approve & merge/));
+
+    expect(submitWorkflowDecision).toHaveBeenCalledWith("wf-1", "approved", "looks right, merging");
+    expect(container.textContent).toContain("Approved");
+  });
+
+  it("tells a viewer the gate is not theirs to open", async () => {
+    const api = stubApi({
+      me: async () => VIEWER,
+      getWorkflow: async () => workflow({ status: "waiting_human" }),
+    });
+    const container = await mountDetail(api);
+
+    expect(container.textContent).toContain("An admin has to approve the merge");
+    expect(buttons(container, /Approve/)).toHaveLength(0);
+  });
+
+  it("reports a 403 as a permission problem rather than signing the user out", async () => {
+    const api = stubApi({
+      getWorkflow: async () => workflow({ status: "waiting_human" }),
+      submitWorkflowDecision: async () => { throw new ApiError(403, "Forbidden"); },
+    });
+    const container = await mountDetail(api);
+    await click(button(container, /Approve & merge/));
+    expect(container.textContent).toContain("You need the admin role for that");
+  });
+
+  it("requires a reason before a run can be blocked, and confirms first", async () => {
+    const blockWorkflow = vi.fn(async () => workflow({ status: "blocked" }));
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "implementing" }), blockWorkflow });
+    const container = await mountDetail(api);
+
+    const block = button(container, /Block & hold issue/);
+    expect(block.disabled).toBe(true);
+
+    await typeInto(textarea(container, "Reason"), "holding for a product decision");
+    await click(button(container, /Block & hold issue/));
+
+    // The dialog names the consequence before anything is sent.
+    expect(document.querySelector(".modal")?.textContent).toContain("agent:blocked");
+    expect(blockWorkflow).not.toHaveBeenCalled();
+    await click(button(document.body, /^Block workflow$/));
+    expect(blockWorkflow).toHaveBeenCalledWith("wf-1", "holding for a product decision");
+  });
+
+  it("hides the controls on a terminal run and from a viewer", async () => {
+    const terminal = stubApi({ getWorkflow: async () => workflow({ status: "completed" }) });
+    const terminalView = await mountDetail(terminal);
+    expect(buttons(terminalView, /Cancel workflow/)).toHaveLength(0);
+
+    const viewer = stubApi({ me: async () => VIEWER, getWorkflow: async () => workflow({ status: "implementing" }) });
+    const viewerView = await mountDetail(viewer);
+    expect(buttons(viewerView, /Cancel workflow/)).toHaveLength(0);
+  });
+
+  it("renders events as sentences and the agent's log lines as text", async () => {
+    const api = stubApi({
+      listWorkflowEvents: async () => ({
+        events: [
+          event({ id: "12", type: "log", payload: { payload: { message: "applying plan step 3/6" } }, createdAt: NOW }),
+          event({ id: "11", type: "execution_requeued", payload: { role: "developer", attempt: 2 }, createdAt: NOW }),
+        ],
+      }),
+    });
+    const container = await mountDetail(api);
+
+    expect(container.textContent).toContain("Execution lost and requeued");
+    expect(container.querySelector(".evt.warn")).not.toBeNull();
+    expect(container.querySelector(".logline")?.textContent).toContain("applying plan step 3/6");
+  });
+
+  it("pages older events once and then stops offering to", async () => {
+    // The last page comes back without a cursor. Falling back to the live page's
+    // cursor there would re-request the same rows forever.
+    const listWorkflowEvents = vi.fn(async (_id: string, options?: { cursor?: string }) =>
+      options?.cursor
+        ? { events: [event({ id: "1", type: "started", createdAt: "2026-08-01T10:00:00Z" })] }
+        : { events: [event({ id: "9" })], nextCursor: "9" }
+    );
+    const api = stubApi({ listWorkflowEvents });
+    const container = await mountDetail(api);
 
     await click(button(container, /Load older events/));
-
-    expect(cursors).toEqual([undefined, "event-1"]);
-    expect(container.textContent).toContain("started");
-    expect(container.querySelector("button")).toBeNull();
+    expect(container.textContent).toContain("Agent execution started");
+    expect(buttons(container, /Load older events/)).toHaveLength(0);
   });
 
-  it("renders a load failure instead of an empty workflow", async () => {
-    const container = await mount(page(stubApi({
-      getWorkflow: async () => {
-        throw new Error("orchestrator unavailable");
-      },
-    })));
+  it("reads the agent log out of the same page the timeline uses", async () => {
+    const listWorkflowEvents = vi.fn(async () => ({
+      events: [event({ id: "3", type: "log", payload: { payload: { message: "compiling" } } })],
+    }));
+    const api = stubApi({ listWorkflowEvents });
+    const container = await mountDetail(api);
 
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("orchestrator unavailable");
-    expect(container.textContent).not.toContain("No runner events have been recorded.");
+    expect(container.querySelector(".logline")?.textContent).toContain("compiling");
+    // One request for both cards, not one each.
+    expect(listWorkflowEvents).toHaveBeenCalledTimes(1);
   });
 
-  it("shows loading before both reads return", async () => {
-    const pending = deferred<WorkflowDetail>();
-    const container = await mount(page(stubApi({ getWorkflow: () => pending.promise })));
+  it("shows gates and the six attempt meters", async () => {
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "ai_review", reviewCycles: 1 }) });
+    const container = await mountDetail(api);
 
-    expect(container.textContent).toContain("Loading workflow...");
-    await pending.resolve(workflow());
-    expect(container.textContent).not.toContain("Loading workflow...");
+    expect(container.textContent).toContain("Plan valid");
+    expect(container.textContent).toContain("Human approval");
+    expect(container.textContent).toContain("not reached");
+    expect(container.querySelectorAll(".meter")).toHaveLength(6);
+  });
+
+  it("surfaces a load failure with a retry", async () => {
+    const api = stubApi({ getWorkflow: async () => { throw new Error("workflow run is unknown"); } });
+    const container = await mountDetail(api);
+    expect(container.textContent).toContain("workflow run is unknown");
+    expect(button(container, /Retry/)).toBeTruthy();
   });
 });

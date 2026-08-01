@@ -232,6 +232,28 @@ func credentialEnvironment(environment map[string]string) ([]string, error) {
 			"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+credential,
 		)
 	}
+	// GIT_SSH_KEY carries a *path*, not key material: the control plane
+	// delivers a private key to a file because ssh takes -i, and because a key
+	// in the environment would be inherited by every process the agent spawns.
+	//
+	// Both this and the token above may be set at once. They do not conflict:
+	// git consults http.extraheader only for an https remote and
+	// GIT_SSH_COMMAND only for an ssh one, so the remote's scheme picks which
+	// credential is used without this code having to parse the URL.
+	//
+	// IdentitiesOnly stops ssh from offering any other key it happens to find,
+	// which would authenticate as the wrong identity. StrictHostKeyChecking is
+	// accept-new rather than yes because the runner's known_hosts starts empty
+	// on a fresh container and "ask" cannot be answered non-interactively; the
+	// cost is that the first connection to a host is trusted on sight.
+	if keyPath := environment["GIT_SSH_KEY"]; keyPath != "" {
+		if !filepath.IsAbs(keyPath) || strings.ContainsAny(keyPath, " \t\"'\\") {
+			return nil, errors.New("git ssh key path is invalid")
+		}
+		extra = append(extra,
+			"GIT_SSH_COMMAND=ssh -i "+keyPath+" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+		)
+	}
 	return extra, nil
 }
 

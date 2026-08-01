@@ -152,13 +152,17 @@ class FakeControlPlane:
             "revoked_at": now,
         }
 
-    async def list_workflows(self) -> list[dict[str, str]]:
+    async def list_workflows(self) -> list[dict[str, object]]:
         return [
             {
-                "id": "workflow-1",
-                "project_id": "project-1",
-                "status": "preparing",
-                "phase": "prepare_workspace",
+                "id": "workflow-1", "project_id": "project-1", "status": "preparing",
+                "phase": "prepare_workspace", "issue_external_id": "41",
+                "issue_title": "Prepare the workspace", "branch_name": "agent/41/prepare",
+                "pull_request_external_id": None, "pull_request_url": None,
+                "pull_request_state": None, "blocking_reason": None, "planning_attempts": 1,
+                "implementation_attempts": 0, "pipeline_repair_attempts": 0, "review_cycles": 0,
+                "ci_repair_attempts": 0, "total_agent_executions": 1,
+                "created_at": NOW, "updated_at": NOW,
             }
         ]
 
@@ -409,6 +413,10 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
             control_plane_pb2.ListWorkflowsRequest(), metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
         )
         self.assertEqual(workflows.workflows[0].phase, "prepare_workspace")
+        # The list carries the same detail the console renders per row.
+        self.assertEqual(workflows.workflows[0].issue_title, "Prepare the workspace")
+        self.assertEqual(workflows.workflows[0].branch_name, "agent/41/prepare")
+        self.assertEqual(workflows.workflows[0].total_agent_executions, 1)
         workflow = await self.client.GetWorkflow(
             control_plane_pb2.GetWorkflowRequest(workflow_run_id="workflow-1"),
             metadata=(("x-loop-session", "admin-session"),),

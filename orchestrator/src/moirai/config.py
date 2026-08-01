@@ -16,6 +16,11 @@ class OrchestratorConfig:
     database_url: str
     grpc_bind: str
     github_token: str | None = None
+    # Encrypts per-project credentials at rest (persistence/secrets.py). Optional
+    # so a deployment that stores none keeps starting without it; storing one
+    # without a key configured is refused at the point of storage, not silently
+    # written in the clear.
+    secret_key: str | None = None
     grpc_tls_cert_file: str | None = None
     grpc_tls_key_file: str | None = None
     grpc_tls_client_ca_file: str | None = None
@@ -35,6 +40,7 @@ class OrchestratorConfig:
             database_url=read_secret(values, "LOOP_DATABASE_URL"),
             grpc_bind=read_bind(values.get("LOOP_GRPC_BIND", "0.0.0.0:50051")),
             github_token=read_optional_secret(values, "LOOP_GITHUB_TOKEN"),
+            secret_key=read_optional_secret(values, "LOOP_SECRET_KEY"),
             grpc_tls_cert_file=cert_file,
             grpc_tls_key_file=key_file,
             grpc_tls_client_ca_file=client_ca_file,

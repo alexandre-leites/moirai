@@ -26,6 +26,9 @@ const (
 	ControlPlane_CreateProject_FullMethodName                 = "/loop.control.v1.ControlPlane/CreateProject"
 	ControlPlane_UpdateProject_FullMethodName                 = "/loop.control.v1.ControlPlane/UpdateProject"
 	ControlPlane_SetProjectEnabled_FullMethodName             = "/loop.control.v1.ControlPlane/SetProjectEnabled"
+	ControlPlane_SetProjectCredential_FullMethodName          = "/loop.control.v1.ControlPlane/SetProjectCredential"
+	ControlPlane_ClearProjectCredential_FullMethodName        = "/loop.control.v1.ControlPlane/ClearProjectCredential"
+	ControlPlane_ListProjectCredentials_FullMethodName        = "/loop.control.v1.ControlPlane/ListProjectCredentials"
 	ControlPlane_CreateRunnerRegistrationToken_FullMethodName = "/loop.control.v1.ControlPlane/CreateRunnerRegistrationToken"
 	ControlPlane_ListRunnerRegistrationTokens_FullMethodName  = "/loop.control.v1.ControlPlane/ListRunnerRegistrationTokens"
 	ControlPlane_RevokeRunnerRegistrationToken_FullMethodName = "/loop.control.v1.ControlPlane/RevokeRunnerRegistrationToken"
@@ -42,6 +45,7 @@ const (
 	ControlPlane_RetryWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/RetryWorkflow"
 	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
 	ControlPlane_BlockWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/BlockWorkflow"
+	ControlPlane_GetSchedulerMetrics_FullMethodName           = "/loop.control.v1.ControlPlane/GetSchedulerMetrics"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -55,6 +59,9 @@ type ControlPlaneClient interface {
 	CreateProject(ctx context.Context, in *CreateProjectRequest, opts ...grpc.CallOption) (*CreateProjectResponse, error)
 	UpdateProject(ctx context.Context, in *UpdateProjectRequest, opts ...grpc.CallOption) (*UpdateProjectResponse, error)
 	SetProjectEnabled(ctx context.Context, in *SetProjectEnabledRequest, opts ...grpc.CallOption) (*SetProjectEnabledResponse, error)
+	SetProjectCredential(ctx context.Context, in *SetProjectCredentialRequest, opts ...grpc.CallOption) (*SetProjectCredentialResponse, error)
+	ClearProjectCredential(ctx context.Context, in *ClearProjectCredentialRequest, opts ...grpc.CallOption) (*ClearProjectCredentialResponse, error)
+	ListProjectCredentials(ctx context.Context, in *ListProjectCredentialsRequest, opts ...grpc.CallOption) (*ListProjectCredentialsResponse, error)
 	CreateRunnerRegistrationToken(ctx context.Context, in *CreateRunnerRegistrationTokenRequest, opts ...grpc.CallOption) (*CreateRunnerRegistrationTokenResponse, error)
 	ListRunnerRegistrationTokens(ctx context.Context, in *ListRunnerRegistrationTokensRequest, opts ...grpc.CallOption) (*ListRunnerRegistrationTokensResponse, error)
 	RevokeRunnerRegistrationToken(ctx context.Context, in *RevokeRunnerRegistrationTokenRequest, opts ...grpc.CallOption) (*RevokeRunnerRegistrationTokenResponse, error)
@@ -71,6 +78,7 @@ type ControlPlaneClient interface {
 	RetryWorkflow(ctx context.Context, in *RetryWorkflowRequest, opts ...grpc.CallOption) (*RetryWorkflowResponse, error)
 	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
 	BlockWorkflow(ctx context.Context, in *BlockWorkflowRequest, opts ...grpc.CallOption) (*BlockWorkflowResponse, error)
+	GetSchedulerMetrics(ctx context.Context, in *GetSchedulerMetricsRequest, opts ...grpc.CallOption) (*GetSchedulerMetricsResponse, error)
 }
 
 type controlPlaneClient struct {
@@ -145,6 +153,36 @@ func (c *controlPlaneClient) SetProjectEnabled(ctx context.Context, in *SetProje
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetProjectEnabledResponse)
 	err := c.cc.Invoke(ctx, ControlPlane_SetProjectEnabled_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) SetProjectCredential(ctx context.Context, in *SetProjectCredentialRequest, opts ...grpc.CallOption) (*SetProjectCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetProjectCredentialResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_SetProjectCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) ClearProjectCredential(ctx context.Context, in *ClearProjectCredentialRequest, opts ...grpc.CallOption) (*ClearProjectCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClearProjectCredentialResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_ClearProjectCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) ListProjectCredentials(ctx context.Context, in *ListProjectCredentialsRequest, opts ...grpc.CallOption) (*ListProjectCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListProjectCredentialsResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_ListProjectCredentials_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -311,6 +349,16 @@ func (c *controlPlaneClient) BlockWorkflow(ctx context.Context, in *BlockWorkflo
 	return out, nil
 }
 
+func (c *controlPlaneClient) GetSchedulerMetrics(ctx context.Context, in *GetSchedulerMetricsRequest, opts ...grpc.CallOption) (*GetSchedulerMetricsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSchedulerMetricsResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_GetSchedulerMetrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -322,6 +370,9 @@ type ControlPlaneServer interface {
 	CreateProject(context.Context, *CreateProjectRequest) (*CreateProjectResponse, error)
 	UpdateProject(context.Context, *UpdateProjectRequest) (*UpdateProjectResponse, error)
 	SetProjectEnabled(context.Context, *SetProjectEnabledRequest) (*SetProjectEnabledResponse, error)
+	SetProjectCredential(context.Context, *SetProjectCredentialRequest) (*SetProjectCredentialResponse, error)
+	ClearProjectCredential(context.Context, *ClearProjectCredentialRequest) (*ClearProjectCredentialResponse, error)
+	ListProjectCredentials(context.Context, *ListProjectCredentialsRequest) (*ListProjectCredentialsResponse, error)
 	CreateRunnerRegistrationToken(context.Context, *CreateRunnerRegistrationTokenRequest) (*CreateRunnerRegistrationTokenResponse, error)
 	ListRunnerRegistrationTokens(context.Context, *ListRunnerRegistrationTokensRequest) (*ListRunnerRegistrationTokensResponse, error)
 	RevokeRunnerRegistrationToken(context.Context, *RevokeRunnerRegistrationTokenRequest) (*RevokeRunnerRegistrationTokenResponse, error)
@@ -338,6 +389,7 @@ type ControlPlaneServer interface {
 	RetryWorkflow(context.Context, *RetryWorkflowRequest) (*RetryWorkflowResponse, error)
 	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
 	BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error)
+	GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -368,6 +420,15 @@ func (UnimplementedControlPlaneServer) UpdateProject(context.Context, *UpdatePro
 }
 func (UnimplementedControlPlaneServer) SetProjectEnabled(context.Context, *SetProjectEnabledRequest) (*SetProjectEnabledResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetProjectEnabled not implemented")
+}
+func (UnimplementedControlPlaneServer) SetProjectCredential(context.Context, *SetProjectCredentialRequest) (*SetProjectCredentialResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetProjectCredential not implemented")
+}
+func (UnimplementedControlPlaneServer) ClearProjectCredential(context.Context, *ClearProjectCredentialRequest) (*ClearProjectCredentialResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClearProjectCredential not implemented")
+}
+func (UnimplementedControlPlaneServer) ListProjectCredentials(context.Context, *ListProjectCredentialsRequest) (*ListProjectCredentialsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListProjectCredentials not implemented")
 }
 func (UnimplementedControlPlaneServer) CreateRunnerRegistrationToken(context.Context, *CreateRunnerRegistrationTokenRequest) (*CreateRunnerRegistrationTokenResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateRunnerRegistrationToken not implemented")
@@ -416,6 +477,9 @@ func (UnimplementedControlPlaneServer) CancelWorkflow(context.Context, *CancelWo
 }
 func (UnimplementedControlPlaneServer) BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method BlockWorkflow not implemented")
+}
+func (UnimplementedControlPlaneServer) GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSchedulerMetrics not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -560,6 +624,60 @@ func _ControlPlane_SetProjectEnabled_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlPlaneServer).SetProjectEnabled(ctx, req.(*SetProjectEnabledRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_SetProjectCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetProjectCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).SetProjectCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_SetProjectCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).SetProjectCredential(ctx, req.(*SetProjectCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_ClearProjectCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClearProjectCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ClearProjectCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ClearProjectCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ClearProjectCredential(ctx, req.(*ClearProjectCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_ListProjectCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListProjectCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ListProjectCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ListProjectCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ListProjectCredentials(ctx, req.(*ListProjectCredentialsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -852,6 +970,24 @@ func _ControlPlane_BlockWorkflow_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_GetSchedulerMetrics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSchedulerMetricsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).GetSchedulerMetrics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_GetSchedulerMetrics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).GetSchedulerMetrics(ctx, req.(*GetSchedulerMetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -886,6 +1022,18 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetProjectEnabled",
 			Handler:    _ControlPlane_SetProjectEnabled_Handler,
+		},
+		{
+			MethodName: "SetProjectCredential",
+			Handler:    _ControlPlane_SetProjectCredential_Handler,
+		},
+		{
+			MethodName: "ClearProjectCredential",
+			Handler:    _ControlPlane_ClearProjectCredential_Handler,
+		},
+		{
+			MethodName: "ListProjectCredentials",
+			Handler:    _ControlPlane_ListProjectCredentials_Handler,
 		},
 		{
 			MethodName: "CreateRunnerRegistrationToken",
@@ -950,6 +1098,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BlockWorkflow",
 			Handler:    _ControlPlane_BlockWorkflow_Handler,
+		},
+		{
+			MethodName: "GetSchedulerMetrics",
+			Handler:    _ControlPlane_GetSchedulerMetrics_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -19,8 +19,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunnerControl_RegisterRunner_FullMethodName = "/loop.runner.v1.RunnerControl/RegisterRunner"
-	RunnerControl_Connect_FullMethodName        = "/loop.runner.v1.RunnerControl/Connect"
+	RunnerControl_RegisterRunner_FullMethodName   = "/loop.runner.v1.RunnerControl/RegisterRunner"
+	RunnerControl_Connect_FullMethodName          = "/loop.runner.v1.RunnerControl/Connect"
+	RunnerControl_ResolveJobSecret_FullMethodName = "/loop.runner.v1.RunnerControl/ResolveJobSecret"
 )
 
 // RunnerControlClient is the client API for RunnerControl service.
@@ -29,6 +30,16 @@ const (
 type RunnerControlClient interface {
 	RegisterRunner(ctx context.Context, in *RegisterRunnerRequest, opts ...grpc.CallOption) (*RegisterRunnerResponse, error)
 	Connect(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RunnerToOrchestrator, OrchestratorToRunner], error)
+	// Hands a runner one secret for a job it currently holds, so the credential
+	// does not have to be provisioned on the runner host. Unary rather than a
+	// message on the Connect stream: it needs no correlation machinery, and a
+	// refusal is an ordinary status the caller can act on.
+	//
+	// The orchestrator refuses to answer this over an insecure channel, so a
+	// deployment without TLS keeps working exactly as before -- the runner
+	// resolves from its own environment -- and simply has no per-project
+	// credentials.
+	ResolveJobSecret(ctx context.Context, in *ResolveJobSecretRequest, opts ...grpc.CallOption) (*ResolveJobSecretResponse, error)
 }
 
 type runnerControlClient struct {
@@ -62,12 +73,32 @@ func (c *runnerControlClient) Connect(ctx context.Context, opts ...grpc.CallOpti
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RunnerControl_ConnectClient = grpc.BidiStreamingClient[RunnerToOrchestrator, OrchestratorToRunner]
 
+func (c *runnerControlClient) ResolveJobSecret(ctx context.Context, in *ResolveJobSecretRequest, opts ...grpc.CallOption) (*ResolveJobSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveJobSecretResponse)
+	err := c.cc.Invoke(ctx, RunnerControl_ResolveJobSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerControlServer is the server API for RunnerControl service.
 // All implementations must embed UnimplementedRunnerControlServer
 // for forward compatibility.
 type RunnerControlServer interface {
 	RegisterRunner(context.Context, *RegisterRunnerRequest) (*RegisterRunnerResponse, error)
 	Connect(grpc.BidiStreamingServer[RunnerToOrchestrator, OrchestratorToRunner]) error
+	// Hands a runner one secret for a job it currently holds, so the credential
+	// does not have to be provisioned on the runner host. Unary rather than a
+	// message on the Connect stream: it needs no correlation machinery, and a
+	// refusal is an ordinary status the caller can act on.
+	//
+	// The orchestrator refuses to answer this over an insecure channel, so a
+	// deployment without TLS keeps working exactly as before -- the runner
+	// resolves from its own environment -- and simply has no per-project
+	// credentials.
+	ResolveJobSecret(context.Context, *ResolveJobSecretRequest) (*ResolveJobSecretResponse, error)
 	mustEmbedUnimplementedRunnerControlServer()
 }
 
@@ -83,6 +114,9 @@ func (UnimplementedRunnerControlServer) RegisterRunner(context.Context, *Registe
 }
 func (UnimplementedRunnerControlServer) Connect(grpc.BidiStreamingServer[RunnerToOrchestrator, OrchestratorToRunner]) error {
 	return status.Errorf(codes.Unimplemented, "method Connect not implemented")
+}
+func (UnimplementedRunnerControlServer) ResolveJobSecret(context.Context, *ResolveJobSecretRequest) (*ResolveJobSecretResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ResolveJobSecret not implemented")
 }
 func (UnimplementedRunnerControlServer) mustEmbedUnimplementedRunnerControlServer() {}
 func (UnimplementedRunnerControlServer) testEmbeddedByValue()                       {}
@@ -130,6 +164,24 @@ func _RunnerControl_Connect_Handler(srv interface{}, stream grpc.ServerStream) e
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type RunnerControl_ConnectServer = grpc.BidiStreamingServer[RunnerToOrchestrator, OrchestratorToRunner]
 
+func _RunnerControl_ResolveJobSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveJobSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerControlServer).ResolveJobSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerControl_ResolveJobSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerControlServer).ResolveJobSecret(ctx, req.(*ResolveJobSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerControl_ServiceDesc is the grpc.ServiceDesc for RunnerControl service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -140,6 +192,10 @@ var RunnerControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RegisterRunner",
 			Handler:    _RunnerControl_RegisterRunner_Handler,
+		},
+		{
+			MethodName: "ResolveJobSecret",
+			Handler:    _RunnerControl_ResolveJobSecret_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

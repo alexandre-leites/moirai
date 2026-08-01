@@ -348,9 +348,15 @@ func TestDispatcherPersistsFailedTerminalResult(t *testing.T) {
 type environmentResolver struct {
 	values map[string]string
 	err    error
+	// scopes records what each call was told about the job, so a test can
+	// assert the lease actually reaches the resolver.
+	scopes *[]SecretScope
 }
 
-func (resolver environmentResolver) Resolve(context.Context, []taskpacket.EnvironmentRef) (map[string]string, error) {
+func (resolver environmentResolver) Resolve(_ context.Context, scope SecretScope, _ []taskpacket.EnvironmentRef) (map[string]string, error) {
+	if resolver.scopes != nil {
+		*resolver.scopes = append(*resolver.scopes, scope)
+	}
 	return resolver.values, resolver.err
 }
 
@@ -895,4 +901,109 @@ func (agent *callbackBackend) Execute(context.Context, agents.Request) (agents.R
 }
 func (agent *callbackBackend) Continue(ctx context.Context, request agents.Request) (agents.Result, error) {
 	return agent.Execute(ctx, request)
+}
+
+// discardingResolver records the jobs whose key material it was asked to
+// remove, so a test can assert the dispatcher actually asks.
+type discardingResolver struct {
+	environmentResolver
+	discarded []string
+}
+
+func (r *discardingResolver) Resolve(ctx context.Context, scope SecretScope, refs []taskpacket.EnvironmentRef) (map[string]string, error) {
+	return r.environmentResolver.Resolve(ctx, scope, refs)
+}
+
+func (r *discardingResolver) DiscardJobKeys(jobID string) error {
+	r.discarded = append(r.discarded, jobID)
+	return nil
+}
+
+func TestDispatcherTellsTheResolverWhichJobAndLeaseTheSecretsAreFor(t *testing.T) {
+	// Without this the control-plane resolver cannot prove the runner still
+	// holds the job, and the lease fence on the orchestrator is unusable.
+	var scopes []SecretScope
+	lease := deliverableLease()
+	lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}}
+	dispatcher := Dispatcher{
+		Workspaces:         &workspaceManager{workspace: testWorkspace(t)},
+		Backend:            &backend{result: agents.Result{Status: "completed"}},
+		Delivery:           &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}},
+		Environment:        environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}, scopes: &scopes},
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(scopes) != 1 || scopes[0].JobID != lease.JobID || scopes[0].LeaseGeneration != lease.Generation {
+		t.Fatalf("resolver was told %#v, want the lease's job and generation", scopes)
+	}
+}
+
+func TestDispatcherDiscardsKeyMaterialWhenTheJobEnds(t *testing.T) {
+	lease := deliverableLease()
+	lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}}
+	resolver := &discardingResolver{
+		environmentResolver: environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}},
+	}
+	dispatcher := Dispatcher{
+		Workspaces:         &workspaceManager{workspace: testWorkspace(t)},
+		Backend:            &backend{result: agents.Result{Status: "completed"}},
+		Delivery:           &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}},
+		Environment:        resolver,
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), lease); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(resolver.discarded) != 1 || resolver.discarded[0] != lease.JobID {
+		t.Fatalf("discarded = %#v, want the job once", resolver.discarded)
+	}
+}
+
+func TestDispatcherDiscardsKeyMaterialEvenWhenTheExecutionFails(t *testing.T) {
+	// A key left on the tmpfs after a failure would be readable by the next
+	// execution, which was never granted it.
+	lease := deliverableLease()
+	lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}}
+	resolver := &discardingResolver{
+		environmentResolver: environmentResolver{values: map[string]string{"GITHUB_TOKEN": "token-value"}},
+	}
+	dispatcher := Dispatcher{
+		Workspaces:         &workspaceManager{prepareErr: errors.New("prepare exploded")},
+		Backend:            &backend{result: agents.Result{Status: "completed"}},
+		Environment:        resolver,
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), lease); err == nil {
+		t.Fatal("Execute() succeeded, want the prepare failure")
+	}
+	if len(resolver.discarded) != 1 || resolver.discarded[0] != lease.JobID {
+		t.Fatalf("discarded = %#v, want the job once", resolver.discarded)
+	}
+}
+
+func TestDispatcherDiscardsKeyMaterialWhenResolutionItselfFails(t *testing.T) {
+	// Resolution can write one key and then fail on the next reference.
+	lease := deliverableLease()
+	lease.Packet.EnvironmentRefs = []taskpacket.EnvironmentRef{{Name: "GITHUB_TOKEN", SecretRef: "github_token"}}
+	resolver := &discardingResolver{
+		environmentResolver: environmentResolver{err: errors.New("control plane unreachable")},
+	}
+	dispatcher := Dispatcher{
+		Workspaces:         &workspaceManager{workspace: testWorkspace(t)},
+		Backend:            &backend{result: agents.Result{Status: "completed"}},
+		Environment:        resolver,
+		AllowedEnvironment: []string{"GITHUB_TOKEN"},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), lease); err == nil {
+		t.Fatal("Execute() succeeded, want the resolution failure")
+	}
+	if len(resolver.discarded) != 1 {
+		t.Fatalf("discarded = %#v, want the job once", resolver.discarded)
+	}
 }

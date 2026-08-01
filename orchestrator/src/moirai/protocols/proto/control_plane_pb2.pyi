@@ -154,6 +154,58 @@ class SetProjectEnabledResponse(_message.Message):
     project: Project
     def __init__(self, project: _Optional[_Union[Project, _Mapping]] = ...) -> None: ...
 
+class SetProjectCredentialRequest(_message.Message):
+    __slots__ = ("project_id", "kind", "value")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    kind: str
+    value: str
+    def __init__(self, project_id: _Optional[str] = ..., kind: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+
+class ClearProjectCredentialRequest(_message.Message):
+    __slots__ = ("project_id", "kind")
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    kind: str
+    def __init__(self, project_id: _Optional[str] = ..., kind: _Optional[str] = ...) -> None: ...
+
+class ListProjectCredentialsRequest(_message.Message):
+    __slots__ = ("project_id",)
+    PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
+    project_id: str
+    def __init__(self, project_id: _Optional[str] = ...) -> None: ...
+
+class ProjectCredential(_message.Message):
+    __slots__ = ("kind", "created_at", "updated_at")
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    CREATED_AT_FIELD_NUMBER: _ClassVar[int]
+    UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    kind: str
+    created_at: str
+    updated_at: str
+    def __init__(self, kind: _Optional[str] = ..., created_at: _Optional[str] = ..., updated_at: _Optional[str] = ...) -> None: ...
+
+class SetProjectCredentialResponse(_message.Message):
+    __slots__ = ("credentials",)
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    credentials: _containers.RepeatedCompositeFieldContainer[ProjectCredential]
+    def __init__(self, credentials: _Optional[_Iterable[_Union[ProjectCredential, _Mapping]]] = ...) -> None: ...
+
+class ClearProjectCredentialResponse(_message.Message):
+    __slots__ = ("credentials",)
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    credentials: _containers.RepeatedCompositeFieldContainer[ProjectCredential]
+    def __init__(self, credentials: _Optional[_Iterable[_Union[ProjectCredential, _Mapping]]] = ...) -> None: ...
+
+class ListProjectCredentialsResponse(_message.Message):
+    __slots__ = ("credentials",)
+    CREDENTIALS_FIELD_NUMBER: _ClassVar[int]
+    credentials: _containers.RepeatedCompositeFieldContainer[ProjectCredential]
+    def __init__(self, credentials: _Optional[_Iterable[_Union[ProjectCredential, _Mapping]]] = ...) -> None: ...
+
 class CreateRunnerRegistrationTokenRequest(_message.Message):
     __slots__ = ("allowed_labels",)
     ALLOWED_LABELS_FIELD_NUMBER: _ClassVar[int]
@@ -211,7 +263,7 @@ class ListWorkflowsRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class Workflow(_message.Message):
-    __slots__ = ("id", "project_id", "status", "phase", "issue_external_id", "issue_title", "branch_name", "pull_request_external_id", "pull_request_url", "pull_request_state", "blocking_reason", "planning_attempts", "implementation_attempts", "pipeline_repair_attempts", "ci_repair_attempts", "review_cycles", "created_at", "updated_at")
+    __slots__ = ("id", "project_id", "status", "phase", "issue_external_id", "issue_title", "branch_name", "pull_request_external_id", "pull_request_url", "pull_request_state", "blocking_reason", "planning_attempts", "implementation_attempts", "pipeline_repair_attempts", "ci_repair_attempts", "review_cycles", "created_at", "updated_at", "total_agent_executions")
     ID_FIELD_NUMBER: _ClassVar[int]
     PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
@@ -230,6 +282,7 @@ class Workflow(_message.Message):
     REVIEW_CYCLES_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
     UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    TOTAL_AGENT_EXECUTIONS_FIELD_NUMBER: _ClassVar[int]
     id: str
     project_id: str
     status: str
@@ -248,7 +301,8 @@ class Workflow(_message.Message):
     review_cycles: int
     created_at: str
     updated_at: str
-    def __init__(self, id: _Optional[str] = ..., project_id: _Optional[str] = ..., status: _Optional[str] = ..., phase: _Optional[str] = ..., issue_external_id: _Optional[str] = ..., issue_title: _Optional[str] = ..., branch_name: _Optional[str] = ..., pull_request_external_id: _Optional[str] = ..., pull_request_url: _Optional[str] = ..., pull_request_state: _Optional[str] = ..., blocking_reason: _Optional[str] = ..., planning_attempts: _Optional[int] = ..., implementation_attempts: _Optional[int] = ..., pipeline_repair_attempts: _Optional[int] = ..., ci_repair_attempts: _Optional[int] = ..., review_cycles: _Optional[int] = ..., created_at: _Optional[str] = ..., updated_at: _Optional[str] = ...) -> None: ...
+    total_agent_executions: int
+    def __init__(self, id: _Optional[str] = ..., project_id: _Optional[str] = ..., status: _Optional[str] = ..., phase: _Optional[str] = ..., issue_external_id: _Optional[str] = ..., issue_title: _Optional[str] = ..., branch_name: _Optional[str] = ..., pull_request_external_id: _Optional[str] = ..., pull_request_url: _Optional[str] = ..., pull_request_state: _Optional[str] = ..., blocking_reason: _Optional[str] = ..., planning_attempts: _Optional[int] = ..., implementation_attempts: _Optional[int] = ..., pipeline_repair_attempts: _Optional[int] = ..., ci_repair_attempts: _Optional[int] = ..., review_cycles: _Optional[int] = ..., created_at: _Optional[str] = ..., updated_at: _Optional[str] = ..., total_agent_executions: _Optional[int] = ...) -> None: ...
 
 class ListWorkflowsResponse(_message.Message):
     __slots__ = ("workflows",)
@@ -489,3 +543,17 @@ class BlockWorkflowResponse(_message.Message):
     WORKFLOW_FIELD_NUMBER: _ClassVar[int]
     workflow: Workflow
     def __init__(self, workflow: _Optional[_Union[Workflow, _Mapping]] = ...) -> None: ...
+
+class GetSchedulerMetricsRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class GetSchedulerMetricsResponse(_message.Message):
+    __slots__ = ("queue_depth", "active_workflows", "scheduled_jobs")
+    QUEUE_DEPTH_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_WORKFLOWS_FIELD_NUMBER: _ClassVar[int]
+    SCHEDULED_JOBS_FIELD_NUMBER: _ClassVar[int]
+    queue_depth: int
+    active_workflows: int
+    scheduled_jobs: int
+    def __init__(self, queue_depth: _Optional[int] = ..., active_workflows: _Optional[int] = ..., scheduled_jobs: _Optional[int] = ...) -> None: ...

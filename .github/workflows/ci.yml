@@ -1,5 +1,15 @@
 name: CI
 
+# Runner pool: this repository's jobs normally target a self-hosted pool. Those
+# declarations are commented out below rather than deleted, next to the
+# GitHub-hosted `ubuntu-latest` line that replaces each one, so the switch back
+# is a one-line edit per job.
+#
+# Why: no self-hosted runner was picking jobs up, so every CI run on main queued
+# until the next push cancelled it via `cancel-in-progress` -- eleven consecutive
+# cancelled runs, and nothing merged in that window was verified. Switched to
+# hosted runners on 2026-08-01 (fresh monthly Actions allowance).
+
 on:
   push:
     branches: [main]
@@ -19,7 +29,8 @@ env:
 
 jobs:
   test-orchestrator:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
@@ -42,7 +53,8 @@ jobs:
       - run: make test-orchestrator
 
   test-postgres-integration:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     env:
       LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
     services:
@@ -81,7 +93,8 @@ jobs:
       - run: make test-postgres-integration
 
   lint:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
@@ -104,7 +117,8 @@ jobs:
       - run: make lint
 
   typecheck:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
@@ -127,7 +141,8 @@ jobs:
       - run: make typecheck
 
   runner:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -138,7 +153,8 @@ jobs:
       - run: cd runner && go vet ./...
 
   api:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -157,7 +173,8 @@ jobs:
   # gates eslint *errors* only; the ten warnings in the quality backlog do not
   # fail this job today.
   test-web:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -168,7 +185,8 @@ jobs:
       - run: make test-web
 
   build-web:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -179,35 +197,60 @@ jobs:
       - run: make build-web
 
   compose-smoke:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Create Compose secrets
+      - name: Validate every Compose combination
         run: |
-          mkdir secrets
-          printf '%s\n' 'postgres-password' > secrets/postgres_password
-          printf '%s\n' 'postgresql+asyncpg://loop:postgres-password@postgres:5432/loop' > secrets/database_url
-          printf '%s\n' 'admin-password' > secrets/initial_admin_password
-          printf '%s\n' 'github-token' > secrets/github_token
-          printf '%s\n' 'runner-registration-token' > secrets/runner_registration_token
-          chmod 0400 secrets/*
-      - name: Validate Compose configuration
-        run: docker compose config --quiet
+          docker compose config --quiet
+          docker compose -f compose.yaml -f compose.build.yaml config --quiet
+          docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
+      # Builds from the checkout rather than pulling: this job has to fail on a
+      # Dockerfile a pull request broke, and the published images are whatever
+      # the last release produced. The defaults in compose.yaml are enough to
+      # start the stack, so nothing has to be prepared first.
       - name: Build and start stack
-        run: docker compose up --build --detach --wait --wait-timeout 180
+        run: docker compose -f compose.yaml -f compose.build.yaml up --build --detach --wait --wait-timeout 240
       - name: Verify readiness endpoints
         run: |
           curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/
-          curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:8080/ready
+          # Only port 3000 is published; nginx proxies /api/ to the API, so this
+          # also proves the console can reach its own backend.
+          curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/api/v1/health
+      # Every external program a service shells out to. `git` reaching for `ssh`
+      # on an ssh:// remote is the one that shipped missing: the key resolved,
+      # the file was written, GIT_SSH_COMMAND was set, and the clone died with
+      # "ssh: not found" -- with everything upstream of it looking healthy.
+      # A container that boots proves nothing about the binaries it will need
+      # only once a job runs.
+      - name: Verify the tools each image shells out to
+        run: |
+          set -eu
+          runner_tools='git ssh opencode'
+          for tool in $runner_tools; do
+            docker compose -f compose.yaml -f compose.build.yaml exec -T runner \
+              sh -c "command -v $tool >/dev/null" \
+              || { echo "::error::runner image is missing $tool"; exit 1; }
+            echo "runner: $tool ok"
+          done
+          for tool in git gh; do
+            docker compose -f compose.yaml -f compose.build.yaml exec -T orchestrator \
+              sh -c "command -v $tool >/dev/null" \
+              || { echo "::error::orchestrator image is missing $tool"; exit 1; }
+            echo "orchestrator: $tool ok"
+          done
+
       - name: Collect diagnostics
         if: always()
-        run: docker compose ps && docker compose logs --no-color
+        run: docker compose -f compose.yaml -f compose.build.yaml ps && docker compose -f compose.yaml -f compose.build.yaml logs --no-color
       - name: Tear down stack
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        run: docker compose -f compose.yaml -f compose.build.yaml down --volumes --remove-orphans
 
   vulnerability-scan:
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -262,6 +305,7 @@ jobs:
 
   validate:
     needs: [test-orchestrator, lint, typecheck, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
-    runs-on: [self-hosted, linux]
+    # runs-on: [self-hosted, linux]
+    runs-on: ubuntu-latest
     steps:
       - run: true

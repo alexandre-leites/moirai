@@ -11,46 +11,127 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 - `proto/` contains the gRPC contracts; `api/openapi.yaml` is the maintained HTTP contract.
 - `docs/design/web-console/` is the approved management-console design package: benchmark mockup, UI specification, and implementation task breakdown.
 
-## Local stack
-
-Prerequisites: Docker Engine with the Compose plugin and a GitHub token that can access the repository you intend to automate.
+## Quick start
 
 ```bash
-cp .env.example .env
-mkdir -p secrets
-printf '%s\n' 'choose-a-strong-postgres-password' > secrets/postgres_password
-printf '%s\n' 'postgresql+asyncpg://loop:choose-a-strong-postgres-password@postgres:5432/loop' > secrets/database_url
-printf '%s\n' 'choose-a-strong-admin-password' > secrets/initial_admin_password
-printf '%s\n' 'github-token-with-repo-and-workflow-scopes' > secrets/github_token
-openssl rand -hex 32 > secrets/runner_registration_token
-chmod 600 secrets/*
-docker compose up --build -d
-docker compose ps
-curl --fail http://localhost:3000/
-curl --fail http://localhost:8080/ready
+docker compose up -d
 ```
 
-`docker compose ps` reports every service as healthy once startup completes. The API port is bound to loopback for local diagnostics; use the web endpoint on port 3000 for normal browser access. Stop the stack with `docker compose down`. Add `-v` only when you intentionally want to remove local database and runner data.
+Then open <http://localhost:3000> and sign in as `admin` / `Moirai-Local-1`.
 
-That is the whole installation: Compose builds `orchestrator/`, `api/`, `runner/`, and `web/` from this checkout, so no language toolchain has to be installed on the host. Every service image runs its process as an unprivileged user, drops all Linux capabilities, and sets `no-new-privileges`.
+That is the whole installation. `compose.yaml` is complete and self-contained: it pulls the
+published images, brings up all five services in the right order, and every setting has a working
+default, so nothing has to be prepared first — no `.env`, no `secrets/`, no build step. Copy
+[`.env.example`](.env.example) to `.env` when you want to change something; it documents every
+knob and its default.
 
-Compose reads passwords, tokens, and registration credentials only from the files in `secrets/`. Do not put their values in `.env` or shell environment variables. The `.env` file contains non-secret configuration only; its `${...}` values are the variables Compose reads.
+In **Portainer**: *Stacks → Add stack → Web editor*, paste `compose.yaml`, and put any overrides
+under *Environment variables*. The repository is private, so the packages are too — add
+credentials for `ghcr.io` first under *Registries → Add registry → Custom*, or every pull fails
+with `403 Forbidden`.
 
-`secrets/github_token` is mounted into both the orchestrator and the runner. The orchestrator uses it for issue synchronization and pull requests; the runner uses it to authenticate `git clone`, `git fetch`, and `git push` for the repositories it works on. A task packet only names the credential it needs, and the runner resolves the value locally, so the token never travels over the control stream. `LOOP_RUNNER_ALLOWED_ENVIRONMENT` must list `GITHUB_TOKEN` for that resolution to be permitted; a packet naming a variable that is not allowed or not configured fails the execution instead of running unauthenticated.
+**You do not need a GitHub token to bring it up.** The stack runs and the console works without
+one. Moirai just cannot do any *work* — reading issues, cloning, pushing and opening pull requests
+all happen as you — so set `MOIRAI_GITHUB_TOKEN` (scopes `repo`, `workflow`) when you want it to
+run something.
 
-## Running published images
+### Credentials for one project
 
-The same stack runs from the images published to GitHub Container Registry, without building anything. `compose.ghcr.yaml` replaces the four `build:` sections with `image:` references and changes nothing else — same networks, secrets, healthchecks, and capability drops.
+`MOIRAI_GITHUB_TOKEN` is deployment-wide: every project is reached as whoever it belongs to. A
+project can instead carry its own, under *Projects → Credentials*, which is how you reach a
+private repository the shared token cannot see. Anything Moirai does for that project — issue
+sync, clone, push, pull requests — then runs as that identity.
+
+Stored credentials are encrypted, so this needs a key:
 
 ```bash
-# secrets/ and .env are prepared exactly as above
-docker login ghcr.io          # required while the repository is private
-export MOIRAI_IMAGE_TAG=1.4.0 # defaults to latest, which moves
-docker compose -f compose.yaml -f compose.ghcr.yaml pull
-docker compose -f compose.yaml -f compose.ghcr.yaml up --detach --wait
+echo "MOIRAI_SECRET_KEY=$(openssl rand -base64 32)" >> .env
 ```
 
-The images are `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}`, each a `linux/amd64` + `linux/arm64` manifest list. `MOIRAI_IMAGE_PREFIX` overrides the registry and namespace for a fork or mirror.
+Without one the stack still runs; only per-project credentials are refused, with a message
+saying so. **Back the key up.** It is not derived from anything and is stored nowhere else, so
+losing it means every stored credential has to be entered again.
+
+A value is never shown again once saved — the console reports which credentials are set and
+when, and replacing one is the only way to change it.
+
+Two halves of the system use these, and they have different requirements:
+
+| Who | What it does with it | Needs |
+|---|---|---|
+| Orchestrator | Issue sync, opening and merging pull requests | Nothing extra |
+| Runner | Cloning, fetching and pushing the repository | TLS on the control stream |
+
+The runner half needs TLS because the credential has to travel to reach it, and the
+orchestrator refuses to send one over a channel it cannot encrypt. Turn it on with the
+overlay, which generates a self-signed certificate for the internal network on first start:
+
+```bash
+docker compose -f compose.yaml -f compose.tls.yaml up -d
+```
+
+Without it nothing breaks — runners keep using the `GITHUB_TOKEN` configured on them, which
+is the same credential for every project. With it a runner needs no token at all: each job
+is handed its own project's credential, for as long as it holds that job's lease, and the
+key material is written to tmpfs and removed when the job ends.
+
+An SSH remote (`git@github.com:owner/repo.git`) uses the project's SSH private key instead of
+its token; the remote's scheme decides which, so a project may carry both.
+
+Only port 3000 is published; nginx proxies `/api/` to the API over an internal network. That is
+what lets the same file work unchanged against a remote Portainer host.
+
+Startup order is enforced by health checks rather than by timing: postgres has to report ready
+before the orchestrator starts, and the orchestrator has to report its database reachable and
+migrations applied before the API and runner do. `docker compose up --wait` returns only once all
+five are healthy.
+
+### Three overlays
+
+```bash
+# build the images from this checkout instead of pulling them
+docker compose -f compose.yaml -f compose.build.yaml up --build -d
+
+# read every secret from a file under ./secrets/ instead of the environment
+docker compose -f compose.yaml -f compose.secrets.yaml up -d
+
+# encrypt the control stream, so runners can be handed per-project credentials
+docker compose -f compose.yaml -f compose.tls.yaml up -d
+```
+
+They compose: `-f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml` is a valid stack.
+
+**In Portainer**, which takes one file and has no `-f`, paste
+[`compose.tls-stack.yaml`](compose.tls-stack.yaml) instead — the same thing as `compose.yaml +
+compose.tls.yaml`, rendered as a single document. It is generated by `make compose-tls-stack`
+and `make compose-overlays` fails if it has drifted from its sources, so it cannot quietly
+diverge from the stack that gets tested.
+
+Environment values are visible to `docker inspect` and to anything that renders a container's
+configuration, Portainer's UI included. [`compose.secrets.yaml`](compose.secrets.yaml) moves them
+into files; its header lists the five it expects. It needs files on the Docker host, so it suits a
+machine you have a shell on rather than a pasted Portainer stack.
+
+**The defaults are public knowledge and the console is plain HTTP.** That is fine on a private
+host and nowhere else: change `MOIRAI_ADMIN_PASSWORD` and `MOIRAI_POSTGRES_PASSWORD` if anyone
+else can reach it, put it behind TLS before exposing it, and set `MOIRAI_COOKIE_SECURE=true` when
+you do.
+
+## Published images
+
+`v0.2.0` is the current release: `ghcr.io/alexandre-leites/moirai/{orchestrator,api,runner,web}`
+at `0.2.0`, `0.2`, `0`, `latest` and `sha-<short sha>`, each a `linux/amd64` + `linux/arm64`
+manifest list. `v0.1.0` remains available at `0.1.0` and `0.1`.
+
+`compose.yaml` pulls `latest` by default. Pin `MOIRAI_IMAGE_TAG=0.2.0` for anything reproducible;
+`latest` moves with every release. `MOIRAI_IMAGE_PREFIX` points the stack at a fork or mirror.
+
+The packages inherit the repository's visibility, so while it is private a pull needs a token with
+`read:packages`:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <your-github-username> --password-stdin
+```
 
 ## Releases
 

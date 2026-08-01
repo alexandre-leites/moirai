@@ -19,14 +19,62 @@ class _Pool:
 
 
 class MetricsSnapshotTests(unittest.IsolatedAsyncioTestCase):
-    async def test_snapshot_reads_queue_workflows_and_runner_heartbeat_age(self) -> None:
-        pool = _Pool({"queue_depth": 3, "active_workflows": 2, "runner_heartbeat_age": 4.5})
+    async def test_snapshot_reads_queue_workflows_jobs_and_runner_heartbeat_age(self) -> None:
+        pool = _Pool(
+            {"queue_depth": 3, "active_workflows": 2, "scheduled_jobs": 1, "runner_heartbeat_age": 4.5}
+        )
         snapshot = await AsyncpgControlPlane(pool).metrics_snapshot(datetime(2026, 1, 1, tzinfo=UTC))
-        self.assertEqual(snapshot, {"queue_depth": 3.0, "active_workflows": 2.0, "runner_heartbeat_age": 4.5})
+        self.assertEqual(
+            snapshot,
+            {
+                "queue_depth": 3.0,
+                "active_workflows": 2.0,
+                "scheduled_jobs": 1.0,
+                "runner_heartbeat_age": 4.5,
+            },
+        )
         self.assertIn("app.issues", pool.query)
         self.assertIn("app.workflow_runs", pool.query)
+        self.assertIn("app.jobs", pool.query)
         self.assertIn("app.runners", pool.query)
 
     async def test_snapshot_defaults_missing_values_to_zero(self) -> None:
+        # Every gauge GetSchedulerMetrics reads must be present even when the
+        # query returns no row, or the RPC raises a KeyError instead of
+        # reporting an idle control plane.
         snapshot = await AsyncpgControlPlane(_Pool(None)).metrics_snapshot(datetime(2026, 1, 1, tzinfo=UTC))
-        self.assertEqual(snapshot, {"queue_depth": 0, "active_workflows": 0, "runner_heartbeat_age": 0})
+        self.assertEqual(
+            snapshot,
+            {"queue_depth": 0, "active_workflows": 0, "scheduled_jobs": 0, "runner_heartbeat_age": 0},
+        )
+
+
+class MetricsGaugeTests(unittest.IsolatedAsyncioTestCase):
+    """The snapshot's keys and the gauge writer's keys are one contract.
+
+    They drifted once — `update_snapshot` read `scheduled_job_count` while the
+    snapshot reported `scheduled_jobs` — and because the metrics loop logs and
+    swallows the exception, every gauge silently stayed at zero for the life of
+    the process instead of anything failing loudly.
+    """
+
+    async def test_gauges_take_their_values_from_a_real_snapshot(self) -> None:
+        from moirai.observability import Metrics
+
+        pool = _Pool(
+            {"queue_depth": 7, "active_workflows": 3, "scheduled_jobs": 2, "runner_heartbeat_age": 9.5}
+        )
+        snapshot = await AsyncpgControlPlane(pool).metrics_snapshot(datetime(2026, 1, 1, tzinfo=UTC))
+
+        metrics = Metrics()
+        metrics.update_snapshot(snapshot)
+
+        collected = {
+            sample.name: sample.value
+            for metric in metrics._registry.collect()
+            for sample in metric.samples
+        }
+        self.assertEqual(collected["moirai_queue_depth"], 7)
+        self.assertEqual(collected["moirai_active_workflow_count"], 3)
+        self.assertEqual(collected["moirai_scheduled_job_count"], 2)
+        self.assertEqual(collected["moirai_runner_heartbeat_age_seconds"], 9.5)

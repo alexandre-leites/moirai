@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import sys
 import tempfile
@@ -9,14 +10,17 @@ from pathlib import Path
 from typing import Self
 from unittest.mock import AsyncMock, patch
 
+from moirai.config import OrchestratorConfig
 from moirai.health import HealthState
 from moirai.main import (
     CheckpointerUnavailableError,
     _build_checkpointer,
+    _connect_control_plane,
     _log_unexpected_completion,
     _run_workflow_maintenance_loop,
     register_services,
 )
+from moirai.persistence.secrets import SecretCipher, SecretCipherError
 
 
 class _ModuleUnavailable:
@@ -243,3 +247,61 @@ class WorkflowMaintenanceLoopTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConnectControlPlaneTests(unittest.IsolatedAsyncioTestCase):
+    """How the credential cipher reaches the control plane at startup."""
+
+    KEY = base64.b64encode(b"k" * 32).decode()
+
+    def _config(self, secret_key: str | None) -> OrchestratorConfig:
+        return OrchestratorConfig(
+            database_url="postgresql://localhost/db",
+            grpc_bind="0.0.0.0:50051",
+            secret_key=secret_key,
+        )
+
+    async def test_no_key_configured_connects_without_a_cipher(self) -> None:
+        async def factory(database_url: str, secret_cipher: object = None) -> dict[str, object]:
+            return {"url": database_url, "cipher": secret_cipher}
+
+        connected = await _connect_control_plane(factory, self._config(None))
+        self.assertIsNone(connected["cipher"])
+
+    async def test_a_configured_key_is_passed_to_the_factory(self) -> None:
+        async def factory(database_url: str, secret_cipher: object = None) -> dict[str, object]:
+            return {"url": database_url, "cipher": secret_cipher}
+
+        connected = await _connect_control_plane(factory, self._config(self.KEY))
+        self.assertIsInstance(connected["cipher"], SecretCipher)
+
+    async def test_an_unusable_key_fails_startup_rather_than_the_first_write(self) -> None:
+        calls: list[str] = []
+
+        async def factory(database_url: str, secret_cipher: object = None) -> object:
+            calls.append(database_url)
+            return object()
+
+        with self.assertRaises(SecretCipherError):
+            await _connect_control_plane(factory, self._config("not-a-key"))
+        self.assertEqual(calls, [])
+
+    async def test_a_factory_without_the_parameter_is_called_with_the_url_alone(self) -> None:
+        async def factory(database_url: str) -> dict[str, object]:
+            return {"url": database_url}
+
+        connected = await _connect_control_plane(factory, self._config(self.KEY))
+        self.assertEqual(connected, {"url": "postgresql://localhost/db"})
+
+    async def test_a_type_error_inside_the_factory_is_not_retried_without_the_cipher(self) -> None:
+        # Retrying would connect a control plane that silently stores nothing
+        # encrypted, which is worse than failing to start.
+        attempts: list[object] = []
+
+        async def factory(database_url: str, secret_cipher: object = None) -> object:
+            attempts.append(secret_cipher)
+            raise TypeError("something unrelated broke")
+
+        with self.assertRaises(TypeError):
+            await _connect_control_plane(factory, self._config(self.KEY))
+        self.assertEqual(len(attempts), 1)

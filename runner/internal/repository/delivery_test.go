@@ -95,6 +95,61 @@ func TestCredentialEnvironmentConfiguresRealGit(t *testing.T) {
 	}
 }
 
+// GIT_SSH_KEY carries a path, and the whole point is that git invokes ssh with
+// it. Asserting on the exported GIT_SSH_COMMAND is what proves the -i actually
+// reaches ssh rather than a variable being set and ignored.
+func TestAnSSHKeyPathBecomesTheGitSSHCommand(t *testing.T) {
+	extra, err := credentialEnvironment(map[string]string{"GIT_SSH_KEY": "/run/moirai/keys/job-1.GIT_SSH_KEY"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ""
+	for _, entry := range extra {
+		if strings.HasPrefix(entry, "GIT_SSH_COMMAND=") {
+			command = strings.TrimPrefix(entry, "GIT_SSH_COMMAND=")
+		}
+	}
+	if !strings.Contains(command, "-i /run/moirai/keys/job-1.GIT_SSH_KEY") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want it to pass the key with -i", command)
+	}
+	// Without this ssh offers every other key it can find and may authenticate
+	// as an identity the project never configured.
+	if !strings.Contains(command, "IdentitiesOnly=yes") {
+		t.Fatalf("GIT_SSH_COMMAND = %q, want IdentitiesOnly", command)
+	}
+}
+
+func TestBothCredentialsMaySetAtOnceAndGitPicksByScheme(t *testing.T) {
+	// The runner does not parse the remote: git consults extraheader only for
+	// https and GIT_SSH_COMMAND only for ssh, so setting both is correct.
+	extra, err := credentialEnvironment(map[string]string{
+		"GITHUB_TOKEN": "token-value",
+		"GIT_SSH_KEY":  "/run/moirai/keys/job-1.GIT_SSH_KEY",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(extra, "\n")
+	if !strings.Contains(joined, "GIT_SSH_COMMAND=") || !strings.Contains(joined, "extraheader") {
+		t.Fatalf("expected both credentials to be configured, got %q", joined)
+	}
+}
+
+func TestAKeyPathThatCouldBreakOutOfTheSSHCommandIsRejected(t *testing.T) {
+	// The path is interpolated into a command string git will word-split, so a
+	// space or a quote in it would let the value become further arguments.
+	for _, path := range []string{
+		"relative/path",
+		"/run/keys/job 1",
+		`/run/keys/job"1`,
+		"/run/keys/job'1",
+	} {
+		if _, err := credentialEnvironment(map[string]string{"GIT_SSH_KEY": path}); err == nil {
+			t.Fatalf("path %q was accepted", path)
+		}
+	}
+}
+
 func TestCommitAndPushUseRunnerIdentityWithoutAmbientGitConfiguration(t *testing.T) {
 	root := t.TempDir()
 	working := filepath.Join(root, "working")

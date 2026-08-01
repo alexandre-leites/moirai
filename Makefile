@@ -2,13 +2,13 @@ BUF_IMAGE ?= bufbuild/buf:1.50.0
 VENV ?= .venv
 MYPY_CACHE ?= /tmp/moirai-mypy-cache
 
-.PHONY: help test lint typecheck validate compose compose-ghcr dev-install \
-        proto-lint proto-generate proto-check test-release-tags \
+.PHONY: help test lint typecheck validate compose compose-overlays dev-install \
+        proto-lint proto-generate proto-check test-release-tags compose-tls-stack \
         test-orchestrator test-postgres-integration test-runner test-api test-web \
         build-runner build-api build-web
 
 help:
-	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run orchestrator tests.' '  make test-runner       Run runner tests with the race detector.' '  make test-api          Run API tests.' '  make test-web          Install web dependencies and run typecheck, lint, and unit tests.' '  make lint              Run orchestrator lint.' '  make typecheck         Run orchestrator type checks.' '  make validate          Run test, lint, typecheck, Compose, and proto checks.' '  make compose           Validate the Compose configuration.' '  make compose-ghcr      Validate the published-image Compose overlay.' '  make test-release-tags Check the release trigger to image tag mapping.' '  make proto-check       Lint, generate, and verify protobuf outputs.'
+	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run orchestrator tests.' '  make test-runner       Run runner tests with the race detector.' '  make test-api          Run API tests.' '  make test-web          Install web dependencies and run typecheck, lint, and unit tests.' '  make lint              Run orchestrator lint.' '  make typecheck         Run orchestrator type checks.' '  make validate          Run test, lint, typecheck, Compose, and proto checks.' '  make compose           Validate the Compose configuration.' '  make compose-overlays  Validate the build and secrets Compose overlays.' '  make test-release-tags Check the release trigger to image tag mapping.' '  make proto-check       Lint, generate, and verify protobuf outputs.'
 
 test: test-orchestrator test-runner test-api test-web
 
@@ -55,14 +55,33 @@ build-web:
 compose:
 	docker compose config
 
-# Renders compose.yaml with the published-image overlay. Fails if the overlay
-# stops replacing a build section, which would let `up` silently build from
-# source instead of running the released image.
-compose-ghcr:
-	docker compose -f compose.yaml -f compose.ghcr.yaml config --quiet
-	! docker compose -f compose.yaml -f compose.ghcr.yaml config | grep -q '^ *build:'
+# Every supported Compose combination has to render. The build overlay must
+# actually add build sections, and the secrets overlay must leave no secret in
+# the environment -- both are silent failures otherwise.
+compose-overlays:
+	docker compose -f compose.yaml -f compose.build.yaml config --quiet
+	docker compose -f compose.yaml -f compose.build.yaml config | grep -q '^ *build:'
+	docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
+	! docker compose -f compose.yaml -f compose.secrets.yaml config | grep -qE '^ *(LOOP_DATABASE_URL|LOOP_INITIAL_ADMIN_PASSWORD|LOOP_RUNNER_REGISTRATION_TOKEN|LOOP_SECRET_KEY):'
+	docker compose -f compose.yaml -f compose.tls.yaml config --quiet
+	# Both ends, or the runner dials plaintext against a TLS port and the whole
+	# per-project credential path is off with nothing to show for it.
+	docker compose -f compose.yaml -f compose.tls.yaml config | grep -q 'LOOP_GRPC_TLS_CERT_FILE'
+	test "$$(docker compose -f compose.yaml -f compose.tls.yaml config | grep -c 'LOOP_ORCHESTRATOR_TLS: "true"')" = 2
+	docker compose -f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml config --quiet
+	sh scripts/render-tls-stack.sh --check
+	docker compose -f compose.tls-stack.yaml config --quiet
+
+# Portainer takes one file, so the TLS stack also exists as a single rendered
+# document. Generated, never hand-edited -- two full stacks drift, and the way
+# you find out is a deployment behaving differently from the one you tested.
+compose-tls-stack:
+	sh scripts/render-tls-stack.sh
 
 # Executable specification of the release trigger -> image tag mapping.
+# release.yml runs this script directly before deriving a version, so a release
+# is gated on it either way; this target is what makes `make validate` -- and a
+# developer checking before they cut one -- run the same specification.
 test-release-tags:
 	sh scripts/release-version_test.sh
 
@@ -75,4 +94,4 @@ proto-generate:
 proto-check: proto-lint proto-generate
 	git diff --exit-code -- gen/go orchestrator/src/moirai/protocols
 
-validate: test-orchestrator lint typecheck compose compose-ghcr test-release-tags proto-check
+validate: test-orchestrator lint typecheck compose compose-overlays test-release-tags proto-check

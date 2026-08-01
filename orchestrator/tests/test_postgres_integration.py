@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -9,9 +10,11 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from moirai.domain.control_plane import AuthenticationError
+from moirai.domain.leases import StaleLeaseError
 from moirai.persistence.authentication import AsyncpgAuthentication
 from moirai.persistence.control_plane import AsyncpgControlPlane
 from moirai.persistence.migrations import MigrationRunner
+from moirai.persistence.secrets import SecretCipher, SecretCipherError
 from moirai.workflows.persistence import AsyncpgWorkflowPersistence
 
 _DATABASE_URL_ENV = "LOOP_TEST_DATABASE_URL"
@@ -41,6 +44,11 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_control_plane_persists_project_runner_issue_and_lease_lifecycle(self) -> None:
         control_plane = AsyncpgControlPlane(self.pool)
         suffix = uuid4().hex
+        # schedule() picks one online runner ordered by id, so a runner this
+        # suite left online in an earlier run would be assigned the job instead
+        # of the one registered below and the assertion would fail against every
+        # database but a virgin one.
+        await self._retire_leftover_runners()
         project = await control_plane.create_project(
             f"integration-{suffix}",
             "managed_clone",
@@ -147,6 +155,16 @@ class PostgreSQLPersistenceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([run["issue_id"] for run in runs], sorted(str(run["issue_id"]) for run in runs))
         self.assertEqual(runs, await control_plane.list_latest_workflow_runs_for_project(project_id))
 
+    async def _retire_leftover_runners(self) -> None:
+        """Takes every runner this database still reports online offline.
+
+        Runners outlive the tests that register them — they belong to no
+        project, so the per-project cleanups below never touch them. Marking
+        them offline is enough to keep them out of `schedule()`, and is safer
+        than deleting rows that jobs and leases still reference.
+        """
+        await self.pool.execute("UPDATE app.runners SET status = 'offline' WHERE status = 'online'")
+
     async def _delete_project(self, project_id: str) -> None:
         for table in ("workflow_runs", "issues"):
             await self.pool.execute(f"DELETE FROM app.{table} WHERE project_id = $1", UUID(project_id))
@@ -229,6 +247,11 @@ class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         from moirai.persistence.authentication import _hash_token
 
         other_session_id = uuid4()
+        # app.user_sessions.token_hash is globally unique, so a literal token
+        # here would collide with the row a previous run of this test left
+        # behind and the suite could only ever pass against a virgin database.
+        other_session_token = f"other-session-token-{other_session_id.hex}"
+        other_csrf_token = f"other-csrf-token-{other_session_id.hex}"
         await self.pool.execute(
             """
             INSERT INTO app.user_sessions
@@ -237,8 +260,8 @@ class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
             """,
             other_session_id,
             UUID(self.credentials.user_id),
-            _hash_token("other-session-token"),
-            _hash_token("other-csrf-token"),
+            _hash_token(other_session_token),
+            _hash_token(other_csrf_token),
             _NOW,
             _NOW + timedelta(hours=1),
         )
@@ -259,7 +282,7 @@ class AccountManagementIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.email, "admin@example.com")
         with self.assertRaises(AuthenticationError):
             await self.authentication.validate_session(
-                "other-session-token", "other-csrf-token", _NOW + timedelta(minutes=2), True
+                other_session_token, other_csrf_token, _NOW + timedelta(minutes=2), True
             )
 
     async def test_update_account_rejects_a_wrong_current_password(self) -> None:
@@ -941,7 +964,15 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self, job_id: str, runner_id: str, request_id: str, on_transition: Any = None
     ) -> None:
         """A successful developer execution, reported the way the runner does:
-        `started`, then `completed` with the files it changed."""
+        `started`, then `completed` with the files it changed.
+
+        The `result` document is what makes this a *delivery*. Since issue #105
+        the orchestrator will not advance a run on an exit code alone: a
+        terminal event whose agent result is missing or invalid, or that
+        reports no changed files or outstanding `remainingWork`, is recorded as
+        a non-delivery and the run holds its phase. Omitting it here would test
+        that guard rather than the transition.
+        """
         from moirai.domain.models import ExecutionEvent
 
         generation = int(
@@ -949,12 +980,27 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT lease_generation FROM app.jobs WHERE id = $1", UUID(job_id)
             )
         )
+        result = {
+            "protocolVersion": "1.0",
+            "executionId": f"{request_id}-implement",
+            "status": "completed",
+            "summary": "implemented the requested change",
+            "changedFiles": ["src/main.py"],
+            "commandsRun": ["make test"],
+            "remainingWork": [],
+            "knownLimitations": [],
+        }
         for sequence, event_type, payload in (
             (1, "started", {}),
             (
                 2,
                 "completed",
-                {"exitCode": 0, "changedFiles": ["src/main.py"], "commandsRun": ["make test"]},
+                {
+                    "exitCode": 0,
+                    "changedFiles": ["src/main.py"],
+                    "commandsRun": ["make test"],
+                    "result": result,
+                },
             ),
         ):
             await self.control_plane.accept_event(
@@ -2081,6 +2127,438 @@ class RunnerDrainIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaises(ValueError):
             await self.control_plane.set_runner_draining(str(uuid4()), True)
+
+
+class ProjectCredentialIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """Per-project credentials against the real schema.
+
+    The unit tests cover the cipher in isolation and the gRPC surface against an
+    in-memory control plane. What is only exercised here is migration 015 and the
+    SQL around it: the BYTEA round-trip, the composite primary key that makes a
+    second write a replacement rather than a duplicate, the kind CHECK, and the
+    cascade that stops a deleted project leaving its secrets behind.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        await MigrationRunner(self.pool).run()
+        self.cipher = SecretCipher.from_configured_key(base64.b64encode(os.urandom(32)).decode())
+        self.control_plane = AsyncpgControlPlane(self.pool, secret_cipher=self.cipher)
+        self.project_id = await self._project()
+
+    async def _project(self) -> str:
+        project = await self.control_plane.create_project(
+            f"credentials-{uuid4().hex[:12]}",
+            "managed_clone",
+            "https://example.test/credentials.git",
+            None,
+            "main",
+            set(),
+            _NOW,
+        )
+        # Seeded projects are scheduling candidates for every other test in this
+        # file; this one exists only to hang credentials off.
+        await self.pool.execute("UPDATE app.projects SET enabled = false WHERE id = $1", UUID(project["id"]))
+        return str(project["id"])
+
+    async def test_a_stored_credential_round_trips_through_the_database(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        self.assertEqual(
+            await self.control_plane.project_credential(self.project_id, "github_token"),
+            "ghp_integration",
+        )
+
+    async def test_the_plaintext_is_not_what_is_written_to_the_row(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        row = await self.pool.fetchrow(
+            "SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+            UUID(self.project_id),
+            "github_token",
+        )
+        self.assertNotIn(b"ghp_integration", bytes(row["ciphertext"]))
+        self.assertEqual(len(bytes(row["nonce"])), 12)
+
+    async def test_writing_twice_replaces_rather_than_duplicates(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "first", None, _NOW
+        )
+        later = _NOW + timedelta(hours=1)
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "second", None, later
+        )
+
+        self.assertEqual(
+            await self.control_plane.project_credential(self.project_id, "github_token"), "second"
+        )
+        described = await self.control_plane.describe_project_credentials(self.project_id)
+        self.assertEqual(len(described), 1)
+        # created_at is the first write, updated_at the replacement: the console
+        # reports "set <age> ago" from updated_at and would otherwise be stale.
+        self.assertEqual(described[0]["created_at"], _NOW)
+        self.assertEqual(described[0]["updated_at"], later)
+
+    async def test_the_two_kinds_are_stored_independently(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "a-token", None, _NOW
+        )
+        await self.control_plane.set_project_credential(
+            self.project_id, "ssh_private_key", "-----BEGIN KEY-----", None, _NOW
+        )
+
+        self.assertEqual(
+            [entry["kind"] for entry in await self.control_plane.describe_project_credentials(self.project_id)],
+            ["github_token", "ssh_private_key"],
+        )
+        self.assertTrue(await self.control_plane.clear_project_credential(
+            self.project_id, "github_token", None, _NOW
+        ))
+        self.assertIsNone(await self.control_plane.project_credential(self.project_id, "github_token"))
+        self.assertEqual(
+            await self.control_plane.project_credential(self.project_id, "ssh_private_key"),
+            "-----BEGIN KEY-----",
+        )
+
+    async def test_clearing_a_credential_that_is_not_set_reports_no_change(self) -> None:
+        self.assertFalse(await self.control_plane.clear_project_credential(
+            self.project_id, "github_token", None, _NOW
+        ))
+
+    async def test_an_unknown_kind_never_reaches_the_database(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.control_plane.set_project_credential(
+                self.project_id, "aws_key", "value", None, _NOW
+            )
+        # And the CHECK constraint is the backstop if a caller bypasses the guard.
+        with self.assertRaises(asyncpg.PostgresError):
+            await self.pool.execute(
+                "INSERT INTO app.project_credentials (project_id, kind, ciphertext, nonce, created_at, updated_at)"
+                " VALUES ($1, $2, $3, $4, $5, $5)",
+                UUID(self.project_id), "aws_key", b"x", b"y" * 12, _NOW,
+            )
+
+    async def test_a_value_sealed_with_another_key_is_an_error_not_a_fallback(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        stranger = AsyncpgControlPlane(
+            self.pool,
+            secret_cipher=SecretCipher.from_configured_key(base64.b64encode(os.urandom(32)).decode()),
+        )
+        # Falling back to the deployment-wide token here would act on the code
+        # host as the wrong identity and look like a permissions problem.
+        with self.assertRaises(SecretCipherError):
+            await stranger.project_credential(self.project_id, "github_token")
+
+    async def test_credentials_without_a_key_configured_are_refused_not_written(self) -> None:
+        keyless = AsyncpgControlPlane(self.pool)
+        with self.assertRaises(SecretCipherError):
+            await keyless.set_project_credential(
+                self.project_id, "github_token", "ghp_integration", None, _NOW
+            )
+        self.assertEqual(await keyless.describe_project_credentials(self.project_id), [])
+
+    async def test_an_unknown_project_is_reported_as_such_not_as_a_database_error(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            await self.control_plane.set_project_credential(
+                str(uuid4()), "github_token", "ghp_integration", None, _NOW
+            )
+        self.assertIn("unknown", str(raised.exception))
+
+    async def test_deleting_the_project_takes_its_credentials_with_it(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_integration", None, _NOW
+        )
+        await self.pool.execute("DELETE FROM app.projects WHERE id = $1", UUID(self.project_id))
+        self.assertEqual(
+            await self.pool.fetchval(
+                "SELECT count(*) FROM app.project_credentials WHERE project_id = $1", UUID(self.project_id)
+            ),
+            0,
+        )
+
+
+class ResolveJobSecretIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """The lease fence, against the real jobs table.
+
+    `test_runner_grpc.py` covers the servicer against the in-memory control
+    plane. What only a real database exercises is the SQL that decides whether
+    a runner still holds a job -- the same predicate `renew_lease` uses, which
+    is the whole basis for handing a credential out at all.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._leave_no_stalled_runs)
+        await MigrationRunner(self.pool).run()
+        self.cipher = SecretCipher.from_configured_key(base64.b64encode(os.urandom(32)).decode())
+        self.control_plane = AsyncpgControlPlane(self.pool, secret_cipher=self.cipher)
+        self.workflow_run_ids: list[str] = []
+        self.project_id, self.runner_id, self.job_id, self.generation = await self._held_job()
+
+    async def _leave_no_stalled_runs(self) -> None:
+        """Parks the runs this class created in a terminal state.
+
+        The database is shared, and `find_stalled_workflow_runs` scans all of
+        it. A run left in `preparing` whose job is no longer active is exactly
+        what that query looks for, so leaving one behind fails
+        StalledRunRecoveryIntegrationTests rather than anything here.
+        """
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        for workflow_run_id in self.workflow_run_ids:
+            await self.pool.execute(
+                "UPDATE app.workflow_runs SET status = 'cancelled' WHERE id = $1", UUID(workflow_run_id)
+            )
+
+    async def _held_job(self) -> tuple[str, str, str, int]:
+        """A project whose issue was scheduled onto a runner that accepted it."""
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        suffix = uuid4().hex[:12]
+        label = f"secret-{suffix}"
+        project = await self.control_plane.create_project(
+            f"resolve-secret-{suffix}",
+            "managed_clone",
+            "https://example.test/resolve-secret.git",
+            None,
+            "main",
+            {label},
+            _NOW,
+        )
+        project_id = str(project["id"])
+        await self.control_plane.upsert_issue(
+            project_id=project_id,
+            external_id=f"issue-{suffix}",
+            title="A runner resolves its project's credential",
+            body="",
+            state="open",
+            labels=["agent:ready"],
+            priority=100,
+            eligible=True,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+        token = await self.control_plane.create_registration_token(
+            {label}, _NOW + timedelta(minutes=30), now=_NOW
+        )
+        runner, credential = await self.control_plane.register_runner(
+            token, f"runner-{suffix}", {label}, _NOW
+        )
+        await self.control_plane.heartbeat(runner.id, credential, _NOW)
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert scheduled is not None
+        lease = await self.control_plane.accept_offer(scheduled.offer.job_id, runner.id, _NOW)
+        self.workflow_run_ids.append(scheduled.workflow.id)
+        return project_id, runner.id, scheduled.offer.job_id, lease.generation
+
+    async def test_a_runner_holding_the_job_resolves_its_projects_token(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+
+        resolved = await self.control_plane.resolve_job_secret(
+            self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+        )
+
+        self.assertEqual(resolved, ("ghp_for_the_runner", "environment"))
+
+    async def test_an_ssh_key_is_resolved_for_file_delivery(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "ssh_private_key", "-----BEGIN KEY-----", None, _NOW
+        )
+
+        resolved = await self.control_plane.resolve_job_secret(
+            self.runner_id, self.job_id, self.generation, "GIT_SSH_KEY", _NOW
+        )
+
+        self.assertEqual(resolved, ("-----BEGIN KEY-----", "file"))
+
+    async def test_a_project_with_no_credential_resolves_to_none(self) -> None:
+        # None, not an error: it is what tells the runner to fall back to its
+        # own environment, which is how a pre-existing deployment keeps working.
+        self.assertIsNone(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+            )
+        )
+
+    async def test_a_stale_generation_is_refused_even_for_the_right_runner(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation + 1, "GITHUB_TOKEN", _NOW
+            )
+
+    async def test_another_runner_cannot_resolve_this_jobs_credential(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+        _, stranger_id, _, _ = await self._held_job()
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                stranger_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+            )
+
+    async def test_an_expired_lease_is_refused(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW + timedelta(hours=1)
+            )
+
+    async def test_a_finished_job_no_longer_resolves_secrets(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+        await self.pool.execute(
+            "UPDATE app.jobs SET status = 'succeeded' WHERE id = $1", UUID(self.job_id)
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+            )
+
+    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "AWS_SECRET_ACCESS_KEY", _NOW
+            )
+
+
+class IssueStateNormalizationIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """An issue synchronised from GitHub must be visible to every reader.
+
+    The GitHub CLI reports state as "OPEN". It was stored verbatim while every
+    query compares against 'open', so a project whose issues had just
+    synchronised successfully showed "0/0" in the console, had an empty queue,
+    and contributed nothing to the queue-depth metric -- while `schedule()`,
+    which did not filter on state at all, could still pick the issue up.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._disable_seeded_projects)
+        await MigrationRunner(self.pool).run()
+        self.control_plane = AsyncpgControlPlane(self.pool)
+        self.project_id = await self._project()
+
+    async def _disable_seeded_projects(self) -> None:
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+
+    async def _project(self) -> str:
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        project = await self.control_plane.create_project(
+            f"issue-state-{uuid4().hex[:12]}",
+            "managed_clone",
+            "https://example.test/issue-state.git",
+            None,
+            "main",
+            {"linux"},
+            _NOW,
+        )
+        return str(project["id"])
+
+    async def _upsert(self, external_id: str, state: str, eligible: bool = True) -> None:
+        await self.control_plane.upsert_issue(
+            project_id=self.project_id,
+            external_id=external_id,
+            title="An issue the console must be able to count",
+            body="",
+            state=state,
+            labels=["agent:ready"],
+            priority=100,
+            eligible=eligible,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+
+    async def test_the_state_github_reports_is_stored_canonically(self) -> None:
+        await self._upsert("1", "OPEN")
+        self.assertEqual(
+            await self.pool.fetchval(
+                "SELECT state FROM app.issues WHERE project_id = $1", UUID(self.project_id)
+            ),
+            "open",
+        )
+
+    async def test_an_issue_synced_as_OPEN_is_counted_as_eligible(self) -> None:
+        # This is the reported symptom: four issues synchronised, console "0/0".
+        await self._upsert("1", "OPEN")
+        entry = next(
+            e for e in await self.control_plane.issue_sync_status(_NOW)
+            if e["project_id"] == self.project_id
+        )
+        self.assertEqual(entry["issue_count"], 1)
+        self.assertEqual(entry["eligible_count"], 1)
+
+    async def test_an_issue_synced_as_OPEN_reaches_the_queue(self) -> None:
+        await self._upsert("1", "OPEN")
+        await self.pool.execute(
+            "UPDATE app.projects SET enabled = true WHERE id = $1", UUID(self.project_id)
+        )
+        queued = [
+            entry for entry in await self.control_plane.list_queue(_NOW, 50)
+            if entry["project_id"] == self.project_id
+        ]
+        self.assertEqual(len(queued), 1)
+
+    async def test_a_closed_issue_is_not_scheduled_even_if_eligible_is_stale(self) -> None:
+        # `eligible` is a cached verdict from the last sync; the state is the
+        # fact. Scheduling on the cache alone would act on a closed issue.
+        await self._upsert("1", "CLOSED", eligible=True)
+        await self.pool.execute(
+            "UPDATE app.projects SET enabled = true WHERE id = $1", UUID(self.project_id)
+        )
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        self.assertIsNone(scheduled)
+
+    async def test_a_project_that_has_never_synced_does_not_break_the_status_view(self) -> None:
+        # No issue_sync_state row means a NULL failure count from the LEFT JOIN.
+        # int(None) raised, taking down the one view an operator would consult
+        # to find out why a project they just added is not being picked up.
+        entry = next(
+            e for e in await self.control_plane.issue_sync_status(_NOW)
+            if e["project_id"] == self.project_id
+        )
+        self.assertEqual(entry["consecutive_failures"], 0)
+        self.assertIsNone(entry["last_synced_at"])
+        self.assertFalse(entry["backing_off"])
+
+    async def test_mixed_case_from_any_code_host_normalises(self) -> None:
+        for spelling in ("Open", " OPEN ", "open"):
+            await self._upsert("1", spelling)
+            self.assertEqual(
+                await self.pool.fetchval(
+                    "SELECT state FROM app.issues WHERE project_id = $1", UUID(self.project_id)
+                ),
+                "open",
+            )
 
 
 if __name__ == "__main__":

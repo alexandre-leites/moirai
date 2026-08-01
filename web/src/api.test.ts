@@ -96,7 +96,7 @@ describe("createApiClient CSRF handling", () => {
 
   it("encodes workflow event cursors", async () => {
     const { calls, fetchClient } = recorder(() => jsonResponse({ events: [] }));
-    await createApiClient(fetchClient).listWorkflowEvents("workflow/a", "42?bad");
+    await createApiClient(fetchClient).listWorkflowEvents("workflow/a", { cursor: "42?bad" });
     expect(calls[0].url).toBe("/api/v1/workflows/workflow%2Fa/events?cursor=42%3Fbad");
   });
 
@@ -138,11 +138,13 @@ describe("createApiClient CSRF handling", () => {
       ["listTokens", (api) => api.listTokens()],
       ["listRunners", (api) => api.listRunners()],
       ["listQueue", (api) => api.listQueue()],
+      ["issueSyncStatus", (api) => api.issueSyncStatus()],
+      ["schedulerMetrics", (api) => api.schedulerMetrics()],
     ];
 
     for (const [name, read] of reads) {
       const { calls, fetchClient } = recorder(() =>
-        jsonResponse({ projects: [], workflows: [], tokens: [], runners: [] })
+        jsonResponse({ projects: [], workflows: [], tokens: [], runners: [], entries: [] })
       );
       await read(createApiClient(fetchClient));
       expect(calls[0].init?.credentials, `${name} did not send the session cookie`).toBe("include");
@@ -358,7 +360,7 @@ describe("createApiClient request shapes", () => {
     const api = createApiClient(fetchClient);
 
     await api.getWorkflow("w/1");
-    await api.listWorkflowEvents("w/1", "cursor/1");
+    await api.listWorkflowEvents("w/1", { cursor: "cursor/1" });
 
     expect(calls[0].url).toBe("/api/v1/workflows/w%2F1");
     expect(calls[1].url).toBe("/api/v1/workflows/w%2F1/events?cursor=cursor%2F1");
@@ -367,7 +369,7 @@ describe("createApiClient request shapes", () => {
   });
 
   it("unwraps the collection envelopes the API returns", async () => {
-    const projects = [{ id: "p1", name: "svc", enabled: true }];
+    const projects = [{ id: "p1", name: "svc", enabled: true, requiredRunnerLabels: ["go"] }];
     const workflows = [{ id: "w1", projectId: "p1", status: "running", phase: "implement" }];
     const tokens = [{ id: "t1", allowedLabels: [], expiresAt: "2026-07-30T00:00:00Z" }];
     const api = createApiClient(async (url) => {
@@ -408,10 +410,12 @@ describe("createApiClient request shapes", () => {
     expect(error.message).toBe("request failed: 500");
   });
 
-  it("reports an unreachable API as unhealthy instead of throwing", async () => {
+  it("reports an unreachable API from the status code when there is no body", async () => {
     const { fetchClient } = recorder(() => new Response(null, { status: 503 }));
-    await expect(createApiClient(fetchClient).health()).resolves.toBe("unhealthy");
-    await expect(createApiClient(async () => new Response(null, { status: 200 })).health()).resolves.toBe("healthy");
+    await expect(createApiClient(fetchClient).health())
+      .resolves.toEqual({ status: "degraded", orchestrator: "unreachable" });
+    await expect(createApiClient(async () => new Response(null, { status: 200 })).health())
+      .resolves.toEqual({ status: "healthy", orchestrator: "reachable" });
   });
 
   it("listQueue unwraps the envelope and forwards the limit query", async () => {
@@ -430,5 +434,54 @@ describe("createApiClient request shapes", () => {
     const { calls, fetchClient } = recorder(() => jsonResponse({ projects: [] }));
     await createApiClient(fetchClient).listProjects(controller.signal);
     expect(calls[0].init?.signal).toBe(controller.signal);
+  });
+});
+
+describe("createApiClient session handling", () => {
+  it("treats 401 as a lost session and 403 as a refusal the caller stays put for", async () => {
+    // A viewer clicking an admin-only control gets 403. Signing them out for it
+    // would make the console unusable for viewers (specification.md §3.2).
+    const seen: string[] = [];
+    const api = createApiClient(async (url) =>
+      problemResponse({ title: "Forbidden", detail: "admin role required" }, String(url).includes("cancel") ? 403 : 401)
+    );
+    api.setUnauthorizedHandler(() => seen.push("signed-out"));
+
+    await expect(api.me()).rejects.toBeInstanceOf(ApiError);
+    expect(seen).toEqual(["signed-out"]);
+
+    const forbidden = (await api.cancelWorkflow("w1").catch((error: unknown) => error)) as ApiError;
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.isForbidden).toBe(true);
+    expect(forbidden.message).toBe("Forbidden: admin role required");
+    // Still just the one sign-out, from the 401 above.
+    expect(seen).toEqual(["signed-out"]);
+  });
+
+  it("stops calling the handler once it is unregistered", async () => {
+    const seen: string[] = [];
+    const api = createApiClient(async () => problemResponse({ title: "Unauthorized" }, 401));
+    api.setUnauthorizedHandler(() => seen.push("signed-out"));
+    await api.me().catch(() => undefined);
+    api.setUnauthorizedHandler(null);
+    await api.me().catch(() => undefined);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("reports a malformed collection response instead of showing an empty state", async () => {
+    // A 200 whose body is not the envelope we asked for must not read as
+    // "nothing is registered" — that is the silent failure §6 forbids.
+    const api = createApiClient(async () => jsonResponse({ unexpected: true }));
+    await expect(api.listWorkflows()).rejects.toThrow(/malformed/);
+    await expect(api.listRunners()).rejects.toThrow(/malformed/);
+    await expect(api.listQueue()).rejects.toThrow(/malformed/);
+    await expect(api.listProjects()).rejects.toThrow(/malformed/);
+    await expect(api.issueSyncStatus()).rejects.toThrow(/malformed/);
+  });
+
+  it("caps an event page and encodes both parameters", async () => {
+    const { calls, fetchClient } = recorder(() => jsonResponse({ events: [] }));
+    await createApiClient(fetchClient).listWorkflowEvents("w1", { cursor: "9", limit: 5 });
+    expect(calls[0].url).toBe("/api/v1/workflows/w1/events?cursor=9&limit=5");
   });
 });

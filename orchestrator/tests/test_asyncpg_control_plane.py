@@ -2149,14 +2149,21 @@ class _ListWorkflowsPool:
                 {"id": 10, "event_type": "started", "payload": {}, "created_at": NOW},
             ]
         assert "FROM app.workflow_runs" in query
+        # The list shares get_workflow's projection, so it joins the issue and
+        # any pull request rather than reading workflow_runs alone.
+        assert "JOIN app.issues" in query
         return [
             {
                 "id": "00000000-0000-0000-0000-000000000001",
                 "project_id": "00000000-0000-0000-0000-000000000002",
                 "status": "blocked",
                 "current_phase": "blocked",
+                "issue_external_id": "42",
+                "issue_title": "Fix workflow visibility",
+                "branch_name": "agent/42/fix",
                 "pull_request_external_id": "42",
                 "pull_request_url": "https://github.com/example/repo/pull/42",
+                "pull_request_state": "open",
                 "blocking_reason": "workflow retry budget exhausted",
                 "planning_attempts": 1,
                 "implementation_attempts": 2,
@@ -2164,6 +2171,8 @@ class _ListWorkflowsPool:
                 "review_cycles": 3,
                 "ci_repair_attempts": 0,
                 "total_agent_executions": 6,
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         ]
 
@@ -2194,6 +2203,12 @@ class ListWorkflowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(workflow["blocking_reason"], "workflow retry budget exhausted")
         self.assertEqual(workflow["review_cycles"], 3)
         self.assertEqual(workflow["total_agent_executions"], 6)
+        # The console's list view renders these without a per-row detail fetch.
+        self.assertEqual(workflow["issue_external_id"], "42")
+        self.assertEqual(workflow["issue_title"], "Fix workflow visibility")
+        self.assertEqual(workflow["branch_name"], "agent/42/fix")
+        self.assertEqual(workflow["pull_request_state"], "open")
+        self.assertEqual(workflow["created_at"], NOW)
 
     async def test_reads_workflow_detail_and_cursor_page(self) -> None:
         control_plane = AsyncpgControlPlane(_ListWorkflowsPool())

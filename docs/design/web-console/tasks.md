@@ -113,41 +113,47 @@ tests at each layer (spec §4).
 
 ## Phase C — Web foundation
 
-- [ ] **C1 (S) Fix the API client 401/403 split.**
+*Delivered 2026-08-01. Phase D landed alongside it for every view whose data the current API
+serves; the sections still gated on Phase A/B are listed under Phase D below.*
+
+- [x] **C1 (S) Fix the API client 401/403 split.**
   Spec §3.2: 401 → session expired/login; 403 → toast, stay put. (Pre-existing bug,
   `web/src/api.ts`.)
   *Accept:* MSW tests for both codes; a viewer clicking an admin action is not logged out.
 
-- [ ] **C2 (M) Web test infrastructure.**
+- [x] **C2 (M) Web test infrastructure.**
   vitest + Testing Library + MSW; `make test-web` runs vitest + eslint + `tsc --noEmit`, wired
   into CI (also closes the "eslint never runs in CI" gap).
   *Accept:* CI fails on a failing component test; C1's tests run under it.
 
-- [ ] **C3 (M) Design tokens + theming.**
+- [x] **C3 (M) Design tokens + theming.**
   Spec §2.2–2.4: port the mockup's token sheet (light/dark, `prefers-color-scheme` +
   `data-theme` override persisted in localStorage); base styles; no literal colors in components.
   *Accept:* theme toggle + OS preference both work; grep finds no hex colors outside the token
   sheet.
 
-- [ ] **C4 (L) Component library.**
+- [x] **C4 (L) Component library.**
   Spec §2.5: Pill, StatTile, Meter, Table (row-link a11y), FilterChips, AttentionItem, FeedItem,
   Banner, DecisionPanel, Buttons, Toast, KV, HealthStrip, ConfirmDialog, skeletons/empty/error
   blocks — visually matching the mockup.
   *Accept:* component tests; keyboard + focus-visible verified for row-links, chips, dialogs.
 
-- [ ] **C5 (M) Phase-thread component.**
+- [x] **C5 (M) Phase-thread component.**
   Spec §2.6: full + mini variants, spun/ahead/current/cut geometry, labels, legend, aria-label,
   reduced-motion.
   *Accept:* snapshot/geometry tests per status class (running, waiting, completed, blocked-at-
   pipeline, failed-with-PR).
 
-- [ ] **C6 (M) App shell, routing, data layer.**
+- [x] **C6 (M) App shell, routing, data layer.**
   Spec §3.1, §5.7, §4.5-interim: sidebar with live counts, mobile drawer, route titles, 404;
   data layer with per-view polling (10s, paused when hidden) behind an interface SSE can later
   implement.
   *Accept:* nav counts update after a poll tick; drawer focus-trap; unknown route renders 404.
 
 ## Phase D — Views (each depends on C-phase + listed APIs)
+
+*Partly delivered 2026-08-01: every view ships, built from what the current API serves. The
+boxes stay open because each still has sections gated on Phase A/B — named per task below.*
 
 - [ ] **D1 (L) Overview** — needs A1, A5, A7, A8, A9, A12. Spec §5.1 (health strip, tiles,
   Needs-you triage, outcomes chart with hover tooltip, in-flight mini-threads, event feed).
@@ -176,7 +182,7 @@ tests at each layer (spec §4).
   *Accept:* execution-request tile flips to warning per the 30-min rule; circuits table reset
   works; audit paginates.
 
-- [ ] **D8 (S) Retire the old pages** — delete the link-list dashboard, old flat workflows page,
+- [x] **D8 (S) Retire the old pages** — delete the link-list dashboard, old flat workflows page,
   old tokens page once D1–D7 ship; redirect `/tokens` → `/runners`.
   *Accept:* no dead routes; nav is the §3.1 set.
 

@@ -18,6 +18,11 @@ from moirai.domain.control_plane import (
     RegistrationError,
     ScheduledJob,
 )
+from moirai.domain.credentials import (
+    CREDENTIAL_DELIVERY,
+    CREDENTIAL_KIND_BY_ENVIRONMENT_NAME,
+    VALID_CREDENTIAL_KINDS,
+)
 from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import (
     ExecutionEvent,
@@ -36,6 +41,7 @@ from moirai.persistence.authentication import (
     SessionCredentials,
 )
 from moirai.persistence.circuits import reap_orphaned_probes, reopen_probe_circuits
+from moirai.persistence.secrets import SealedSecret, SecretCipher, SecretCipherError
 
 if TYPE_CHECKING:
     # Deferred: grpc/protocol.py imports this module's classes back for a
@@ -48,7 +54,6 @@ if TYPE_CHECKING:
         RunnerRecord,
         WorkflowDetailRecord,
         WorkflowEventRecord,
-        WorkflowRecord,
     )
 from moirai.workflows.runner_events import (
     WorkflowTransition,
@@ -193,6 +198,12 @@ def _scheduling_conditions(issue: str, project: str, cooldown: str) -> str:
     """
     return (
         f"{issue}.eligible = true"
+        # `eligible` is a cached verdict from the last synchronisation; the
+        # state is the fact. Without this, a closed issue whose eligible flag
+        # had not yet been refreshed was schedulable -- and `list_queue` filters
+        # on state separately, so it would have been scheduled without ever
+        # having appeared in the queue an operator can see.
+        f" AND {issue}.state = 'open'"
         f" AND {project}.enabled = true"
         f" AND {_locked_condition(project)}"
         f" AND {_project_circuit_condition(project, cooldown)}"
@@ -231,6 +242,7 @@ class AsyncpgControlPlane:
         circuit_probe_cooldown: timedelta = timedelta(minutes=5),
         unanswered_offer_limit: int = 5,
         unanswered_offer_grace: timedelta = timedelta(minutes=15),
+        secret_cipher: SecretCipher | None = None,
     ) -> None:
         if circuit_probe_cooldown <= timedelta():
             raise ValueError("circuit probe cooldown must be positive")
@@ -243,6 +255,7 @@ class AsyncpgControlPlane:
         self._circuit_probe_cooldown = circuit_probe_cooldown
         self._unanswered_offer_limit = unanswered_offer_limit
         self._unanswered_offer_grace = unanswered_offer_grace
+        self._secret_cipher = secret_cipher
 
     @property
     def pool(self) -> Any:
@@ -250,13 +263,18 @@ class AsyncpgControlPlane:
         return self._pool
 
     @classmethod
-    async def connect(cls, database_url: str) -> AsyncpgControlPlane:
+    async def connect(
+        cls, database_url: str, secret_cipher: SecretCipher | None = None
+    ) -> AsyncpgControlPlane:
         try:
             import asyncpg
         except ModuleNotFoundError as error:
             raise RuntimeError("asyncpg is required to run the orchestrator") from error
         pg_dsn = database_url.replace("+asyncpg", "")
-        return cls(await asyncpg.create_pool(dsn=pg_dsn, min_size=1, max_size=10))
+        return cls(
+            await asyncpg.create_pool(dsn=pg_dsn, min_size=1, max_size=10),
+            secret_cipher=secret_cipher,
+        )
 
     async def close(self) -> None:
         await self._pool.close()
@@ -434,6 +452,11 @@ class AsyncpgControlPlane:
         now: datetime,
     ) -> None:
         labels_json = json.dumps(sorted(labels), separators=(",", ":"))
+        # GitHub reports "OPEN"; every read in this file compares against
+        # 'open'. Normalising here rather than at each of those comparisons
+        # keeps one canonical spelling in the column, and matches what
+        # domain.issues.is_eligible already does with the same value.
+        state = state.strip().lower()
         await self._pool.execute(
             """
             INSERT INTO app.issues
@@ -621,7 +644,12 @@ class AsyncpgControlPlane:
                 "issue_count": int(record["issue_count"]),
                 "eligible_count": int(record["eligible_count"]),
                 "last_synced_at": record["last_synced_at"],
-                "consecutive_failures": int(record["consecutive_failures"]),
+                # LEFT JOIN: a project that has never synchronised has no
+                # issue_sync_state row, so this is NULL rather than 0. int(None)
+                # raised, which took down the whole sync-status view -- the one
+                # place an operator would look to find out why a project they
+                # had just added was not being picked up.
+                "consecutive_failures": int(record["consecutive_failures"] or 0),
                 "next_retry_at": record["next_retry_at"],
                 "last_error": record["last_error"],
                 "backing_off": bool(record["backing_off"]),
@@ -921,35 +949,188 @@ class AsyncpgControlPlane:
             raise AuthenticationError("runner is inactive")
         return _runner(updated, connected=True, healthy=True)
 
-    async def list_workflows(self) -> list[WorkflowRecord]:
+    # --- Per-project credentials ------------------------------------------
+
+    def _cipher(self) -> SecretCipher:
+        if self._secret_cipher is None:
+            raise SecretCipherError(
+                "no secret key is configured, so per-project credentials cannot be "
+                "stored or read; set LOOP_SECRET_KEY (or LOOP_SECRET_KEY_FILE) to a "
+                "32-byte key, for example from `openssl rand -base64 32`"
+            )
+        return self._secret_cipher
+
+    async def set_project_credential(
+        self,
+        project_id: str,
+        kind: str,
+        value: str,
+        actor_user_id: str | None,
+        now: datetime,
+    ) -> None:
+        """Seals a credential and replaces whatever that project had for `kind`."""
+        if kind not in VALID_CREDENTIAL_KINDS:
+            raise ValueError(f"unknown credential kind: {kind}")
+        sealed = self._cipher().seal(value)
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                # Same "project is unknown" as update_project, so the servicer
+                # reports it the same way. Without this the foreign key still
+                # rejects the write, but as a database error the caller sees as
+                # "service unavailable" rather than as a bad project id.
+                if not await connection.fetchval(
+                    "SELECT true FROM app.projects WHERE id = $1", _uuid(project_id)
+                ):
+                    raise ValueError("project is unknown")
+                await connection.execute(
+                    """
+                    INSERT INTO app.project_credentials
+                        (project_id, kind, ciphertext, nonce, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $5)
+                    ON CONFLICT (project_id, kind) DO UPDATE
+                    SET ciphertext = EXCLUDED.ciphertext,
+                        nonce = EXCLUDED.nonce,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    _uuid(project_id),
+                    kind,
+                    sealed.ciphertext,
+                    sealed.nonce,
+                    now,
+                )
+                # The value is never audited, only that it changed and to which
+                # kind -- the resource id carries the project and the kind.
+                await AsyncpgAuthentication._append_audit(
+                    connection,
+                    actor_user_id=_uuid_or_none(actor_user_id),
+                    action="project.credential.set",
+                    resource_type="project_credential",
+                    resource_id=f"{project_id}/{kind}",
+                    outcome="succeeded",
+                    now=now,
+                )
+
+    async def clear_project_credential(
+        self, project_id: str, kind: str, actor_user_id: str | None, now: datetime
+    ) -> bool:
+        if kind not in VALID_CREDENTIAL_KINDS:
+            raise ValueError(f"unknown credential kind: {kind}")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                status = await connection.execute(
+                    "DELETE FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+                    _uuid(project_id),
+                    kind,
+                )
+                removed = status != "DELETE 0"
+                if removed:
+                    await AsyncpgAuthentication._append_audit(
+                        connection,
+                        actor_user_id=_uuid_or_none(actor_user_id),
+                        action="project.credential.cleared",
+                        resource_type="project_credential",
+                        resource_id=f"{project_id}/{kind}",
+                        outcome="succeeded",
+                        now=now,
+                    )
+                return removed
+
+    async def resolve_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, now: datetime
+    ) -> tuple[str, str] | None:
+        """One secret for a job a runner currently holds, or None if unconfigured.
+
+        Returns `(value, delivery)`. Fenced on exactly the conditions
+        `renew_lease` uses -- this runner, this job, this generation, an
+        unexpired lease and a live status -- so a runner whose work was taken
+        away by recovery cannot go on resolving secrets for it. A request that
+        fails the fence raises `StaleLeaseError` rather than returning None:
+        "you no longer hold this job" and "that project has no such credential"
+        are different answers and must not look alike to the caller.
+        """
+        kind = CREDENTIAL_KIND_BY_ENVIRONMENT_NAME.get(name)
+        if kind is None:
+            raise ValueError(f"no project credential backs the environment reference {name!r}")
+        job = await self._pool.fetchrow(
+            """
+            SELECT project_id
+            FROM app.jobs
+            WHERE id = $1 AND runner_id = $2 AND status IN ('preparing', 'running')
+              AND lease_generation = $3 AND lease_expires_at > $4
+            """,
+            _uuid(job_id),
+            _uuid(runner_id),
+            generation,
+            now,
+        )
+        if job is None:
+            raise StaleLeaseError("runner does not hold this job at this lease generation")
+        value = await self.project_credential(str(job["project_id"]), kind)
+        if value is None:
+            return None
+        return value, CREDENTIAL_DELIVERY[kind]
+
+    async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]:
+        """What is configured, never the values. This is the only read the API has."""
         records = await self._pool.fetch(
             """
-            SELECT wr.id, wr.project_id, wr.status, wr.current_phase,
-                   wr.pull_request_external_id, wr.pull_request_url, wr.blocking_reason,
-                   wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts,
-                   wr.review_cycles, wr.ci_repair_attempts, wr.total_agent_executions
-            FROM app.workflow_runs AS wr
-            ORDER BY wr.created_at DESC, wr.id ASC
-            """
+            SELECT kind, created_at, updated_at
+            FROM app.project_credentials
+            WHERE project_id = $1
+            ORDER BY kind
+            """,
+            _uuid(project_id),
         )
         return [
             {
-                "id": str(record["id"]),
-                "project_id": str(record["project_id"]),
-                "status": str(record["status"]),
-                "phase": str(record["current_phase"]),
-                "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
-                "pull_request_url": _optional_text(record["pull_request_url"]),
-                "blocking_reason": _optional_text(record["blocking_reason"]),
-                "planning_attempts": int(record["planning_attempts"]),
-                "implementation_attempts": int(record["implementation_attempts"]),
-                "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
-                "review_cycles": int(record["review_cycles"]),
-                "ci_repair_attempts": int(record["ci_repair_attempts"]),
-                "total_agent_executions": int(record["total_agent_executions"]),
+                "kind": str(record["kind"]),
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
             }
             for record in records
         ]
+
+    async def project_credential(self, project_id: str, kind: str) -> str | None:
+        """Opens one credential for the orchestrator's own use.
+
+        Returns None when the project has none, so callers fall back to the
+        deployment-wide token. A stored value that cannot be opened is an error
+        rather than a None: silently falling back would use the wrong identity
+        against the code host and look like a permissions problem.
+        """
+        if kind not in VALID_CREDENTIAL_KINDS:
+            raise ValueError(f"unknown credential kind: {kind}")
+        record = await self._pool.fetchrow(
+            "SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+            _uuid(project_id),
+            kind,
+        )
+        if record is None:
+            return None
+        return self._cipher().open(
+            SealedSecret(ciphertext=bytes(record["ciphertext"]), nonce=bytes(record["nonce"]))
+        )
+
+    async def list_workflows(self) -> list[WorkflowDetailRecord]:
+        # Same projection as get_workflow below: the management console renders
+        # issue titles, pull requests and attempt budgets straight from the list,
+        # and fetching them per row would be one request per workflow.
+        records = await self._pool.fetch(
+            """
+            SELECT wr.id, wr.project_id, wr.status, wr.current_phase, i.external_id AS issue_external_id,
+                   i.title AS issue_title, wr.branch_name,
+                   COALESCE(pr.external_id, wr.pull_request_external_id) AS pull_request_external_id,
+                   COALESCE(pr.url, wr.pull_request_url) AS pull_request_url, pr.state AS pull_request_state,
+                   wr.blocking_reason, wr.planning_attempts, wr.implementation_attempts,
+                   wr.pipeline_repair_attempts, wr.review_cycles, wr.ci_repair_attempts,
+                   wr.total_agent_executions, wr.created_at, wr.updated_at
+            FROM app.workflow_runs AS wr
+            JOIN app.issues AS i ON i.id = wr.issue_id
+            LEFT JOIN app.pull_requests AS pr ON pr.workflow_run_id = wr.id
+            ORDER BY wr.created_at DESC, wr.id ASC
+            """
+        )
+        return [_workflow_detail_record(record) for record in records]
 
     async def get_workflow(self, workflow_run_id: str) -> WorkflowDetailRecord | None:
         record = await self._pool.fetchrow(
@@ -970,27 +1151,7 @@ class AsyncpgControlPlane:
         )
         if record is None:
             return None
-        return {
-            "id": str(record["id"]),
-            "project_id": str(record["project_id"]),
-            "status": str(record["status"]),
-            "phase": str(record["current_phase"]),
-            "issue_external_id": str(record["issue_external_id"]),
-            "issue_title": str(record["issue_title"]),
-            "branch_name": _optional_text(record["branch_name"]),
-            "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
-            "pull_request_url": _optional_text(record["pull_request_url"]),
-            "pull_request_state": _optional_text(record["pull_request_state"]),
-            "blocking_reason": _optional_text(record["blocking_reason"]),
-            "planning_attempts": int(record["planning_attempts"]),
-            "implementation_attempts": int(record["implementation_attempts"]),
-            "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
-            "review_cycles": int(record["review_cycles"]),
-            "ci_repair_attempts": int(record["ci_repair_attempts"]),
-            "total_agent_executions": int(record["total_agent_executions"]),
-            "created_at": record["created_at"],
-            "updated_at": record["updated_at"],
-        }
+        return _workflow_detail_record(record)
 
     async def list_workflow_events(
         self, workflow_run_id: str, after_id: int, limit: int
@@ -1550,7 +1711,7 @@ class AsyncpgControlPlane:
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 candidate = await connection.fetchrow(
-                    """
+                    f"""
                     SELECT i.id AS issue_id, i.project_id, i.provider, i.external_id, i.priority,
                            i.external_created_at, i.last_synced_at,
                            p.enabled, p.configuration, r.id AS runner_id, r.labels,
@@ -3308,6 +3469,31 @@ def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _workflow_detail_record(record: Any) -> WorkflowDetailRecord:
+    """Maps one row of the workflow-run projection shared by list and get."""
+    return {
+        "id": str(record["id"]),
+        "project_id": str(record["project_id"]),
+        "status": str(record["status"]),
+        "phase": str(record["current_phase"]),
+        "issue_external_id": str(record["issue_external_id"]),
+        "issue_title": str(record["issue_title"]),
+        "branch_name": _optional_text(record["branch_name"]),
+        "pull_request_external_id": _optional_text(record["pull_request_external_id"]),
+        "pull_request_url": _optional_text(record["pull_request_url"]),
+        "pull_request_state": _optional_text(record["pull_request_state"]),
+        "blocking_reason": _optional_text(record["blocking_reason"]),
+        "planning_attempts": int(record["planning_attempts"]),
+        "implementation_attempts": int(record["implementation_attempts"]),
+        "pipeline_repair_attempts": int(record["pipeline_repair_attempts"]),
+        "review_cycles": int(record["review_cycles"]),
+        "ci_repair_attempts": int(record["ci_repair_attempts"]),
+        "total_agent_executions": int(record["total_agent_executions"]),
+        "created_at": record["created_at"],
+        "updated_at": record["updated_at"],
+    }
 
 
 def _text_list(value: Any) -> tuple[str, ...]:

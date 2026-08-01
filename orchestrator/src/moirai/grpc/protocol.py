@@ -163,7 +163,7 @@ class ControlPlane(Protocol):
         self, token_id: str, actor_user_id: str | None, now: datetime
     ) -> RegistrationTokenRecord: ...
 
-    async def list_workflows(self) -> list[WorkflowRecord]: ...
+    async def list_workflows(self) -> list[WorkflowDetailRecord]: ...
 
     async def get_workflow(self, workflow_run_id: str) -> WorkflowDetailRecord | None: ...
 
@@ -197,6 +197,30 @@ class ControlPlane(Protocol):
     async def list_queue(self, now: datetime, limit: int) -> list[QueueEntryRecord]: ...
 
     async def issue_sync_status(self, now: datetime) -> list[IssueSyncStatusRecord]: ...
+
+    # Scheduler gauges for GetSchedulerMetrics: queue depth, active workflows,
+    # scheduled jobs and the oldest runner heartbeat age.
+    async def metrics_snapshot(self, now: datetime) -> dict[str, float]: ...
+
+    # Per-project credentials. `describe_` reports which kinds are configured
+    # and when; it never returns a value, and there is deliberately no protocol
+    # method that returns one to a caller outside the orchestrator.
+    async def set_project_credential(
+        self, project_id: str, kind: str, value: str, actor_user_id: str | None, now: datetime
+    ) -> None: ...
+
+    async def clear_project_credential(
+        self, project_id: str, kind: str, actor_user_id: str | None, now: datetime
+    ) -> bool: ...
+
+    async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]: ...
+
+    # The runner-facing resolver. Returns (value, delivery), or None when the
+    # project has no credential of that kind; raises StaleLeaseError when the
+    # runner does not hold the job at that generation.
+    async def resolve_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, now: datetime
+    ) -> tuple[str, str] | None: ...
 
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 

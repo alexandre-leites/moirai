@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate } from "react-router";
 import { useAuth } from "./auth";
 
 export function LoginPage() {
@@ -33,8 +33,8 @@ export function LoginPage() {
       <h1>Moirai</h1>
       <form onSubmit={handleSubmit} className="login-form">
         <h2>Sign in</h2>
-        {error && <p className="error" role="alert">{error}</p>}
-        <label>
+        {error && <div className="error-block" role="alert">{error}</div>}
+        <label className="field">
           Username
           <input
             type="text"
@@ -44,7 +44,7 @@ export function LoginPage() {
             disabled={loading}
           />
         </label>
-        <label>
+        <label className="field">
           Password
           <input
             type="password"
@@ -54,9 +54,8 @@ export function LoginPage() {
             disabled={loading}
           />
         </label>
-        <button type="submit" disabled={loading} aria-busy={loading}>
-          {loading && <span className="spinner" aria-hidden="true" />}
-          {loading ? "Signing in..." : "Sign in"}
+        <button type="submit" className="btn primary" disabled={loading} aria-busy={loading}>
+          {loading ? "Signing in…" : "Sign in"}
         </button>
       </form>
     </main>

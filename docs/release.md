@@ -17,7 +17,7 @@ pushes an image.
 The names are `ghcr.io/<owner>/<repo>/<service>`, derived at runtime from
 `github.repository`, so a fork publishes under its own owner without editing the
 workflow. (A fork consuming its own images does have to set
-`MOIRAI_IMAGE_PREFIX`; `compose.ghcr.yaml` cannot read `github.repository`.)
+`MOIRAI_IMAGE_PREFIX`; Compose cannot read `github.repository`.)
 The nested form was chosen over a flat `moirai-<service>` because the
 repository is a monorepo of co-released services: nesting keeps all four
 packages grouped under the repository they come from, and leaves the owner's
@@ -123,27 +123,31 @@ architectures and pushes nothing.
 
 ## Runners
 
-The release workflow runs on the same `[self-hosted, linux]` pool as CI.
+The release workflow runs on GitHub-hosted `ubuntu-latest`, the same as CI. The
+`[self-hosted, linux]` lines are kept commented out beside each `runs-on` so the
+pool can be switched back in one edit.
 
-The repository is private, so GitHub-hosted minutes are billable and
-GitHub-hosted arm64 runners are not free either; the self-hosted pool already
-builds and boots the whole Compose stack in CI, so it is the cheaper and more
-consistent choice. The workflow also deliberately uses no `actions/setup-*`
-step -- it needs Docker and nothing else.
+That is a change from the original design, which used a self-hosted pool because
+the repository is private and GitHub-hosted minutes are billable. The pool had
+nothing online, so every queued run was cancelled by the next push and neither
+workflow had executed for over a week. Hosted runners are the cheaper trade while
+that is true: a release that does not run is worth less than the minutes it saves.
 
-Prerequisites on the self-hosted runner, which this repository cannot install
-for you:
+The workflow deliberately uses no `actions/setup-*` step -- it needs Docker and
+nothing else. On a self-hosted runner that means:
 
 - Docker Engine (already required by the CI `compose-smoke` job).
 - Permission to run privileged containers. `docker/setup-qemu-action` registers
   the aarch64 emulator by running `tonistiigi/binfmt` with `--privileged`. If it
   cannot, the workflow fails at that step rather than publishing an amd64-only
-  image.
+  image. The image is pinned to `qemu-v9.2.2`: a later build of it crashed
+  `npm install` under arm64 emulation with SIGILL, which presents as an
+  unexplained failure inside the web image's runtime stage.
 - Outbound network access to `ghcr.io`, plus the package registries the images
   build from (Debian, Alpine, npm, PyPI, and the GitHub CLI release archive).
 
-`docker/setup-buildx-action` downloads buildx itself, so the runner does not
-need the buildx plugin preinstalled.
+`docker/setup-buildx-action` downloads buildx itself, so no runner needs the
+buildx plugin preinstalled.
 
 Layer cache is stored in the GitHub Actions cache, scoped per service
 (`type=gha,scope=release-<service>`), so a release reuses the previous release's
@@ -151,19 +155,10 @@ layers.
 
 ## Running the published images
 
-See [`compose.ghcr.yaml`](../compose.ghcr.yaml). It replaces the four `build:`
-sections in `compose.yaml` with `image:` references and changes nothing else --
-same networks, secrets, healthchecks, and capability drops.
-
-```bash
-export MOIRAI_IMAGE_TAG=1.4.0
-docker compose -f compose.yaml -f compose.ghcr.yaml pull
-docker compose -f compose.yaml -f compose.ghcr.yaml up --detach --wait
-```
-
-`MOIRAI_IMAGE_TAG` defaults to `latest`, which moves; pin an exact version or a
-`sha-<short sha>` tag for anything reproducible. `MOIRAI_IMAGE_PREFIX` overrides
-the registry and namespace, for a fork or a mirror.
+`compose.yaml` pulls the published images by default, so consuming a release is just
+`docker compose up -d`. `MOIRAI_IMAGE_TAG` selects the version (`latest` by
+default, which moves) and `MOIRAI_IMAGE_PREFIX` points at a fork or mirror.
+Building from the checkout instead is the `compose.build.yaml` overlay.
 
 ## Credentials
 

@@ -13,7 +13,9 @@ import (
 )
 
 // A continuation resumes the session the previous run reported, using opencode's
-// own session selector, and changes nothing else about the invocation.
+// own session selector, and changes nothing else about the invocation. The final
+// argument stays the fixed pointer at `.loop/prompt.md` that every opencode run
+// uses — the prompt itself travels in the task packet's file, never on argv.
 func TestOpenCodeContinueResumesTheCapturedSession(t *testing.T) {
 	workspace := t.TempDir()
 	binary := writeFakeOpenCode(t, workspace, `printf '%s\n' "$@" > arguments
@@ -34,7 +36,8 @@ printf '%s' '{"protocolVersion":"1.0","executionId":"execution-1","status":"comp
 	if err != nil {
 		t.Fatalf("read arguments: %v", err)
 	}
-	want := "run\n--model\nprovider/model\n--dir\n" + workspace + "\n--session\nsession-1\ncontinue the task\n"
+	want := "run\n--model\nprovider/model\n--dir\n" + workspace +
+		"\n--session\nsession-1\nRead .loop/prompt.md and follow its instructions.\n"
 	if string(contents) != want {
 		t.Fatalf("arguments = %q, want %q", contents, want)
 	}

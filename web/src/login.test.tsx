@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { ApiError, type ApiClient, type CurrentUser } from "./api";
 import { AuthProvider } from "./auth";
 import { LoginPage } from "./login";
@@ -71,7 +71,7 @@ describe("LoginPage", () => {
   it("shows no error before the first submission", async () => {
     const { api } = authApi();
     const container = await mountLogin(api);
-    expect(container.querySelector(".error")).toBeNull();
+    expect(container.querySelector(".error-block")).toBeNull();
   });
 
   it("refuses an empty submission without calling the API", async () => {
@@ -80,7 +80,7 @@ describe("LoginPage", () => {
 
     await submitForm(form(container));
 
-    expect(container.querySelector(".error")?.textContent).toBe("Username and password are required");
+    expect(container.querySelector(".error-block")?.textContent).toBe("Username and password are required");
     expect(attempts).toEqual([]);
   });
 
@@ -92,7 +92,7 @@ describe("LoginPage", () => {
     await typeInto(field(container, /^Password/), "lovelace");
     await submitForm(form(container));
 
-    expect(container.querySelector(".error")?.textContent).toBe("Username and password are required");
+    expect(container.querySelector(".error-block")?.textContent).toBe("Username and password are required");
     expect(attempts).toEqual([]);
   });
 
@@ -103,7 +103,7 @@ describe("LoginPage", () => {
     await typeInto(field(container, /^Username/), "ada");
     await submitForm(form(container));
 
-    expect(container.querySelector(".error")?.textContent).toBe("Username and password are required");
+    expect(container.querySelector(".error-block")?.textContent).toBe("Username and password are required");
     expect(attempts).toEqual([]);
   });
 
@@ -116,7 +116,7 @@ describe("LoginPage", () => {
     await submitForm(form(container));
 
     expect(attempts).toEqual([{ username: "ada", password: "lovelace" }]);
-    expect(container.querySelector(".error")).toBeNull();
+    expect(container.querySelector(".error-block")).toBeNull();
     expect(container.querySelector("[data-testid=location]")?.textContent).toBe("/");
   });
 
@@ -140,13 +140,13 @@ describe("LoginPage", () => {
     const container = await mountLogin(api);
 
     await submitForm(form(container));
-    expect(container.querySelector(".error")).not.toBeNull();
+    expect(container.querySelector(".error-block")).not.toBeNull();
 
     await typeInto(field(container, /^Username/), "ada");
     await typeInto(field(container, /^Password/), "lovelace");
     await submitForm(form(container));
 
-    expect(container.querySelector(".error")).toBeNull();
+    expect(container.querySelector(".error-block")).toBeNull();
   });
 
   it("reports a rejected sign-in and leaves the form usable for another try", async () => {
@@ -159,7 +159,7 @@ describe("LoginPage", () => {
     await typeInto(field(container, /^Password/), "wrong");
     await submitForm(form(container));
 
-    expect(container.querySelector(".error")?.textContent).toBe("Login failed. Check your credentials.");
+    expect(container.querySelector(".error-block")?.textContent).toBe("Login failed. Check your credentials.");
     expect(signIn(container).disabled).toBe(false);
     expect(signIn(container).textContent).toBe("Sign in");
     expect(attempts).toHaveLength(1);
@@ -178,8 +178,7 @@ describe("LoginPage", () => {
     await typeInto(field(container, /^Password/), "lovelace");
     await submitForm(form(container));
 
-    expect(signIn(container).textContent).toBe("Signing in...");
-    expect(signIn(container).querySelector(".spinner")).not.toBeNull();
+    expect(signIn(container).textContent).toBe("Signing in…");
     expect(signIn(container).getAttribute("aria-busy")).toBe("true");
     expect(signIn(container).disabled).toBe(true);
     expect(field(container, /^Username/).disabled).toBe(true);
@@ -204,6 +203,6 @@ describe("LoginPage", () => {
     await pending.reject(new ApiError(503, "orchestrator unavailable"));
 
     expect(signIn(container).disabled).toBe(false);
-    expect(container.querySelector(".error")?.textContent).toBe("Login failed. Check your credentials.");
+    expect(container.querySelector(".error-block")?.textContent).toBe("Login failed. Check your credentials.");
   });
 });
