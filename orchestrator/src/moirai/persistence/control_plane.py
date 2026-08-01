@@ -18,6 +18,11 @@ from moirai.domain.control_plane import (
     RegistrationError,
     ScheduledJob,
 )
+from moirai.domain.credentials import (
+    CREDENTIAL_DELIVERY,
+    CREDENTIAL_KIND_BY_ENVIRONMENT_NAME,
+    VALID_CREDENTIAL_KINDS,
+)
 from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import (
     ExecutionEvent,
@@ -930,8 +935,6 @@ class AsyncpgControlPlane:
 
     # --- Per-project credentials ------------------------------------------
 
-    VALID_CREDENTIAL_KINDS = ("github_token", "ssh_private_key")
-
     def _cipher(self) -> SecretCipher:
         if self._secret_cipher is None:
             raise SecretCipherError(
@@ -950,7 +953,7 @@ class AsyncpgControlPlane:
         now: datetime,
     ) -> None:
         """Seals a credential and replaces whatever that project had for `kind`."""
-        if kind not in self.VALID_CREDENTIAL_KINDS:
+        if kind not in VALID_CREDENTIAL_KINDS:
             raise ValueError(f"unknown credential kind: {kind}")
         sealed = self._cipher().seal(value)
         async with self._pool.acquire() as connection:
@@ -994,7 +997,7 @@ class AsyncpgControlPlane:
     async def clear_project_credential(
         self, project_id: str, kind: str, actor_user_id: str | None, now: datetime
     ) -> bool:
-        if kind not in self.VALID_CREDENTIAL_KINDS:
+        if kind not in VALID_CREDENTIAL_KINDS:
             raise ValueError(f"unknown credential kind: {kind}")
         async with self._pool.acquire() as connection:
             async with connection.transaction():
@@ -1015,6 +1018,41 @@ class AsyncpgControlPlane:
                         now=now,
                     )
                 return removed
+
+    async def resolve_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, now: datetime
+    ) -> tuple[str, str] | None:
+        """One secret for a job a runner currently holds, or None if unconfigured.
+
+        Returns `(value, delivery)`. Fenced on exactly the conditions
+        `renew_lease` uses -- this runner, this job, this generation, an
+        unexpired lease and a live status -- so a runner whose work was taken
+        away by recovery cannot go on resolving secrets for it. A request that
+        fails the fence raises `StaleLeaseError` rather than returning None:
+        "you no longer hold this job" and "that project has no such credential"
+        are different answers and must not look alike to the caller.
+        """
+        kind = CREDENTIAL_KIND_BY_ENVIRONMENT_NAME.get(name)
+        if kind is None:
+            raise ValueError(f"no project credential backs the environment reference {name!r}")
+        job = await self._pool.fetchrow(
+            """
+            SELECT project_id
+            FROM app.jobs
+            WHERE id = $1 AND runner_id = $2 AND status IN ('preparing', 'running')
+              AND lease_generation = $3 AND lease_expires_at > $4
+            """,
+            _uuid(job_id),
+            _uuid(runner_id),
+            generation,
+            now,
+        )
+        if job is None:
+            raise StaleLeaseError("runner does not hold this job at this lease generation")
+        value = await self.project_credential(str(job["project_id"]), kind)
+        if value is None:
+            return None
+        return value, CREDENTIAL_DELIVERY[kind]
 
     async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]:
         """What is configured, never the values. This is the only read the API has."""
@@ -1044,7 +1082,7 @@ class AsyncpgControlPlane:
         rather than a None: silently falling back would use the wrong identity
         against the code host and look like a permissions problem.
         """
-        if kind not in self.VALID_CREDENTIAL_KINDS:
+        if kind not in VALID_CREDENTIAL_KINDS:
             raise ValueError(f"unknown credential kind: {kind}")
         record = await self._pool.fetchrow(
             "SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id = $1 AND kind = $2",

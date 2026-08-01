@@ -285,3 +285,228 @@ class RunnerControlGrpcTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(grpc is None, "grpcio is not installed")
+class ResolveJobSecretTests(unittest.IsolatedAsyncioTestCase):
+    """The one RPC that sends credential material outward.
+
+    Every test here is a refusal except the first: this is the boundary where a
+    mistake hands a secret to something that should not have it, so what it
+    declines matters more than what it returns.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.control_plane = InMemoryControlPlane()
+        await self._start(secure_channel=True)
+
+    async def _start(self, secure_channel: bool) -> None:
+        self.server = grpc.aio.server()
+        self.server_service = RunnerControlService(
+            self.control_plane, now=lambda: NOW, secure_channel=secure_channel
+        )
+        runner_control_pb2_grpc.add_RunnerControlServicer_to_server(self.server_service, self.server)
+        port = self.server.add_insecure_port("127.0.0.1:0")
+        await self.server.start()
+        self.channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+        self.client = runner_control_pb2_grpc.RunnerControlStub(self.channel)
+        self.addAsyncCleanup(self.server.stop, 0)
+        self.addAsyncCleanup(self.channel.close)
+
+    async def _holding_runner(self) -> tuple[str, str, str, int]:
+        """A registered runner holding an accepted job, with its lease generation."""
+        token = self.control_plane.create_registration_token({"docker"}, NOW + timedelta(minutes=1))
+        registered = await self.client.RegisterRunner(
+            runner_control_pb2.RegisterRunnerRequest(
+                token=token, name="runner-a", labels=["docker"], protocol_version="1.0"
+            )
+        )
+        self.control_plane.add_project(Project("project-a", True, frozenset({"docker"})))
+        self.control_plane.add_issue(Issue("issue-a", "project-a", "1", 1, NOW, NOW, True))
+        # Placement only considers a connected runner; the stream is what marks
+        # one in production, and a heartbeat is the same thing without one.
+        self.control_plane.heartbeat(registered.runner_id, registered.credential, NOW)
+        scheduled = self.control_plane.schedule(NOW, timedelta(minutes=1))
+        assert scheduled is not None
+        lease = self.control_plane.accept_offer(scheduled.offer.job_id, registered.runner_id, NOW)
+        return registered.runner_id, registered.credential, scheduled.offer.job_id, lease.generation
+
+    def _request(self, runner_id: str, credential: str, job_id: str, generation: int, name: str = "GITHUB_TOKEN") -> Any:
+        return runner_control_pb2.ResolveJobSecretRequest(
+            runner_id=runner_id, credential=credential, job_id=job_id,
+            lease_generation=generation, name=name,
+        )
+
+    async def test_a_runner_holding_the_job_receives_the_projects_credential(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+
+        response = await self.client.ResolveJobSecret(
+            self._request(runner_id, credential, job_id, generation)
+        )
+
+        self.assertEqual(response.value, "ghp_project")
+        self.assertEqual(response.delivery, "environment")
+
+    async def test_an_ssh_key_is_delivered_as_a_file_not_a_variable(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "ssh_private_key", "-----BEGIN KEY-----")
+
+        response = await self.client.ResolveJobSecret(
+            self._request(runner_id, credential, job_id, generation, name="GIT_SSH_KEY")
+        )
+
+        self.assertEqual(response.delivery, "file")
+
+    async def test_a_project_without_a_credential_is_not_found_so_the_runner_falls_back(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(self._request(runner_id, credential, job_id, generation))
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.NOT_FOUND)
+
+    async def test_a_stale_lease_generation_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+        # Recovery took the job away and moved the generation on. The runner
+        # does not know that yet and keeps asking with the one it was given --
+        # which is exactly the case this fence exists for.
+        self.control_plane.expire_leases(NOW + timedelta(hours=1))
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(
+                self._request(runner_id, credential, job_id, generation)
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+    async def test_a_runner_that_does_not_hold_the_job_is_refused(self) -> None:
+        _, _, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+        other = self.control_plane.create_registration_token({"docker"}, NOW + timedelta(minutes=1))
+        stranger = await self.client.RegisterRunner(
+            runner_control_pb2.RegisterRunnerRequest(
+                token=other, name="runner-b", labels=["docker"], protocol_version="1.0"
+            )
+        )
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(
+                self._request(stranger.runner_id, stranger.credential, job_id, generation)
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+    async def test_an_expired_lease_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+        # The service asks at NOW; the lease this server was handed expires a
+        # minute later, so move the clock past it rather than the lease.
+        self.server_service._now = lambda: NOW + timedelta(hours=1)
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(self._request(runner_id, credential, job_id, generation))
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+    async def test_a_wrong_credential_is_refused_before_any_lookup(self) -> None:
+        runner_id, _, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(
+                self._request(runner_id, "not-the-credential", job_id, generation)
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+
+    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(
+                self._request(runner_id, credential, job_id, generation, name="AWS_SECRET_ACCESS_KEY")
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    async def test_an_incomplete_request_is_rejected(self) -> None:
+        runner_id, credential, job_id, _ = await self._holding_runner()
+
+        for request in (
+            self._request("", credential, job_id, 1),
+            self._request(runner_id, "", job_id, 1),
+            self._request(runner_id, credential, "", 1),
+            self._request(runner_id, credential, job_id, 0),
+            self._request(runner_id, credential, job_id, 1, name="  "),
+        ):
+            with self.assertRaises(grpc.aio.AioRpcError) as raised:
+                await self.client.ResolveJobSecret(request)
+            self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+
+@unittest.skipIf(grpc is None, "grpcio is not installed")
+class ResolveJobSecretWithoutTlsTests(ResolveJobSecretTests):
+    """Without TLS the value would cross the network in the clear.
+
+    Refusing keeps a non-TLS deployment exactly as it is today: the runner
+    resolves from its own environment and simply has no per-project
+    credentials. Inheriting the suite above is deliberate -- *every* call must
+    be refused here, including the ones that succeed with TLS.
+    """
+
+    async def asyncSetUp(self) -> None:
+        self.control_plane = InMemoryControlPlane()
+        await self._start(secure_channel=False)
+
+    async def _expect_refusal(self, request: Any) -> None:
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(request)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+        self.assertIn("insecure channel", raised.exception.details())
+
+    async def test_a_runner_holding_the_job_receives_the_projects_credential(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_an_ssh_key_is_delivered_as_a_file_not_a_variable(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "ssh_private_key", "-----BEGIN KEY-----")
+        await self._expect_refusal(
+            self._request(runner_id, credential, job_id, generation, name="GIT_SSH_KEY")
+        )
+
+    async def test_a_project_without_a_credential_is_not_found_so_the_runner_falls_back(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        # Refused before the lookup, so it never becomes NOT_FOUND.
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_stale_lease_generation_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.expire_leases(NOW + timedelta(hours=1))
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_runner_that_does_not_hold_the_job_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_an_expired_lease_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_wrong_credential_is_refused_before_any_lookup(self) -> None:
+        runner_id, _, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, "not-the-credential", job_id, generation))
+
+    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(
+            self._request(runner_id, credential, job_id, generation, name="AWS_SECRET_ACCESS_KEY")
+        )
+
+    async def test_an_incomplete_request_is_rejected(self) -> None:
+        # The TLS gate is checked before request validation, deliberately: a
+        # deployment that cannot serve secrets at all should say so first.
+        await self._expect_refusal(self._request("", "", "", 0))

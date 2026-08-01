@@ -8,9 +8,9 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: per-project credentials — stored encrypted and used for every
-  GitHub call made on a project's behalf. The rest of the dumb-runner plan (lease-fenced
-  secret resolution, control-stream TLS enforcement, SSH keys on the runner) is not started.
+- Active implementation: none. Per-project credentials are complete on both sides — the
+  orchestrator uses a project's own credential for issue sync and pull requests, and a runner
+  is handed one per job over TLS rather than being provisioned with a shared token.
 - Last updated: 2026-08-01
 - Agent/session identifier: per-project-credentials / 2026-08-01
 
@@ -23,6 +23,9 @@ _Nothing is claimed. The next agent should take the first item under Pending Imp
 - [x] Per-project GitHub credentials, encrypted at rest and used for that project's `gh`
       calls (migration 015, `persistence/secrets.py`, `workflows/code_host_factory.py`,
       three gRPC RPCs, three REST endpoints, console section). Details in `tasks/todo.md`.
+- [x] Dumb runners: `ResolveJobSecret` hands a runner one secret for a job it currently
+      holds, lease-fenced and refused over an insecure channel. SSH keys land on tmpfs at
+      0600 and are removed when the job ends. `compose.tls.yaml` turns it on.
 - [x] Replace the web console with the approved design package (phases C and D of
       `docs/design/web-console/tasks.md`)
   - Completed: 2026-08-01 (`acd7ad3` on `main`)
@@ -151,6 +154,18 @@ are fixed in `f15d6ef` and `238a9c4`, and run `30701717203` is green across all 
     one. The key must be backed up — losing it makes stored credentials unopenable, and
     they have to be entered again.
 
+- Decision: refuse to serve a secret over an insecure channel rather than warn
+  - Context: dumb runners reverse the previous design, in which the secret value never left
+    the runner host. For a runner to be handed one, the value has to travel.
+  - Alternatives considered: send it anyway and log a warning; require TLS globally.
+  - Reason: sending it over plaintext would be strictly worse than the runner-side
+    environment it replaces, and a warning is not a control. Requiring TLS globally would
+    break every existing deployment on upgrade.
+  - Consequences: a deployment without TLS is completely unchanged — runners resolve from
+    their own environment and simply have no per-project credentials. Turning it on is one
+    extra `-f compose.tls.yaml`. The gate defaults to closed, so a caller that forgets to
+    pass the flag refuses rather than leaks.
+
 - Decision: an unopenable credential is an error, not a fallback to the shared token
   - Context: `ProjectCodeHostFactory` falls back to the deployment-wide runner when a
     project has no credential. The same path could absorb a credential that fails to
@@ -189,12 +204,16 @@ CI run `30701717203` on `238a9c4` — **all 12 jobs green**. This is the first C
 complete on `main`; everything below was confirmed by it, not only locally.
 
 - Targeted tests: `web` — 195 vitest tests
-- Service tests: `api`; `runner` under `-race`; `orchestrator` — 551 tests
-- Postgres integration: 47 tests against a real database, and re-runnable — the suite used to
-  pass only against a virgin one
+- Service tests: `api`; `runner` under `-race`; `orchestrator` — 577 tests
+- Postgres integration: 55 tests against a real database, re-runnable and verified against a
+  virgin one — the suite used to pass only against the latter
 - End to end on the built stack: credentials stored, replaced, removed and re-read through
   nginx → api → gRPC → orchestrator; the plaintext appears in no database row and no
   container log; a missing key is refused with a message naming the variable
+- End to end with `compose.tls.yaml`: a runner carrying no GITHUB_TOKEN registers and
+  connects over TLS, and `ResolveJobSecret` authenticates its real credential, refuses a job
+  it does not hold and refuses an unbacked name. On the same stack without the overlay, the
+  identical call is refused for the insecure channel
 - Full repository tests: yes, via CI
 - Build: `build-web` and `go build`
 - Lint: `ruff` and `eslint` clean

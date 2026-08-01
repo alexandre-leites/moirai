@@ -19,10 +19,12 @@ class PipelineCommand:
 
 @dataclass(frozen=True)
 class EnvironmentRef:
-    """A credential the runner must resolve locally before executing the task.
+    """A credential the runner must resolve before executing the task.
 
-    Only the variable name and an opaque audit reference travel in the packet;
-    the secret value never leaves the runner host.
+    Only the name and the reference travel in the packet, never a value. The
+    runner resolves it either from the control plane -- which answers from the
+    project's own credential, over TLS, for a job the runner currently holds --
+    or, failing that, from its own environment under the same name.
     """
 
     name: str
@@ -33,21 +35,37 @@ class EnvironmentRef:
 
 
 GITHUB_TOKEN_REF = EnvironmentRef(name="GITHUB_TOKEN", secret_ref="github_token")
+SSH_KEY_REF = EnvironmentRef(name="GIT_SSH_KEY", secret_ref="ssh_private_key")
+
+
+def _is_ssh_remote(repository_url: str | None) -> bool:
+    """Whether git will reach this remote over ssh rather than https."""
+    if not repository_url:
+        return False
+    url = repository_url.strip()
+    return url.startswith(("ssh://", "git+ssh://")) or ("@" in url.split("/", 1)[0] and "://" not in url)
 
 
 def environment_refs_for(
-    *, repository_mode: str, may_push: bool
+    *, repository_mode: str, may_push: bool, repository_url: str | None = None
 ) -> tuple[EnvironmentRef, ...]:
     """Decide which credentials a role needs for its repository.
 
     A managed clone is fetched from the code host by the runner, and any role
-    that may push writes back to it, so both cases require the GitHub
-    credential. An ``existing_path`` read-only role works entirely inside an
+    that may push writes back to it, so both cases require a credential. Which
+    one follows the remote: an ssh remote needs a key, everything else a token.
+    An ``existing_path`` read-only role works entirely inside an
     operator-provided checkout and is given nothing.
+
+    A reference here is a *request*, not a guarantee -- the runner falls back to
+    its own environment when the control plane has nothing for it, which is what
+    keeps a deployment that predates per-project credentials working.
     """
-    if may_push or repository_mode == "managed_clone":
-        return (GITHUB_TOKEN_REF,)
-    return ()
+    if not (may_push or repository_mode == "managed_clone"):
+        return ()
+    if _is_ssh_remote(repository_url):
+        return (SSH_KEY_REF,)
+    return (GITHUB_TOKEN_REF,)
 
 
 @dataclass(frozen=True)
@@ -133,7 +151,9 @@ def task_execution(
     read_only = role in {"planner", "pipeline", "reviewer", "verifier"}
     may_push = role == "developer"
     if environment_refs is None:
-        environment_refs = environment_refs_for(repository_mode=mode, may_push=may_push)
+        environment_refs = environment_refs_for(
+            repository_mode=mode, may_push=may_push, repository_url=repository_url
+        )
     return TaskExecutionRequest(
         job_id=job_id,
         execution_id=execution_id,

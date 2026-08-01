@@ -310,12 +310,18 @@ def register_services(
     now: Callable[[], Any] | None = None,
     workflow_runtime: Any | None = None,
     issue_sync: Any | None = None,
+    secure_channel: bool = False,
 ) -> RunnerControlService:
     from moirai.grpc.control_plane import ControlPlaneService
     from moirai.grpc.runner_control import RunnerControlService
     from proto import control_plane_pb2_grpc, runner_control_pb2_grpc
 
-    runner_service = RunnerControlService(control_plane, now=now, workflow_runtime=workflow_runtime)
+    # secure_channel gates ResolveJobSecret, the one RPC that sends credential
+    # material outward. It defaults to false so a caller that does not pass it
+    # gets the safe answer rather than the convenient one.
+    runner_service = RunnerControlService(
+        control_plane, now=now, workflow_runtime=workflow_runtime, secure_channel=secure_channel
+    )
     control_plane_pb2_grpc.add_ControlPlaneServicer_to_server(
         ControlPlaneService(
             control_plane,
@@ -483,7 +489,11 @@ async def serve(
         await issue_sync.restore_retry_state(datetime.now(UTC))
 
         runner_service = register_services(
-            server, control_plane, workflow_runtime=workflow_runtime, issue_sync=issue_sync
+            server,
+            control_plane,
+            workflow_runtime=workflow_runtime,
+            issue_sync=issue_sync,
+            secure_channel=active_config.grpc_tls_cert_file is not None,
         )
 
         scheduler = Scheduler(
@@ -542,7 +552,9 @@ async def serve(
             "control plane implementation does not support durability features "
             "(migrations, workflow checkpointing, scheduling, issue sync) — running in reduced capacity"
         )
-        register_services(server, control_plane)
+        register_services(
+            server, control_plane, secure_channel=active_config.grpc_tls_cert_file is not None
+        )
     port = _bind_grpc_endpoint(server, active_config)
     if port == 0:
         shutdown.set()

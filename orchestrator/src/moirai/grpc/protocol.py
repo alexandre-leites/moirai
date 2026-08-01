@@ -215,6 +215,13 @@ class ControlPlane(Protocol):
 
     async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]: ...
 
+    # The runner-facing resolver. Returns (value, delivery), or None when the
+    # project has no credential of that kind; raises StaleLeaseError when the
+    # runner does not hold the job at that generation.
+    async def resolve_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, now: datetime
+    ) -> tuple[str, str] | None: ...
+
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 
     async def append_audit(

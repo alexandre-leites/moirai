@@ -63,6 +63,12 @@ compose-overlays:
 	docker compose -f compose.yaml -f compose.build.yaml config | grep -q '^ *build:'
 	docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
 	! docker compose -f compose.yaml -f compose.secrets.yaml config | grep -qE '^ *(LOOP_DATABASE_URL|LOOP_INITIAL_ADMIN_PASSWORD|LOOP_RUNNER_REGISTRATION_TOKEN|LOOP_SECRET_KEY):'
+	docker compose -f compose.yaml -f compose.tls.yaml config --quiet
+	# Both ends, or the runner dials plaintext against a TLS port and the whole
+	# per-project credential path is off with nothing to show for it.
+	docker compose -f compose.yaml -f compose.tls.yaml config | grep -q 'LOOP_GRPC_TLS_CERT_FILE'
+	test "$$(docker compose -f compose.yaml -f compose.tls.yaml config | grep -c 'LOOP_ORCHESTRATOR_TLS: "true"')" = 2
+	docker compose -f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml config --quiet
 
 proto-lint:
 	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) lint

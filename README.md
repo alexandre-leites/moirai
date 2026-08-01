@@ -55,6 +55,29 @@ losing it means every stored credential has to be entered again.
 A value is never shown again once saved — the console reports which credentials are set and
 when, and replacing one is the only way to change it.
 
+Two halves of the system use these, and they have different requirements:
+
+| Who | What it does with it | Needs |
+|---|---|---|
+| Orchestrator | Issue sync, opening and merging pull requests | Nothing extra |
+| Runner | Cloning, fetching and pushing the repository | TLS on the control stream |
+
+The runner half needs TLS because the credential has to travel to reach it, and the
+orchestrator refuses to send one over a channel it cannot encrypt. Turn it on with the
+overlay, which generates a self-signed certificate for the internal network on first start:
+
+```bash
+docker compose -f compose.yaml -f compose.tls.yaml up -d
+```
+
+Without it nothing breaks — runners keep using the `GITHUB_TOKEN` configured on them, which
+is the same credential for every project. With it a runner needs no token at all: each job
+is handed its own project's credential, for as long as it holds that job's lease, and the
+key material is written to tmpfs and removed when the job ends.
+
+An SSH remote (`git@github.com:owner/repo.git`) uses the project's SSH private key instead of
+its token; the remote's scheme decides which, so a project may carry both.
+
 Only port 3000 is published; nginx proxies `/api/` to the API over an internal network. That is
 what lets the same file work unchanged against a remote Portainer host.
 
@@ -63,7 +86,7 @@ before the orchestrator starts, and the orchestrator has to report its database 
 migrations applied before the API and runner do. `docker compose up --wait` returns only once all
 five are healthy.
 
-### Two overlays
+### Three overlays
 
 ```bash
 # build the images from this checkout instead of pulling them
@@ -71,7 +94,12 @@ docker compose -f compose.yaml -f compose.build.yaml up --build -d
 
 # read every secret from a file under ./secrets/ instead of the environment
 docker compose -f compose.yaml -f compose.secrets.yaml up -d
+
+# encrypt the control stream, so runners can be handed per-project credentials
+docker compose -f compose.yaml -f compose.tls.yaml up -d
 ```
+
+They compose: `-f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml` is a valid stack.
 
 Environment values are visible to `docker inspect` and to anything that renders a container's
 configuration, Portainer's UI included. [`compose.secrets.yaml`](compose.secrets.yaml) moves them

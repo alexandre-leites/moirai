@@ -9,6 +9,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from .credentials import CREDENTIAL_DELIVERY, CREDENTIAL_KIND_BY_ENVIRONMENT_NAME
 from .leases import StaleLeaseError, accept_event, renew_lease
 from .models import ExecutionEvent, Issue, JobLease, Project, Runner, Workflow, WorkflowStatus
 from .scheduling import Assignment, select_assignment
@@ -73,6 +74,8 @@ class InMemoryControlPlane:
         self._offers: dict[str, JobOffer] = {}
         self._leases: dict[str, JobLease] = {}
         self._project_locks: dict[str, str] = {}
+        self._project_credentials: dict[tuple[str, str], str] = {}
+        self._audit: list[tuple[str | None, str, str, str, str, datetime]] = []
 
     @staticmethod
     def _hash(secret: str) -> str:
@@ -231,6 +234,61 @@ class InMemoryControlPlane:
             lease = renew_lease(self._leases[job_id], generation, expires_at, now)
             self._leases[job_id] = lease
             return lease
+
+    def resolve_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, now: datetime
+    ) -> tuple[str, str] | None:
+        """The in-memory twin of the asyncpg resolver, fenced the same way.
+
+        Credentials are held per project by `set_project_credential` below;
+        tests that never set one get None, which is the "fall back to the
+        runner's own environment" answer.
+        """
+        kind = CREDENTIAL_KIND_BY_ENVIRONMENT_NAME.get(name)
+        if kind is None:
+            raise ValueError(f"no project credential backs the environment reference {name!r}")
+        with self._lock:
+            offer = self._offers.get(job_id)
+            lease = self._leases.get(job_id)
+            if (
+                offer is None
+                or offer.accepted_at is None
+                or offer.runner_id != runner_id
+                or lease is None
+                or lease.generation != generation
+                or lease.expires_at <= now
+            ):
+                raise StaleLeaseError("runner does not hold this job at this lease generation")
+            workflow = self._workflows[offer.workflow_id]
+            value = self._project_credentials.get((workflow.project_id, kind))
+        if value is None:
+            return None
+        return value, CREDENTIAL_DELIVERY[kind]
+
+    def append_audit(
+        self,
+        actor_user_id: str | None,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        outcome: str,
+        now: datetime,
+    ) -> None:
+        """Records an audit entry in memory.
+
+        Present so the reduced-capability path is not missing a method the
+        servicers call -- handing out a secret without recording it would
+        otherwise be an AttributeError at the worst possible moment.
+        """
+        with self._lock:
+            self._audit.append((actor_user_id, action, resource_type, resource_id, outcome, now))
+
+    def set_project_credential(self, project_id: str, kind: str, value: str) -> None:
+        """Test seam: the real control plane seals this, here it is just held."""
+        if kind not in CREDENTIAL_DELIVERY:
+            raise ValueError(f"unknown credential kind: {kind}")
+        with self._lock:
+            self._project_credentials[(project_id, kind)] = value
 
     def expire_offers(self, now: datetime) -> tuple[str, ...]:
         expired: list[str] = []

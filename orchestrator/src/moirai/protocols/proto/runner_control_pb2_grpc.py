@@ -24,6 +24,11 @@ class RunnerControlStub:
                 request_serializer=proto_dot_runner__control__pb2.RunnerToOrchestrator.SerializeToString,
                 response_deserializer=proto_dot_runner__control__pb2.OrchestratorToRunner.FromString,
                 _registered_method=True)
+        self.ResolveJobSecret = channel.unary_unary(
+                '/loop.runner.v1.RunnerControl/ResolveJobSecret',
+                request_serializer=proto_dot_runner__control__pb2.ResolveJobSecretRequest.SerializeToString,
+                response_deserializer=proto_dot_runner__control__pb2.ResolveJobSecretResponse.FromString,
+                _registered_method=True)
 
 
 class RunnerControlServicer:
@@ -41,6 +46,21 @@ class RunnerControlServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ResolveJobSecret(self, request, context):
+        """Hands a runner one secret for a job it currently holds, so the credential
+        does not have to be provisioned on the runner host. Unary rather than a
+        message on the Connect stream: it needs no correlation machinery, and a
+        refusal is an ordinary status the caller can act on.
+
+        The orchestrator refuses to answer this over an insecure channel, so a
+        deployment without TLS keeps working exactly as before -- the runner
+        resolves from its own environment -- and simply has no per-project
+        credentials.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RunnerControlServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -53,6 +73,11 @@ def add_RunnerControlServicer_to_server(servicer, server):
                     servicer.Connect,
                     request_deserializer=proto_dot_runner__control__pb2.RunnerToOrchestrator.FromString,
                     response_serializer=proto_dot_runner__control__pb2.OrchestratorToRunner.SerializeToString,
+            ),
+            'ResolveJobSecret': grpc.unary_unary_rpc_method_handler(
+                    servicer.ResolveJobSecret,
+                    request_deserializer=proto_dot_runner__control__pb2.ResolveJobSecretRequest.FromString,
+                    response_serializer=proto_dot_runner__control__pb2.ResolveJobSecretResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -109,6 +134,33 @@ class RunnerControl:
             '/loop.runner.v1.RunnerControl/Connect',
             proto_dot_runner__control__pb2.RunnerToOrchestrator.SerializeToString,
             proto_dot_runner__control__pb2.OrchestratorToRunner.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ResolveJobSecret(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.runner.v1.RunnerControl/ResolveJobSecret',
+            proto_dot_runner__control__pb2.ResolveJobSecretRequest.SerializeToString,
+            proto_dot_runner__control__pb2.ResolveJobSecretResponse.FromString,
             options,
             channel_credentials,
             insecure,

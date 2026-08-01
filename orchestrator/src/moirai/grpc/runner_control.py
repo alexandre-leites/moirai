@@ -39,11 +39,17 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
         now: Callable[[], datetime] | None = None,
         sessions: RunnerSessionRegistry | None = None,
         workflow_runtime: Any | None = None,
+        secure_channel: bool = False,
     ) -> None:
         self._control_plane = control_plane
         self._now = now or (lambda: datetime.now(UTC))
         self._sessions = sessions or RunnerSessionRegistry()
         self._workflow_runtime = workflow_runtime
+        # Whether this server is TLS-configured. ResolveJobSecret is the one RPC
+        # that sends secret material *out*, so it refuses to answer when this is
+        # false. Defaults to false so a caller that forgets to pass it fails
+        # closed.
+        self._secure_channel = secure_channel
 
     async def RegisterRunner(
         self,
@@ -115,6 +121,87 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
         if not runner_id:
             raise ValueError("runner ID is required")
         return await self._sessions.disconnect_runner(runner_id)
+
+    async def ResolveJobSecret(
+        self,
+        request: runner_control_pb2.ResolveJobSecretRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> runner_control_pb2.ResolveJobSecretResponse:
+        """Hands a runner one secret for a job it holds right now.
+
+        This is the only place the orchestrator sends credential material
+        outward, so it is the strictest handler in the service. Every refusal is
+        the same shape -- a status and a short reason -- because the runner falls
+        back to its own environment on any of them, and distinguishing "no such
+        credential" from "your lease is stale" to the *caller* would say more
+        than it needs to know.
+        """
+        if not self._secure_channel:
+            # Without TLS the value would cross the network in the clear, which
+            # is strictly worse than the runner-side environment this replaces.
+            # Refusing keeps a non-TLS deployment exactly as it is today.
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "the control plane will not serve a secret over an insecure channel; "
+                "configure LOOP_GRPC_TLS_CERT_FILE and LOOP_GRPC_TLS_KEY_FILE",
+            )
+        if (
+            not request.runner_id
+            or not request.credential
+            or not request.job_id
+            or request.lease_generation < 1
+            or not request.name.strip()
+        ):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "secret resolution request is invalid")
+        try:
+            await _await_if_needed(
+                self._control_plane.authenticate_runner(
+                    request.runner_id, request.credential, self._now()
+                )
+            )
+        except AuthenticationError:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "runner authentication was rejected")
+        try:
+            resolved = await _await_if_needed(
+                self._control_plane.resolve_job_secret(
+                    request.runner_id,
+                    request.job_id,
+                    request.lease_generation,
+                    request.name.strip(),
+                    self._now(),
+                )
+            )
+        except StaleLeaseError:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "runner does not hold this job"
+            )
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except Exception:
+            # A credential that will not open reaches here. The runner must not
+            # be told it simply has none, or it would fall back to its own
+            # environment and act as the wrong identity.
+            _LOGGER.exception(
+                "resolving a job secret failed",
+                extra={"runner_id": request.runner_id, "job_id": request.job_id},
+            )
+            await context.abort(grpc.StatusCode.INTERNAL, "secret could not be resolved")
+        if resolved is None:
+            # The project simply has no credential of this kind. NOT_FOUND is
+            # what tells the runner to fall back to its own environment.
+            await context.abort(grpc.StatusCode.NOT_FOUND, "no credential is configured for this project")
+        value, delivery = resolved
+        await _await_if_needed(
+            self._control_plane.append_audit(
+                None,
+                "runner.secret.resolved",
+                "job",
+                f"{request.job_id}/{request.name.strip()}",
+                "succeeded",
+                self._now(),
+            )
+        )
+        return runner_control_pb2.ResolveJobSecretResponse(value=value, delivery=delivery)
 
     async def Connect(
         self,

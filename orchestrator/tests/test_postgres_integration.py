@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import asyncpg
 
 from moirai.domain.control_plane import AuthenticationError
+from moirai.domain.leases import StaleLeaseError
 from moirai.persistence.authentication import AsyncpgAuthentication
 from moirai.persistence.control_plane import AsyncpgControlPlane
 from moirai.persistence.migrations import MigrationRunner
@@ -2282,6 +2283,166 @@ class ProjectCredentialIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
             0,
         )
+
+
+class ResolveJobSecretIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    """The lease fence, against the real jobs table.
+
+    `test_runner_grpc.py` covers the servicer against the in-memory control
+    plane. What only a real database exercises is the SQL that decides whether
+    a runner still holds a job -- the same predicate `renew_lease` uses, which
+    is the whole basis for handing a credential out at all.
+    """
+
+    async def asyncSetUp(self) -> None:
+        database_url = os.environ.get(_DATABASE_URL_ENV)
+        if not database_url:
+            self.skipTest(f"{_DATABASE_URL_ENV} is not configured")
+        self.pool = await asyncpg.create_pool(database_url)
+        self.addAsyncCleanup(self.pool.close)
+        self.addAsyncCleanup(self._leave_no_stalled_runs)
+        await MigrationRunner(self.pool).run()
+        self.cipher = SecretCipher.from_configured_key(base64.b64encode(os.urandom(32)).decode())
+        self.control_plane = AsyncpgControlPlane(self.pool, secret_cipher=self.cipher)
+        self.workflow_run_ids: list[str] = []
+        self.project_id, self.runner_id, self.job_id, self.generation = await self._held_job()
+
+    async def _leave_no_stalled_runs(self) -> None:
+        """Parks the runs this class created in a terminal state.
+
+        The database is shared, and `find_stalled_workflow_runs` scans all of
+        it. A run left in `preparing` whose job is no longer active is exactly
+        what that query looks for, so leaving one behind fails
+        StalledRunRecoveryIntegrationTests rather than anything here.
+        """
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        for workflow_run_id in self.workflow_run_ids:
+            await self.pool.execute(
+                "UPDATE app.workflow_runs SET status = 'cancelled' WHERE id = $1", UUID(workflow_run_id)
+            )
+
+    async def _held_job(self) -> tuple[str, str, str, int]:
+        """A project whose issue was scheduled onto a runner that accepted it."""
+        await self.pool.execute("UPDATE app.projects SET enabled = false")
+        suffix = uuid4().hex[:12]
+        label = f"secret-{suffix}"
+        project = await self.control_plane.create_project(
+            f"resolve-secret-{suffix}",
+            "managed_clone",
+            "https://example.test/resolve-secret.git",
+            None,
+            "main",
+            {label},
+            _NOW,
+        )
+        project_id = str(project["id"])
+        await self.control_plane.upsert_issue(
+            project_id=project_id,
+            external_id=f"issue-{suffix}",
+            title="A runner resolves its project's credential",
+            body="",
+            state="open",
+            labels=["agent:ready"],
+            priority=100,
+            eligible=True,
+            human_approval_required=False,
+            external_created_at=_NOW,
+            external_updated_at=_NOW,
+            now=_NOW,
+        )
+        token = await self.control_plane.create_registration_token(
+            {label}, _NOW + timedelta(minutes=30), now=_NOW
+        )
+        runner, credential = await self.control_plane.register_runner(
+            token, f"runner-{suffix}", {label}, _NOW
+        )
+        await self.control_plane.heartbeat(runner.id, credential, _NOW)
+        scheduled = await self.control_plane.schedule(_NOW, timedelta(minutes=5))
+        assert scheduled is not None
+        lease = await self.control_plane.accept_offer(scheduled.offer.job_id, runner.id, _NOW)
+        self.workflow_run_ids.append(scheduled.workflow.id)
+        return project_id, runner.id, scheduled.offer.job_id, lease.generation
+
+    async def test_a_runner_holding_the_job_resolves_its_projects_token(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+
+        resolved = await self.control_plane.resolve_job_secret(
+            self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+        )
+
+        self.assertEqual(resolved, ("ghp_for_the_runner", "environment"))
+
+    async def test_an_ssh_key_is_resolved_for_file_delivery(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "ssh_private_key", "-----BEGIN KEY-----", None, _NOW
+        )
+
+        resolved = await self.control_plane.resolve_job_secret(
+            self.runner_id, self.job_id, self.generation, "GIT_SSH_KEY", _NOW
+        )
+
+        self.assertEqual(resolved, ("-----BEGIN KEY-----", "file"))
+
+    async def test_a_project_with_no_credential_resolves_to_none(self) -> None:
+        # None, not an error: it is what tells the runner to fall back to its
+        # own environment, which is how a pre-existing deployment keeps working.
+        self.assertIsNone(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+            )
+        )
+
+    async def test_a_stale_generation_is_refused_even_for_the_right_runner(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation + 1, "GITHUB_TOKEN", _NOW
+            )
+
+    async def test_another_runner_cannot_resolve_this_jobs_credential(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+        _, stranger_id, _, _ = await self._held_job()
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                stranger_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+            )
+
+    async def test_an_expired_lease_is_refused(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW + timedelta(hours=1)
+            )
+
+    async def test_a_finished_job_no_longer_resolves_secrets(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "github_token", "ghp_for_the_runner", None, _NOW
+        )
+        await self.pool.execute(
+            "UPDATE app.jobs SET status = 'succeeded' WHERE id = $1", UUID(self.job_id)
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
+            )
+
+    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "AWS_SECRET_ACCESS_KEY", _NOW
+            )
 
 
 if __name__ == "__main__":

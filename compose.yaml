@@ -147,10 +147,18 @@ services:
       LOOP_RUNNER_NAME: "${MOIRAI_RUNNER_NAME:-runner-1}"
       LOOP_RUNNER_LABELS: "${MOIRAI_RUNNER_LABELS:-linux}"
       LOOP_RUNNER_CAPACITY: "${MOIRAI_RUNNER_CAPACITY:-1}"
-      # Which task-packet environment requests the runner will honour.
-      # GITHUB_TOKEN is required for managed clones and anything that pushes.
-      LOOP_RUNNER_ALLOWED_ENVIRONMENT: GITHUB_TOKEN
+      # Which task-packet environment requests the runner will honour. One of
+      # these is required for a managed clone and for anything that pushes:
+      # GITHUB_TOKEN for an https remote, GIT_SSH_KEY for an ssh one.
+      LOOP_RUNNER_ALLOWED_ENVIRONMENT: GITHUB_TOKEN,GIT_SSH_KEY
+      # Only used for projects with no credential of their own. A runner whose
+      # projects all carry theirs needs nothing here -- the orchestrator hands
+      # each job its project's credential over the control stream, which is why
+      # the stream has to be TLS for that to work at all.
       GITHUB_TOKEN: "${MOIRAI_GITHUB_TOKEN-}"
+      # Private keys the control plane delivers land here. Under /run, which is
+      # the tmpfs below: key material must not survive a restart.
+      LOOP_RUNNER_KEY_DIR: /run/moirai/keys
       LOOP_RUNNER_AGENT_ARGUMENTS: "${MOIRAI_AGENT_ARGUMENTS:---model,opencode/deepseek-v4-flash-free,--auto}"
     depends_on:
       orchestrator: {condition: service_healthy}

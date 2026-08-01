@@ -5,6 +5,16 @@ option go_package = "github.com/loop-engineering/contracts/gen/runner/v1;runnerv
 service RunnerControl {
   rpc RegisterRunner(RegisterRunnerRequest) returns (RegisterRunnerResponse);
   rpc Connect(stream RunnerToOrchestrator) returns (stream OrchestratorToRunner);
+  // Hands a runner one secret for a job it currently holds, so the credential
+  // does not have to be provisioned on the runner host. Unary rather than a
+  // message on the Connect stream: it needs no correlation machinery, and a
+  // refusal is an ordinary status the caller can act on.
+  //
+  // The orchestrator refuses to answer this over an insecure channel, so a
+  // deployment without TLS keeps working exactly as before -- the runner
+  // resolves from its own environment -- and simply has no per-project
+  // credentials.
+  rpc ResolveJobSecret(ResolveJobSecretRequest) returns (ResolveJobSecretResponse);
 }
 
 message RegisterRunnerRequest { string token = 1; string name = 2; repeated string labels = 3; string protocol_version = 4; int32 capacity = 5; }
@@ -39,3 +49,23 @@ message CancelExecution { string execution_id = 1; int64 lease_generation = 2; }
 message DrainRunner { bool undrain = 1; }
 message RunnerDraining { bool draining = 1; }
 message ExecutionEvent { string job_id = 1; string execution_id = 2; int64 lease_generation = 3; int64 event_sequence = 4; string type = 5; string payload_json = 6; }
+
+message ResolveJobSecretRequest {
+  string runner_id = 1;
+  string credential = 2;
+  // The job whose project owns the secret. The runner must hold this job at
+  // this generation right now, so a runner whose lease was taken away cannot
+  // keep resolving secrets for work it no longer owns.
+  string job_id = 3;
+  int64 lease_generation = 4;
+  // The task packet's EnvironmentRef name, e.g. "GITHUB_TOKEN". This is what
+  // finally gives EnvironmentRef.secret_ref a backend to select.
+  string name = 5;
+}
+message ResolveJobSecretResponse {
+  string value = 1;
+  // Where the value has to land. "environment" is a variable the agent and git
+  // see; "file" means the runner writes it to a private path and passes that
+  // path instead, which is what an SSH key needs.
+  string delivery = 2;
+}

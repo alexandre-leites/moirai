@@ -147,3 +147,25 @@ class ExecutionEvent(_message.Message):
     type: str
     payload_json: str
     def __init__(self, job_id: _Optional[str] = ..., execution_id: _Optional[str] = ..., lease_generation: _Optional[int] = ..., event_sequence: _Optional[int] = ..., type: _Optional[str] = ..., payload_json: _Optional[str] = ...) -> None: ...
+
+class ResolveJobSecretRequest(_message.Message):
+    __slots__ = ("runner_id", "credential", "job_id", "lease_generation", "name")
+    RUNNER_ID_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    JOB_ID_FIELD_NUMBER: _ClassVar[int]
+    LEASE_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    runner_id: str
+    credential: str
+    job_id: str
+    lease_generation: int
+    name: str
+    def __init__(self, runner_id: _Optional[str] = ..., credential: _Optional[str] = ..., job_id: _Optional[str] = ..., lease_generation: _Optional[int] = ..., name: _Optional[str] = ...) -> None: ...
+
+class ResolveJobSecretResponse(_message.Message):
+    __slots__ = ("value", "delivery")
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    DELIVERY_FIELD_NUMBER: _ClassVar[int]
+    value: str
+    delivery: str
+    def __init__(self, value: _Optional[str] = ..., delivery: _Optional[str] = ...) -> None: ...

@@ -30,8 +30,23 @@ type WorkspaceManager interface {
 	ReleaseBranch(context.Context, repository.Workspace) error
 }
 
+// SecretScope identifies the job a secret is being resolved for. A resolver
+// that asks the control plane has to prove the runner still holds that job at
+// that lease generation; one that reads the runner's own environment ignores it.
+type SecretScope struct {
+	JobID           string
+	LeaseGeneration int64
+}
+
 type EnvironmentResolver interface {
-	Resolve(context.Context, []taskpacket.EnvironmentRef) (map[string]string, error)
+	Resolve(context.Context, SecretScope, []taskpacket.EnvironmentRef) (map[string]string, error)
+}
+
+// SecretDiscarder is implemented by resolvers that put secret material on disk.
+// Execute calls it once the job is over, on every path out including a failure
+// or a cancellation, so a private key never outlives the execution granted it.
+type SecretDiscarder interface {
+	DiscardJobKeys(jobID string) error
 }
 
 type RevisionInspector interface {
@@ -184,7 +199,18 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// fetch of a private repository needs the same credential the later push
 	// does, and an unresolvable reference must fail the execution rather than
 	// silently degrade to an unauthenticated Git operation.
-	environment, err := dispatcher.resolveEnvironment(ctx, packet.EnvironmentRefs)
+	environment, err := dispatcher.resolveEnvironment(
+		ctx, SecretScope{JobID: lease.JobID, LeaseGeneration: lease.Generation}, packet.EnvironmentRefs,
+	)
+	// Registered before the error check: a resolution that failed partway may
+	// already have written one key before failing on the next.
+	if discarder, ok := dispatcher.Environment.(SecretDiscarder); ok {
+		defer func() {
+			if discardErr := discarder.DiscardJobKeys(lease.JobID); discardErr != nil {
+				slog.Error("could not discard job key material", "job_id", lease.JobID, "error", discardErr)
+			}
+		}()
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -610,7 +636,7 @@ func (dispatcher Dispatcher) cleanupWorkspace(ctx context.Context, mode, project
 	return dispatcher.Workspaces.Cleanup(ctx, projectID, jobID)
 }
 
-func (dispatcher Dispatcher) resolveEnvironment(ctx context.Context, references []taskpacket.EnvironmentRef) (map[string]string, error) {
+func (dispatcher Dispatcher) resolveEnvironment(ctx context.Context, scope SecretScope, references []taskpacket.EnvironmentRef) (map[string]string, error) {
 	if len(references) == 0 {
 		return nil, nil
 	}
@@ -626,7 +652,7 @@ func (dispatcher Dispatcher) resolveEnvironment(ctx context.Context, references 
 	if dispatcher.Environment == nil {
 		return nil, errors.New("environment resolver is required for task secret references")
 	}
-	environment, err := dispatcher.Environment.Resolve(ctx, references)
+	environment, err := dispatcher.Environment.Resolve(ctx, scope, references)
 	if err != nil {
 		return nil, fmt.Errorf("resolve task environment: %w", err)
 	}

@@ -46,12 +46,10 @@ func main() {
 // runner process's own environment. Operators configure the runner host or
 // container with the secret material (e.g. GITHUB_TOKEN) under the same
 // name declared in LOOP_RUNNER_ALLOWED_ENVIRONMENT, either as a plain
-// variable or as a "<NAME>_FILE" path to a mounted Compose secret; the
-// SecretRef field is carried for audit purposes only and does not select a
-// backend here.
+// variable or as a "<NAME>_FILE" path to a mounted Compose secret.
 type osEnvironmentResolver struct{}
 
-func (osEnvironmentResolver) Resolve(_ context.Context, references []taskpacket.EnvironmentRef) (map[string]string, error) {
+func (osEnvironmentResolver) Resolve(_ context.Context, _ dispatch.SecretScope, references []taskpacket.EnvironmentRef) (map[string]string, error) {
 	resolved := make(map[string]string, len(references))
 	for _, reference := range references {
 		value, err := config.SecretValue(os.LookupEnv, reference.Name)
@@ -62,6 +60,60 @@ func (osEnvironmentResolver) Resolve(_ context.Context, references []taskpacket.
 			return nil, fmt.Errorf("environment reference %q is not configured on this runner", reference.Name)
 		}
 		resolved[reference.Name] = value
+	}
+	return resolved, nil
+}
+
+// controlPlaneResolver asks the orchestrator for each reference first and falls
+// back to the runner's own environment when it declines.
+//
+// That order is what makes a runner "dumb": a project that configures its own
+// credential needs nothing provisioned here, and one that does not keeps
+// working exactly as it did. The fallback is not silent -- the control plane
+// only declines for reasons that mean "there is nothing for you here" (no such
+// credential, a stale lease, no TLS on this deployment). A credential that
+// exists but could not be served is an error, and fails the execution.
+type controlPlaneResolver struct {
+	secrets  *control.SecretResolver
+	fallback osEnvironmentResolver
+}
+
+// DiscardJobKeys satisfies dispatch.SecretDiscarder, so the dispatcher removes
+// anything this resolver wrote to disk once the job is over.
+func (r controlPlaneResolver) DiscardJobKeys(jobID string) error {
+	return r.secrets.DiscardJobKeys(jobID)
+}
+
+func (r controlPlaneResolver) Resolve(ctx context.Context, scope dispatch.SecretScope, references []taskpacket.EnvironmentRef) (map[string]string, error) {
+	resolved := make(map[string]string, len(references))
+	var remaining []taskpacket.EnvironmentRef
+	for _, reference := range references {
+		value, path, err := r.secrets.Resolve(ctx, scope.JobID, scope.LeaseGeneration, reference.Name)
+		switch {
+		case errors.Is(err, control.ErrNoControlPlaneSecret):
+			remaining = append(remaining, reference)
+			continue
+		case err != nil:
+			return nil, err
+		}
+		if path != "" {
+			// A key is delivered as a path: ssh cannot read a variable, and the
+			// material itself must not become one that every child process
+			// inherits. The reference's name carries the path instead.
+			resolved[reference.Name] = path
+			continue
+		}
+		resolved[reference.Name] = value
+	}
+	if len(remaining) == 0 {
+		return resolved, nil
+	}
+	fromEnvironment, err := r.fallback.Resolve(ctx, scope, remaining)
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range fromEnvironment {
+		resolved[name] = value
 	}
 	return resolved, nil
 }
@@ -207,6 +259,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create runner control client: %w", err)
 	}
+	// Key material from a previous life is removed before any job can start: a
+	// crash mid-job leaves a private key on the tmpfs, and the next execution
+	// must not inherit one it was never granted.
+	secrets := control.NewSecretResolver(service, identity, settings.KeyDir)
+	if err := secrets.DiscardJobKeys(""); err != nil {
+		return fmt.Errorf("clear leftover job keys: %w", err)
+	}
 	projects := dispatch.NewProjectConcurrencyGuard()
 	repositories := repository.Manager{DataDirectory: settings.DataDir, CleanupAttempts: settings.CleanupAttempts, CleanupRetryDelay: settings.CleanupRetryDelay, LockPollInterval: settings.RepositoryLockPoll, GitCommitterName: settings.GitCommitterName, GitCommitterEmail: settings.GitCommitterEmail}
 	dispatcher := &dispatch.Dispatcher{
@@ -215,7 +274,7 @@ func run(ctx context.Context) error {
 		Delivery:           repositories,
 		Backend:            agentBackend(settings),
 		Pipeline:           pipelineRunner(settings),
-		Environment:        osEnvironmentResolver{},
+		Environment:        controlPlaneResolver{secrets: secrets},
 		AllowedEnvironment: settings.AllowedEnvironment,
 		MinimumFreeBytes:   settings.MinimumFreeBytes,
 		DiskPath:           settings.DataDir,

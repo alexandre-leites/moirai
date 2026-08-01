@@ -50,11 +50,35 @@ nginx → api → gRPC → orchestrator; the plaintext appears in no row and no 
 CSRF-less and unknown-kind writes refused; a missing key refused with a message naming the
 variable rather than written in the clear.
 
-**Not done — the rest of the dumb-runner plan.** `ResolveJobSecret` (lease-fenced), TLS
-enforcement on the control stream, the runner-side resolver, and SSH keys materialised to
-tmpfs with `GIT_SSH_COMMAND`. The SSH credential *kind* stores and round-trips today, but
-nothing consumes it yet: runners still resolve secrets from their own environment. Plan in
-`.claude/plans/drifting-sniffing-rain.md` (A2–A4).
+**Dumb runners — done.**
+
+- [x] `ResolveJobSecret` on `RunnerControl`, fenced on the same predicate `renew_lease` uses:
+      this runner, this job, this generation, an unexpired lease, a live status. A runner
+      whose work was taken away by recovery cannot go on resolving secrets for it.
+- [x] The orchestrator refuses to serve a secret over an insecure channel. A deployment
+      without TLS is therefore unchanged — runners keep resolving from their own environment
+      — rather than newly shipping credentials in the clear.
+- [x] Runner-side resolver: control plane first, its own environment second. The fallback
+      only fires on refusals that mean "nothing for you here"; an unreachable control plane
+      fails the execution rather than running it as the wrong identity.
+- [x] SSH keys materialised to a tmpfs file at 0600 with `GIT_SSH_COMMAND=ssh -i … -o
+      IdentitiesOnly=yes`. Removed when the job ends, on every path out including failure,
+      and the whole directory is swept at startup so a crash leaves nothing behind.
+- [x] `EnvironmentRef.secret_ref` finally selects a backend: `GITHUB_TOKEN` → the project's
+      token, `GIT_SSH_KEY` → its private key, chosen by the remote's scheme.
+- [x] `compose.tls.yaml`, which generates a self-signed certificate for the internal network
+      on first start, so turning this on is one extra `-f`.
+
+**Verified end to end on the live stack, both directions.** With `compose.tls.yaml`: the
+runner registers and connects over TLS carrying no `GITHUB_TOKEN`, and `ResolveJobSecret`
+authenticates its real credential, refuses a job it does not hold, and refuses a name no
+credential backs. Without the overlay the same call is refused with a message naming the two
+variables to set.
+
+**Not done.** Client-certificate mutual TLS between runner and orchestrator (the server
+supports `LOOP_GRPC_TLS_CLIENT_CA_FILE`; the overlay does not issue client certs), and the
+readable-logs feature (Feature B in `.claude/plans/drifting-sniffing-rain.md`), which is
+independent of all of this.
 
 ## Platform review remediation (2026-07-29) — issues #88–#108
 

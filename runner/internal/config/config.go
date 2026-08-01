@@ -16,7 +16,11 @@ import (
 var environmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 
 const (
-	defaultDataDir           = "/data"
+	defaultDataDir = "/data"
+	// Where a control-plane secret delivered as a file is written. On tmpfs
+	// deliberately: private key material must not survive a reboot, and /run is
+	// already mounted as one in the runner image.
+	defaultKeyDir            = "/run/moirai/keys"
 	defaultHeartbeatInterval = 10 * time.Second
 	defaultReconnectMin      = time.Second
 	defaultReconnectMax      = time.Minute
@@ -30,6 +34,7 @@ const (
 type Config struct {
 	OrchestratorEndpoint string
 	DataDir              string
+	KeyDir               string
 	RunnerName           string
 	Labels               []string
 	AllowedEnvironment   []string
@@ -101,6 +106,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 	config := Config{
 		OrchestratorEndpoint: envOrDefault(lookupEnv, "LOOP_ORCHESTRATOR_ENDPOINT", "orchestrator:50051"),
 		DataDir:              envOrDefault(lookupEnv, "LOOP_RUNNER_DATA_DIR", defaultDataDir),
+		KeyDir:               envOrDefault(lookupEnv, "LOOP_RUNNER_KEY_DIR", defaultKeyDir),
 		RunnerName:           envOrDefault(lookupEnv, "LOOP_RUNNER_NAME", name),
 		HeartbeatInterval:    defaultHeartbeatInterval,
 		ReconnectMin:         defaultReconnectMin,
