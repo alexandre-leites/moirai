@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,10 +240,24 @@ func TestManagedCloneMirrorConfigurationDoesNotBreakFetchOrLsRemote(t *testing.T
 	}
 }
 
+// chmodWritable registers a t.Cleanup that makes the entire tree under root
+// writable before Go's TempDir cleanup tries to remove it. Git pack files in
+// bare repositories are written read-only, which causes os.RemoveAll to fail
+// with "directory not empty" on some kernels when the files cannot be unlinked.
+func chmodWritable(t *testing.T, root string) {
+	t.Helper()
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(path string, _ fs.DirEntry, _ error) error {
+			return os.Chmod(path, 0o755)
+		})
+	})
+}
+
 // managedCloneOrigin creates a bare repository holding a single commit on main,
 // standing in for the code host a managed_clone project is cloned from.
 func managedCloneOrigin(t *testing.T, root string) string {
 	t.Helper()
+	chmodWritable(t, root)
 	origin := filepath.Join(root, "origin.git")
 	seed := filepath.Join(root, "seed")
 	runRealGit(t, root, "init", "-q", "--bare", "-b", "main", origin)
