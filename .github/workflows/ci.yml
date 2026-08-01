@@ -218,6 +218,29 @@ jobs:
           # Only port 3000 is published; nginx proxies /api/ to the API, so this
           # also proves the console can reach its own backend.
           curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/api/v1/health
+      # Every external program a service shells out to. `git` reaching for `ssh`
+      # on an ssh:// remote is the one that shipped missing: the key resolved,
+      # the file was written, GIT_SSH_COMMAND was set, and the clone died with
+      # "ssh: not found" -- with everything upstream of it looking healthy.
+      # A container that boots proves nothing about the binaries it will need
+      # only once a job runs.
+      - name: Verify the tools each image shells out to
+        run: |
+          set -eu
+          runner_tools='git ssh opencode'
+          for tool in $runner_tools; do
+            docker compose -f compose.yaml -f compose.build.yaml exec -T runner \
+              sh -c "command -v $tool >/dev/null" \
+              || { echo "::error::runner image is missing $tool"; exit 1; }
+            echo "runner: $tool ok"
+          done
+          for tool in git gh; do
+            docker compose -f compose.yaml -f compose.build.yaml exec -T orchestrator \
+              sh -c "command -v $tool >/dev/null" \
+              || { echo "::error::orchestrator image is missing $tool"; exit 1; }
+            echo "orchestrator: $tool ok"
+          done
+
       - name: Collect diagnostics
         if: always()
         run: docker compose -f compose.yaml -f compose.build.yaml ps && docker compose -f compose.yaml -f compose.build.yaml logs --no-color

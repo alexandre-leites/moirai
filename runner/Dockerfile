@@ -28,7 +28,11 @@ ARG OPENCODE_VERSION=1.18.7
 # ~0.6 GB per architecture. `opencode --version` runs after the deletion, so a
 # future opencode layout that stops hardlinking fails the build here instead of
 # shipping a runner whose agent binary is missing.
-RUN apk add --no-cache git ca-certificates su-exec \
+# openssh-client because git shells out to `ssh` for an ssh:// or git@ remote.
+# Without it a project with an SSH remote fails the clone with
+# "ssh: not found" -- after the key has been resolved and written, so
+# everything upstream looks like it worked. git itself does not pull it in.
+RUN apk add --no-cache git openssh-client ca-certificates su-exec \
     && npm install --global --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}" \
     && rm -rf "$(npm root -g)/opencode-ai/node_modules" \
     && npm cache clean --force \
