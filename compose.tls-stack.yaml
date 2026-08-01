@@ -1,0 +1,279 @@
+# Moirai with an encrypted control stream — one file, for Portainer.
+#
+# GENERATED. Do not edit: `make compose-tls-stack` renders it from
+# compose.yaml + compose.tls.yaml, and `make compose-overlays` fails if the two
+# have drifted. Edit those, then regenerate.
+#
+# Use this when you paste a stack into Portainer's web editor, which takes one
+# file. On a machine with a shell, prefer
+#
+#   docker compose -f compose.yaml -f compose.tls.yaml up -d
+#
+# What the encryption is for: the orchestrator refuses to hand a runner a
+# project's own credential over a channel it cannot encrypt. With this stack a
+# runner needs no GitHub token of its own — each job is given its project's
+# credential, for as long as it holds that job's lease. Without it, runners fall
+# back to the shared GITHUB_TOKEN below, which is the same credential for every
+# project.
+#
+# This does NOT put the console behind TLS. That is still plain HTTP on the
+# published port, and is a separate concern.
+#
+# The certificate is self-signed, generated on first start into a volume, and
+# names only "orchestrator" — the service name on the internal network, which is
+# the only name anything dials it by.
+name: moirai
+networks:
+  control:
+    internal: true
+    name: moirai_control
+  database:
+    internal: true
+    name: moirai_database
+  egress:
+    name: moirai_egress
+  public:
+    name: moirai_public
+services:
+  api:
+    cap_drop:
+      - ALL
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+        required: true
+    environment:
+      - LOOP_API_COOKIE_SECURE=${MOIRAI_COOKIE_SECURE:-false}
+      - LOOP_ORCHESTRATOR_ENDPOINT=orchestrator:50051
+      - LOOP_ORCHESTRATOR_TLS=true
+      - LOOP_ORCHESTRATOR_TLS_CA_FILE=/tls/ca.crt
+      - LOOP_ORCHESTRATOR_TLS_SERVER_NAME=orchestrator
+    healthcheck:
+      interval: 10s
+      retries: 12
+      start_period: 20s
+      test:
+        - CMD-SHELL
+        - wget --no-verbose --tries=1 --spider http://localhost:8080/ready || exit
+          1
+      timeout: 5s
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/api:${MOIRAI_IMAGE_TAG:-latest}
+    networks:
+      control: null
+      public: null
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - read_only: true
+        source: tls
+        target: /tls
+        type: volume
+        volume: {}
+  orchestrator:
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: true
+      tls-init:
+        condition: service_completed_successfully
+        required: true
+    environment:
+      - LOOP_DATABASE_URL=postgresql+asyncpg://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop
+      - LOOP_GITHUB_TOKEN=${MOIRAI_GITHUB_TOKEN-}
+      - LOOP_GRPC_BIND=0.0.0.0:50051
+      - LOOP_INITIAL_ADMIN_PASSWORD=${MOIRAI_ADMIN_PASSWORD:-Moirai-Local-1}
+      - LOOP_INITIAL_ADMIN_USERNAME=${MOIRAI_ADMIN_USERNAME:-admin}
+      - LOOP_SECRET_KEY=${MOIRAI_SECRET_KEY-}
+      - LOOP_SEED_ISSUE_BODY=${MOIRAI_SEED_ISSUE_BODY-}
+      - LOOP_SEED_ISSUE_TITLE=${MOIRAI_SEED_ISSUE_TITLE-}
+      - LOOP_SEED_PROJECT_NAME=${MOIRAI_SEED_PROJECT_NAME-demo}
+      - LOOP_SEED_PROJECT_REPOSITORY_URL=${MOIRAI_SEED_PROJECT_REPOSITORY_URL-}
+      - LOOP_SEED_TOKEN_LABELS=${MOIRAI_RUNNER_LABELS:-linux}
+      - RUNNER_REGISTRATION_TOKEN=${MOIRAI_RUNNER_TOKEN:-moirai-local-runner-registration-token}
+      - LOOP_GRPC_TLS_CERT_FILE=/tls/server.crt
+      - LOOP_GRPC_TLS_KEY_FILE=/tls/server.key
+    healthcheck:
+      interval: 10s
+      retries: 12
+      start_period: 60s
+      test:
+        - CMD-SHELL
+        - python -c "import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json'));
+          sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else
+          1)"
+      timeout: 5s
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/orchestrator:${MOIRAI_IMAGE_TAG:-latest}
+    networks:
+      control: null
+      database: null
+      egress: null
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - read_only: true
+        source: tls
+        target: /tls
+        type: volume
+        volume: {}
+  postgres:
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
+    cap_drop:
+      - ALL
+    environment:
+      POSTGRES_DB: loop
+      POSTGRES_PASSWORD: ${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}
+      POSTGRES_USER: loop
+    healthcheck:
+      interval: 5s
+      retries: 12
+      start_period: 20s
+      test:
+        - CMD-SHELL
+        - pg_isready -U loop -d loop
+      timeout: 5s
+    image: postgres:16-alpine
+    networks:
+      database: null
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - source: postgres-data
+        target: /var/lib/postgresql/data
+        type: volume
+        volume: {}
+  runner:
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    cap_drop:
+      - ALL
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+        required: true
+    deploy:
+      resources:
+        limits:
+          cpus: ${MOIRAI_RUNNER_CPUS:-2}
+          memory: ${MOIRAI_RUNNER_MEMORY:-4g}
+    environment:
+      - GITHUB_TOKEN=${MOIRAI_GITHUB_TOKEN-}
+      - LOOP_ORCHESTRATOR_ENDPOINT=orchestrator:50051
+      - LOOP_RUNNER_AGENT_ARGUMENTS=${MOIRAI_AGENT_ARGUMENTS:---model,opencode/deepseek-v4-flash-free,--auto}
+      - LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN,GIT_SSH_KEY
+      - LOOP_RUNNER_CAPACITY=${MOIRAI_RUNNER_CAPACITY:-1}
+      - LOOP_RUNNER_KEY_DIR=/run/moirai/keys
+      - LOOP_RUNNER_LABELS=${MOIRAI_RUNNER_LABELS:-linux}
+      - LOOP_RUNNER_NAME=${MOIRAI_RUNNER_NAME:-runner-1}
+      - LOOP_RUNNER_REGISTRATION_TOKEN=${MOIRAI_RUNNER_TOKEN:-moirai-local-runner-registration-token}
+      - LOOP_ORCHESTRATOR_TLS=true
+      - LOOP_ORCHESTRATOR_TLS_CA_FILE=/tls/ca.crt
+      - LOOP_ORCHESTRATOR_TLS_SERVER_NAME=orchestrator
+    healthcheck:
+      interval: 10s
+      retries: 12
+      start_period: 40s
+      test:
+        - CMD
+        - /runner
+        - live
+      timeout: 10s
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/runner:${MOIRAI_IMAGE_TAG:-latest}
+    networks:
+      control: null
+      egress: null
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /run:mode=0755
+    volumes:
+      - source: runner-data
+        target: /data
+        type: volume
+        volume: {}
+      - read_only: true
+        source: tls
+        target: /tls
+        type: volume
+        volume: {}
+  tls-init:
+    command:
+      - |
+        set -eu
+        if [ -s /tls/server.crt ] && [ -s /tls/server.key ]; then
+          echo "tls-init: reusing the existing certificate"
+          exit 0
+        fi
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -subj "/CN=orchestrator" \
+          -addext "subjectAltName=DNS:orchestrator,DNS:localhost,IP:127.0.0.1" \
+          -keyout /tls/server.key -out /tls/server.crt
+        # The runner verifies against the certificate itself: it is its own CA.
+        cp /tls/server.crt /tls/ca.crt
+        chmod 0644 /tls/server.crt /tls/ca.crt
+        # The orchestrator runs as an unprivileged user and has to read the key.
+        chmod 0644 /tls/server.key
+        echo "tls-init: generated a self-signed certificate for CN=orchestrator"
+    entrypoint:
+      - /bin/sh
+      - -c
+    image: alpine/openssl:3.3.2
+    networks:
+      control: null
+    restart: 'no'
+    volumes:
+      - source: tls
+        target: /tls
+        type: volume
+        volume: {}
+  web:
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+        required: true
+    healthcheck:
+      interval: 10s
+      retries: 12
+      start_period: 15s
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1
+      timeout: 5s
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/web:${MOIRAI_IMAGE_TAG:-latest}
+    networks:
+      public: null
+    ports:
+      - ${MOIRAI_WEB_PORT:-3000}:8080
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  postgres-data:
+    name: moirai_postgres-data
+  runner-data:
+    name: moirai_runner-data
+  tls:
+    name: moirai_tls

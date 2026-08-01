@@ -3,7 +3,7 @@ VENV ?= .venv
 MYPY_CACHE ?= /tmp/moirai-mypy-cache
 
 .PHONY: help test lint typecheck validate compose compose-overlays dev-install \
-        proto-lint proto-generate proto-check test-release-tags \
+        proto-lint proto-generate proto-check test-release-tags compose-tls-stack \
         test-orchestrator test-postgres-integration test-runner test-api test-web \
         build-runner build-api build-web
 
@@ -69,6 +69,14 @@ compose-overlays:
 	docker compose -f compose.yaml -f compose.tls.yaml config | grep -q 'LOOP_GRPC_TLS_CERT_FILE'
 	test "$$(docker compose -f compose.yaml -f compose.tls.yaml config | grep -c 'LOOP_ORCHESTRATOR_TLS: "true"')" = 2
 	docker compose -f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml config --quiet
+	sh scripts/render-tls-stack.sh --check
+	docker compose -f compose.tls-stack.yaml config --quiet
+
+# Portainer takes one file, so the TLS stack also exists as a single rendered
+# document. Generated, never hand-edited -- two full stacks drift, and the way
+# you find out is a deployment behaving differently from the one you tested.
+compose-tls-stack:
+	sh scripts/render-tls-stack.sh
 
 # Executable specification of the release trigger -> image tag mapping.
 # release.yml runs this script directly before deriving a version, so a release
