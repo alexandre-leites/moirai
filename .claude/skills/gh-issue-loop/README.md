@@ -120,9 +120,9 @@ To also use it from any other repository, symlink it into personal scope — the
 repo-agnostic and derives the repo root, owner, name, and default branch at runtime:
 
 ```bash
+repo="$(git rev-parse --show-toplevel)"
 mkdir -p ~/.claude/skills
-ln -s /home/william/Workspace/Personal/moirai/.claude/skills/gh-issue-loop \
-      ~/.claude/skills/gh-issue-loop
+ln -s "$repo/.claude/skills/gh-issue-loop" ~/.claude/skills/gh-issue-loop
 ```
 
 Claude Code follows a symlinked skill directory and loads `SKILL.md` from the target, and if the
@@ -133,11 +133,10 @@ is not enough: it does not carry `bin/`, so the slot helper would be unreachable
 refuse to run.
 
 ```bash
+repo="$(git rev-parse --show-toplevel)"
 mkdir -p ~/.config/opencode/command ~/.config/opencode/skills
-ln -s /home/william/Workspace/Personal/moirai/.claude/skills/gh-issue-loop/SKILL.md \
-      ~/.config/opencode/command/gh-issue-loop.md
-ln -s /home/william/Workspace/Personal/moirai/.claude/skills/gh-issue-loop \
-      ~/.config/opencode/skills/gh-issue-loop
+ln -s "$repo/.claude/skills/gh-issue-loop/SKILL.md" ~/.config/opencode/command/gh-issue-loop.md
+ln -s "$repo/.claude/skills/gh-issue-loop" ~/.config/opencode/skills/gh-issue-loop
 ```
 
 The helper is looked up in three places in order — the repo copy, `~/.claude/skills/...`, then
