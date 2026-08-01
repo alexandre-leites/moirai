@@ -1,3 +1,14 @@
+# OVERLAY, NOT A STACK. This file only swaps `build:` for `image:` on the four
+# services; it defines no postgres, no environment, and no secrets. Deploying it
+# on its own gives four containers with no configuration, which fail at startup
+# with "provide database_url ...", "provide the registration token ..." and an
+# API that cannot reach the orchestrator. It must be layered on compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.ghcr.yaml up --detach --wait
+#
+# For a single self-contained file that pulls the same images -- one you can
+# paste into Portainer -- use compose.local.yaml instead.
+#
 # Run the stack from the images published to GitHub Container Registry instead
 # of building them from this checkout. Everything else -- networks, secrets,
 # healthchecks, capability drops -- still comes from compose.yaml.

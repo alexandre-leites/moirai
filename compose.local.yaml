@@ -4,7 +4,7 @@
 # default, so this is meant to be pasted straight into Portainer
 # (Stacks -> Add stack -> Web editor) or run with:
 #
-#   docker compose -f compose.local.yaml up --build -d
+#   docker compose -f compose.local.yaml up -d
 #
 # Nothing has to be set to bring the stack up, including the GitHub token. The
 # console will run and you can sign in. Moirai cannot do any actual work
@@ -26,10 +26,17 @@
 # in a file under ./secrets and binds the API to loopback.
 # ---------------------------------------------------------------------------
 #
-# Images: each service declares both `image` and `build`, so Compose builds from
-# this checkout on first use and reuses the tagged result afterwards. Once the
-# release workflow has published to GHCR you can instead run
-# `compose.yaml` + `compose.ghcr.yaml` and pull rather than build.
+# Images are pulled from GHCR, never built -- Portainer's web editor has no build
+# context, and a `build:` section here would make the stack undeployable there.
+# Pin MOIRAI_IMAGE_TAG (`0.1.0`) for anything reproducible; it defaults to
+# `latest`, which moves. MOIRAI_IMAGE_PREFIX points it at a fork or mirror.
+#
+# The repository is private, so the packages are too: the Docker host needs
+# credentials for ghcr.io with `read:packages`. In Portainer that is
+# Registries -> Add registry -> Custom, with `ghcr.io` as the URL.
+#
+# To build from this checkout instead, use compose.yaml -- it builds all four
+# services and keeps its secrets in files under ./secrets/.
 
 services:
   postgres:
@@ -52,10 +59,7 @@ services:
       start_period: 15s
 
   orchestrator:
-    image: moirai-local/orchestrator:latest
-    build:
-      context: ./orchestrator
-      dockerfile: Dockerfile
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/orchestrator:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       LOOP_GRPC_BIND: 0.0.0.0:50051
@@ -94,10 +98,7 @@ services:
       start_period: 30s
 
   api:
-    image: moirai-local/api:latest
-    build:
-      context: .
-      dockerfile: api/Dockerfile
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/api:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051
@@ -117,8 +118,7 @@ services:
       start_period: 15s
 
   web:
-    image: moirai-local/web:latest
-    build: ./web
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/web:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       api: {condition: service_healthy}
@@ -136,10 +136,7 @@ services:
       start_period: 15s
 
   runner:
-    image: moirai-local/runner:latest
-    build:
-      context: .
-      dockerfile: runner/Dockerfile
+    image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/runner:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       LOOP_ORCHESTRATOR_ENDPOINT: orchestrator:50051

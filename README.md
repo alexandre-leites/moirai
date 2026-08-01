@@ -13,13 +13,17 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 
 ## Quick start — the `local` stack
 
-One file, nothing to prepare: [`compose.local.yaml`](compose.local.yaml) carries a working
-default for every value, so it starts unattended and is meant to be pasted straight into
-Portainer (**Stacks → Add stack → Web editor**).
+One file, nothing to prepare: [`compose.local.yaml`](compose.local.yaml) pulls the published
+images and carries a working default for every value, so it starts unattended and can be pasted
+straight into Portainer (**Stacks → Add stack → Web editor**).
 
 ```bash
-docker compose -f compose.local.yaml up --build -d
+docker compose -f compose.local.yaml up -d
 ```
+
+> Do **not** deploy [`compose.ghcr.yaml`](compose.ghcr.yaml) on its own. It is an overlay that
+> only replaces `build:` with `image:`; alone it defines no database, environment or secrets, and
+> every service fails at startup. Layer it on `compose.yaml`, or use `compose.local.yaml`.
 
 Then open <http://localhost:3000> and sign in as `admin` / `Moirai-Local-1`.
 
@@ -84,7 +88,7 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u <your-github-username> --password-s
 ```
 
 In Portainer, add the same credential under **Registries → Add registry → Custom**
-(`ghcr.io`), and the stack can then reference the published images directly.
+(`ghcr.io`) before deploying the stack, or every image pull fails with `403 Forbidden`.
 
 The same stack runs from the images published to GitHub Container Registry, without building anything. `compose.ghcr.yaml` replaces the four `build:` sections with `image:` references and changes nothing else — same networks, secrets, healthchecks, and capability drops.
 
