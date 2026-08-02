@@ -65,8 +65,10 @@ var (
 // Snapshot is one reading of the orchestrator-owned state, taken from a single
 // database query.
 type Snapshot struct {
-	// QueueDepth counts eligible open issues in enabled projects: the work the
-	// scheduler could hand out if a runner were free.
+	// QueueDepth counts eligible open issues in enabled projects — the
+	// scheduler's candidate set. An issue stays eligible while its workflow
+	// runs (it is parked only when the run delivers or ends), so this includes
+	// work already in flight, at most one issue per project.
 	QueueDepth int64
 	// ActiveWorkflows counts workflow runs that have not reached a terminal
 	// status.
@@ -96,7 +98,7 @@ type Source interface {
 var (
 	queueDepthDesc = prometheus.NewDesc(
 		"moirai_queue_depth",
-		"Eligible open issues in enabled projects, waiting to be scheduled.",
+		"Eligible open issues in enabled projects: the scheduler's candidate set. An issue stays eligible while its workflow runs, so this includes work already in flight.",
 		nil, nil)
 	activeWorkflowsDesc = prometheus.NewDesc(
 		"moirai_active_workflows",
@@ -282,7 +284,6 @@ func (c *collector) collectState(ch chan<- prometheus.Metric) {
 // Server exposes the orchestrator's registry over HTTP at /metrics.
 type Server struct {
 	bind     string
-	registry *prometheus.Registry
 	recorder *Recorder
 	server   *http.Server
 	listener net.Listener
@@ -306,7 +307,6 @@ func NewWithClock(bind string, source Source, now func() time.Time) *Server {
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
 	return &Server{
 		bind:     bind,
-		registry: registry,
 		recorder: recorder,
 		server:   &http.Server{Addr: bind, Handler: mux, ReadHeaderTimeout: 5 * time.Second},
 	}

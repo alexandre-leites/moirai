@@ -45,7 +45,7 @@ Every secret below can be supplied either directly or as `<NAME>_FILE` pointing 
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `moirai_queue_depth` | gauge | | Eligible open issues in enabled projects, waiting to be scheduled. |
+| `moirai_queue_depth` | gauge | | Eligible open issues in enabled projects: the scheduler's candidate set. An issue stays eligible while its workflow runs — it is parked only when the run delivers or ends — so this includes work already in flight, at most one issue per project. Identical to the console's queue depth, which reads the same query. |
 | `moirai_active_workflows` | gauge | | Workflow runs that have not reached a terminal status. |
 | `moirai_scheduled_jobs` | gauge | | Jobs offered to, being prepared by, or running on a runner. |
 | `moirai_enabled_runners` | gauge | | Runners an operator has neither disabled nor revoked. |

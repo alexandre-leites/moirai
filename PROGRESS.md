@@ -736,11 +736,20 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   - **No age series for the `unknown` loop bucket.** It absorbs a mislabelled count; nothing ever
     succeeds under that name, so its age would grow forever by construction and fire any alert
     written against the family. Caught while reading a live scrape.
+  - **A pass cut short by shutdown is not counted as a failure.** `observed` skips recording when
+    `ctx.Err() != nil`, matching what `every` already does with its logging; counting it would make
+    every clean restart look like a reconciliation failure.
   - `moirai_active_workflows`, not the Python-era `moirai_active_workflow_count`: the issue
     specifies the shorter name, it matches the proto field, and `_count` is a reserved suffix.
+  - **`moirai_queue_depth` counts the scheduler's candidate set, not "work not yet started".** An
+    issue stays `eligible` while its workflow runs — `parkIssue`/the delivery path clear it only at
+    the end — so at most one in-flight issue per project is included. The help text and the README
+    row say so rather than implying a pure backlog; it is the same number the console shows,
+    because it is the same query.
 - Relevant files: `orchestrator/internal/metrics/metrics.go` (+ `metrics_test.go`),
   `orchestrator/internal/config/config.go` (+ test), `orchestrator/internal/server/server.go`,
-  `orchestrator/internal/server/integration_test.go`, `orchestrator/cmd/orchestrator/main.go`,
+  `orchestrator/internal/server/integration_test.go`, `orchestrator/cmd/orchestrator/main.go`
+  (+ `main_test.go`, covering `observed`'s success, failure and cancelled-pass paths),
   `orchestrator/go.mod`/`go.sum` (adds `prometheus/client_golang v1.24.1`, the version the API and
   runner already pin; `golang.org/x/net` moved 0.56.0 → 0.57.0 indirectly, matching those two
   modules), `orchestrator/README.md`, `runner/README.md`, `api/README.md`,
@@ -749,8 +758,9 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   `.github/workflows/ci.yml` (compose smoke now scrapes the running orchestrator container).
 - Validation performed — commands and their results, all from the worktree:
   - `make lint` → pass. `make typecheck` (`go vet ./...`) → pass.
-  - `make test-orchestrator` → ok, 4 packages (12 new tests in `internal/metrics`, 4 in
-    `internal/config`). `make test-runner` → ok, 12 packages. `make test-api` → ok, 5 packages.
+  - `make test-orchestrator` → ok, 5 packages (11 new tests in `internal/metrics`, 4 in
+    `internal/config`, 2 in `cmd/orchestrator`). `make test-runner` → ok, 12 packages.
+    `make test-api` → ok, 5 packages.
   - `make test-postgres-integration` against a throwaway PostgreSQL on a **unique** port
     (`docker run -d --name moirai-pg-issue-296 -p 55296:5432 postgres:16-alpine`,
     `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:55296/loop_test`) → ok.

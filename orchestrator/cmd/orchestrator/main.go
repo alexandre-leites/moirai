@@ -60,6 +60,12 @@ func healthcheckAddress() string {
 func observed(recorder *metrics.Recorder, loop string, fn func(context.Context) error) func(context.Context) error {
 	return func(ctx context.Context) error {
 		err := fn(ctx)
+		// A pass cut short by shutdown is not a failed pass, and `every` does
+		// not log it as one either. Counting it would make every clean restart
+		// look like a reconciliation failure.
+		if err != nil && ctx.Err() != nil {
+			return err
+		}
 		recorder.RecordLoopRun(loop, err)
 		return err
 	}
