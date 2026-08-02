@@ -10,13 +10,21 @@
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
 - Active implementation: none.
 - Last updated: 2026-08-02
-- Agent/session identifier: ci-deploy-webhook / 2026-08-02
+- Agent/session identifier: ci-warn-deploy-webhook / 2026-08-02
 
 ## In Progress
 
 _Nothing is claimed. The next agent should take the first item under Pending Implementation._
 
 ## Done
+
+- [x] Non-blocking CI deployment webhook
+  - Completed: 2026-08-02
+  - Relevant files: `.github/workflows/ci.yml`
+  - Behavior delivered: HTTP webhook errors emit `::warning::` but do not fail CI.
+  - Validation performed: Python YAML parse, `git diff --check`, and a failing curl shell check pass.
+  - Commands executed: `python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/ci.yml"))'`, `bash -e -c 'curl() { return 22; }; if ! curl ...; then ...; fi'`, `git diff --check`.
+
 
 - [x] CI deployment webhook notification
   - Completed: 2026-08-02

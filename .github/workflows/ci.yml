@@ -342,7 +342,7 @@ jobs:
           header_args=(-H "Content-Type: application/json")
           [[ -n "$CF_ACCESS_CLIENT_ID" ]] && header_args+=(-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
           [[ -n "$CF_ACCESS_CLIENT_SECRET" ]] && header_args+=(-H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
-          curl -fsSL -X POST "${{ secrets.DEPLOY_WEBHOOK_URL }}" \
+          if ! curl -fsSL -X POST "${{ secrets.DEPLOY_WEBHOOK_URL }}" \
             "${header_args[@]}" \
             -d '{
               "repository": "${{ github.repository }}",
@@ -350,4 +350,6 @@ jobs:
               "sha": "${{ github.sha }}",
               "actor": "${{ github.actor }}",
               "run_id": "${{ github.run_id }}"
-            }'
+            }'; then
+            echo "::warning::Deployment webhook failed; continuing CI."
+          fi
