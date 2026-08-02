@@ -67,9 +67,10 @@ func (c Config) Validate() error {
 // (PROJECT.md, "Service boundaries"). Those three names used to be registered
 // here as gauges set to zero once at construction and never written again,
 // which made an alert on them permanently unfireable; only the service that
-// owns the state may export them. See issue #124. The Go orchestrator has no
-// Prometheus surface of its own yet, so today nobody exports them — which is
-// still better than a series that can never fire.
+// owns the state may export them. See issue #124. The orchestrator exports them
+// from its own listener on LOOP_METRICS_BIND
+// (orchestrator/internal/metrics), read from the database at scrape time, so
+// they are scraped there rather than here.
 type Server struct {
 	cfg      Config
 	mux      *http.ServeMux

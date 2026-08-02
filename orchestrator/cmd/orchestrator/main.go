@@ -14,6 +14,7 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/config"
+	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
 	"github.com/loop-engineering/orchestrator/internal/server"
 	"google.golang.org/grpc"
@@ -49,6 +50,25 @@ func healthcheckAddress() string {
 		_, port, _ = net.SplitHostPort(config.DefaultGRPCBind)
 	}
 	return net.JoinHostPort("127.0.0.1", port)
+}
+
+// observed reports each pass of a reconciliation loop to the metrics recorder
+// and passes the error through untouched, so the loop's own logging and retry
+// behaviour is unchanged. Wrapping here rather than inside the loop bodies
+// keeps the server package free of a metrics dependency it would otherwise
+// carry into every test.
+func observed(recorder *metrics.Recorder, loop string, fn func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) error {
+		err := fn(ctx)
+		// A pass cut short by shutdown is not a failed pass, and `every` does
+		// not log it as one either. Counting it would make every clean restart
+		// look like a reconciliation failure.
+		if err != nil && ctx.Err() != nil {
+			return err
+		}
+		recorder.RecordLoopRun(loop, err)
+		return err
+	}
 }
 
 // every runs fn immediately and then on each tick until ctx is cancelled,
@@ -121,6 +141,35 @@ func run() error {
 	if err := service.ReconcileDatabaseOnce(ctx); err != nil {
 		slog.Error("startup recovery failed", "error", err)
 	}
+	// Queue depth, active workflow counts and the fleet-wide runner heartbeat
+	// age are derived from this process's database and exist in no other
+	// service's reach, so this listener is the only place they are published.
+	// Binding fails loudly rather than being logged and dropped: an
+	// observability endpoint that silently never listens is indistinguishable
+	// from a healthy one that nothing is scraping.
+	metricsServer := metrics.New(cfg.MetricsBind, service)
+	if err := metricsServer.Start(); err != nil {
+		return err
+	}
+	if metricsServer.Enabled() {
+		// The bound address, not the configured one: they differ when the
+		// configured port was 0, and the address a scraper needs is the one
+		// that was actually taken.
+		slog.Info("serving metrics", "bind", metricsServer.Addr(), "path", "/metrics")
+		// Deferred, so /metrics stays scrapeable for the whole of the gRPC
+		// graceful drain below. The pool is closed by an earlier defer, so it
+		// outlives this one; a scrape still running when Shutdown's own
+		// deadline expires can still lose its connection under it, which the
+		// collector reports as a failed scrape rather than a crash.
+		defer func() {
+			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := metricsServer.Shutdown(shutdown); err != nil {
+				slog.Warn("metrics server shutdown failed", "error", err)
+			}
+		}()
+	}
+	recorder := metricsServer.Recorder()
 	controlv1.RegisterControlPlaneServer(grpcServer, service)
 	runnerv1.RegisterRunnerControlServer(grpcServer, service)
 	every(ctx, time.Second, "scheduler tick", func(ctx context.Context) error {
@@ -128,11 +177,11 @@ func run() error {
 		return err
 	})
 	every(ctx, 15*time.Second, "workflow observer", service.ObserveWorkflows)
-	every(ctx, 30*time.Second, "recovery sweep", service.RecoverOnce)
+	every(ctx, 30*time.Second, "recovery sweep", observed(recorder, metrics.LoopRecoverySweep, service.RecoverOnce))
 	// Issues are otherwise only discovered when an operator opens the console and
 	// presses "Sync now", which leaves an unattended deployment idle no matter how
 	// much work its projects have queued.
-	every(ctx, cfg.IssueSyncInterval, "issue sync", service.SyncProjects)
+	every(ctx, cfg.IssueSyncInterval, "issue sync", observed(recorder, metrics.LoopIssueSync, service.SyncProjects))
 	go func() {
 		<-ctx.Done()
 		grpcServer.GracefulStop()

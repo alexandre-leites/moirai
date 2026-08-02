@@ -188,3 +188,61 @@ func TestLoadRejectsAmbiguousSecret(t *testing.T) {
 		t.Fatal("Load() accepted both database URL sources")
 	}
 }
+
+// Metrics are on unless an operator turns them off: queue depth and the
+// fleet-wide runner heartbeat age are exported by no other service, so a
+// deployment that says nothing about metrics still publishes them.
+func TestMetricsBindDefaultsToTheServedPort(t *testing.T) {
+	// t.Setenv first so the variable is restored on cleanup, then unset it:
+	// "unset" is the case under test and testing has no t.Unsetenv.
+	t.Setenv("LOOP_METRICS_BIND", "127.0.0.1:19090")
+	os.Unsetenv("LOOP_METRICS_BIND")
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsBind != DefaultMetricsBind {
+		t.Fatalf("MetricsBind = %q, want %q", cfg.MetricsBind, DefaultMetricsBind)
+	}
+}
+
+func TestMetricsBindHonoursAnOverride(t *testing.T) {
+	t.Setenv("LOOP_METRICS_BIND", " 127.0.0.1:19090 ")
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsBind != "127.0.0.1:19090" {
+		t.Fatalf("MetricsBind = %q, want 127.0.0.1:19090", cfg.MetricsBind)
+	}
+}
+
+// An explicitly empty value is the documented way to serve no metrics at all.
+func TestEmptyMetricsBindDisablesTheListener(t *testing.T) {
+	t.Setenv("LOOP_METRICS_BIND", "")
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsBind != "" {
+		t.Fatalf("MetricsBind = %q, want an empty bind", cfg.MetricsBind)
+	}
+}
+
+// A typo must stop the process, not silently serve somewhere else -- the same
+// treatment LOOP_GRPC_BIND gets. "0.0.0.0:" is the interesting one:
+// SplitHostPort accepts it, and it would bind an ephemeral port that nothing is
+// configured to scrape while the process reported itself as serving metrics.
+func TestMetricsBindRejectsAnAddressWithoutAPort(t *testing.T) {
+	for name, bind := range map[string]string{
+		"no separator": "9090",
+		"empty port":   "0.0.0.0:",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("LOOP_METRICS_BIND", bind)
+			if _, err := loadWith(t, nil); err == nil {
+				t.Fatalf("Load() accepted %q as a metrics bind", bind)
+			}
+		})
+	}
+}

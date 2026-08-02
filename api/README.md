@@ -9,7 +9,7 @@ The API is the HTTP gateway for the orchestrator gRPC control plane. It serves b
 
 ### Exported metrics
 
-The API exports only what it can populate itself. Queue depth, active workflow counts, and the fleet-wide runner heartbeat age are orchestrator-owned state derived from the database, and the API has no database access, so it does not re-export them — the orchestrator does ([#124](https://github.com/alexandre-leites/moirai/issues/124)).
+The API exports only what it can populate itself. Queue depth, active workflow counts, and the fleet-wide runner heartbeat age are orchestrator-owned state derived from the database, and the API has no database access, so it does not re-export them — the orchestrator does, on `LOOP_METRICS_BIND` ([#124](https://github.com/alexandre-leites/moirai/issues/124), and [orchestrator/README.md](../orchestrator/README.md#metrics)).
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |

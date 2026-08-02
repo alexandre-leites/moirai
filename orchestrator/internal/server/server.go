@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"golang.org/x/crypto/scrypt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -669,16 +671,86 @@ func (s *Server) ListQueue(ctx context.Context, request *controlv1.ListQueueRequ
 	return response, nil
 }
 
+// schedulerSnapshot is one reading of the scheduling state the orchestrator
+// owns. The heartbeat age is a pointer because it is NULL when no runner is
+// enabled: there is no fleet-wide age to report, which is a different fact from
+// an age of zero.
+type schedulerSnapshot struct {
+	queueDepth         int64
+	activeWorkflows    int64
+	scheduledJobs      int64
+	enabledRunners     int64
+	oldestHeartbeatAge *float64
+}
+
+// readSchedulerSnapshot is the one query behind both the console's
+// GetSchedulerMetrics RPC and the Prometheus surface, so the two cannot report
+// different numbers for the same word. It is a single round trip: five
+// correlated subqueries, each an aggregate over a table the scheduler already
+// indexes.
+//
+// The heartbeat age is MIN over *enabled, unrevoked* runners — the oldest, not
+// the newest. A fleet where one runner is healthy and nine are gone is a
+// broken fleet, and a MAX (or an average) would hide that behind the one that
+// still reports. Disabled and revoked runners are excluded because an operator
+// took them out of service deliberately; leaving them in would make the series
+// permanently and correctly alarming, which is the same as useless. The age is
+// computed by the database from its own clock, so orchestrator clock skew
+// cannot make a heartbeat look fresher than it is.
+func (s *Server) readSchedulerSnapshot(ctx context.Context) (schedulerSnapshot, error) {
+	var snapshot schedulerSnapshot
+	err := s.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id=i.project_id WHERE p.enabled AND i.eligible AND i.state='open'), (SELECT COUNT(*) FROM app.workflow_runs WHERE status NOT IN (`+terminalStatusList+`)), (SELECT COUNT(*) FROM app.jobs WHERE status IN ('offered','preparing','running')), (SELECT COUNT(*) FROM app.runners WHERE enabled AND revoked_at IS NULL), (SELECT EXTRACT(EPOCH FROM now()-MIN(COALESCE(last_seen_at,registered_at)))::double precision FROM app.runners WHERE enabled AND revoked_at IS NULL)`).
+		Scan(&snapshot.queueDepth, &snapshot.activeWorkflows, &snapshot.scheduledJobs, &snapshot.enabledRunners, &snapshot.oldestHeartbeatAge)
+	if err != nil {
+		return schedulerSnapshot{}, databaseError(err)
+	}
+	return snapshot, nil
+}
+
 func (s *Server) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedulerMetricsRequest) (*controlv1.GetSchedulerMetricsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	response := &controlv1.GetSchedulerMetricsResponse{}
-	err := s.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id=i.project_id WHERE p.enabled AND i.eligible AND i.state='open'), (SELECT COUNT(*) FROM app.workflow_runs WHERE status NOT IN ('completed','blocked','failed','cancelled')), (SELECT COUNT(*) FROM app.jobs WHERE status IN ('offered','preparing','running'))`).Scan(&response.QueueDepth, &response.ActiveWorkflows, &response.ScheduledJobs)
+	snapshot, err := s.readSchedulerSnapshot(ctx)
 	if err != nil {
-		return nil, databaseError(err)
+		return nil, err
 	}
-	return response, nil
+	return &controlv1.GetSchedulerMetricsResponse{
+		QueueDepth:      int32(snapshot.queueDepth),
+		ActiveWorkflows: int32(snapshot.activeWorkflows),
+		ScheduledJobs:   int32(snapshot.scheduledJobs),
+	}, nil
+}
+
+// MetricsSnapshot reads the orchestrator-owned state the Prometheus surface
+// exports. It runs on the scrape's goroutine, against the same pooled
+// connections every other query uses — one round trip, no connection of its
+// own — and returns an error rather than a zeroed snapshot when the database
+// cannot answer, so the exporter can omit the series instead of publishing a
+// zero nothing measured.
+func (s *Server) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
+	snapshot, err := s.readSchedulerSnapshot(ctx)
+	if err != nil {
+		return metrics.Snapshot{}, err
+	}
+	reading := metrics.Snapshot{
+		QueueDepth:      snapshot.queueDepth,
+		ActiveWorkflows: snapshot.activeWorkflows,
+		ScheduledJobs:   snapshot.scheduledJobs,
+		EnabledRunners:  snapshot.enabledRunners,
+	}
+	if snapshot.oldestHeartbeatAge != nil {
+		seconds := *snapshot.oldestHeartbeatAge
+		// A last_seen_at in the future is only reachable through a clock that
+		// moved; reporting a negative age would read as "seen in the future",
+		// so it is clamped the same way the runner clamps its own.
+		if seconds < 0 {
+			seconds = 0
+		}
+		reading.OldestHeartbeatAge = time.Duration(seconds * float64(time.Second))
+		reading.HeartbeatKnown = true
+	}
+	return reading, nil
 }
 
 // GetSystemVersion is deliberately unauthenticated, as it was before the Go
@@ -1542,8 +1614,20 @@ func hashSecret(value string) string {
 	return hex.EncodeToString(digest[:])
 }
 func jsonLabels(labels []string) string { encoded, _ := json.Marshal(labels); return string(encoded) }
+
+// terminalStatuses are the workflow-run statuses a run never leaves. Both the
+// Go predicate below and the SQL the active-workflow gauge counts with are
+// derived from this one list: they were independent copies, and a fifth
+// terminal status added to one and not the other would have left the gauge
+// counting finished work as active, with nothing to catch it.
+var terminalStatuses = []string{"completed", "failed", "blocked", "cancelled"}
+
+// terminalStatusList renders them as the SQL literal list `'a','b'`. Built from
+// the constants above, never from input.
+var terminalStatusList = "'" + strings.Join(terminalStatuses, "','") + "'"
+
 func terminalStatus(state string) bool {
-	return state == "completed" || state == "failed" || state == "blocked" || state == "cancelled"
+	return slices.Contains(terminalStatuses, state)
 }
 func terminalEvent(event string) bool {
 	return event == "completed" || event == "failed" || event == "cancelled"

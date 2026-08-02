@@ -168,6 +168,22 @@ jobs:
           # Only port 3000 is published; nginx proxies /api/ to the API, so this
           # also proves the console can reach its own backend.
           curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/api/v1/health
+      # Queue depth, active workflow counts and the fleet-wide runner heartbeat
+      # age exist in no other service's reach, so a listener that silently never
+      # binds means nobody exports them at all -- which is the state issue #296
+      # found the deployment in. Scraped from inside the container because the
+      # orchestrator publishes no port.
+      - name: Verify the orchestrator's Prometheus surface
+        run: |
+          set -eu
+          series="$(docker compose -f compose.yaml -f compose.build.yaml exec -T orchestrator \
+            curl --fail --silent --retry 6 --retry-all-errors --retry-delay 2 http://127.0.0.1:9090/metrics)" \
+            || { echo "::error::orchestrator is not serving /metrics"; exit 1; }
+          for metric in moirai_queue_depth moirai_active_workflows moirai_scheduled_jobs moirai_enabled_runners; do
+            echo "$series" | grep -qE "^$metric " \
+              || { echo "::error::orchestrator /metrics is missing $metric"; exit 1; }
+            echo "orchestrator: $metric ok"
+          done
       # Every external program a service shells out to. `git` reaching for `ssh`
       # on an ssh:// remote is the one that shipped missing: the key resolved,
       # the file was written, GIT_SSH_COMMAND was set, and the clone died with
