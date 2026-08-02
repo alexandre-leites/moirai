@@ -95,9 +95,10 @@ class FakeControlPlane:
         now: datetime,
         actor_user_id: str | None,
         pipeline_steps: tuple[dict[str, object], ...] = (),
+        execution_image: str = "",
     ) -> dict[str, object]:
         del repository_mode, repository_url, local_repository_path, default_branch, labels, now, actor_user_id, pipeline_steps
-        return {"id": "project-2", "name": name, "enabled": True, "pipeline_steps": []}
+        return {"id": "project-2", "name": name, "enabled": True, "pipeline_steps": [], "execution_image": execution_image}
 
     async def update_project(
         self,
@@ -111,9 +112,10 @@ class FakeControlPlane:
         now: datetime,
         actor_user_id: str | None,
         pipeline_steps: tuple[dict[str, object], ...] = (),
+        execution_image: str = "",
     ) -> dict[str, object]:
         del repository_mode, repository_url, local_repository_path, default_branch, labels, now, actor_user_id, pipeline_steps
-        return {"id": project_id, "name": name, "enabled": True, "pipeline_steps": []}
+        return {"id": project_id, "name": name, "enabled": True, "pipeline_steps": [], "execution_image": execution_image}
 
     async def set_project_enabled(
         self, project_id: str, enabled: bool, now: datetime, actor_user_id: str | None

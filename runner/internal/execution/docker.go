@@ -135,6 +135,9 @@ func (executor DockerExecutor) runCommand(containerName, workspace string, reque
 	if environmentFile != "" {
 		command = append(command, "--env-file", environmentFile)
 	}
+	if keyPath := request.Environment["GIT_SSH_KEY"]; filepath.IsAbs(keyPath) {
+		command = append(command, "--mount", "type=bind,src="+keyPath+",dst="+keyPath+",readonly")
+	}
 	command = append(command, executor.Image)
 	return append(command, request.Command...)
 }

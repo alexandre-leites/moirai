@@ -43,6 +43,15 @@ func TestDockerExecutorBuildsRestrictedRunCommand(t *testing.T) {
 	}
 }
 
+func TestDockerExecutorMountsDeliveredSSHKeyReadOnly(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "key")
+	arguments := DockerExecutor{Image: "example/agent:1"}.runCommand("container", t.TempDir(), Request{Environment: map[string]string{"GIT_SSH_KEY": key}}, "")
+	want := "type=bind,src=" + key + ",dst=" + key + ",readonly"
+	if !strings.Contains(strings.Join(arguments, "\n"), want) {
+		t.Fatalf("docker arguments = %#v, want SSH key mount", arguments)
+	}
+}
+
 func TestDockerExecutorRejectsUnsafeConfiguration(t *testing.T) {
 	executor := DockerExecutor{Image: "example image"}
 	_, err := executor.Execute(context.Background(), Request{

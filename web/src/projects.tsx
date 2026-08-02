@@ -139,6 +139,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   const [branch, setBranch] = useState(project?.defaultBranch ?? "main");
   const [labels, setLabels] = useState((project?.requiredRunnerLabels ?? []).join(", "));
   const [pipelineSteps, setPipelineSteps] = useState(project?.pipelineSteps ?? []);
+  const [executionImage, setExecutionImage] = useState(project?.executionImage ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -165,6 +166,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       defaultBranch: branch.trim() || "main",
       requiredRunnerLabels: labels.split(",").map((label) => label.trim()).filter(Boolean),
       pipelineSteps: pipelineSteps.map((step, position) => ({ ...step, position })),
+      executionImage: executionImage.trim() || undefined,
     }).then(
       () => { onDone(); onClose(); },
       (reason: unknown) => {
@@ -208,6 +210,10 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
           <label>
             Runner labels
             <input value={labels} placeholder="go, docker" onChange={(event) => setLabels(event.target.value)} />
+          </label>
+          <label>
+            Execution image
+            <input value={executionImage} placeholder="ghcr.io/acme/project-tools:latest" onChange={(event) => setExecutionImage(event.target.value)} />
           </label>
         </div>
         <fieldset>

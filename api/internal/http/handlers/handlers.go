@@ -77,6 +77,7 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 		DefaultBranch        string                `json:"defaultBranch"`
 		RequiredRunnerLabels []string              `json:"requiredRunnerLabels"`
 		PipelineSteps        []pipelineStepPayload `json:"pipelineSteps"`
+		ExecutionImage       string                `json:"executionImage"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -91,6 +92,7 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 			DefaultBranch:        body.DefaultBranch,
 			RequiredRunnerLabels: body.RequiredRunnerLabels,
 			PipelineSteps:        pipelineSteps(body.PipelineSteps),
+			ExecutionImage:       body.ExecutionImage,
 		},
 	})
 	if err != nil {
@@ -110,6 +112,7 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 		DefaultBranch        string                `json:"defaultBranch"`
 		RequiredRunnerLabels []string              `json:"requiredRunnerLabels"`
 		PipelineSteps        []pipelineStepPayload `json:"pipelineSteps"`
+		ExecutionImage       string                `json:"executionImage"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -125,6 +128,7 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 			DefaultBranch:        body.DefaultBranch,
 			RequiredRunnerLabels: body.RequiredRunnerLabels,
 			PipelineSteps:        pipelineSteps(body.PipelineSteps),
+			ExecutionImage:       body.ExecutionImage,
 		},
 	})
 	if err != nil {
@@ -247,6 +251,7 @@ func projectPayload(p *controlv1.Project) map[string]any {
 		"defaultBranch":        p.DefaultBranch,
 		"requiredRunnerLabels": labels,
 		"pipelineSteps":        pipeline,
+		"executionImage":       p.ExecutionImage,
 	}
 }
 

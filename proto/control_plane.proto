@@ -61,6 +61,7 @@ message Project {
   string default_branch = 7;
   repeated string required_runner_labels = 8;
   repeated PipelineStep pipeline_steps = 9;
+  string execution_image = 10;
 }
 message ListProjectsResponse { repeated Project projects = 1; }
 message ProjectConfiguration {
@@ -71,6 +72,7 @@ message ProjectConfiguration {
   string default_branch = 5;
   repeated string required_runner_labels = 6;
   repeated PipelineStep pipeline_steps = 7;
+  string execution_image = 8;
 }
 message CreateProjectRequest { ProjectConfiguration project = 1; }
 message CreateProjectResponse { Project project = 1; }

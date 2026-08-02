@@ -89,17 +89,18 @@ func (guard *ProjectConcurrencyGuard) Acquire(projectID string) (func(), error) 
 }
 
 type Dispatcher struct {
-	Workspaces         WorkspaceManager
-	Backend            agents.Backend
-	Environment        EnvironmentResolver
-	AllowedEnvironment []string
-	MinimumFreeBytes   uint64
-	DiskPath           string
-	AvailableBytes     func(string) (uint64, error)
-	RevisionInspector  RevisionInspector
-	Pipeline           pipeline.Runner
-	Retention          RetentionPolicy
-	Projects           *ProjectConcurrencyGuard
+	Workspaces           WorkspaceManager
+	Backend              agents.Backend
+	ExecutionEnvironment func(string) (agents.Backend, pipeline.Runner, error)
+	Environment          EnvironmentResolver
+	AllowedEnvironment   []string
+	MinimumFreeBytes     uint64
+	DiskPath             string
+	AvailableBytes       func(string) (uint64, error)
+	RevisionInspector    RevisionInspector
+	Pipeline             pipeline.Runner
+	Retention            RetentionPolicy
+	Projects             *ProjectConcurrencyGuard
 	// Active guards the workspaces of running executions against the retention
 	// sweep. A nil tracker is safe only where no execution can be running
 	// concurrently with a sweep.
@@ -165,6 +166,17 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return Result{}, errors.New("lease is invalid")
 	}
 	packet := lease.Packet
+	if packet.ExecutionImage != "" {
+		if dispatcher.ExecutionEnvironment == nil {
+			return Result{}, fmt.Errorf("execution image %q cannot run on this runner: Docker execution is unavailable", packet.ExecutionImage)
+		}
+		backend, pipelineRunner, environmentErr := dispatcher.ExecutionEnvironment(packet.ExecutionImage)
+		if environmentErr != nil {
+			return Result{}, environmentErr
+		}
+		dispatcher.Backend = backend
+		dispatcher.Pipeline = pipelineRunner
+	}
 	if dispatcher.Projects != nil {
 		release, err := dispatcher.Projects.Acquire(packet.Repository.ProjectID)
 		if err != nil {
