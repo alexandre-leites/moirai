@@ -72,8 +72,20 @@ class ListProjectsRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
+class PipelineStep(_message.Message):
+    __slots__ = ("command", "timeout_seconds", "position", "required")
+    COMMAND_FIELD_NUMBER: _ClassVar[int]
+    TIMEOUT_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    POSITION_FIELD_NUMBER: _ClassVar[int]
+    REQUIRED_FIELD_NUMBER: _ClassVar[int]
+    command: str
+    timeout_seconds: int
+    position: int
+    required: bool
+    def __init__(self, command: _Optional[str] = ..., timeout_seconds: _Optional[int] = ..., position: _Optional[int] = ..., required: _Optional[bool] = ...) -> None: ...
+
 class Project(_message.Message):
-    __slots__ = ("id", "name", "enabled", "repository_mode", "repository_url", "local_repository_path", "default_branch", "required_runner_labels")
+    __slots__ = ("id", "name", "enabled", "repository_mode", "repository_url", "local_repository_path", "default_branch", "required_runner_labels", "pipeline_steps")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     ENABLED_FIELD_NUMBER: _ClassVar[int]
@@ -82,6 +94,7 @@ class Project(_message.Message):
     LOCAL_REPOSITORY_PATH_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_BRANCH_FIELD_NUMBER: _ClassVar[int]
     REQUIRED_RUNNER_LABELS_FIELD_NUMBER: _ClassVar[int]
+    PIPELINE_STEPS_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     enabled: bool
@@ -90,7 +103,8 @@ class Project(_message.Message):
     local_repository_path: str
     default_branch: str
     required_runner_labels: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ..., repository_mode: _Optional[str] = ..., repository_url: _Optional[str] = ..., local_repository_path: _Optional[str] = ..., default_branch: _Optional[str] = ..., required_runner_labels: _Optional[_Iterable[str]] = ...) -> None: ...
+    pipeline_steps: _containers.RepeatedCompositeFieldContainer[PipelineStep]
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ..., repository_mode: _Optional[str] = ..., repository_url: _Optional[str] = ..., local_repository_path: _Optional[str] = ..., default_branch: _Optional[str] = ..., required_runner_labels: _Optional[_Iterable[str]] = ..., pipeline_steps: _Optional[_Iterable[_Union[PipelineStep, _Mapping]]] = ...) -> None: ...
 
 class ListProjectsResponse(_message.Message):
     __slots__ = ("projects",)
@@ -99,20 +113,22 @@ class ListProjectsResponse(_message.Message):
     def __init__(self, projects: _Optional[_Iterable[_Union[Project, _Mapping]]] = ...) -> None: ...
 
 class ProjectConfiguration(_message.Message):
-    __slots__ = ("name", "repository_mode", "repository_url", "local_repository_path", "default_branch", "required_runner_labels")
+    __slots__ = ("name", "repository_mode", "repository_url", "local_repository_path", "default_branch", "required_runner_labels", "pipeline_steps")
     NAME_FIELD_NUMBER: _ClassVar[int]
     REPOSITORY_MODE_FIELD_NUMBER: _ClassVar[int]
     REPOSITORY_URL_FIELD_NUMBER: _ClassVar[int]
     LOCAL_REPOSITORY_PATH_FIELD_NUMBER: _ClassVar[int]
     DEFAULT_BRANCH_FIELD_NUMBER: _ClassVar[int]
     REQUIRED_RUNNER_LABELS_FIELD_NUMBER: _ClassVar[int]
+    PIPELINE_STEPS_FIELD_NUMBER: _ClassVar[int]
     name: str
     repository_mode: str
     repository_url: str
     local_repository_path: str
     default_branch: str
     required_runner_labels: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, name: _Optional[str] = ..., repository_mode: _Optional[str] = ..., repository_url: _Optional[str] = ..., local_repository_path: _Optional[str] = ..., default_branch: _Optional[str] = ..., required_runner_labels: _Optional[_Iterable[str]] = ...) -> None: ...
+    pipeline_steps: _containers.RepeatedCompositeFieldContainer[PipelineStep]
+    def __init__(self, name: _Optional[str] = ..., repository_mode: _Optional[str] = ..., repository_url: _Optional[str] = ..., local_repository_path: _Optional[str] = ..., default_branch: _Optional[str] = ..., required_runner_labels: _Optional[_Iterable[str]] = ..., pipeline_steps: _Optional[_Iterable[_Union[PipelineStep, _Mapping]]] = ...) -> None: ...
 
 class CreateProjectRequest(_message.Message):
     __slots__ = ("project",)

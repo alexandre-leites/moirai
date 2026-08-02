@@ -2,7 +2,7 @@
 // may work on — its issues, its labels, its delivery policy.
 import { useCallback, useState, type FormEvent } from "react";
 import { Link } from "react-router";
-import type { ApiClient, CredentialKind, Project, ProjectConfiguration, ProjectCredential } from "./api";
+import type { ApiClient, CredentialKind, PipelineStep, Project, ProjectConfiguration, ProjectCredential } from "./api";
 import { ApiError } from "./api";
 import { activeWorkflowFor, useConsoleData } from "./console-data";
 import { useIsAdmin } from "./auth";
@@ -138,6 +138,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   );
   const [branch, setBranch] = useState(project?.defaultBranch ?? "main");
   const [labels, setLabels] = useState((project?.requiredRunnerLabels ?? []).join(", "));
+  const [pipelineSteps, setPipelineSteps] = useState(project?.pipelineSteps ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -150,6 +151,10 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       setError(mode === "managed_clone" ? "A repository URL is required." : "A local repository path is required.");
       return;
     }
+    if (pipelineSteps.some((step) => !step.command.trim() || !Number.isInteger(step.timeoutSeconds) || step.timeoutSeconds < 1)) {
+      setError("Each pipeline command needs a command and positive timeout.");
+      return;
+    }
     setError("");
     setSaving(true);
     onSubmit({
@@ -159,6 +164,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       localRepositoryPath: mode === "existing_path" ? source.trim() : undefined,
       defaultBranch: branch.trim() || "main",
       requiredRunnerLabels: labels.split(",").map((label) => label.trim()).filter(Boolean),
+      pipelineSteps: pipelineSteps.map((step, position) => ({ ...step, position })),
     }).then(
       () => { onDone(); onClose(); },
       (reason: unknown) => {
@@ -204,6 +210,38 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
             <input value={labels} placeholder="go, docker" onChange={(event) => setLabels(event.target.value)} />
           </label>
         </div>
+        <fieldset>
+          <legend>Local pipeline</legend>
+          <p className="t2">Required commands must pass before AI review. No required command blocks completion.</p>
+          {pipelineSteps.map((step, index) => (
+            <div className="row-line" key={`${step.position}-${index}`}>
+              <input
+                aria-label={`Pipeline command ${index + 1}`}
+                value={step.command}
+                placeholder="make test"
+                onChange={(event) => setPipelineSteps(pipelineSteps.map((item, i) => i === index ? { ...item, command: event.target.value } : item))}
+              />
+              <input
+                aria-label={`Pipeline timeout ${index + 1}`}
+                type="number"
+                min="1"
+                value={step.timeoutSeconds}
+                onChange={(event) => setPipelineSteps(pipelineSteps.map((item, i) => i === index ? { ...item, timeoutSeconds: Number(event.target.value) } : item))}
+              />
+              <label>
+                <input
+                  type="checkbox"
+                  checked={step.required}
+                  onChange={(event) => setPipelineSteps(pipelineSteps.map((item, i) => i === index ? { ...item, required: event.target.checked } : item))}
+                /> Required
+              </label>
+              <button type="button" className="btn sm" disabled={index === 0} onClick={() => setPipelineSteps(movePipelineStep(pipelineSteps, index, -1))}>Up</button>
+              <button type="button" className="btn sm" disabled={index === pipelineSteps.length - 1} onClick={() => setPipelineSteps(movePipelineStep(pipelineSteps, index, 1))}>Down</button>
+              <button type="button" className="btn sm danger" onClick={() => setPipelineSteps(pipelineSteps.filter((_, i) => i !== index))}>Remove</button>
+            </div>
+          ))}
+          <button type="button" className="btn sm" onClick={() => setPipelineSteps([...pipelineSteps, newPipelineStep(pipelineSteps.length)])}>Add command</button>
+        </fieldset>
         <div className="btnrow">
           <button type="submit" className="btn primary" disabled={saving}>{saving ? "Saving…" : submitLabel}</button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
@@ -213,6 +251,18 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   );
 }
 
+
+function newPipelineStep(position: number): PipelineStep {
+  return { command: "", timeoutSeconds: 300, position, required: true };
+}
+
+function movePipelineStep(steps: PipelineStep[], index: number, offset: number): PipelineStep[] {
+  const target = index + offset;
+  if (target < 0 || target >= steps.length) return steps;
+  const result = [...steps];
+  [result[index], result[target]] = [result[target], result[index]];
+  return result;
+}
 
 const CREDENTIAL_LABELS: Record<CredentialKind, string> = {
   github_token: "GitHub token",

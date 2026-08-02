@@ -22,6 +22,7 @@ class ProjectRecord(TypedDict):
     local_repository_path: str | None
     default_branch: str
     required_runner_labels: list[str]
+    pipeline_steps: list[dict[str, object]]
 
 
 class RegistrationTokenRecord(TypedDict):
@@ -134,6 +135,7 @@ class ControlPlane(Protocol):
         required_runner_labels: tuple[str, ...],
         now: datetime,
         actor_user_id: str | None,
+        pipeline_steps: tuple[dict[str, object], ...] = (),
     ) -> ProjectRecord: ...
 
     async def update_project(
@@ -147,6 +149,7 @@ class ControlPlane(Protocol):
         required_runner_labels: tuple[str, ...],
         now: datetime,
         actor_user_id: str | None,
+        pipeline_steps: tuple[dict[str, object], ...] = (),
     ) -> ProjectRecord: ...
 
     async def set_project_enabled(
