@@ -29,6 +29,11 @@ class RunnerControlStub:
                 request_serializer=proto_dot_runner__control__pb2.ResolveJobSecretRequest.SerializeToString,
                 response_deserializer=proto_dot_runner__control__pb2.ResolveJobSecretResponse.FromString,
                 _registered_method=True)
+        self.StoreJobSecret = channel.unary_unary(
+                '/loop.runner.v1.RunnerControl/StoreJobSecret',
+                request_serializer=proto_dot_runner__control__pb2.StoreJobSecretRequest.SerializeToString,
+                response_deserializer=proto_dot_runner__control__pb2.StoreJobSecretResponse.FromString,
+                _registered_method=True)
 
 
 class RunnerControlServicer:
@@ -61,6 +66,19 @@ class RunnerControlServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StoreJobSecret(self, request, context):
+        """Persists a credential the agent harness rotated while running the job.
+
+        A subscription credential is an access token that expires, and the harness
+        refreshes it inside the execution. Without somewhere durable to put the new
+        value, every execution redoes the authorization dance or starts failing.
+        Fenced exactly like ResolveJobSecret, and an update only: a runner may
+        replace a credential the project already gave it and nothing else.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RunnerControlServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -78,6 +96,11 @@ def add_RunnerControlServicer_to_server(servicer, server):
                     servicer.ResolveJobSecret,
                     request_deserializer=proto_dot_runner__control__pb2.ResolveJobSecretRequest.FromString,
                     response_serializer=proto_dot_runner__control__pb2.ResolveJobSecretResponse.SerializeToString,
+            ),
+            'StoreJobSecret': grpc.unary_unary_rpc_method_handler(
+                    servicer.StoreJobSecret,
+                    request_deserializer=proto_dot_runner__control__pb2.StoreJobSecretRequest.FromString,
+                    response_serializer=proto_dot_runner__control__pb2.StoreJobSecretResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -161,6 +184,33 @@ class RunnerControl:
             '/loop.runner.v1.RunnerControl/ResolveJobSecret',
             proto_dot_runner__control__pb2.ResolveJobSecretRequest.SerializeToString,
             proto_dot_runner__control__pb2.ResolveJobSecretResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StoreJobSecret(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.runner.v1.RunnerControl/StoreJobSecret',
+            proto_dot_runner__control__pb2.StoreJobSecretRequest.SerializeToString,
+            proto_dot_runner__control__pb2.StoreJobSecretResponse.FromString,
             options,
             channel_credentials,
             insecure,

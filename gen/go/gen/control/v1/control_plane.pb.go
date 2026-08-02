@@ -1039,9 +1039,16 @@ func (x *SetProjectEnabledResponse) GetProject() *Project {
 type SetProjectCredentialRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	ProjectId string                 `protobuf:"bytes,1,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
-	// "github_token" or "ssh_private_key".
-	Kind          string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	Value         string `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	// "github_token", "ssh_private_key", or "agent:<NAME>" where <NAME> is the
+	// environment variable an agent harness reads the credential from, e.g.
+	// "agent:OPENROUTER_API_KEY".
+	Kind  string `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Value string `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	// Only for an "agent:" kind, and only when the harness wants a file rather
+	// than a variable: where to write it, relative to the home directory the
+	// runner builds for the execution. Empty means environment delivery. This is
+	// a destination, not a secret.
+	FilePath      string `protobuf:"bytes,4,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1093,6 +1100,13 @@ func (x *SetProjectCredentialRequest) GetKind() string {
 func (x *SetProjectCredentialRequest) GetValue() string {
 	if x != nil {
 		return x.Value
+	}
+	return ""
+}
+
+func (x *SetProjectCredentialRequest) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
 	}
 	return ""
 }
@@ -1194,10 +1208,12 @@ func (x *ListProjectCredentialsRequest) GetProjectId() string {
 }
 
 type ProjectCredential struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	CreatedAt     string                 `protobuf:"bytes,2,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     string                 `protobuf:"bytes,3,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Kind      string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	CreatedAt string                 `protobuf:"bytes,2,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt string                 `protobuf:"bytes,3,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// Empty for environment delivery. Never a value.
+	FilePath      string `protobuf:"bytes,4,opt,name=file_path,json=filePath,proto3" json:"file_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1249,6 +1265,13 @@ func (x *ProjectCredential) GetCreatedAt() string {
 func (x *ProjectCredential) GetUpdatedAt() string {
 	if x != nil {
 		return x.UpdatedAt
+	}
+	return ""
+}
+
+func (x *ProjectCredential) GetFilePath() string {
+	if x != nil {
+		return x.FilePath
 	}
 	return ""
 }
@@ -3808,25 +3831,27 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"project_id\x18\x01 \x01(\tR\tprojectId\x12\x18\n" +
 	"\aenabled\x18\x02 \x01(\bR\aenabled\"O\n" +
 	"\x19SetProjectEnabledResponse\x122\n" +
-	"\aproject\x18\x01 \x01(\v2\x18.loop.control.v1.ProjectR\aproject\"f\n" +
+	"\aproject\x18\x01 \x01(\v2\x18.loop.control.v1.ProjectR\aproject\"\x83\x01\n" +
 	"\x1bSetProjectCredentialRequest\x12\x1d\n" +
 	"\n" +
 	"project_id\x18\x01 \x01(\tR\tprojectId\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x14\n" +
-	"\x05value\x18\x03 \x01(\tR\x05value\"R\n" +
+	"\x05value\x18\x03 \x01(\tR\x05value\x12\x1b\n" +
+	"\tfile_path\x18\x04 \x01(\tR\bfilePath\"R\n" +
 	"\x1dClearProjectCredentialRequest\x12\x1d\n" +
 	"\n" +
 	"project_id\x18\x01 \x01(\tR\tprojectId\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\">\n" +
 	"\x1dListProjectCredentialsRequest\x12\x1d\n" +
 	"\n" +
-	"project_id\x18\x01 \x01(\tR\tprojectId\"e\n" +
+	"project_id\x18\x01 \x01(\tR\tprojectId\"\x82\x01\n" +
 	"\x11ProjectCredential\x12\x12\n" +
 	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x1d\n" +
 	"\n" +
 	"created_at\x18\x02 \x01(\tR\tcreatedAt\x12\x1d\n" +
 	"\n" +
-	"updated_at\x18\x03 \x01(\tR\tupdatedAt\"d\n" +
+	"updated_at\x18\x03 \x01(\tR\tupdatedAt\x12\x1b\n" +
+	"\tfile_path\x18\x04 \x01(\tR\bfilePath\"d\n" +
 	"\x1cSetProjectCredentialResponse\x12D\n" +
 	"\vcredentials\x18\x01 \x03(\v2\".loop.control.v1.ProjectCredentialR\vcredentials\"f\n" +
 	"\x1eClearProjectCredentialResponse\x12D\n" +

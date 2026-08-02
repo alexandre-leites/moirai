@@ -16,9 +16,20 @@ import (
 
 type secretClient struct {
 	runnerv1.RunnerControlClient
-	response *runnerv1.ResolveJobSecretResponse
-	err      error
-	requests []*runnerv1.ResolveJobSecretRequest
+	response      *runnerv1.ResolveJobSecretResponse
+	err           error
+	requests      []*runnerv1.ResolveJobSecretRequest
+	storeResponse *runnerv1.StoreJobSecretResponse
+	storeErr      error
+	stores        []*runnerv1.StoreJobSecretRequest
+}
+
+func (c *secretClient) StoreJobSecret(_ context.Context, in *runnerv1.StoreJobSecretRequest, _ ...grpc.CallOption) (*runnerv1.StoreJobSecretResponse, error) {
+	c.stores = append(c.stores, in)
+	if c.storeResponse == nil && c.storeErr == nil {
+		return &runnerv1.StoreJobSecretResponse{Stored: true}, nil
+	}
+	return c.storeResponse, c.storeErr
 }
 
 func (c *secretClient) ResolveJobSecret(_ context.Context, in *runnerv1.ResolveJobSecretRequest, _ ...grpc.CallOption) (*runnerv1.ResolveJobSecretResponse, error) {
@@ -212,5 +223,72 @@ func TestEnsureKeyDirectoryRejectsADirectoryOwnedByAnother(t *testing.T) {
 	// is precisely the container case the probe exists to catch.
 	if err := resolver.EnsureKeyDirectory(); err == nil {
 		t.Fatal("EnsureKeyDirectory() accepted a directory it cannot write to")
+	}
+}
+
+// The durable half of a rotating credential (issue #230). Without it a
+// subscription token refreshed inside a run is lost with the workspace, and the
+// next execution starts from one that has already expired.
+func TestStoreSendsTheRotatedValueUnderTheJobsLease(t *testing.T) {
+	client := &secretClient{}
+	resolver := testResolver(t, client)
+
+	if err := resolver.Store(context.Background(), "job-1", 3, "OPENCODE_AUTH", `{"access":"new"}`); err != nil {
+		t.Fatalf("Store() error = %v", err)
+	}
+
+	if len(client.stores) != 1 {
+		t.Fatalf("stores = %#v", client.stores)
+	}
+	request := client.stores[0]
+	if request.GetJobId() != "job-1" || request.GetLeaseGeneration() != 3 {
+		t.Fatalf("store request lease = %q/%d", request.GetJobId(), request.GetLeaseGeneration())
+	}
+	if request.GetName() != "OPENCODE_AUTH" || request.GetValue() != `{"access":"new"}` {
+		t.Fatalf("store request = %#v", request)
+	}
+	if request.GetRunnerId() != "runner-1" || request.GetCredential() != "secret" {
+		t.Fatalf("store request identity = %q/%q", request.GetRunnerId(), request.GetCredential())
+	}
+}
+
+// Nothing to rotate is reported distinctly, because it is not an execution
+// failure: the value the harness is using still works for the run it is in.
+func TestStoreReportsWhenThereIsNothingToRotate(t *testing.T) {
+	client := &secretClient{storeResponse: &runnerv1.StoreJobSecretResponse{Stored: false}}
+	resolver := testResolver(t, client)
+
+	err := resolver.Store(context.Background(), "job-1", 3, "OPENCODE_AUTH", "value")
+
+	if !errors.Is(err, ErrRotationNotStored) {
+		t.Fatalf("Store() error = %v, want ErrRotationNotStored", err)
+	}
+}
+
+// An orchestrator older than this runner has no write-back at all.
+func TestStoreTreatsAnUnimplementedOrchestratorAsNowhereToWriteTo(t *testing.T) {
+	client := &secretClient{storeErr: status.Error(codes.Unimplemented, "unknown method")}
+	resolver := testResolver(t, client)
+
+	err := resolver.Store(context.Background(), "job-1", 3, "OPENCODE_AUTH", "value")
+
+	if !errors.Is(err, ErrNoControlPlaneSecret) {
+		t.Fatalf("Store() error = %v, want ErrNoControlPlaneSecret", err)
+	}
+}
+
+// A stale lease is refused by the control plane, and that refusal must not be
+// silently swallowed: it means this runner's work was reassigned.
+func TestStoreReportsARefusedLease(t *testing.T) {
+	client := &secretClient{storeErr: status.Error(codes.FailedPrecondition, "runner does not hold this job")}
+	resolver := testResolver(t, client)
+
+	err := resolver.Store(context.Background(), "job-1", 3, "OPENCODE_AUTH", "value")
+
+	if err == nil || errors.Is(err, ErrNoControlPlaneSecret) || errors.Is(err, ErrRotationNotStored) {
+		t.Fatalf("Store() error = %v, want the refusal reported", err)
+	}
+	if !strings.Contains(err.Error(), "OPENCODE_AUTH") {
+		t.Fatalf("Store() error = %v, want it to name the credential", err)
 	}
 }

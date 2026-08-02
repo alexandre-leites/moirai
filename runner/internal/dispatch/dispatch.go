@@ -121,6 +121,21 @@ type Dispatcher struct {
 	// as it is produced, so it can be streamed to the orchestrator as log
 	// events (see control.EventReporter.EmitLog).
 	EmitLog func(jobID string, generation int64, message string) ([]int64, error)
+	// RedactSecrets registers a job's resolved credential values so no event
+	// this runner sends can carry one. Called as soon as they are resolved and
+	// before any of them can reach the agent: redaction that begins after the
+	// harness has echoed its own configuration protects nothing. The values stop
+	// being redacted when the reporter is told the job finished, which is after
+	// the terminal event has been built (see control.EventReporter.Finish).
+	RedactSecrets func(jobID string, values []string)
+	// StoreSecret persists a credential the agent harness refreshed during the
+	// execution. Without it a rotated subscription token lives only in the
+	// throwaway home the run is given, so the next execution starts from the
+	// expired one. Nil disables write-back; a rotation is then runner-local.
+	StoreSecret func(ctx context.Context, scope SecretScope, name, value string) error
+	// RotationInterval is how often a file-delivered credential is re-read for
+	// a refreshed value. Zero uses defaultRotationInterval.
+	RotationInterval time.Duration
 }
 
 type Result struct {
@@ -226,6 +241,10 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	if err != nil {
 		return Result{}, err
 	}
+	// Before the workspace exists, and therefore before git, the agent or the
+	// pipeline can be handed one of these. Everything this runner streams from
+	// here on has the values stripped out of it.
+	dispatcher.redact(lease.JobID, environment)
 	request, err := prepareRequest(packet, environment)
 	if err != nil {
 		return Result{}, err
@@ -249,6 +268,29 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		}
 	}()
 
+	// The agent's environment is not the repository's. It carries a home
+	// directory of its own -- MinimalEnvironment overrides HOME, so this is the
+	// only `~` the agent ever sees -- and any credential the packet asked to be
+	// delivered as a file has been written into it.
+	agentEnvironment, credentialFiles, err := prepareExecutionEnvironment(workspace, packet.EnvironmentRefs, environment)
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() {
+		if discardErr := discardCredentialFiles(credentialFiles); discardErr != nil {
+			slog.Error("could not discard delivered credential files", "job_id", packet.JobID, "error", discardErr)
+		}
+	}()
+	rotations := newRotationWatcher(
+		credentialFiles,
+		dispatcher.RotationInterval,
+		dispatcher.storeSecret(SecretScope{JobID: lease.JobID, LeaseGeneration: lease.Generation}),
+		func(values []string) { dispatcher.redactValues(lease.JobID, values) },
+		slog.Default(),
+	)
+	rotations.Start(ctx)
+	defer rotations.Stop()
+
 	initial, err := dispatcher.snapshot(ctx, workspace)
 	if err != nil {
 		return Result{}, err
@@ -257,7 +299,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return Result{}, err
 	}
 	if packet.Role == taskpacket.RolePipeline {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, environment, packet.Pipeline)
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, agentEnvironment, packet.Pipeline)
 		result = Result{Status: "completed", ExitCode: 0, InitialRevision: initial.Revision, PipelineResults: pipelineResults}
 		if pipelineErr != nil {
 			result.Status = "failed"
@@ -285,7 +327,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// decides whether the objective was met and, while it was not and budget
 	// remains, the agent is continued in the same session (see goalgate.go).
 	// With MaxContinuations at zero this is exactly one Execute, as before.
-	run := dispatcher.runAgent(ctx, lease.Generation, packet, workspace, initial, environment, output)
+	run := dispatcher.runAgent(ctx, lease.Generation, packet, workspace, initial, agentEnvironment, output)
 	if forwarder, ok := output.(*logForwarder); ok {
 		forwarder.Close()
 	}
@@ -308,7 +350,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// work with a generic pipeline failure — destroying the very signal the
 	// block exists to deliver.
 	if executeErr == nil && result.Status == "completed" && len(packet.Pipeline) > 0 {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, environment, packet.Pipeline)
+		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, agentEnvironment, packet.Pipeline)
 		result.PipelineResults = pipelineResults
 		if pipelineErr != nil {
 			executeErr = pipelineErr
@@ -658,7 +700,15 @@ func (dispatcher Dispatcher) resolveEnvironment(ctx context.Context, scope Secre
 	}
 	for _, reference := range references {
 		if _, ok := allowed[reference.Name]; !ok {
-			return nil, fmt.Errorf("task environment %q is not allowed on this runner", reference.Name)
+			// Names the setting and the value to add to it. The allow-list is a
+			// deliberate gate -- a runner decides what it will accept, not the
+			// packet -- but "is not allowed" alone sent operators looking for a
+			// project setting that does not exist, and a provider key added to
+			// a project is *expected* to hit this the first time.
+			return nil, fmt.Errorf(
+				"task environment %q is not allowed on this runner: add it to LOOP_RUNNER_ALLOWED_ENVIRONMENT (currently %q)",
+				reference.Name, strings.Join(dispatcher.AllowedEnvironment, ","),
+			)
 		}
 	}
 	if dispatcher.Environment == nil {
@@ -682,6 +732,38 @@ func (dispatcher Dispatcher) resolveEnvironment(ctx context.Context, scope Secre
 		}
 	}
 	return environment, nil
+}
+
+// redact registers every resolved credential value against the job, so no event
+// the runner sends can carry one out. A no-op without a redactor configured,
+// which is the case in tests that emit nothing.
+func (dispatcher Dispatcher) redact(jobID string, environment map[string]string) {
+	if dispatcher.RedactSecrets == nil || len(environment) == 0 {
+		return
+	}
+	values := make([]string, 0, len(environment))
+	for _, value := range environment {
+		values = append(values, secretLiterals(value)...)
+	}
+	dispatcher.RedactSecrets(jobID, values)
+}
+
+func (dispatcher Dispatcher) redactValues(jobID string, values []string) {
+	if dispatcher.RedactSecrets == nil || len(values) == 0 {
+		return
+	}
+	dispatcher.RedactSecrets(jobID, values)
+}
+
+// storeSecret binds the write-back to this job's lease, or returns nil when the
+// deployment has no durable place to put a rotated credential.
+func (dispatcher Dispatcher) storeSecret(scope SecretScope) func(context.Context, string, string) error {
+	if dispatcher.StoreSecret == nil {
+		return nil
+	}
+	return func(ctx context.Context, name, value string) error {
+		return dispatcher.StoreSecret(ctx, scope, name, value)
+	}
 }
 
 func writeArtifacts(workspace repository.Workspace, packet taskpacket.Packet) error {

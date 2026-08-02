@@ -38,6 +38,7 @@ type credentialWrite struct {
 	projectID string
 	kind      string
 	value     string
+	filePath  string
 }
 
 func (f *fakeControlPlane) SetProjectCredential(_ context.Context, request *controlv1.SetProjectCredentialRequest) (*controlv1.SetProjectCredentialResponse, error) {
@@ -45,9 +46,13 @@ func (f *fakeControlPlane) SetProjectCredential(_ context.Context, request *cont
 	defer f.mu.Unlock()
 	f.credentialWrites = append(f.credentialWrites, credentialWrite{
 		projectID: request.GetProjectId(), kind: request.GetKind(), value: request.GetValue(),
+		filePath: request.GetFilePath(),
 	})
 	f.credentials = []*controlv1.ProjectCredential{
-		{Kind: request.GetKind(), CreatedAt: "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:00:00Z"},
+		{
+			Kind: request.GetKind(), CreatedAt: "2026-08-01T00:00:00Z",
+			UpdatedAt: "2026-08-01T00:00:00Z", FilePath: request.GetFilePath(),
+		},
 	}
 	return &controlv1.SetProjectCredentialResponse{Credentials: f.credentials}, nil
 }
@@ -523,5 +528,38 @@ func TestListProjectCredentialsReportsKindsWithoutValues(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "ssh_private_key") || !strings.Contains(body, "updatedAt") {
 		t.Fatalf("unexpected payload: %s", body)
+	}
+}
+
+// A provider credential is named by whoever configures it, so the kind carries
+// the environment variable the agent reads it from. The colon is
+// percent-encoded by the console; the router has to decode it back.
+func TestSetProjectCredentialAcceptsAnAgentKindAndItsFileDestination(t *testing.T) {
+	mux, fake := startProjectServer(t)
+	req := mutateRequest(t, http.MethodPut,
+		"/api/v1/projects/p-1/credentials/agent%3AOPENCODE_AUTH",
+		`{"value":"{\"access\":\"sk-ant-oat01-token\"}","filePath":".local/share/opencode/auth.json"}`,
+		"admin-session")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	fake.mu.Lock()
+	writes := append([]credentialWrite(nil), fake.credentialWrites...)
+	fake.mu.Unlock()
+	if len(writes) != 1 || writes[0].kind != "agent:OPENCODE_AUTH" {
+		t.Fatalf("orchestrator received %+v", writes)
+	}
+	if writes[0].filePath != ".local/share/opencode/auth.json" {
+		t.Fatalf("file destination was dropped: %+v", writes[0])
+	}
+	// The destination is not a secret and comes back; the value never does.
+	if !strings.Contains(rec.Body.String(), ".local/share/opencode/auth.json") {
+		t.Fatalf("response omitted the file destination: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "sk-ant-oat01-token") {
+		t.Fatalf("response echoed the credential: %s", rec.Body.String())
 	}
 }

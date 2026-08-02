@@ -89,6 +89,19 @@ services:
       LOOP_SEED_TOKEN_LABELS: "${MOIRAI_RUNNER_LABELS:-linux}"
       LOOP_SEED_ISSUE_TITLE: "${MOIRAI_SEED_ISSUE_TITLE-}"
       LOOP_SEED_ISSUE_BODY: "${MOIRAI_SEED_ISSUE_BODY-}"
+      # Provider credentials every task packet asks the runner for. Names only,
+      # never values -- this is what makes the packet *request* a key, which is
+      # the layer a paid model was missing. Comma separated; `NAME=path`
+      # delivers it as a file below the agent's home directory instead of as a
+      # variable, which is what a subscription harness wants.
+      #
+      #   MOIRAI_AGENT_CREDENTIAL_REFS=OPENROUTER_API_KEY
+      #   MOIRAI_AGENT_CREDENTIAL_REFS=OPENCODE_AUTH=.local/share/opencode/auth.json
+      #
+      # The value comes from the runner's own environment under the same name,
+      # or from the project's own credential -- which needs compose.tls.yaml,
+      # because the orchestrator will not send one in the clear.
+      LOOP_AGENT_CREDENTIAL_REFS: "${MOIRAI_AGENT_CREDENTIAL_REFS-}"
     depends_on:
       postgres: {condition: service_healthy}
     # `egress` is not optional: issue sync, pull requests, check polling and
@@ -162,7 +175,7 @@ services:
       # Which task-packet environment requests the runner will honour. One of
       # these is required for a managed clone and for anything that pushes:
       # GITHUB_TOKEN for an https remote, GIT_SSH_KEY for an ssh one.
-      LOOP_RUNNER_ALLOWED_ENVIRONMENT: GITHUB_TOKEN,GIT_SSH_KEY
+      LOOP_RUNNER_ALLOWED_ENVIRONMENT: "GITHUB_TOKEN,GIT_SSH_KEY${MOIRAI_AGENT_CREDENTIAL_NAMES:+,${MOIRAI_AGENT_CREDENTIAL_NAMES}}"
       # Only used for projects with no credential of their own. A runner whose
       # projects all carry theirs needs nothing here -- the orchestrator hands
       # each job its project's credential over the control stream, which is why
@@ -172,6 +185,15 @@ services:
       # the tmpfs below: key material must not survive a restart.
       LOOP_RUNNER_KEY_DIR: /run/moirai/keys
       LOOP_RUNNER_AGENT_ARGUMENTS: "${MOIRAI_AGENT_ARGUMENTS:---model,opencode/deepseek-v4-flash-free,--auto}"
+      # Deployment-wide provider keys, used by any project that has not stored
+      # its own. Each has to be listed in MOIRAI_AGENT_CREDENTIAL_NAMES above
+      # and declared in MOIRAI_AGENT_CREDENTIAL_REFS on the orchestrator, or the
+      # packet never asks for it and the runner never accepts it.
+      #
+      # Compose cannot name a variable it does not know, so a provider not
+      # listed here needs a line of its own in an override file.
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY-}"
     depends_on:
       orchestrator: {condition: service_healthy}
     # Clones, fetches and pushes, and the agent calls its model provider, so

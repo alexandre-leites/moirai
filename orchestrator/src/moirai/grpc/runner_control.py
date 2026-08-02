@@ -221,6 +221,98 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
         )
         return runner_control_pb2.ResolveJobSecretResponse(value=value, delivery=delivery)
 
+    async def StoreJobSecret(
+        self,
+        request: runner_control_pb2.StoreJobSecretRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> runner_control_pb2.StoreJobSecretResponse:
+        """Persists a credential the harness rotated inside a job it holds.
+
+        The mirror of ResolveJobSecret and gated the same way. TLS first,
+        because a rotated access token is exactly as sensitive as the one it
+        replaces; then the runner's identity; then the lease fence, inside the
+        control plane, so a runner whose work was reassigned cannot rewrite the
+        project's credential from under its successor.
+
+        A refusal to store is never fatal to the caller: the value the runner
+        already holds still works for the run it is in. What is fatal is
+        pretending to have stored it, which is why every failure below is
+        reported rather than swallowed.
+        """
+        if not self._secure_channel:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "the control plane will not accept a secret over an insecure channel; "
+                "configure LOOP_GRPC_TLS_CERT_FILE and LOOP_GRPC_TLS_KEY_FILE",
+            )
+        if (
+            not request.runner_id
+            or not request.credential
+            or not request.job_id
+            or request.lease_generation < 1
+            or not request.name.strip()
+            or not request.value
+        ):
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "secret storage request is invalid")
+        try:
+            await _await_if_needed(
+                self._control_plane.authenticate_runner(
+                    request.runner_id, request.credential, self._now()
+                )
+            )
+        except AuthenticationError:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "runner authentication was rejected")
+        store = getattr(self._control_plane, "store_job_secret", None)
+        if store is None:
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED, "this control plane cannot store rotated credentials"
+            )
+        try:
+            stored = await _await_if_needed(
+                store(
+                    request.runner_id,
+                    request.job_id,
+                    request.lease_generation,
+                    request.name.strip(),
+                    request.value,
+                    self._now(),
+                )
+            )
+        except StaleLeaseError:
+            await context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "runner does not hold this job"
+            )
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except SecretCipherError as error:
+            _LOGGER.error(
+                "a rotated job secret could not be sealed",
+                extra={
+                    "runner_id": request.runner_id,
+                    "job_id": request.job_id,
+                    "reason": str(error),
+                },
+            )
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+        except Exception:
+            _LOGGER.exception(
+                "storing a rotated job secret failed",
+                extra={"runner_id": request.runner_id, "job_id": request.job_id},
+            )
+            await context.abort(grpc.StatusCode.INTERNAL, "secret could not be stored")
+        if stored:
+            await _await_if_needed(
+                self._control_plane.append_audit(
+                    None,
+                    "runner.secret.rotated",
+                    "job",
+                    f"{request.job_id}/{request.name.strip()}",
+                    "succeeded",
+                    self._now(),
+                )
+            )
+        return runner_control_pb2.StoreJobSecretResponse(stored=bool(stored))
+
     async def Connect(
         self,
         request_iterator: AsyncIterator[runner_control_pb2.RunnerToOrchestrator],

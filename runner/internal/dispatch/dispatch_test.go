@@ -99,6 +99,9 @@ type backend struct {
 	request agents.Request
 	result  agents.Result
 	err     error
+	// onExecute observes the request while the agent is "running", for
+	// assertions on state the dispatcher tears down on the way out.
+	onExecute func(agents.Request)
 }
 
 func (backend *backend) Name() string                      { return "fake" }
@@ -106,6 +109,9 @@ func (backend *backend) HealthCheck(context.Context) error { return nil }
 func (backend *backend) Cancel(string) error               { return nil }
 func (backend *backend) Execute(_ context.Context, request agents.Request) (agents.Result, error) {
 	backend.request = request
+	if backend.onExecute != nil {
+		backend.onExecute(request)
+	}
 	return backend.result, backend.err
 }
 func (backend *backend) Continue(ctx context.Context, request agents.Request) (agents.Result, error) {

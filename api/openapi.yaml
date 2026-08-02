@@ -717,9 +717,13 @@ components:
       name: kind
       in: path
       required: true
+      description: >-
+        `github_token`, `ssh_private_key`, or `agent:<NAME>` where `<NAME>` is
+        the environment variable an agent harness reads the credential from,
+        e.g. `agent:OPENROUTER_API_KEY`. Percent-encode the colon in the path.
       schema:
         type: string
-        enum: [github_token, ssh_private_key]
+        pattern: '^(github_token|ssh_private_key|agent:[A-Z_][A-Z0-9_]{0,127})$'
   responses:
     BadRequest:
       description: Malformed request
@@ -836,9 +840,16 @@ components:
       properties:
         kind:
           type: string
-          enum: [github_token, ssh_private_key]
+          pattern: '^(github_token|ssh_private_key|agent:[A-Z_][A-Z0-9_]{0,127})$'
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        filePath:
+          type: string
+          description: >-
+            Where the harness reads this credential from, relative to the home
+            directory the runner builds for the execution. Empty means it is
+            delivered as an environment variable. A destination, not a secret,
+            which is why it is reported and the value never is.
     ProjectCredentialValue:
       type: object
       required: [value]
@@ -847,8 +858,18 @@ components:
           type: string
           format: password
           description: >-
-            The credential itself — a token, or PEM private-key material. Must
-            not be blank; use DELETE to remove a credential.
+            The credential itself — a token, PEM private-key material, or a
+            provider API key or credentials document. Must not be blank; use
+            DELETE to remove a credential.
+        filePath:
+          type: string
+          description: >-
+            Only for an `agent:<NAME>` kind. Deliver the credential as a file at
+            this path below the execution's home directory instead of as an
+            environment variable; the variable then carries the path. Must be
+            relative, with no `..` segment. Required for a subscription harness
+            that reads its credentials from `~/...`, because the runner
+            overrides HOME to a throwaway directory.
     RunnerToken:
       type: object
       required: [id, allowedLabels, expiresAt]

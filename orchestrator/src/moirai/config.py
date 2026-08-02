@@ -25,6 +25,13 @@ class OrchestratorConfig:
     grpc_tls_key_file: str | None = None
     grpc_tls_client_ca_file: str | None = None
     metrics_bind: str = "0.0.0.0:9090"
+    # Provider credentials every task packet asks the runner for, as
+    # (name, home-relative file path) pairs. Declarations, never values: the
+    # deployment's value lives in the runner's own environment under the same
+    # name, and a project that stores its own overrides it. Without a
+    # declaration here the packet requests nothing and the key never arrives,
+    # which is the whole of issue #230.
+    agent_credential_refs: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> OrchestratorConfig:
@@ -45,7 +52,26 @@ class OrchestratorConfig:
             grpc_tls_key_file=key_file,
             grpc_tls_client_ca_file=client_ca_file,
             metrics_bind=read_bind(values.get("LOOP_METRICS_BIND", "0.0.0.0:9090")),
+            agent_credential_refs=read_agent_credential_refs(
+                values.get("LOOP_AGENT_CREDENTIAL_REFS", "")
+            ),
         )
+
+
+def read_agent_credential_refs(value: str) -> tuple[tuple[str, str], ...]:
+    """Parses LOOP_AGENT_CREDENTIAL_REFS, refusing a malformed declaration.
+
+    `OPENROUTER_API_KEY,OPENCODE_AUTH=.local/share/opencode/auth.json`
+
+    Raised as a ConfigurationError so a typo stops the orchestrator at startup
+    rather than producing packets that quietly request nothing.
+    """
+    from moirai.domain.credentials import parse_agent_credential_refs
+
+    try:
+        return parse_agent_credential_refs(value)
+    except ValueError as error:
+        raise ConfigurationError(f"LOOP_AGENT_CREDENTIAL_REFS is invalid: {error}") from error
 
 
 def read_secret(environment: Mapping[str, str], name: str) -> str:

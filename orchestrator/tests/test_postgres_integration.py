@@ -2443,11 +2443,151 @@ class ResolveJobSecretIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.runner_id, self.job_id, self.generation, "GITHUB_TOKEN", _NOW
             )
 
-    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
+    async def test_a_name_that_cannot_name_a_credential_is_rejected(self) -> None:
+        """HOME is what the agent's home directory is, not a credential."""
+        for name in ("HOME", "PATH", "not-an-env-name"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    await self.control_plane.resolve_job_secret(
+                        self.runner_id, self.job_id, self.generation, name, _NOW
+                    )
+
+    async def test_an_unstored_provider_name_falls_back_to_the_runner(self) -> None:
+        """None, not an error: the runner is being told to use its own value.
+
+        This is the gate that made a deployment-wide OPENROUTER_API_KEY
+        impossible -- a name outside the two git kinds used to be rejected
+        outright (issue #230).
+        """
+        self.assertIsNone(
             await self.control_plane.resolve_job_secret(
-                self.runner_id, self.job_id, self.generation, "AWS_SECRET_ACCESS_KEY", _NOW
+                self.runner_id, self.job_id, self.generation, "OPENROUTER_API_KEY", _NOW
             )
+        )
+
+    async def test_a_provider_key_is_stored_sealed_and_resolved_for_the_job(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "agent:OPENROUTER_API_KEY", "or-v1-9f2c1d4e8a7b6c5d", None, _NOW
+        )
+
+        self.assertEqual(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "OPENROUTER_API_KEY", _NOW
+            ),
+            ("or-v1-9f2c1d4e8a7b6c5d", "environment"),
+        )
+        # Sealed at rest: the ciphertext column must not contain the plaintext.
+        stored = await self.pool.fetchval(
+            "SELECT ciphertext FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
+            UUID(self.project_id), "agent:OPENROUTER_API_KEY",
+        )
+        self.assertNotIn(b"or-v1-9f2c1d4e8a7b6c5d", bytes(stored))
+
+    async def test_delivery_follows_the_stored_row_not_the_name(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "agent:OPENCODE_AUTH", '{"access":"token"}', None, _NOW,
+            file_path=".local/share/opencode/auth.json",
+        )
+
+        self.assertEqual(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "OPENCODE_AUTH", _NOW
+            ),
+            ('{"access":"token"}', "file"),
+        )
+        described = await self.control_plane.describe_project_credentials(self.project_id)
+        entry = next(item for item in described if item["kind"] == "agent:OPENCODE_AUTH")
+        self.assertEqual(entry["file_path"], ".local/share/opencode/auth.json")
+
+    async def test_a_stored_provider_credential_is_requested_by_the_projects_packets(self) -> None:
+        """Derived from what is stored, so a credential cannot go unrequested."""
+        await self.control_plane.set_project_credential(
+            self.project_id, "agent:OPENCODE_AUTH", "value", None, _NOW,
+            file_path=".local/share/opencode/auth.json",
+        )
+
+        refs = await self.control_plane.project_agent_credential_refs(self.project_id)
+
+        self.assertEqual(
+            [(ref.name, ref.secret_ref, ref.path) for ref in refs],
+            [("OPENCODE_AUTH", "agent:OPENCODE_AUTH", ".local/share/opencode/auth.json")],
+        )
+
+    async def test_a_deployment_declaration_reaches_every_projects_packets(self) -> None:
+        self.control_plane.set_agent_credential_refs((("OPENROUTER_API_KEY", ""),))
+
+        refs = await self.control_plane.project_agent_credential_refs(self.project_id)
+
+        self.assertEqual([ref.name for ref in refs], ["OPENROUTER_API_KEY"])
+
+    async def test_a_project_credential_overrides_the_deployment_declaration(self) -> None:
+        self.control_plane.set_agent_credential_refs((("OPENCODE_AUTH", ""),))
+        await self.control_plane.set_project_credential(
+            self.project_id, "agent:OPENCODE_AUTH", "value", None, _NOW,
+            file_path=".local/share/opencode/auth.json",
+        )
+
+        refs = await self.control_plane.project_agent_credential_refs(self.project_id)
+
+        self.assertEqual(
+            [(ref.name, ref.path) for ref in refs],
+            [("OPENCODE_AUTH", ".local/share/opencode/auth.json")],
+        )
+
+    async def test_a_rotated_token_survives_the_execution_that_rotated_it(self) -> None:
+        """The whole point of the write-back: the next run uses the new value."""
+        await self.control_plane.set_project_credential(
+            self.project_id, "agent:OPENCODE_AUTH", '{"access":"expiring"}', None, _NOW,
+            file_path=".config/auth.json",
+        )
+
+        stored = await self.control_plane.store_job_secret(
+            self.runner_id, self.job_id, self.generation, "OPENCODE_AUTH",
+            '{"access":"refreshed"}', _NOW,
+        )
+
+        self.assertTrue(stored)
+        self.assertEqual(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "OPENCODE_AUTH", _NOW
+            ),
+            ('{"access":"refreshed"}', "file"),
+        )
+        # The delivery survives the rotation: a file must not become a variable
+        # the harness will never read.
+        described = await self.control_plane.describe_project_credentials(self.project_id)
+        entry = next(item for item in described if item["kind"] == "agent:OPENCODE_AUTH")
+        self.assertEqual(entry["file_path"], ".config/auth.json")
+
+    async def test_a_runner_cannot_introduce_a_credential_by_rotating_it(self) -> None:
+        stored = await self.control_plane.store_job_secret(
+            self.runner_id, self.job_id, self.generation, "OPENROUTER_API_KEY", "injected", _NOW
+        )
+
+        self.assertFalse(stored)
+        self.assertIsNone(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "OPENROUTER_API_KEY", _NOW
+            )
+        )
+
+    async def test_a_stale_lease_cannot_rotate_the_projects_credential(self) -> None:
+        await self.control_plane.set_project_credential(
+            self.project_id, "agent:OPENCODE_AUTH", "original", None, _NOW,
+            file_path=".config/auth.json",
+        )
+
+        with self.assertRaises(StaleLeaseError):
+            await self.control_plane.store_job_secret(
+                self.runner_id, self.job_id, self.generation + 1, "OPENCODE_AUTH", "stolen", _NOW
+            )
+
+        self.assertEqual(
+            await self.control_plane.resolve_job_secret(
+                self.runner_id, self.job_id, self.generation, "OPENCODE_AUTH", _NOW
+            ),
+            ("original", "file"),
+        )
 
 
 class IssueStateNormalizationIntegrationTests(unittest.IsolatedAsyncioTestCase):

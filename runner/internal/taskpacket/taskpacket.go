@@ -67,6 +67,15 @@ type Repository struct {
 type EnvironmentRef struct {
 	Name      string `json:"name"`
 	SecretRef string `json:"secretRef"`
+	// Path, when set, means the resolved value has to be written to a file
+	// rather than exported as a variable, at this location *relative to the
+	// home directory the runner builds for the execution*. The variable named
+	// by Name then carries that path instead of the value.
+	//
+	// It exists because the runner overrides HOME to a throwaway directory, so
+	// a harness looking for ~/.config/... finds nothing that an image baked in.
+	// A path is a destination, not a secret: it is safe in the packet.
+	Path string `json:"path,omitempty"`
 }
 
 type Constraints struct {
@@ -205,12 +214,34 @@ func validateEnvironmentRefs(references []EnvironmentRef) error {
 		if !environmentName.MatchString(reference.Name) || !safeText(reference.SecretRef, 512) {
 			return errors.New("task packet environment reference is invalid")
 		}
+		if reference.Path != "" && !credentialFilePath(reference.Path) {
+			return errors.New("task packet credential file path is invalid")
+		}
 		if _, exists := seen[reference.Name]; exists {
 			return errors.New("task packet environment references must be unique")
 		}
 		seen[reference.Name] = struct{}{}
 	}
 	return nil
+}
+
+// credentialFilePath accepts only a destination inside the execution's own home
+// directory. Absolute paths and parent traversal are refused here rather than
+// where the file is written, so a packet that could place credential material
+// outside the directory the runner owns and discards never gets that far.
+func credentialFilePath(path string) bool {
+	if !safeText(path, 256) || filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	if strings.HasPrefix(path, "~") || strings.ContainsAny(path, "\\") {
+		return false
+	}
+	for _, segment := range strings.Split(path, string(filepath.Separator)) {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func taskPath(path string) bool {

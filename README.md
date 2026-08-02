@@ -78,6 +78,56 @@ key material is written to tmpfs and removed when the job ends.
 An SSH remote (`git@github.com:owner/repo.git`) uses the project's SSH private key instead of
 its token; the remote's scheme decides which, so a project may carry both.
 
+### Running against a paid or subscription model
+
+The default model, `opencode/deepseek-v4-flash-free`, needs no credential — which is why the
+free tier is what works out of the box. A paid provider needs three things, and missing any one
+of them fails the execution with a message naming it.
+
+**1. Declare it**, so the task packet asks for it. Names only; no value goes near this setting:
+
+```bash
+echo "MOIRAI_AGENT_CREDENTIAL_REFS=OPENROUTER_API_KEY" >> .env
+echo "MOIRAI_AGENT_CREDENTIAL_NAMES=OPENROUTER_API_KEY" >> .env
+```
+
+The first tells the orchestrator to request it in every task packet; the second adds it to the
+runner's allow-list, which is what the runner will accept a request for.
+
+**2. Supply a value**, in one of two places:
+
+| Where | How | Applies to |
+|---|---|---|
+| Deployment | `OPENROUTER_API_KEY=...` in `.env`, read by the runner | Every project that has no key of its own |
+| Project | *Projects → Credentials → Add provider credential* | That project, overriding the deployment key |
+
+A per-project key travels to the runner over the control stream, so it needs the TLS overlay for
+the same reason a per-project GitHub token does.
+
+**3. Point the agent at the model**, which is `MOIRAI_AGENT_ARGUMENTS`:
+
+```bash
+echo "MOIRAI_AGENT_ARGUMENTS=--model,openrouter/anthropic/claude-sonnet-4,--auto" >> .env
+```
+
+A resolved key is added to the runner's redaction set before it reaches the agent, so nothing
+the agent echoes carries it into the console log, and no value ever travels in a task packet.
+
+**A subscription harness** keeps its credentials in a file rather than a variable. Give the
+credential a path and it is written below the home directory the runner builds for the
+execution — which is the only `~` the agent sees, because the runner overrides `HOME` to keep
+an execution from inheriting anything it was not granted:
+
+```bash
+echo "MOIRAI_AGENT_CREDENTIAL_REFS=OPENCODE_AUTH=.local/share/opencode/auth.json" >> .env
+```
+
+The named variable then carries the path rather than the value. If the harness refreshes the
+token inside a run, the runner notices and writes the new value back to the project's
+credential, so the next execution starts from a live token instead of re-authorizing. That
+write-back needs the credential to be stored per project — a deployment-wide key in the
+runner's environment has nowhere durable to go back to.
+
 Only port 3000 is published; nginx proxies `/api/` to the API over an internal network. That is
 what lets the same file work unchanged against a remote Portainer host.
 

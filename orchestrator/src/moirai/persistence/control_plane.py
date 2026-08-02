@@ -20,9 +20,13 @@ from moirai.domain.control_plane import (
     ScheduledJob,
 )
 from moirai.domain.credentials import (
+    AGENT_KIND_PREFIX,
     CREDENTIAL_DELIVERY,
-    CREDENTIAL_KIND_BY_ENVIRONMENT_NAME,
-    VALID_CREDENTIAL_KINDS,
+    agent_environment_name,
+    credential_kind_for_environment,
+    is_agent_credential_kind,
+    normalize_credential_file_path,
+    validate_credential_kind,
 )
 from moirai.domain.leases import StaleLeaseError
 from moirai.domain.models import (
@@ -65,8 +69,10 @@ from moirai.workflows.runner_events import (
 )
 from moirai.workflows.schema_validation import SchemaNotFoundError, load_schema, validate
 from moirai.workflows.task_packets import (
+    EnvironmentRef,
     ExecutionRole,
     PipelineCommand,
+    agent_environment_refs,
     build_task_packet,
     pipeline_task_execution,
     planner_task_execution,
@@ -258,6 +264,19 @@ class AsyncpgControlPlane:
         self._unanswered_offer_limit = unanswered_offer_limit
         self._unanswered_offer_grace = unanswered_offer_grace
         self._secret_cipher = secret_cipher
+        self._agent_credential_refs: tuple[tuple[str, str], ...] = ()
+
+    def set_agent_credential_refs(self, refs: tuple[tuple[str, str], ...]) -> None:
+        """Declares the provider credentials every project's packets request.
+
+        The deployment default: (name, file path) pairs from
+        ``LOOP_AGENT_CREDENTIAL_REFS``. The *values* stay in the runner's own
+        environment -- this only makes the packet ask, which is the layer that
+        was missing. A project that stores its own credential of the same name
+        overrides both the declaration and, through the control plane, the
+        value.
+        """
+        self._agent_credential_refs = tuple(refs)
 
     @property
     def pool(self) -> Any:
@@ -1005,10 +1024,11 @@ class AsyncpgControlPlane:
         value: str,
         actor_user_id: str | None,
         now: datetime,
+        file_path: str = "",
     ) -> None:
         """Seals a credential and replaces whatever that project had for `kind`."""
-        if kind not in VALID_CREDENTIAL_KINDS:
-            raise ValueError(f"unknown credential kind: {kind}")
+        validate_credential_kind(kind)
+        file_path = normalize_credential_file_path(kind, file_path)
         sealed = self._cipher().seal(value)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
@@ -1023,11 +1043,12 @@ class AsyncpgControlPlane:
                 await connection.execute(
                     """
                     INSERT INTO app.project_credentials
-                        (project_id, kind, ciphertext, nonce, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $5)
+                        (project_id, kind, ciphertext, nonce, file_path, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $6, $5, $5)
                     ON CONFLICT (project_id, kind) DO UPDATE
                     SET ciphertext = EXCLUDED.ciphertext,
                         nonce = EXCLUDED.nonce,
+                        file_path = EXCLUDED.file_path,
                         updated_at = EXCLUDED.updated_at
                     """,
                     _uuid(project_id),
@@ -1035,6 +1056,7 @@ class AsyncpgControlPlane:
                     sealed.ciphertext,
                     sealed.nonce,
                     now,
+                    file_path,
                 )
                 # The value is never audited, only that it changed and to which
                 # kind -- the resource id carries the project and the kind.
@@ -1051,8 +1073,7 @@ class AsyncpgControlPlane:
     async def clear_project_credential(
         self, project_id: str, kind: str, actor_user_id: str | None, now: datetime
     ) -> bool:
-        if kind not in VALID_CREDENTIAL_KINDS:
-            raise ValueError(f"unknown credential kind: {kind}")
+        validate_credential_kind(kind)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 status = await connection.execute(
@@ -1086,9 +1107,90 @@ class AsyncpgControlPlane:
         "you no longer hold this job" and "that project has no such credential"
         are different answers and must not look alike to the caller.
         """
-        kind = CREDENTIAL_KIND_BY_ENVIRONMENT_NAME.get(name)
+        kind = credential_kind_for_environment(name)
         if kind is None:
             raise ValueError(f"no project credential backs the environment reference {name!r}")
+        project_id = await self._fenced_job_project(runner_id, job_id, generation, now)
+        record = await self._pool.fetchrow(
+            "SELECT ciphertext, nonce, file_path FROM app.project_credentials "
+            "WHERE project_id = $1 AND kind = $2",
+            _uuid(project_id),
+            kind,
+        )
+        if record is None:
+            return None
+        value = self._cipher().open(
+            SealedSecret(ciphertext=bytes(record["ciphertext"]), nonce=bytes(record["nonce"]))
+        )
+        if is_agent_credential_kind(kind):
+            # An agent credential's delivery is a property of the row, not of
+            # the kind: the same OPENROUTER_API_KEY is a variable for one
+            # deployment and a credentials file for another.
+            return value, "file" if str(record["file_path"] or "") else "environment"
+        return value, CREDENTIAL_DELIVERY[kind]
+
+    async def store_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, value: str, now: datetime
+    ) -> bool:
+        """Persists a credential a harness rotated during a job it holds.
+
+        This is the durable half of a rotating credential. A subscription token
+        is refreshed by the harness inside the execution; without somewhere to
+        put the new value, the next execution starts from an access token that
+        has already expired and redoes the authorization dance -- or simply
+        fails.
+
+        Deliberately an *update*, never an insert. A runner may replace the
+        value of a credential this project already gave it, and nothing else: it
+        cannot introduce a credential under a name nobody configured, and it
+        cannot write to a project whose job it does not hold. False means
+        "there was nothing of that name to rotate", which the runner reports and
+        moves on from rather than failing the execution over.
+        """
+        kind = credential_kind_for_environment(name)
+        if kind is None or not is_agent_credential_kind(kind):
+            raise ValueError(f"{name!r} is not a rotatable agent credential")
+        if not value:
+            raise ValueError("refusing to store an empty credential")
+        project_id = await self._fenced_job_project(runner_id, job_id, generation, now)
+        sealed = self._cipher().seal(value)
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                status = await connection.execute(
+                    """
+                    UPDATE app.project_credentials
+                    SET ciphertext = $3, nonce = $4, updated_at = $5
+                    WHERE project_id = $1 AND kind = $2
+                    """,
+                    _uuid(project_id),
+                    kind,
+                    sealed.ciphertext,
+                    sealed.nonce,
+                    now,
+                )
+                if status == "UPDATE 0":
+                    return False
+                await AsyncpgAuthentication._append_audit(
+                    connection,
+                    actor_user_id=None,
+                    action="runner.secret.rotated",
+                    resource_type="project_credential",
+                    resource_id=f"{project_id}/{kind}",
+                    outcome="succeeded",
+                    now=now,
+                )
+                return True
+
+    async def _fenced_job_project(
+        self, runner_id: str, job_id: str, generation: int, now: datetime
+    ) -> str:
+        """The project of a job this runner holds right now, or a stale lease.
+
+        Fenced on exactly the conditions `renew_lease` uses -- this runner, this
+        job, this generation, an unexpired lease and a live status -- so a runner
+        whose work was taken away by recovery can neither read nor write the
+        project's credentials for it.
+        """
         job = await self._pool.fetchrow(
             """
             SELECT project_id
@@ -1103,16 +1205,13 @@ class AsyncpgControlPlane:
         )
         if job is None:
             raise StaleLeaseError("runner does not hold this job at this lease generation")
-        value = await self.project_credential(str(job["project_id"]), kind)
-        if value is None:
-            return None
-        return value, CREDENTIAL_DELIVERY[kind]
+        return str(job["project_id"])
 
     async def describe_project_credentials(self, project_id: str) -> list[dict[str, object]]:
         """What is configured, never the values. This is the only read the API has."""
         records = await self._pool.fetch(
             """
-            SELECT kind, created_at, updated_at
+            SELECT kind, file_path, created_at, updated_at
             FROM app.project_credentials
             WHERE project_id = $1
             ORDER BY kind
@@ -1122,11 +1221,32 @@ class AsyncpgControlPlane:
         return [
             {
                 "kind": str(record["kind"]),
+                "file_path": str(record["file_path"] or ""),
                 "created_at": record["created_at"],
                 "updated_at": record["updated_at"],
             }
             for record in records
         ]
+
+    async def project_agent_credential_refs(self, project_id: str) -> tuple[EnvironmentRef, ...]:
+        """The provider credentials this project's task packets must request.
+
+        Derived from what the project has stored rather than from a second list
+        an operator has to keep in step with it: a credential nobody requests is
+        a credential that never reaches the agent, and that is precisely the
+        failure this whole path exists to remove.
+        """
+        records = await self._pool.fetch(
+            "SELECT kind, file_path FROM app.project_credentials "
+            "WHERE project_id = $1 AND kind LIKE $2 ORDER BY kind",
+            _uuid(project_id),
+            f"{AGENT_KIND_PREFIX}%",
+        )
+        stored = [
+            (agent_environment_name(str(record["kind"])), str(record["file_path"] or ""))
+            for record in records
+        ]
+        return agent_environment_refs((*self._agent_credential_refs, *stored))
 
     async def project_credential(self, project_id: str, kind: str) -> str | None:
         """Opens one credential for the orchestrator's own use.
@@ -1136,8 +1256,7 @@ class AsyncpgControlPlane:
         rather than a None: silently falling back would use the wrong identity
         against the code host and look like a permissions problem.
         """
-        if kind not in VALID_CREDENTIAL_KINDS:
-            raise ValueError(f"unknown credential kind: {kind}")
+        validate_credential_kind(kind)
         record = await self._pool.fetchrow(
             "SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id = $1 AND kind = $2",
             _uuid(project_id),
@@ -1619,6 +1738,9 @@ class AsyncpgControlPlane:
         default_branch = str(record["default_branch"])
         configuration = _json_object(record.get("configuration"))
         execution_image = str(configuration.get("execution_image", ""))
+        agent_credential_refs = await self.project_agent_credential_refs(
+            str(record["project_id"])
+        )
         planner_execution_result = _json_object(record.get("planner_result"))
         planner_result = _schema_result(planner_execution_result.get("result"), "planner-result")
         review_result = _json_object(record.get("review_result"))
@@ -1649,6 +1771,7 @@ class AsyncpgControlPlane:
                     local_repository_path=local_repository_path,
                     default_branch=default_branch,
                     acceptance_criteria=acceptance_criteria,
+                    agent_credential_refs=agent_credential_refs,
                     execution_image=execution_image,
                 )
             )
@@ -1686,6 +1809,7 @@ class AsyncpgControlPlane:
                     diff_summary=diff_summary,
                     failed_checks=failed_checks,
                     review_findings=review_findings,
+                    agent_credential_refs=agent_credential_refs,
                     execution_image=execution_image,
                 )
             )
@@ -1711,6 +1835,7 @@ class AsyncpgControlPlane:
                 diff_summary=diff_summary,
                 failed_checks=failed_checks,
                 review_findings=review_findings,
+                agent_credential_refs=agent_credential_refs,
                 execution_image=execution_image,
             )
         )

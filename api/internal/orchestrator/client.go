@@ -241,11 +241,12 @@ func (c *Client) SetProjectEnabled(ctx context.Context, projectID string, enable
 	return resp, nil
 }
 
-func (c *Client) SetProjectCredential(ctx context.Context, projectID, kind, value string) (*controlv1.SetProjectCredentialResponse, error) {
+func (c *Client) SetProjectCredential(ctx context.Context, projectID, kind, value, filePath string) (*controlv1.SetProjectCredentialResponse, error) {
 	resp, err := c.client.SetProjectCredential(ctx, &controlv1.SetProjectCredentialRequest{
 		ProjectId: projectID,
 		Kind:      kind,
 		Value:     value,
+		FilePath:  filePath,
 	})
 	if err != nil {
 		return nil, mapError(err)

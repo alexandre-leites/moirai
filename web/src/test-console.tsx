@@ -92,7 +92,7 @@ export function token(overrides: Partial<RunnerToken> = {}): RunnerToken {
 }
 
 export function credential(overrides: Partial<ProjectCredential> = {}): ProjectCredential {
-  return { kind: "github_token", createdAt: NOW, updatedAt: NOW, ...overrides };
+  return { kind: "github_token", createdAt: NOW, updatedAt: NOW, filePath: "", ...overrides };
 }
 
 export function event(overrides: Partial<WorkflowEvent> = {}): WorkflowEvent {

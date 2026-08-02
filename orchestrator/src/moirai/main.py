@@ -412,6 +412,18 @@ async def serve(
     shutdown = stop_event or asyncio.Event()
     factory = control_plane_factory or AsyncpgControlPlane.connect
     control_plane = await _connect_control_plane(factory, active_config)
+    # Applied after the connection rather than through the factory: an injected
+    # test factory takes only a database URL, and a declaration that silently
+    # failed to apply would produce packets requesting nothing -- the exact
+    # failure this setting exists to remove.
+    declare_refs = getattr(control_plane, "set_agent_credential_refs", None)
+    if callable(declare_refs):
+        declare_refs(active_config.agent_credential_refs)
+    elif active_config.agent_credential_refs:
+        _LOGGER.warning(
+            "control plane does not accept agent credential declarations; "
+            "LOOP_AGENT_CREDENTIAL_REFS will not reach task packets"
+        )
     health = HealthState()
     server = grpc.aio.server(interceptors=(CorrelationLoggingInterceptor(),))
     workflow_runtime: Any | None = None

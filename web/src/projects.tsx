@@ -2,7 +2,12 @@
 // may work on — its issues, its labels, its delivery policy.
 import { useCallback, useState, type FormEvent } from "react";
 import { Link } from "react-router";
-import type { ApiClient, CredentialKind, PipelineStep, Project, ProjectConfiguration, ProjectCredential } from "./api";
+import {
+  AGENT_CREDENTIAL_NAME, AGENT_CREDENTIAL_PREFIX, agentCredentialName, isAgentCredentialKind,
+} from "./api";
+import type {
+  ApiClient, CredentialKind, GitCredentialKind, PipelineStep, Project, ProjectConfiguration, ProjectCredential,
+} from "./api";
 import { ApiError } from "./api";
 import { activeWorkflowFor, useConsoleData } from "./console-data";
 import { useIsAdmin } from "./auth";
@@ -270,15 +275,25 @@ function movePipelineStep(steps: PipelineStep[], index: number, offset: number):
   return result;
 }
 
-const CREDENTIAL_LABELS: Record<CredentialKind, string> = {
+const CREDENTIAL_LABELS: Record<GitCredentialKind, string> = {
   github_token: "GitHub token",
   ssh_private_key: "SSH private key",
 };
 
-const CREDENTIAL_HINTS: Record<CredentialKind, string> = {
+const CREDENTIAL_HINTS: Record<GitCredentialKind, string> = {
   github_token: "Reads issues and opens pull requests as this token. Needs `repo` scope for a private repository.",
   ssh_private_key: "Used for git over SSH. Paste the private key, including its BEGIN and END lines.",
 };
+
+/** An agent credential is named by the operator, so its label is its name. */
+function credentialLabel(kind: CredentialKind): string {
+  return isAgentCredentialKind(kind) ? agentCredentialName(kind) : CREDENTIAL_LABELS[kind];
+}
+
+function credentialHint(kind: CredentialKind): string {
+  if (!isAgentCredentialKind(kind)) return CREDENTIAL_HINTS[kind];
+  return `Reaches the agent as $${agentCredentialName(kind)}. Delivered over the control stream, which requires the TLS overlay, and added to the runner's LOOP_RUNNER_ALLOWED_ENVIRONMENT.`;
+}
 
 /**
  * Per-project credentials (specification: they replace the deployment-wide
@@ -293,6 +308,7 @@ function Credentials({ api, projectId }: { api: ApiClient; projectId: string }) 
   const toast = useToast();
   const { confirm, dialog } = useConfirm();
   const [editing, setEditing] = useState<CredentialKind | null>(null);
+  const [adding, setAdding] = useState(false);
 
   const load = useCallback(
     (signal: AbortSignal) => api.listProjectCredentials(projectId, signal),
@@ -305,61 +321,177 @@ function Credentials({ api, projectId }: { api: ApiClient; projectId: string }) 
 
   const clear = (kind: CredentialKind) => {
     api.clearProjectCredential(projectId, kind).then(
-      () => { toast(`${CREDENTIAL_LABELS[kind]} removed`); refresh(); },
+      () => { toast(`${credentialLabel(kind)} removed`); refresh(); },
       (reason: unknown) => toast(credentialFailure(reason))
     );
   };
 
   if (error) return <p className="t2">{error}</p>;
 
+  const agentKinds = (data ?? []).map((entry) => entry.kind).filter(isAgentCredentialKind);
+  const kinds: CredentialKind[] = [...(Object.keys(CREDENTIAL_LABELS) as GitCredentialKind[]), ...agentKinds];
+
+  const row = (kind: CredentialKind) => {
+    const entry = configured(kind);
+    const agent = isAgentCredentialKind(kind);
+    return (
+      <div className="row-line" key={kind}>
+        <span>
+          {credentialLabel(kind)}
+          <span className="t2">
+            {entry
+              ? ` · set ${ageAgo(entry.updatedAt, "recently")}${entry.filePath ? ` · file ~/${entry.filePath}` : ""}`
+              : " · not set, uses the shared token"}
+          </span>
+        </span>
+        {isAdmin && (
+          <span className="btnrow">
+            <button type="button" className="btn sm" onClick={() => setEditing(kind)}>
+              {entry ? "Replace" : "Set"}
+            </button>
+            {entry && (
+              <button
+                type="button"
+                className="btn sm danger"
+                onClick={() => confirm({
+                  title: `Remove ${credentialLabel(kind)}`,
+                  body: agent
+                    ? "This project falls back to whatever the runner has configured under that name. Work already running is unaffected."
+                    : "This project falls back to the deployment-wide credential. Work already running is unaffected.",
+                  confirmLabel: "Remove",
+                  danger: true,
+                  onConfirm: () => clear(kind),
+                })}
+              >
+                Remove
+              </button>
+            )}
+          </span>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="cred-list">
-      {(Object.keys(CREDENTIAL_LABELS) as CredentialKind[]).map((kind) => {
-        const entry = configured(kind);
-        return (
-          <div className="row-line" key={kind}>
-            <span>
-              {CREDENTIAL_LABELS[kind]}
-              <span className="t2">
-                {entry ? ` · set ${ageAgo(entry.updatedAt, "recently")}` : " · not set, uses the shared token"}
-              </span>
-            </span>
-            {isAdmin && (
-              <span className="btnrow">
-                <button type="button" className="btn sm" onClick={() => setEditing(kind)}>
-                  {entry ? "Replace" : "Set"}
-                </button>
-                {entry && (
-                  <button
-                    type="button"
-                    className="btn sm danger"
-                    onClick={() => confirm({
-                      title: `Remove the ${CREDENTIAL_LABELS[kind].toLowerCase()}`,
-                      body: "This project falls back to the deployment-wide credential. Work already running is unaffected.",
-                      confirmLabel: "Remove",
-                      danger: true,
-                      onConfirm: () => clear(kind),
-                    })}
-                  >
-                    Remove
-                  </button>
-                )}
-              </span>
-            )}
-          </div>
-        );
-      })}
+      {kinds.map(row)}
+      {isAdmin && (
+        <div className="btnrow">
+          <button type="button" className="btn sm" onClick={() => setAdding(true)}>
+            Add provider credential
+          </button>
+        </div>
+      )}
       {editing && (
         <CredentialForm
           api={api}
           projectId={projectId}
           kind={editing}
+          filePath={configured(editing)?.filePath ?? ""}
           onClose={() => setEditing(null)}
-          onSaved={() => { toast(`${CREDENTIAL_LABELS[editing]} saved`); refresh(); }}
+          onSaved={() => { toast(`${credentialLabel(editing)} saved`); refresh(); }}
+        />
+      )}
+      {adding && (
+        <AgentCredentialForm
+          api={api}
+          projectId={projectId}
+          onClose={() => setAdding(false)}
+          onSaved={(name) => { toast(`${name} saved`); refresh(); }}
         />
       )}
       {dialog}
     </div>
+  );
+}
+
+/**
+ * Adds a provider credential the agent needs: an OpenRouter key, a direct
+ * provider key, or a subscription credentials document.
+ *
+ * The name is the environment variable the harness reads, because that is the
+ * only thing the runner can deliver it under. A path turns it into a file
+ * written below the execution's home directory — which is what a subscription
+ * harness wants, and what an API key never does.
+ */
+function AgentCredentialForm({ api, projectId, onClose, onSaved }: {
+  api: ApiClient;
+  projectId: string;
+  onClose: () => void;
+  onSaved: (name: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [filePath, setFilePath] = useState("");
+  const [value, setValue] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const variable = name.trim().toUpperCase();
+    if (!AGENT_CREDENTIAL_NAME.test(variable)) {
+      setError("Use the environment variable name the agent reads, e.g. OPENROUTER_API_KEY.");
+      return;
+    }
+    if (!value.trim()) { setError("Paste the credential, or cancel."); return; }
+    setError("");
+    setSaving(true);
+    api.setProjectCredential(projectId, `${AGENT_CREDENTIAL_PREFIX}${variable}`, value, filePath.trim()).then(
+      () => { onSaved(variable); onClose(); },
+      (reason: unknown) => setError(credentialFailure(reason))
+    ).finally(() => setSaving(false));
+  };
+
+  return (
+    <Modal title="Provider credential" onClose={onClose}>
+      <h2>Provider credential</h2>
+      <p>
+        Reaches the agent under this name. The runner must also list it in
+        LOOP_RUNNER_ALLOWED_ENVIRONMENT, and the control stream must be running
+        the TLS overlay — the orchestrator will not send a credential in the clear.
+      </p>
+      <form onSubmit={submit}>
+        {error && <ErrorBlock title={error} />}
+        <div className="form-grid">
+          <label>
+            Variable
+            <input
+              value={name}
+              placeholder="OPENROUTER_API_KEY"
+              aria-label="Variable"
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <label>
+            File path (optional)
+            <input
+              value={filePath}
+              placeholder=".local/share/opencode/auth.json"
+              aria-label="File path"
+              onChange={(event) => setFilePath(event.target.value)}
+            />
+          </label>
+          <label className="wide">
+            Value
+            <textarea
+              value={value}
+              rows={4}
+              aria-label="Value"
+              onChange={(event) => setValue(event.target.value)}
+            />
+          </label>
+        </div>
+        <p className="t2">
+          Leave the path empty for an API key. Set it for a subscription harness
+          that reads credentials from a file: it is written below the agent's
+          home directory, and the variable carries the path.
+        </p>
+        <div className="btnrow">
+          <button type="submit" className="btn primary" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -372,33 +504,39 @@ function credentialFailure(reason: unknown): string {
   return reason instanceof Error ? reason.message : "The credential could not be saved.";
 }
 
-function CredentialForm({ api, projectId, kind, onClose, onSaved }: {
+function CredentialForm({ api, projectId, kind, filePath = "", onClose, onSaved }: {
   api: ApiClient;
   projectId: string;
   kind: CredentialKind;
+  filePath?: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const multiline = kind === "ssh_private_key";
+  // An SSH key and a subscription credentials document are both multi-line
+  // pastes; a token and an API key are one line.
+  const multiline = kind === "ssh_private_key" || filePath !== "";
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!value.trim()) { setError("Paste the credential, or cancel."); return; }
     setError("");
     setSaving(true);
-    api.setProjectCredential(projectId, kind, value).then(
+    // Replacing a credential keeps its delivery: an operator changing a
+    // subscription token must not silently turn a file into a variable the
+    // harness will never read.
+    api.setProjectCredential(projectId, kind, value, filePath).then(
       () => { onSaved(); onClose(); },
       (reason: unknown) => setError(credentialFailure(reason))
     ).finally(() => setSaving(false));
   };
 
   return (
-    <Modal title={CREDENTIAL_LABELS[kind]} onClose={onClose}>
-      <h2>{CREDENTIAL_LABELS[kind]}</h2>
-      <p>{CREDENTIAL_HINTS[kind]}</p>
+    <Modal title={credentialLabel(kind)} onClose={onClose}>
+      <h2>{credentialLabel(kind)}</h2>
+      <p>{credentialHint(kind)}</p>
       <form onSubmit={submit}>
         {error && <ErrorBlock title={error} />}
         <div className="form-grid">
@@ -408,7 +546,7 @@ function CredentialForm({ api, projectId, kind, onClose, onSaved }: {
               <textarea
                 value={value}
                 rows={6}
-                aria-label={CREDENTIAL_LABELS[kind]}
+                aria-label={credentialLabel(kind)}
                 onChange={(event) => setValue(event.target.value)}
               />
             ) : (
@@ -416,7 +554,7 @@ function CredentialForm({ api, projectId, kind, onClose, onSaved }: {
                 type="password"
                 value={value}
                 autoComplete="off"
-                aria-label={CREDENTIAL_LABELS[kind]}
+                aria-label={credentialLabel(kind)}
                 onChange={(event) => setValue(event.target.value)}
               />
             )}

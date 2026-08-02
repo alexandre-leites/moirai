@@ -422,15 +422,38 @@ class ResolveJobSecretTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
 
-    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
+    async def test_an_unstored_provider_name_falls_back_to_the_runner(self) -> None:
+        """Any provider name is resolvable; having none is NOT_FOUND, not a bug.
+
+        Before agent credentials, a name outside the two git kinds was rejected
+        outright, which is what made a deployment-wide OPENROUTER_API_KEY
+        impossible: the runner could never be told "I have nothing, use yours".
+        """
         runner_id, credential, job_id, generation = await self._holding_runner()
 
         with self.assertRaises(grpc.aio.AioRpcError) as raised:
             await self.client.ResolveJobSecret(
-                self._request(runner_id, credential, job_id, generation, name="AWS_SECRET_ACCESS_KEY")
+                self._request(runner_id, credential, job_id, generation, name="OPENROUTER_API_KEY")
             )
 
-        self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.NOT_FOUND)
+
+    async def test_a_name_that_cannot_name_a_credential_is_rejected(self) -> None:
+        """HOME is not a credential: it is what the agent's home directory is.
+
+        Serving it would let a project repoint the throwaway home the runner
+        built, and lowercase names are not environment references at all.
+        """
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        for name in ("HOME", "PATH", "not-an-env-name"):
+            with self.subTest(name=name):
+                with self.assertRaises(grpc.aio.AioRpcError) as raised:
+                    await self.client.ResolveJobSecret(
+                        self._request(runner_id, credential, job_id, generation, name=name)
+                    )
+
+                self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
 
     async def test_an_unopenable_credential_says_so_instead_of_reporting_INTERNAL(self) -> None:
         """A missing or wrong LOOP_SECRET_KEY must name itself.
@@ -526,11 +549,19 @@ class ResolveJobSecretWithoutTlsTests(ResolveJobSecretTests):
         runner_id, _, job_id, generation = await self._holding_runner()
         await self._expect_refusal(self._request(runner_id, "not-the-credential", job_id, generation))
 
-    async def test_a_name_with_no_credential_behind_it_is_rejected(self) -> None:
+    async def test_an_unstored_provider_name_falls_back_to_the_runner(self) -> None:
         runner_id, credential, job_id, generation = await self._holding_runner()
         await self._expect_refusal(
-            self._request(runner_id, credential, job_id, generation, name="AWS_SECRET_ACCESS_KEY")
+            self._request(runner_id, credential, job_id, generation, name="OPENROUTER_API_KEY")
         )
+
+    async def test_a_name_that_cannot_name_a_credential_is_rejected(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        for name in ("HOME", "PATH", "not-an-env-name"):
+            with self.subTest(name=name):
+                await self._expect_refusal(
+                    self._request(runner_id, credential, job_id, generation, name=name)
+                )
 
     async def test_an_incomplete_request_is_rejected(self) -> None:
         # The TLS gate is checked before request validation, deliberately: a
@@ -541,3 +572,214 @@ class ResolveJobSecretWithoutTlsTests(ResolveJobSecretTests):
         # Without TLS nothing is resolved at all, so the key never comes up.
         runner_id, credential, job_id, generation = await self._holding_runner()
         await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+
+@unittest.skipIf(grpc is None, "grpcio is not installed")
+class StoreJobSecretTests(ResolveJobSecretTests):
+    """The write-back for a credential the harness rotated mid-job (issue #230).
+
+    Inherits the setup rather than the assertions: the fence, the identity and
+    the TLS gate are the same boundary as ResolveJobSecret, and the reason a
+    rotated access token can be trusted is that it arrives across exactly that
+    boundary. The inherited resolve tests still run here, which is the point --
+    adding a write path must not have loosened the read one.
+    """
+
+    def _store(
+        self,
+        runner_id: str,
+        credential: str,
+        job_id: str,
+        generation: int,
+        name: str = "OPENCODE_AUTH",
+        value: str = '{"access":"rotated"}',
+    ) -> Any:
+        return runner_control_pb2.StoreJobSecretRequest(
+            runner_id=runner_id, credential=credential, job_id=job_id,
+            lease_generation=generation, name=name, value=value,
+        )
+
+    async def test_a_rotated_credential_replaces_the_stored_one(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential(
+            "project-a", "agent:OPENCODE_AUTH", '{"access":"original"}', ".config/auth.json"
+        )
+
+        response = await self.client.StoreJobSecret(
+            self._store(runner_id, credential, job_id, generation)
+        )
+
+        self.assertTrue(response.stored)
+        resolved = await self.client.ResolveJobSecret(
+            runner_control_pb2.ResolveJobSecretRequest(
+                runner_id=runner_id, credential=credential, job_id=job_id,
+                lease_generation=generation, name="OPENCODE_AUTH",
+            )
+        )
+        self.assertEqual(resolved.value, '{"access":"rotated"}')
+        self.assertEqual(resolved.delivery, "file")
+
+    async def test_a_runner_cannot_introduce_a_credential(self) -> None:
+        """An update, never an insert.
+
+        A runner may replace a credential the project already gave it and
+        nothing else, so a compromised one cannot plant a name a later execution
+        would then resolve and use.
+        """
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        response = await self.client.StoreJobSecret(
+            self._store(runner_id, credential, job_id, generation, name="OPENROUTER_API_KEY")
+        )
+
+        self.assertFalse(response.stored)
+
+    async def test_a_stale_lease_cannot_write_back(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential(
+            "project-a", "agent:OPENCODE_AUTH", "original", ".config/auth.json"
+        )
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.StoreJobSecret(
+                self._store(runner_id, credential, job_id, generation + 1)
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+
+    async def test_a_wrong_credential_is_refused(self) -> None:
+        runner_id, _, job_id, generation = await self._holding_runner()
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.StoreJobSecret(
+                self._store(runner_id, "not-the-credential", job_id, generation)
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+
+    async def test_a_git_credential_is_not_the_runners_to_rewrite(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.StoreJobSecret(
+                self._store(runner_id, credential, job_id, generation, name="GITHUB_TOKEN")
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    async def test_an_empty_value_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.StoreJobSecret(
+                self._store(runner_id, credential, job_id, generation, value="")
+            )
+
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+
+@unittest.skipIf(grpc is None, "grpcio is not installed")
+class StoreJobSecretWithoutTlsTests(StoreJobSecretTests):
+    """A rotated token is exactly as sensitive as the one it replaces."""
+
+    async def asyncSetUp(self) -> None:
+        self.control_plane = InMemoryControlPlane()
+        await self._start(secure_channel=False)
+
+    async def _expect_refusal(self, request: Any) -> None:
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.ResolveJobSecret(request)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+        self.assertIn("insecure channel", raised.exception.details())
+
+    async def _expect_store_refusal(self, request: Any) -> None:
+        with self.assertRaises(grpc.aio.AioRpcError) as raised:
+            await self.client.StoreJobSecret(request)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.FAILED_PRECONDITION)
+        self.assertIn("insecure channel", raised.exception.details())
+
+    async def test_a_runner_holding_the_job_receives_the_projects_credential(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "github_token", "ghp_project")
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_an_ssh_key_is_delivered_as_a_file_not_a_variable(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.set_project_credential("project-a", "ssh_private_key", "-----BEGIN KEY-----")
+        await self._expect_refusal(
+            self._request(runner_id, credential, job_id, generation, name="GIT_SSH_KEY")
+        )
+
+    async def test_a_project_without_a_credential_is_not_found_so_the_runner_falls_back(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_stale_lease_generation_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        self.control_plane.expire_leases(NOW + timedelta(hours=1))
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_runner_that_does_not_hold_the_job_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_an_expired_lease_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_wrong_credential_is_refused_before_any_lookup(self) -> None:
+        runner_id, _, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, "not-the-credential", job_id, generation))
+
+    async def test_an_unstored_provider_name_falls_back_to_the_runner(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(
+            self._request(runner_id, credential, job_id, generation, name="OPENROUTER_API_KEY")
+        )
+
+    async def test_a_name_that_cannot_name_a_credential_is_rejected(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        for name in ("HOME", "PATH", "not-an-env-name"):
+            with self.subTest(name=name):
+                await self._expect_refusal(
+                    self._request(runner_id, credential, job_id, generation, name=name)
+                )
+
+    async def test_an_incomplete_request_is_rejected(self) -> None:
+        await self._expect_refusal(self._request("", "", "", 0))
+
+    async def test_an_unopenable_credential_says_so_instead_of_reporting_INTERNAL(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_refusal(self._request(runner_id, credential, job_id, generation))
+
+    async def test_a_rotated_credential_replaces_the_stored_one(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_store_refusal(self._store(runner_id, credential, job_id, generation))
+
+    async def test_a_runner_cannot_introduce_a_credential(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_store_refusal(
+            self._store(runner_id, credential, job_id, generation, name="OPENROUTER_API_KEY")
+        )
+
+    async def test_a_stale_lease_cannot_write_back(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_store_refusal(self._store(runner_id, credential, job_id, generation + 1))
+
+    async def test_a_wrong_credential_is_refused(self) -> None:
+        runner_id, _, job_id, generation = await self._holding_runner()
+        await self._expect_store_refusal(
+            self._store(runner_id, "not-the-credential", job_id, generation)
+        )
+
+    async def test_a_git_credential_is_not_the_runners_to_rewrite(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_store_refusal(
+            self._store(runner_id, credential, job_id, generation, name="GITHUB_TOKEN")
+        )
+
+    async def test_an_empty_value_is_refused(self) -> None:
+        runner_id, credential, job_id, generation = await self._holding_runner()
+        await self._expect_store_refusal(
+            self._store(runner_id, credential, job_id, generation, value="")
+        )

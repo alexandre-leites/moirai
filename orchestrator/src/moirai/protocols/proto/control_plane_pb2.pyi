@@ -175,14 +175,16 @@ class SetProjectEnabledResponse(_message.Message):
     def __init__(self, project: _Optional[_Union[Project, _Mapping]] = ...) -> None: ...
 
 class SetProjectCredentialRequest(_message.Message):
-    __slots__ = ("project_id", "kind", "value")
+    __slots__ = ("project_id", "kind", "value", "file_path")
     PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
     KIND_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
+    FILE_PATH_FIELD_NUMBER: _ClassVar[int]
     project_id: str
     kind: str
     value: str
-    def __init__(self, project_id: _Optional[str] = ..., kind: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    file_path: str
+    def __init__(self, project_id: _Optional[str] = ..., kind: _Optional[str] = ..., value: _Optional[str] = ..., file_path: _Optional[str] = ...) -> None: ...
 
 class ClearProjectCredentialRequest(_message.Message):
     __slots__ = ("project_id", "kind")
@@ -199,14 +201,16 @@ class ListProjectCredentialsRequest(_message.Message):
     def __init__(self, project_id: _Optional[str] = ...) -> None: ...
 
 class ProjectCredential(_message.Message):
-    __slots__ = ("kind", "created_at", "updated_at")
+    __slots__ = ("kind", "created_at", "updated_at", "file_path")
     KIND_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
     UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    FILE_PATH_FIELD_NUMBER: _ClassVar[int]
     kind: str
     created_at: str
     updated_at: str
-    def __init__(self, kind: _Optional[str] = ..., created_at: _Optional[str] = ..., updated_at: _Optional[str] = ...) -> None: ...
+    file_path: str
+    def __init__(self, kind: _Optional[str] = ..., created_at: _Optional[str] = ..., updated_at: _Optional[str] = ..., file_path: _Optional[str] = ...) -> None: ...
 
 class SetProjectCredentialResponse(_message.Message):
     __slots__ = ("credentials",)

@@ -293,6 +293,94 @@ and note that CI will not confirm any of it until the Blocked item is resolved.
 
 ---
 
+## Provider and subscription credentials for the agent (issue #230)
+
+- Completed: 2026-08-02
+- Session: gh-issue-loop / issue-230
+- Behavior delivered: a paid or subscription model provider can now be used. A
+  credential can be declared, stored per deployment or per project, requested by
+  the task packet, resolved by the runner, delivered as a variable or as a file
+  under the agent's own home directory, redacted before it reaches the harness,
+  and — for a rotating subscription token — written back durably mid-execution.
+
+### What was blocking it, and what changed at each layer
+
+The issue named four layers. All four gave:
+
+1. **`CredentialKind` was `github_token | ssh_private_key`.** Added
+   `agent:<NAME>`, where `<NAME>` is the environment variable a harness reads
+   the credential from. One namespace, so a stored kind is self-describing and
+   the database CHECK is one regular expression
+   (`orchestrator/migrations/018_agent_credentials.sql`,
+   `orchestrator/src/moirai/domain/credentials.py`). `HOME`, `PATH`, `TMPDIR`,
+   the loader variables and the two git names are reserved: a credential under
+   one of those would repoint the execution rather than authenticate it.
+2. **The packet only ever requested git credentials.** `task_packets.py` now
+   takes `agent_credential_refs` and appends them for *every* role — a planner
+   without its provider key is as stuck as a developer. The names come from two
+   places: `LOOP_AGENT_CREDENTIAL_REFS` on the orchestrator, and whatever the
+   project has stored, read from `app.project_credentials` when the packet is
+   built. Derived rather than listed twice, so a stored credential cannot go
+   unrequested.
+3. **`LOOP_RUNNER_ALLOWED_ENVIRONMENT` was a gate with nothing to gate.** It
+   stays a gate — a runner decides what it accepts — but the refusal now names
+   the variable and prints what is currently on it (`dispatch.go`).
+4. **`MinimalEnvironment` overrode `HOME` to the checkout.** It now overrides it
+   to `<workspace>/home`, a sibling of the checkout, created 0700 and discarded
+   with the workspace. That is the `~` the agent sees, so a file-delivered
+   credential written there is found — and, unlike before, nothing a tool writes
+   to `~` lands in the tree the agent is about to commit
+   (`runner/internal/dispatch/credentials.go`).
+
+### Rotation
+
+`StoreJobSecret` (new RPC) is the write-back, fenced on exactly the same lease
+predicate as `ResolveJobSecret` and refused over an insecure channel for the
+same reason. It is an **update, never an insert**: a runner may replace a
+credential the project already gave it and nothing else. The runner re-reads
+each file-delivered credential every 30s and once more when the execution ends,
+so a token refreshed inside a run — a developer packet is budgeted at 3600s —
+is persisted while the run is still going.
+
+### Redaction
+
+Every resolved value is registered with the event reporter before the workspace
+is prepared, and released by `Reporter.Finish`, which runs *after* the terminal
+event is built. A provider key matches none of the token prefixes the redactor
+knew, which is exactly why the set is fed by what was actually resolved. For a
+JSON credentials document each string leaf of 16+ characters is registered too,
+so a harness echoing one field of its own config cannot leak it.
+
+### Validation performed
+
+```
+make validate MYPY_CACHE=/tmp/moirai-mypy-cache-issue-230   # 663 orchestrator tests, ruff, mypy, compose, overlays, release tags, proto-check
+make test-runner                                            # go test -race ./... — all packages
+make test-api                                               # go test ./...
+make test-web                                               # typecheck, lint, 218 tests
+LOOP_TEST_DATABASE_URL=... make test-postgres-integration    # 70 tests, on a throwaway container on port 54823
+```
+
+The migration was applied against a real PostgreSQL 16 and its constraints
+probed directly: `agent:lowercase`, `nonsense`, and file paths `/etc/passwd`,
+`../escape`, `a/../b`, `a//b`, `has space`, `trailing/`, `~/x`, `back\slash`
+were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
+
+### Notes
+
+- Per-project provider credentials inherit the TLS requirement that per-project
+  git credentials already had: the value travels on the control stream, and the
+  orchestrator will not send one in the clear. Stated in the README rather than
+  discovered when a key silently fails to resolve.
+- Compose cannot name an environment variable it does not know, so
+  `OPENROUTER_API_KEY` and `ANTHROPIC_API_KEY` are wired explicitly and any other
+  provider name needs a line in an override file. `MOIRAI_AGENT_CREDENTIAL_NAMES`
+  appends to the runner allow-list; `MOIRAI_AGENT_CREDENTIAL_REFS` declares them
+  on the orchestrator.
+- A deployment-wide key lives in the runner's environment and therefore has
+  nowhere durable for a rotation to go back to. Rotation write-back requires the
+  credential to be stored per project; the runner logs the rotation it could not
+  persist rather than failing the execution over it.
 ## Issue #218 — Execution environment declaration (2026-08-02)
 
 - Branch/worktree: `issue-218` in `.claude/worktrees/issue-218`.

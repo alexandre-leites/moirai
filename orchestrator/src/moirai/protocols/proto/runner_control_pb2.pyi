@@ -169,3 +169,25 @@ class ResolveJobSecretResponse(_message.Message):
     value: str
     delivery: str
     def __init__(self, value: _Optional[str] = ..., delivery: _Optional[str] = ...) -> None: ...
+
+class StoreJobSecretRequest(_message.Message):
+    __slots__ = ("runner_id", "credential", "job_id", "lease_generation", "name", "value")
+    RUNNER_ID_FIELD_NUMBER: _ClassVar[int]
+    CREDENTIAL_FIELD_NUMBER: _ClassVar[int]
+    JOB_ID_FIELD_NUMBER: _ClassVar[int]
+    LEASE_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    NAME_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    runner_id: str
+    credential: str
+    job_id: str
+    lease_generation: int
+    name: str
+    value: str
+    def __init__(self, runner_id: _Optional[str] = ..., credential: _Optional[str] = ..., job_id: _Optional[str] = ..., lease_generation: _Optional[int] = ..., name: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+
+class StoreJobSecretResponse(_message.Message):
+    __slots__ = ("stored",)
+    STORED_FIELD_NUMBER: _ClassVar[int]
+    stored: bool
+    def __init__(self, stored: _Optional[bool] = ...) -> None: ...

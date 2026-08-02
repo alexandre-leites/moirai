@@ -222,7 +222,13 @@ class ControlPlane(Protocol):
     # and when; it never returns a value, and there is deliberately no protocol
     # method that returns one to a caller outside the orchestrator.
     async def set_project_credential(
-        self, project_id: str, kind: str, value: str, actor_user_id: str | None, now: datetime
+        self,
+        project_id: str,
+        kind: str,
+        value: str,
+        actor_user_id: str | None,
+        now: datetime,
+        file_path: str = "",
     ) -> None: ...
 
     async def clear_project_credential(
@@ -237,6 +243,13 @@ class ControlPlane(Protocol):
     async def resolve_job_secret(
         self, runner_id: str, job_id: str, generation: int, name: str, now: datetime
     ) -> tuple[str, str] | None: ...
+
+    # The runner-facing write-back for a credential the harness rotated mid-job.
+    # Returns whether anything was replaced; raises StaleLeaseError on the same
+    # fence as resolve_job_secret.
+    async def store_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, value: str, now: datetime
+    ) -> bool: ...
 
     async def revoke_session(self, session_token: str, now: datetime) -> None: ...
 

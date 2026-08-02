@@ -180,7 +180,7 @@ describe("project credentials", () => {
     await typeInto(input, "ghp_a-real-token");
     await submitForm(form(modal()));
 
-    expect(setProjectCredential).toHaveBeenCalledWith("project-1", "github_token", "ghp_a-real-token");
+    expect(setProjectCredential).toHaveBeenCalledWith("project-1", "github_token", "ghp_a-real-token", "");
     // The list repaints from the reload, which reports presence only.
     expect(document.body.textContent).not.toContain("ghp_a-real-token");
     expect(container.querySelector(".modal")).toBeNull();
@@ -208,7 +208,7 @@ describe("project credentials", () => {
     await typeInto(textarea(modal(), "SSH private key"), key);
     await submitForm(form(modal()));
 
-    expect(setProjectCredential).toHaveBeenCalledWith("project-1", "ssh_private_key", key);
+    expect(setProjectCredential).toHaveBeenCalledWith("project-1", "ssh_private_key", key, "");
     expect(document.body.textContent).not.toContain("BEGIN OPENSSH");
   });
 
@@ -271,3 +271,109 @@ describe("project credentials", () => {
     expect(container.textContent).toContain("GitHub token");
   });
 });
+
+/**
+ * Provider credentials (issue #230). A key for a paid model is named by whoever
+ * configures it, so unlike the two git kinds it cannot be a fixed row -- the
+ * console has to let an operator name one, and has to report the ones a project
+ * already has without ever reporting a value.
+ */
+describe("provider credentials", () => {
+  const modal = (): HTMLElement => {
+    const found = document.querySelector<HTMLElement>(".modal");
+    if (!found) throw new Error("no modal is open");
+    return found;
+  };
+
+  afterEach(unmountAll);
+
+  it("stores a provider key under the variable the agent reads", async () => {
+    const setProjectCredential = vi.fn(async () => [credential({ kind: "agent:OPENROUTER_API_KEY" })]);
+    const api = stubApi({ listProjects: async () => [project()], setProjectCredential });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add provider credential/));
+    await typeInto(field(modal(), /Variable/), "OPENROUTER_API_KEY");
+    await typeInto(textarea(modal(), "Value"), "or-v1-9f2c1d4e8a7b6c5d");
+    await submitForm(form(modal()));
+
+    expect(setProjectCredential).toHaveBeenCalledWith(
+      "project-1", "agent:OPENROUTER_API_KEY", "or-v1-9f2c1d4e8a7b6c5d", ""
+    );
+    expect(document.body.textContent).not.toContain("or-v1-9f2c1d4e8a7b6c5d");
+  });
+
+  it("takes a file destination for a subscription harness", async () => {
+    const setProjectCredential = vi.fn(async () => [credential({ kind: "agent:OPENCODE_AUTH" })]);
+    const api = stubApi({ listProjects: async () => [project()], setProjectCredential });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add provider credential/));
+    await typeInto(field(modal(), /Variable/), "OPENCODE_AUTH");
+    await typeInto(field(modal(), /File path/), ".local/share/opencode/auth.json");
+    await typeInto(textarea(modal(), "Value"), '{"access":"sk-ant-oat01-token"}');
+    await submitForm(form(modal()));
+
+    expect(setProjectCredential).toHaveBeenCalledWith(
+      "project-1", "agent:OPENCODE_AUTH", '{"access":"sk-ant-oat01-token"}',
+      ".local/share/opencode/auth.json"
+    );
+  });
+
+  it("refuses a name that is not an environment variable", async () => {
+    const setProjectCredential = vi.fn(async () => []);
+    const api = stubApi({ listProjects: async () => [project()], setProjectCredential });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add provider credential/));
+    await typeInto(field(modal(), /Variable/), "not a variable");
+    await typeInto(textarea(modal(), "Value"), "key");
+    await submitForm(form(modal()));
+
+    expect(setProjectCredential).not.toHaveBeenCalled();
+    expect(modal().textContent).toContain("OPENROUTER_API_KEY");
+  });
+
+  it("reports a configured provider credential and its destination, never its value", async () => {
+    const api = stubApi({
+      listProjects: async () => [project()],
+      listProjectCredentials: async () => [
+        credential({ kind: "agent:OPENCODE_AUTH", filePath: ".local/share/opencode/auth.json" }),
+      ],
+    });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    expect(container.textContent).toContain("OPENCODE_AUTH");
+    expect(container.textContent).toContain(".local/share/opencode/auth.json");
+  });
+
+  // Replacing a rotated subscription token must not silently turn its file into
+  // a variable the harness will never read.
+  it("keeps the delivery when replacing a provider credential", async () => {
+    const setProjectCredential = vi.fn(async () => []);
+    const api = stubApi({
+      listProjects: async () => [project()],
+      listProjectCredentials: async () => [
+        credential({ kind: "agent:OPENCODE_AUTH", filePath: ".local/share/opencode/auth.json" }),
+      ],
+      setProjectCredential,
+    });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(credRowFor(container, /OPENCODE_AUTH/), /^Replace$/));
+    await typeInto(textarea(modal(), "OPENCODE_AUTH"), '{"access":"rotated"}');
+    await submitForm(form(modal()));
+
+    expect(setProjectCredential).toHaveBeenCalledWith(
+      "project-1", "agent:OPENCODE_AUTH", '{"access":"rotated"}',
+      ".local/share/opencode/auth.json"
+    );
+  });
+});
+
+function credRowFor(container: ParentNode, label: RegExp): HTMLElement {
+  const rows = Array.from(container.querySelectorAll<HTMLElement>(".cred-list > .row-line"))
+    .filter((row) => label.test(row.textContent ?? ""));
+  if (rows.length !== 1) throw new Error(`expected one credential row matching ${label}, found ${rows.length}`);
+  return rows[0];
+}

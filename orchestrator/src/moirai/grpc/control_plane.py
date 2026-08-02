@@ -207,7 +207,12 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             )
         try:
             await self._control_plane.set_project_credential(
-                request.project_id, request.kind, request.value, session.user_id or None, self._now()
+                request.project_id,
+                request.kind,
+                request.value,
+                session.user_id or None,
+                self._now(),
+                file_path=request.file_path,
             )
         except ValueError as error:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
@@ -262,6 +267,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
                 kind=str(entry["kind"]),
                 created_at=_isoformat(entry.get("created_at")),
                 updated_at=_isoformat(entry.get("updated_at")),
+                file_path=str(entry.get("file_path") or ""),
             )
             for entry in await describe(project_id)
         ]
