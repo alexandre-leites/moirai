@@ -19,19 +19,11 @@ type ProjectHandlers struct {
 	limiter *auth.RateLimiter
 }
 
-type pipelineStepRequest struct {
+type pipelineStepPayload struct {
 	Command        string `json:"command"`
 	TimeoutSeconds int32  `json:"timeoutSeconds"`
 	Position       int32  `json:"position"`
 	Required       bool   `json:"required"`
-}
-
-func pipelineSteps(steps []pipelineStepRequest) []*controlv1.PipelineStep {
-	result := make([]*controlv1.PipelineStep, len(steps))
-	for index, step := range steps {
-		result[index] = &controlv1.PipelineStep{Command: step.Command, TimeoutSeconds: step.TimeoutSeconds, Position: step.Position, Required: step.Required}
-	}
-	return result
 }
 
 func NewProjectHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *ProjectHandlers {
@@ -78,13 +70,13 @@ func (h *ProjectHandlers) listProjects(w http.ResponseWriter, r *http.Request) {
 
 func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name                 string   `json:"name"`
-		RepositoryMode       string   `json:"repositoryMode"`
-		RepositoryURL        string   `json:"repositoryUrl"`
-		LocalRepositoryPath  string   `json:"localRepositoryPath"`
-		DefaultBranch        string   `json:"defaultBranch"`
-		RequiredRunnerLabels []string `json:"requiredRunnerLabels"`
-		PipelineSteps        []pipelineStepRequest `json:"pipelineSteps"`
+		Name                 string                `json:"name"`
+		RepositoryMode       string                `json:"repositoryMode"`
+		RepositoryURL        string                `json:"repositoryUrl"`
+		LocalRepositoryPath  string                `json:"localRepositoryPath"`
+		DefaultBranch        string                `json:"defaultBranch"`
+		RequiredRunnerLabels []string              `json:"requiredRunnerLabels"`
+		PipelineSteps        []pipelineStepPayload `json:"pipelineSteps"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -96,10 +88,10 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 			RepositoryMode:       body.RepositoryMode,
 			RepositoryUrl:        body.RepositoryURL,
 			LocalRepositoryPath:  body.LocalRepositoryPath,
-				DefaultBranch:        body.DefaultBranch,
-				RequiredRunnerLabels: body.RequiredRunnerLabels,
-				PipelineSteps:        pipelineSteps(body.PipelineSteps),
-			},
+			DefaultBranch:        body.DefaultBranch,
+			RequiredRunnerLabels: body.RequiredRunnerLabels,
+			PipelineSteps:        pipelineSteps(body.PipelineSteps),
+		},
 	})
 	if err != nil {
 		writeClientError(w, err)
@@ -111,13 +103,13 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("project_id")
 	var body struct {
-		Name                 string   `json:"name"`
-		RepositoryMode       string   `json:"repositoryMode"`
-		RepositoryURL        string   `json:"repositoryUrl"`
-		LocalRepositoryPath  string   `json:"localRepositoryPath"`
-		DefaultBranch        string   `json:"defaultBranch"`
-		RequiredRunnerLabels []string `json:"requiredRunnerLabels"`
-		PipelineSteps        []pipelineStepRequest `json:"pipelineSteps"`
+		Name                 string                `json:"name"`
+		RepositoryMode       string                `json:"repositoryMode"`
+		RepositoryURL        string                `json:"repositoryUrl"`
+		LocalRepositoryPath  string                `json:"localRepositoryPath"`
+		DefaultBranch        string                `json:"defaultBranch"`
+		RequiredRunnerLabels []string              `json:"requiredRunnerLabels"`
+		PipelineSteps        []pipelineStepPayload `json:"pipelineSteps"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -130,10 +122,10 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 			RepositoryMode:       body.RepositoryMode,
 			RepositoryUrl:        body.RepositoryURL,
 			LocalRepositoryPath:  body.LocalRepositoryPath,
-				DefaultBranch:        body.DefaultBranch,
-				RequiredRunnerLabels: body.RequiredRunnerLabels,
-				PipelineSteps:        pipelineSteps(body.PipelineSteps),
-			},
+			DefaultBranch:        body.DefaultBranch,
+			RequiredRunnerLabels: body.RequiredRunnerLabels,
+			PipelineSteps:        pipelineSteps(body.PipelineSteps),
+		},
 	})
 	if err != nil {
 		writeClientError(w, err)
@@ -219,6 +211,17 @@ func credentialsPayload(credentials []*controlv1.ProjectCredential) map[string]a
 	return map[string]any{"credentials": entries}
 }
 
+func pipelineSteps(steps []pipelineStepPayload) []*controlv1.PipelineStep {
+	result := make([]*controlv1.PipelineStep, len(steps))
+	for i, step := range steps {
+		result[i] = &controlv1.PipelineStep{
+			Command: step.Command, TimeoutSeconds: step.TimeoutSeconds,
+			Position: step.Position, Required: step.Required,
+		}
+	}
+	return result
+}
+
 func projectPayload(p *controlv1.Project) map[string]any {
 	if p == nil {
 		return nil
@@ -227,9 +230,12 @@ func projectPayload(p *controlv1.Project) map[string]any {
 	if labels == nil {
 		labels = []string{}
 	}
-	pipelineSteps := make([]map[string]any, len(p.PipelineSteps))
+	pipeline := make([]map[string]any, len(p.PipelineSteps))
 	for i, step := range p.PipelineSteps {
-		pipelineSteps[i] = map[string]any{"command": step.Command, "timeoutSeconds": step.TimeoutSeconds, "position": step.Position, "required": step.Required}
+		pipeline[i] = map[string]any{
+			"command": step.Command, "timeoutSeconds": step.TimeoutSeconds,
+			"position": step.Position, "required": step.Required,
+		}
 	}
 	return map[string]any{
 		"id":                   p.Id,
@@ -240,7 +246,7 @@ func projectPayload(p *controlv1.Project) map[string]any {
 		"localRepositoryPath":  p.LocalRepositoryPath,
 		"defaultBranch":        p.DefaultBranch,
 		"requiredRunnerLabels": labels,
-		"pipelineSteps":        pipelineSteps,
+		"pipelineSteps":        pipeline,
 	}
 }
 

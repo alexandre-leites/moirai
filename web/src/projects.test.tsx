@@ -67,9 +67,6 @@ describe("ProjectsPage", () => {
     await chooseOption(selectField(document.body, /Mode/), "existing_path");
     await typeInto(field(document.body, /Local repository path/), "/srv/repos/payments");
     await typeInto(field(document.body, /Runner labels/), "go, docker");
-    await click(button(document.body, /Add pipeline step/));
-    await typeInto(document.querySelector<HTMLInputElement>("input[aria-label='Pipeline command 1']")!, "go test ./...");
-    await typeInto(document.querySelector<HTMLInputElement>("input[aria-label='Pipeline timeout 1']")!, "300");
     await submitForm(form(document.body));
 
     expect(createProject).toHaveBeenCalledWith({
@@ -79,8 +76,27 @@ describe("ProjectsPage", () => {
       localRepositoryPath: "/srv/repos/payments",
       defaultBranch: "main",
       requiredRunnerLabels: ["go", "docker"],
-      pipelineSteps: [{ command: "go test ./...", timeoutSeconds: 300, position: 0, required: true }],
+      pipelineSteps: [],
     });
+  });
+
+  it("submits ordered pipeline steps", async () => {
+    const createProject = vi.fn(async () => project());
+    const api = stubApi({ createProject });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add project/));
+    await typeInto(field(document.body, /Name/), "payments-api");
+    await typeInto(field(document.body, /Repository URL/), "https://example.test/payments.git");
+    await click(button(document.body, /Add command/));
+    const command = document.querySelector<HTMLInputElement>('input[aria-label="Pipeline command 1"]');
+    if (!command) throw new Error("pipeline command input is missing");
+    await typeInto(command, "make test");
+    await submitForm(form(document.body));
+
+    expect(createProject).toHaveBeenCalledWith(expect.objectContaining({
+      pipelineSteps: [{ command: "make test", timeoutSeconds: 300, position: 0, required: true }],
+    }));
   });
 
   it("refuses to submit a project with no source, and says which one it wants", async () => {

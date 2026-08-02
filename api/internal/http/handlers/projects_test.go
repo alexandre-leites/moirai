@@ -76,9 +76,8 @@ func newFakeControlPlane() *fakeControlPlane {
 				RepositoryUrl:        "git@github.com:acme/billing.git",
 				LocalRepositoryPath:  "",
 				DefaultBranch:        "main",
-					RequiredRunnerLabels: []string{"linux", "docker"},
-					PipelineSteps: []*controlv1.PipelineStep{{Command: "go test ./...", TimeoutSeconds: 300, Position: 0, Required: true}},
-				},
+				RequiredRunnerLabels: []string{"linux", "docker"},
+			},
 			"p-2": {
 				Id:                  "p-2",
 				Name:                "secure",
@@ -158,9 +157,9 @@ func (f *fakeControlPlane) CreateProject(ctx context.Context, req *controlv1.Cre
 		RepositoryUrl:        req.Project.RepositoryUrl,
 		LocalRepositoryPath:  req.Project.LocalRepositoryPath,
 		DefaultBranch:        req.Project.DefaultBranch,
-			RequiredRunnerLabels: req.Project.RequiredRunnerLabels,
-			PipelineSteps:        req.Project.PipelineSteps,
-		}
+		RequiredRunnerLabels: req.Project.RequiredRunnerLabels,
+		PipelineSteps:        req.Project.PipelineSteps,
+	}
 	f.projects[project.Id] = project
 	return &controlv1.CreateProjectResponse{Project: project}, nil
 }
@@ -307,10 +306,6 @@ func TestListProjectsReturnsConfiguration(t *testing.T) {
 	if !ok || len(labels) != 2 {
 		t.Errorf("requiredRunnerLabels = %#v, want a 2-element array", billing["requiredRunnerLabels"])
 	}
-	steps, ok := billing["pipelineSteps"].([]any)
-	if !ok || len(steps) != 1 {
-		t.Errorf("pipelineSteps = %#v, want a 1-element array", billing["pipelineSteps"])
-	}
 }
 
 func TestListProjectsRedactsURLUserinfo(t *testing.T) {
@@ -341,7 +336,7 @@ func TestListProjectsRedactsURLUserinfo(t *testing.T) {
 func TestCreateProjectSuccessReturnsConfiguration(t *testing.T) {
 	mux, fake := startProjectServer(t)
 	req := mutateRequest(t, http.MethodPost, "/api/v1/projects",
-		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","requiredRunnerLabels":["linux"],"pipelineSteps":[{"command":"go test ./...","timeoutSeconds":300,"position":0,"required":true},{"command":"go vet ./...","timeoutSeconds":120,"position":1,"required":true}]}`,
+		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","requiredRunnerLabels":["linux"],"pipelineSteps":[{"command":"make lint","timeoutSeconds":60,"position":0,"required":true},{"command":"make test","timeoutSeconds":300,"position":1,"required":true}]}`,
 		"admin-session")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -359,8 +354,8 @@ func TestCreateProjectSuccessReturnsConfiguration(t *testing.T) {
 	if !ok || stored.RepositoryUrl != "git@github.com:acme/ledger.git" {
 		t.Errorf("stored project = %#v, want the submitted URL persisted", stored)
 	}
-	if len(stored.PipelineSteps) != 2 || stored.PipelineSteps[1].Command != "go vet ./..." || stored.PipelineSteps[1].TimeoutSeconds != 120 {
-		t.Errorf("stored pipeline steps = %#v, want submitted ordered steps", stored.PipelineSteps)
+	if len(stored.PipelineSteps) != 2 || stored.PipelineSteps[1].Command != "make test" {
+		t.Errorf("pipeline steps = %#v, want ordered submitted steps", stored.PipelineSteps)
 	}
 	steps, ok := project["pipelineSteps"].([]any)
 	if !ok || len(steps) != 2 {

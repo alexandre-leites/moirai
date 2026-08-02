@@ -36,6 +36,26 @@
 
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  /* The sixteen ANSI colours the agent log is drawn with (ansi.ts). Tuned
+     against --ground rather than lifted from a stock terminal set: this pane is
+     parchment in the light theme, where a stock bright yellow is invisible. */
+  --ansi-0: #3a3844;
+  --ansi-1: #a3324f;
+  --ansi-2: #2f7d4e;
+  --ansi-3: #8a6412;
+  --ansi-4: #3c5fa8;
+  --ansi-5: #8b3d8f;
+  --ansi-6: #1f7d80;
+  --ansi-7: #6d6a78;
+  --ansi-8: #8c8998;
+  --ansi-9: #c04466;
+  --ansi-10: #3d9a63;
+  --ansi-11: #a8801f;
+  --ansi-12: #5479c4;
+  --ansi-13: #a555a9;
+  --ansi-14: #2f9a9d;
+  --ansi-15: #23222b;
 }
 
 /* The dark palette is declared once and applied by both signals below: the OS
@@ -67,6 +87,22 @@
     --scrim: rgb(9 10 15 / 66%);
     --shadow: 0 1px 3px rgb(0 0 0 / 35%);
     --shadow-lift: 0 16px 52px rgb(0 0 0 / 45%);
+    --ansi-0: #4a4857;
+    --ansi-1: #e06c8a;
+    --ansi-2: #6cc08a;
+    --ansi-3: #d4a752;
+    --ansi-4: #7fa0e8;
+    --ansi-5: #c98ed0;
+    --ansi-6: #5cc0c4;
+    --ansi-7: #b6b3c2;
+    --ansi-8: #767386;
+    --ansi-9: #f08fa8;
+    --ansi-10: #8ad8a4;
+    --ansi-11: #e8c274;
+    --ansi-12: #9db8f0;
+    --ansi-13: #dcaae0;
+    --ansi-14: #7fd8db;
+    --ansi-15: #e6e4dc;
   }
 }
 
@@ -96,6 +132,22 @@
   --scrim: rgb(9 10 15 / 66%);
   --shadow: 0 1px 3px rgb(0 0 0 / 35%);
   --shadow-lift: 0 16px 52px rgb(0 0 0 / 45%);
+  --ansi-0: #4a4857;
+  --ansi-1: #e06c8a;
+  --ansi-2: #6cc08a;
+  --ansi-3: #d4a752;
+  --ansi-4: #7fa0e8;
+  --ansi-5: #c98ed0;
+  --ansi-6: #5cc0c4;
+  --ansi-7: #b6b3c2;
+  --ansi-8: #767386;
+  --ansi-9: #f08fa8;
+  --ansi-10: #8ad8a4;
+  --ansi-11: #e8c274;
+  --ansi-12: #9db8f0;
+  --ansi-13: #dcaae0;
+  --ansi-14: #7fd8db;
+  --ansi-15: #e6e4dc;
 }
 
 * { box-sizing: border-box; }

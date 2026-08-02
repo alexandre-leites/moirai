@@ -5,6 +5,7 @@
 // Statuses and their pill variants come from docs/design/web-console/
 // specification.md §3.3; the phase path and its labels from §2.6.
 import type { Workflow, WorkflowEvent } from "./api";
+import { stripAnsi } from "./ansi";
 
 export const PHASES = [
   "prepare", "plan", "implement", "pipeline", "review",
@@ -187,8 +188,13 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
       return { text: `Agent execution started on runner ${text(payload.runner_id) || "unknown"}`, phase: "execution", warn: false };
     case "progress":
       return { text: text(inner.message) || "Agent reported progress", phase: "execution", warn: false };
-    case "log":
-      return { text: logText(event.payload) ?? "Agent log output", phase: "log", warn: false };
+    case "log": {
+      // The timeline reads as sentences, so the escape sequences the agent wrote
+      // for a terminal are dropped here rather than rendered. The agent log pane
+      // is where they are drawn in colour (ui/ansi.tsx).
+      const line = logText(event.payload);
+      return { text: line === null ? "Agent log output" : stripAnsi(line), phase: "log", warn: false };
+    }
     case "completed":
       return { text: "Agent execution completed", phase: "execution", warn: false };
     case "failed": {

@@ -695,8 +695,10 @@ def _project_message(project: ProjectRecord) -> control_plane_pb2.Project:
         required_runner_labels=list(project.get("required_runner_labels") or []),
         pipeline_steps=[
             control_plane_pb2.PipelineStep(
-                command=str(step["command"]), timeout_seconds=cast(int, step["timeout_seconds"]),
-                position=cast(int, step["position"]), required=bool(step["required"]),
+                command=str(step["command"]),
+                timeout_seconds=cast(int, step["timeout_seconds"]),
+                position=cast(int, step["position"]),
+                required=bool(step["required"]),
             )
             for step in project.get("pipeline_steps", [])
         ],

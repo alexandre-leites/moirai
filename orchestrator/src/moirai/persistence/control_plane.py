@@ -380,8 +380,8 @@ class AsyncpgControlPlane:
             local_repository_path,
             default_branch,
             required_runner_labels,
-            pipeline_steps,
         )
+        steps = _pipeline_steps(pipeline_steps)
         project_id = uuid4()
         async with self._pool.acquire() as connection:
             async with connection.transaction():
@@ -405,9 +405,9 @@ class AsyncpgControlPlane:
                 )
                 if record is None:
                     raise ValueError("project could not be created")
-                await _replace_pipeline_steps(connection, project_id, cast(list[dict[str, object]], normalized["pipeline_steps"]))
+                await _replace_pipeline_steps(connection, project_id, steps)
         project = _project_record(record)
-        project["pipeline_steps"] = cast(list[dict[str, object]], normalized["pipeline_steps"])
+        project["pipeline_steps"] = list(steps)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.create", "project", project["id"], "succeeded", now)
         return project
@@ -416,19 +416,18 @@ class AsyncpgControlPlane:
         records = await self._pool.fetch(
             """
             SELECT p.id, p.name, p.enabled, p.repository_mode, p.repository_url,
-                   p.local_repository_path, p.default_branch, p.configuration, steps.pipeline_steps
+                   p.local_repository_path, p.default_branch, p.configuration,
+                   COALESCE((
+                       SELECT jsonb_agg(jsonb_build_object(
+                           'command', s.command,
+                           'timeout_seconds', s.timeout_seconds,
+                           'position', s.position,
+                           'required', s.required
+                       ) ORDER BY s.position, s.id)
+                       FROM app.project_pipeline_steps AS s
+                       WHERE s.project_id = p.id
+                   ), '[]'::jsonb) AS pipeline_steps
             FROM app.projects AS p
-            LEFT JOIN LATERAL (
-                SELECT COALESCE(
-                    jsonb_agg(jsonb_build_object(
-                        'command', command, 'timeout_seconds', timeout_seconds,
-                        'position', position, 'required', required
-                    ) ORDER BY position, id),
-                    '[]'::jsonb
-                ) AS pipeline_steps
-                FROM app.project_pipeline_steps
-                WHERE project_id = p.id
-            ) AS steps ON true
             ORDER BY p.name ASC, p.id ASC
             """
         )
@@ -748,8 +747,8 @@ class AsyncpgControlPlane:
             local_repository_path,
             default_branch,
             required_runner_labels,
-            pipeline_steps,
         )
+        steps = _pipeline_steps(pipeline_steps)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 record = await connection.fetchrow(
@@ -777,9 +776,9 @@ class AsyncpgControlPlane:
                 )
                 if record is None:
                     raise ValueError("project is unknown")
-                await _replace_pipeline_steps(connection, _uuid(project_id), cast(list[dict[str, object]], normalized["pipeline_steps"]))
+                await _replace_pipeline_steps(connection, _uuid(project_id), steps)
         project = _project_record(record)
-        project["pipeline_steps"] = cast(list[dict[str, object]], normalized["pipeline_steps"])
+        project["pipeline_steps"] = list(steps)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.update", "project", project["id"], "succeeded", now)
         return project
@@ -791,7 +790,17 @@ class AsyncpgControlPlane:
             """
             UPDATE app.projects SET enabled = $2, updated_at = $3 WHERE id = $1
             RETURNING id, name, enabled, repository_mode, repository_url,
-                      local_repository_path, default_branch, configuration
+                      local_repository_path, default_branch, configuration,
+                      COALESCE((
+                          SELECT jsonb_agg(jsonb_build_object(
+                              'command', s.command,
+                              'timeout_seconds', s.timeout_seconds,
+                              'position', s.position,
+                              'required', s.required
+                          ) ORDER BY s.position, s.id)
+                          FROM app.project_pipeline_steps AS s
+                          WHERE s.project_id = app.projects.id
+                      ), '[]'::jsonb) AS pipeline_steps
             """,
             _uuid(project_id),
             enabled,
@@ -3300,12 +3309,10 @@ def _project_configuration(
     local_repository_path: str | None,
     default_branch: str,
     required_runner_labels: Iterable[str],
-    pipeline_steps: Iterable[dict[str, object]],
 ) -> dict[str, object]:
     normalized_name = name.strip()
     normalized_branch = default_branch.strip()
     labels = sorted({label.strip() for label in required_runner_labels})
-    steps = _pipeline_steps(pipeline_steps)
     if not normalized_name or len(normalized_name) > 256 or not normalized_branch:
         raise ValueError("project configuration is invalid")
     if any(not label for label in labels):
@@ -3320,7 +3327,6 @@ def _project_configuration(
             "local_repository_path": None,
             "default_branch": normalized_branch,
             "required_runner_labels": labels,
-            "pipeline_steps": steps,
         }
     if repository_mode == "existing_path":
         if repository_url or not local_repository_path or not PurePath(local_repository_path).is_absolute():
@@ -3332,50 +3338,56 @@ def _project_configuration(
             "local_repository_path": str(PurePath(local_repository_path)),
             "default_branch": normalized_branch,
             "required_runner_labels": labels,
-            "pipeline_steps": steps,
         }
     raise ValueError("repository mode is invalid")
 
 
-def _pipeline_steps(values: Iterable[dict[str, object]]) -> list[dict[str, object]]:
-    steps: list[dict[str, object]] = []
-    for value in values:
-        command = value.get("command")
-        timeout = value.get("timeout_seconds")
-        position = value.get("position")
-        required = value.get("required")
-        if (
-            not isinstance(command, str)
-            or not command.strip()
-            or len(command.encode()) > 4096
-            or not isinstance(timeout, int)
-            or not 1 <= timeout <= 3600
-            or not isinstance(position, int)
-            or position < 0
-            or not isinstance(required, bool)
-        ):
-            raise ValueError("pipeline steps are invalid")
-        steps.append({"command": command.strip(), "timeout_seconds": timeout, "position": position, "required": required})
-    if len(steps) > 32:
-        raise ValueError("pipeline steps are invalid")
-    steps.sort(key=lambda step: cast(int, step["position"]))
-    if [step["position"] for step in steps] != list(range(len(steps))):
-        raise ValueError("pipeline steps are invalid")
-    return steps
-
-
-async def _replace_pipeline_steps(connection: Any, project_id: Any, steps: list[dict[str, object]]) -> None:
+async def _replace_pipeline_steps(connection: Any, project_id: UUID, steps: tuple[dict[str, object], ...]) -> None:
     await connection.execute("DELETE FROM app.project_pipeline_steps WHERE project_id = $1", project_id)
     for step in steps:
         await connection.execute(
             """
             INSERT INTO app.project_pipeline_steps
                 (id, project_id, position, name, command, timeout_seconds, required)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES (gen_random_uuid(), $1, $2, $3, $3, $4, $5)
             """,
-            uuid4(), project_id, step["position"], step["command"], step["command"],
-            step["timeout_seconds"], step["required"],
+            project_id,
+            step["position"],
+            step["command"],
+            step["timeout_seconds"],
+            step["required"],
         )
+
+
+def _pipeline_steps(steps: Iterable[dict[str, object]]) -> tuple[dict[str, object], ...]:
+    normalized: list[dict[str, object]] = []
+    positions: set[int] = set()
+    for step in steps:
+        command = step.get("command")
+        timeout = step.get("timeout_seconds")
+        position = step.get("position")
+        required = step.get("required")
+        if (
+            not isinstance(command, str)
+            or not command.strip()
+            or not isinstance(timeout, int)
+            or timeout <= 0
+            or not isinstance(position, int)
+            or position < 0
+            or position in positions
+            or not isinstance(required, bool)
+        ):
+            raise ValueError("pipeline steps are invalid")
+        positions.add(position)
+        normalized.append(
+            {
+                "command": command.strip(),
+                "timeout_seconds": timeout,
+                "position": position,
+                "required": required,
+            }
+        )
+    return tuple(sorted(normalized, key=lambda step: cast(int, step["position"])))
 
 
 def _project_record(record: dict[str, Any]) -> ProjectRecord:
@@ -3383,9 +3395,9 @@ def _project_record(record: dict[str, Any]) -> ProjectRecord:
     if isinstance(configuration, str):
         configuration = json.loads(configuration)
     labels = configuration.get("required_runner_labels") if isinstance(configuration, dict) else None
-    pipeline_steps = record.get("pipeline_steps") or []
-    if isinstance(pipeline_steps, str):
-        pipeline_steps = json.loads(pipeline_steps)
+    steps = record.get("pipeline_steps", [])
+    if isinstance(steps, str):
+        steps = json.loads(steps)
     return {
         "id": str(record["id"]),
         "name": str(record["name"]),
@@ -3395,7 +3407,7 @@ def _project_record(record: dict[str, Any]) -> ProjectRecord:
         "local_repository_path": _optional_text(record["local_repository_path"]),
         "default_branch": str(record["default_branch"]),
         "required_runner_labels": list(labels) if isinstance(labels, list) else [],
-        "pipeline_steps": list(pipeline_steps) if isinstance(pipeline_steps, list) else [],
+        "pipeline_steps": list(steps) if isinstance(steps, list) else [],
     }
 
 

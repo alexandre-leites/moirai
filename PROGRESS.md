@@ -257,12 +257,26 @@ advance; an API handler test for round-tripping steps; a `web` test that the pro
 submits them. Run `make test-orchestrator`, `cd api && go test ./...` and `make test-web` —
 and note that CI will not confirm any of it until the Blocked item is resolved.
 
+## Issue #114 — Project Pipeline Steps
+
+- Status: implemented; awaiting final commit and PR.
+- Fail-closed decision: option (b). A terminal pipeline event with
+  `pipelineCommandCount: 0` writes `pipeline_passed = false` and
+  `blocking_reason = no_pipeline_steps_configured`, routing to repair rather than review.
+- Delivered: typed pipeline steps across protobuf, persistence, gRPC, REST, and project UI;
+  create/update atomically replace ordered rows in `app.project_pipeline_steps`.
+- Validation: `make test-orchestrator` passed; API `go test ./...` passed in `golang:1.25`;
+  web typecheck/lint/tests passed in `node:24`; `make lint` passed; `make typecheck` passed.
+- Environment note: host `make test-api` fails because Go is absent; host `make test-web` fails
+  at ESLint because Node 18 is below its required version. Container equivalents passed.
+- Next: stage generated protobuf outputs, run `make proto-check`, commit, push, open and merge PR.
+
 ---
 
-## Issue #114 — Project pipeline configuration (2026-08-02)
+## Issue #114 — Pipeline Configuration Merge Completion (2026-08-02)
 
 - Branch/worktree: `issue-114-1` in `.claude/worktrees/issue-114-1`.
-- Delivered: pipeline steps cross protobuf, PostgreSQL, gRPC, REST/OpenAPI, and project form. Create/update replace all rows atomically; reads return ordered command, timeout, position, and required values. Pipeline packets use required steps.
-- Fail-closed decision: option (b). Pipeline node blocks with `project has no required pipeline steps`, sets `pipeline_passed = false`, and dispatches nothing. This avoids silently passing an empty deterministic gate.
-- Tests: `make test-orchestrator` passed (594, 61 skipped); `ruff` and `mypy` passed; API `go test ./...` passed in `golang:1.25`; web typecheck, lint, and 195 Vitest tests passed in `node:22`; `make proto-check` passed before final commit. Host Go is unavailable; host Node 18 cannot run ESLint 10, so container validation used per-issue caches under `/tmp/opencode/moirai-114-*`.
-- Review: adversarial contract/transaction/empty-gate/UI review found position normalization initially discarded caller positions; fixed by validating contiguous unique positions and preserving their order.
+- Behavior: project pipeline steps persist and round-trip through protobuf, PostgreSQL, gRPC, REST/OpenAPI, and UI. Required steps populate pipeline task packets in position order.
+- Fail-closed: no required steps block immediately with `pipeline_passed = false` and `project has no required pipeline steps`; runner terminal handling also treats an empty pipeline as failed, never passed.
+- Validation: `make test-orchestrator` passed (594, 61 skipped); `ruff`, `mypy`, and `make proto-check` passed; API tests passed in `golang:1.25`; web typecheck/lint and 195 tests passed in `node:22`; CI run `30725136308` passed all jobs after one corrected integration-test assertion.
+- Review: adversarial review verified contract round-trip, transactional replacement, required-step packet filtering, empty-gate failure, and UI submission. Position preservation was fixed before review completion.
