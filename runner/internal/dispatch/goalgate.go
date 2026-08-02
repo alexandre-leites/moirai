@@ -199,13 +199,17 @@ func (dispatcher Dispatcher) runAgent(
 	// that never continues behaves as it always did.
 	timeout := time.Duration(packet.TimeoutSeconds) * time.Second
 	deadline := time.Now().Add(timeout)
+	// Resolved once and carried into every prompt this execution produces: the
+	// environment does not change between continuations, and an agent that was
+	// told what it has on the first attempt must not lose it on the second.
+	declaration := dispatcher.declareEnvironment(workspace, packet)
 	request := agents.Request{
 		JobID:           packet.JobID,
 		LeaseGeneration: generation,
 		ExecutionID:     packet.ExecutionID,
 		Role:            agents.Role(packet.Role),
 		Workspace:       workspace.Repository,
-		Prompt:          promptFor(packet),
+		Prompt:          promptFor(packet) + declaration,
 		ResultPath:      packet.ExpectedOutput,
 		Timeout:         timeout,
 		Environment:     environment,
@@ -261,7 +265,7 @@ func (dispatcher Dispatcher) runAgent(
 		previousSignature = current.verdict.Signature
 		run.continuations++
 		continuation := request
-		continuation.Prompt = continuationPrompt(packet, current.verdict, current.result, run.continuations, budget)
+		continuation.Prompt = continuationPrompt(packet, current.verdict, current.result, run.continuations, budget) + declaration
 		continuation.SessionID = run.sessionID
 		continuation.Timeout = remaining
 		writeContinuationPrompt(workspace, packet, run.continuations, continuation.Prompt)

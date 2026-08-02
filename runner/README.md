@@ -65,6 +65,33 @@ In Compose the runner receives it as `GITHUB_TOKEN_FILE=/run/secrets/github_toke
 
 Registration credentials must be provided through `LOOP_RUNNER_REGISTRATION_TOKEN_FILE`; raw registration-token environment variables are not read. In Compose, this is mounted as a Docker secret at `/run/secrets/runner_registration_token`, alongside the shared `github_token` secret at `/run/secrets/github_token`.
 
+## Execution Environment Declaration
+
+An agent that is not told what it has probes for it, and a probe that fails still costs a whole attempt. A planning node is allowed two, so two runs that ended in `/bin/sh: python3: not found` block a workflow permanently ([#218](https://github.com/alexandre-leites/moirai/issues/218)). The toolchain is therefore *declared* to the agent rather than discovered by it.
+
+**The image declares itself.** An execution image publishes its own toolchain at `/etc/moirai/toolchain.json`, in the spirit of `/etc/os-release`: a conventional path any image can be asked the same question at, with no control-plane involvement and nothing in the task packet. The document names the image, lists the tools it offers with what each is for, and — the half that actually saves the attempt — lists what it deliberately does *not* have, with a reason attached, because an agent reaches for `python3` or `make` precisely because they are ordinarily there.
+
+```json
+{
+  "schemaVersion": "1.0",
+  "image": "moirai-runner",
+  "summary": "…",
+  "tools":  [{"name": "git",     "purpose": "Version control."}],
+  "absent": [{"name": "python3", "note": "No Python runtime. Use `node -e` instead."}],
+  "notes":  ["…"]
+}
+```
+
+The runner's own declaration is [`runner/toolchain.json`](toolchain.json). Unknown fields, a later `schemaVersion`, and a tool listed as both present and absent are all rejected: a half-understood declaration would tell the agent the list is complete when it is not.
+
+**The runner renders it into the prompt.** The agent's prompt is assembled in two stages. `writeArtifacts` writes what the control plane knows — objective, issue, plan, constraints. The runner then appends an `# EXECUTION ENVIRONMENT` section, because *which* environment the agent lands in is decided here rather than there: the packet may name a per-project execution image ([#219](https://github.com/alexandre-leites/moirai/issues/219)), the operator may have configured a container backend, or the agent may run in the runner image itself. The section is appended to `.loop/prompt.md` — the copy `opencode` actually reads — and carried in the prompt handed to backends that take one on their command line, continuations included. The `pipeline` role never gets one: it runs commands, not an agent.
+
+When the agent runs in a *container image* rather than in the runner's filesystem, the runner declares the image name and the conventional path instead of its own contents. Describing the wrong machine would be worse than describing none; one cheap read at a known path is still a declaration rather than a discovery.
+
+An environment with nothing to declare — a runner on a bare host, an image built before the convention — leaves the prompt exactly as it was. A manifest that exists but cannot be read is logged as the image defect it is and the job still runs.
+
+**The declaration cannot rot.** `runner toolchain --verify` checks it against the filesystem it describes, resolved on the PATH the *agent* is given rather than the one the runner process holds, and fails in both directions: a declared tool that is not installed, and a tool installed without being declared. The image build runs it, so an image whose declaration lies cannot be built; CI runs it again against the started container, alongside the assertion covering the programs the runner itself shells out to. `runner toolchain` prints the declaration.
+
 ## Agent Result Document
 
 Every agent execution must write the result document named by the task packet's `expectedOutput` (default `.loop/result.json`, validated against `schemas/agent-result.schema.json`). The runner treats it as the only evidence of what the agent did: it must be valid JSON with `protocolVersion` `1.0`, an `executionId` matching the execution, a non-empty `summary`, and a `status` of `completed`, `blocked`, or `failed`.
@@ -198,7 +225,7 @@ Note that this runner's `moirai_runner_heartbeat_age_seconds` reports *its own* 
 
 ## Health Probes
 
-`runner live` verifies the process can start. `runner ready` additionally validates its configuration, data directory capacity, and selected agent backend prerequisites.
+`runner live` verifies the process can start. `runner ready` additionally validates its configuration, data directory capacity, and selected agent backend prerequisites. `runner toolchain [--verify]` prints, and optionally checks, the image's [execution environment declaration](#execution-environment-declaration); it reads no configuration, because the question is about the image rather than about a deployment and has to be answerable during the build.
 
 The Compose runner uses the OpenCode backend installed by its image and persists `/data` in the `runner-data` volume.
 
