@@ -240,6 +240,22 @@ jobs:
               || { echo "::error::orchestrator image is missing $tool"; exit 1; }
             echo "orchestrator: $tool ok"
           done
+      # The step above covers what the *runner* shells out to. This one covers
+      # what the *agent* reaches for, which is the other half and the one that
+      # is declared rather than hardcoded: the image publishes its own toolchain
+      # at /etc/moirai/toolchain.json and the runner reads it into the agent's
+      # prompt, so a wrong declaration is a lie told to the agent with
+      # confidence. `--verify` fails both ways -- a declared tool that is not
+      # installed, and a tool installed without being declared -- so the
+      # declaration cannot rot away from the image behind it.
+      #
+      # The build runs the same check, so this asserts it against the image that
+      # was actually started, not the one that was actually built.
+      - name: Verify the toolchain the runner image declares to the agent
+        run: |
+          set -eu
+          docker compose -f compose.yaml -f compose.build.yaml exec -T runner /runner toolchain --verify \
+            || { echo "::error::runner image toolchain declaration does not match the image"; exit 1; }
 
       - name: Collect diagnostics
         if: always()

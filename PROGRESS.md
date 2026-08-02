@@ -293,6 +293,59 @@ and note that CI will not confirm any of it until the Blocked item is resolved.
 
 ---
 
+## Issue #218 — Execution environment declaration (2026-08-02)
+
+- Branch/worktree: `issue-218` in `.claude/worktrees/issue-218`.
+- Scope: the piece of #218 that is concrete now that #219 has landed — declaring the available
+  toolchain to the agent, and extending the CI image assertion to the agent-facing toolchain.
+  Execution modes (#220/#221/#222) and mise (#223) stay out of scope, and no shared contract
+  (`proto/`, `gen/`, migrations, task packets) was touched: the image declares its own contents.
+- Delivered:
+  - `runner/toolchain.json` — the runner image's own declaration, published in the image at
+    `/etc/moirai/toolchain.json`. It lists the tools the image offers *and* the ones it
+    deliberately lacks (`python3`, `make`, `go`, `docker`, `bash`, `curl`, `jq`, `gcc`, `cargo`,
+    `java`, `pip`, `patch`), each with a reason, which is the half that stops the probe.
+  - `runner/internal/toolchain` — loads, validates, verifies and renders a declaration. Rejects
+    unknown fields, a later `schemaVersion`, and a tool declared both present and absent.
+  - `runner/internal/dispatch/toolchain.go` + one call site in `goalgate.go` — appends an
+    `# EXECUTION ENVIRONMENT` section to `.loop/prompt.md` and to the prompt handed to backends
+    that take one on their command line, continuations included. Resolved once per execution.
+    When the agent runs in a container image instead of the runner's filesystem (packet
+    `executionImage`, or a configured `docker` backend), the image name and the conventional
+    manifest path are declared rather than the runner's own contents — describing the wrong
+    machine would be worse than describing none.
+  - `runner toolchain [--verify]` — one implementation, three readers: the image build, CI, and
+    anyone reading the declaration back. `--verify` resolves on the PATH the *agent* is given
+    (`execution.MinimalEnvironmentMap`) and fails both ways: declared-but-missing, and
+    installed-but-declared-absent.
+  - `runner/Dockerfile` — copies the manifest to `/etc/moirai/toolchain.json` and runs
+    `/runner toolchain --verify`, so an image whose declaration lies cannot be built.
+  - `.github/workflows/ci.yml` — new step `Verify the toolchain the runner image declares to the
+    agent`, asserting the declaration against the started container. `c2dd82e` asserted `git`,
+    `ssh`, `opencode` — what the *runner* shells out to; this closes the agent-facing half.
+  - `runner/README.md` — new "Execution Environment Declaration" section; `runner toolchain`
+    documented under Health Probes.
+- Validation actually run (all passing):
+  - `make test-runner` (`go test -race ./...`, all 12 packages ok).
+  - `cd runner && go vet ./...`, `gofmt -l` clean on every file touched.
+  - `docker build -f runner/Dockerfile -t moirai-runner-issue-218:test .` → exit 0; the build-time
+    `--verify` step printed the declaration and passed against the real image.
+  - Negative proof, against the built image with a tampered manifest bind-mounted:
+    declaring `python3` present → exit 1, `declared but not installed: python3`; declaring `node`
+    absent → exit 1, `declared absent but installed: node`. Shipped manifest → exit 0.
+  - `docker run … /runner live` → `{"status":"live"}`, so the new subcommand does not shadow the
+    health probes.
+  - `make test-orchestrator`, `make lint`, `make typecheck MYPY_CACHE=/tmp/moirai-mypy-cache-issue-218`,
+    `make compose`, `make compose-overlays`, `make test-release-tags`, `make proto-check`.
+- Decision: the declaration lives in the image, not in the task packet. It keeps the control plane
+  out of describing an image it did not build, works unchanged under any of #220/#221/#222, and is
+  the only design under which a per-project execution image can say what it is.
+- Known limitation: the runner does not read a *remote* execution image's manifest — that would
+  cost a container start per execution — so for those the agent is pointed at
+  `/etc/moirai/toolchain.json` inside its own image instead of being handed the contents.
+
+---
+
 ## Issue #226 — Orchestrator proxy headers (2026-08-02)
 
 - Branch/worktree: `issue-226-b` in `.claude/worktrees/issue-226-b`.

@@ -44,7 +44,20 @@ RUN apk add --no-cache git openssh-client ca-certificates su-exec \
     && chown -R loop:loop /data /home/loop
 COPY --from=build /runner /runner
 COPY runner/docker-entrypoint.sh /docker-entrypoint.sh
-RUN chmod 0755 /docker-entrypoint.sh
+# The image's own account of the toolchain it offers the agent, at the
+# conventional path every execution image answers on. The runner splices it into
+# the agent's prompt, so the agent is told what it has instead of finding out by
+# running a command that fails -- and a failed probe costs a whole attempt out
+# of a budget of two.
+#
+# `toolchain --verify` runs it against this filesystem and fails the build if it
+# does not match, in both directions: a declared tool that is missing, or a
+# declared absence that someone has since installed. A declaration nobody checks
+# rots into a confident lie, which is worse for the agent than no declaration.
+COPY runner/toolchain.json /etc/moirai/toolchain.json
+RUN chmod 0755 /docker-entrypoint.sh \
+    && chmod 0644 /etc/moirai/toolchain.json \
+    && /runner toolchain --verify
 ENV HOME=/home/loop
 VOLUME ["/data"]
 # Compose overrides this with its own probe. It exists so that `docker run` of a

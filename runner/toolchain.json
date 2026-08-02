@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "image": "moirai-runner",
+  "summary": "The Moirai runner image. It carries the runner daemon and the agent harness, not a project toolchain: a project that needs Go, Python, Docker or a build system asks for an execution image of its own.",
+  "tools": [
+    {"name": "sh", "purpose": "POSIX shell (BusyBox ash). `bash` is not installed, so shell scripts must be POSIX."},
+    {"name": "git", "purpose": "Version control. The workspace is a git worktree; the runner commits and pushes for you."},
+    {"name": "ssh", "purpose": "Reached by git for ssh:// and git@ remotes. You do not normally invoke it yourself."},
+    {"name": "node", "purpose": "Node.js runtime."},
+    {"name": "npm", "purpose": "Node package manager. Installing globally fails: the image filesystem is read-only outside the workspace."},
+    {"name": "npx", "purpose": "Runs a package binary from the workspace's own node_modules."},
+    {"name": "opencode", "purpose": "The agent harness itself. Do not invoke it."},
+    {"name": "tar", "purpose": "Archive extraction (BusyBox)."},
+    {"name": "wget", "purpose": "HTTP downloads (BusyBox). `curl` is not installed."},
+    {"name": "unzip", "purpose": "Zip extraction."}
+  ],
+  "absent": [
+    {"name": "python3", "note": "No Python runtime. Use `node -e` where you would have reached for a one-line Python script."},
+    {"name": "pip", "note": "No Python packaging, because there is no Python."},
+    {"name": "make", "note": "No build system. Read the Makefile and run the underlying commands, or ask for an execution image that has it."},
+    {"name": "go", "note": "No Go toolchain. `go build` and `go test` cannot run here."},
+    {"name": "docker", "note": "No Docker client and no daemon socket. Nothing containerised can be built or run from inside a job."},
+    {"name": "bash", "note": "No bash. `#!/bin/sh` and POSIX syntax only."},
+    {"name": "curl", "note": "Not installed. Use `wget` instead."},
+    {"name": "jq", "note": "Not installed. Use `node -e` to read JSON."},
+    {"name": "gcc", "note": "No C toolchain, so no native build and no npm package that compiles on install."},
+    {"name": "cargo", "note": "No Rust toolchain."},
+    {"name": "java", "note": "No JVM."},
+    {"name": "patch", "note": "Not installed. Edit files directly, or use `git apply`."}
+  ],
+  "notes": [
+    "Standard BusyBox utilities beyond the ones listed -- sed, awk, grep, find, xargs, diff, gzip -- are available. Language runtimes and build tools beyond those listed are not.",
+    "This list is the environment's own declaration and is verified against the image when it is built, so it cannot drift from what is really installed. Trust it instead of probing: a command that fails because a tool is absent still costs a full attempt out of a budget of two.",
+    "The environment is fixed for the run. Do not try to install a missing tool -- everything outside the workspace is read-only in a normal deployment. Solve the task with what is listed, or report the work as blocked and name the tool you needed."
+  ]
+}
