@@ -15,6 +15,8 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | Variable | Default | Description |
 | --- | --- | --- |
 | `LOOP_ORCHESTRATOR_ENDPOINT` | `orchestrator:50051` | Orchestrator gRPC endpoint. |
+| `LOOP_ORCHESTRATOR_HEADERS` | | JSON object of headers sent with every orchestrator RPC. Requires TLS. |
+| `LOOP_ORCHESTRATOR_HEADERS_FILE` | | Absolute path to a JSON header object. Preferred for secret values; read again for each RPC so rotated credentials apply on reconnect. Requires TLS. |
 | `LOOP_RUNNER_DATA_DIR` | `/data` | Absolute directory for runner state and workspaces. |
 | `LOOP_RUNNER_NAME` | hostname | Runner identity name. |
 | `LOOP_RUNNER_REGISTRATION_TOKEN` | | One-time registration token. |
@@ -50,6 +52,22 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_DOCKER_STOP_TIMEOUT` | `10s` | Docker graceful-stop timeout. |
 
 TLS settings are `LOOP_ORCHESTRATOR_TLS`, `LOOP_ORCHESTRATOR_TLS_CA_FILE`, `LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE`, `LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE`, and `LOOP_ORCHESTRATOR_TLS_SERVER_NAME`.
+
+### Cloudflare Access
+
+Cloudflare Tunnel must expose the orchestrator origin as gRPC with HTTP/2 end to end. Enable runner TLS and mount a header file readable only by the runner:
+
+```json
+{"CF-Access-Client-Id":"<service-token-id>.access","CF-Access-Client-Secret":"<service-token-secret>"}
+```
+
+```sh
+LOOP_ORCHESTRATOR_ENDPOINT=orchestrator.example.com:443
+LOOP_ORCHESTRATOR_TLS=true
+LOOP_ORCHESTRATOR_HEADERS_FILE=/run/secrets/orchestrator_headers
+```
+
+The runner lowercases metadata keys on the wire, so Cloudflare receives `cf-access-client-id` and `cf-access-client-secret`. A rejected service token returns an authentication status and stops reconnecting; a broken Tunnel or non-gRPC origin returns a transport status and retries with backoff. Header values are never logged. Do not set headers without TLS: configuration rejects it before dialing.
 
 ## Task credentials
 

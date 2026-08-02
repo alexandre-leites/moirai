@@ -250,13 +250,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reconcile runner executions: %w", err)
 	}
-	service, connection, err := control.Dial(ctx, settings.OrchestratorEndpoint, control.TLSOptions{
+	service, connection, err := control.DialWithHeaders(ctx, settings.OrchestratorEndpoint, control.TLSOptions{
 		Enabled:        settings.TLS,
 		CAFile:         settings.TLSCAFile,
 		ClientCertFile: settings.TLSClientCertFile,
 		ClientKeyFile:  settings.TLSClientKeyFile,
 		ServerName:     settings.TLSServerName,
-	})
+	}, control.HeaderOptions{Headers: settings.OrchestratorHeaders, File: settings.OrchestratorHeadersFile})
 	if err != nil {
 		return fmt.Errorf("dial orchestrator: %w", err)
 	}
