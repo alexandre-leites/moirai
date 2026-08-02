@@ -424,8 +424,15 @@ were excluded and why.
 Then reserve slots for the survivors:
 
 ```bash
+"$SLOTS" verify || { echo "FATAL: slot registry does not record what it reports"; exit 1; }
 "$SLOTS" reserve <candidates in ascending order>
 ```
+
+`verify` round-trips a reservation and checks the count actually moved. It runs **before any label
+is touched**, because the `[ -x ... ]` guard in the preamble only proves the helper *exists*. A
+helper that exists and lies is worse than a missing one: it passes that guard, the pass claims the
+issue, and the claim is then stranded under `WORKING_LABEL` with no work done and no slot recorded.
+That is not hypothetical — a stub helper did exactly this to #219, #226 and #195.
 
 Proceed with `RESERVED` only. Report `SKIPPED_NO_CAPACITY` as *at capacity*, never as *blocked*.
 
@@ -434,20 +441,48 @@ Proceed with `RESERVED` only. Report `SKIPPED_NO_CAPACITY` as *at capacity*, nev
 ```bash
 gh issue edit <N> --add-label "$WORKING_LABEL"                       # a) claim FIRST
 git -C "$REPO" fetch origin                                           # b)
-git -C "$REPO" worktree add "$WORKTREE_DIR/issue-<N>" -b "issue-<N>" "origin/$DEFAULT_BRANCH"
-git -C "$WORKTREE_DIR/issue-<N>" push -u origin "issue-<N>"           # c) push IMMEDIATELY
-"$SLOTS" bind <N> "issue-<N>" "$WORKTREE_DIR/issue-<N>"               # d) record the real paths
-gh issue comment <N> --body "Working on it — branch \`issue-<N>\`: <branch URL>"   # e)
+                                                                      # c) resume, else start fresh
+git -C "$REPO" worktree add "$WORKTREE_DIR/issue-<N>" "issue-<N>" \
+  || git -C "$REPO" worktree add "$WORKTREE_DIR/issue-<N>" -b "issue-<N>" "origin/issue-<N>" \
+  || git -C "$REPO" worktree add "$WORKTREE_DIR/issue-<N>" -b "issue-<N>" "origin/$DEFAULT_BRANCH"
+git -C "$WORKTREE_DIR/issue-<N>" push -u origin "issue-<N>"           # d) push IMMEDIATELY
+"$SLOTS" bind <N> "issue-<N>" "$WORKTREE_DIR/issue-<N>"               # e) record the real paths
+gh issue comment <N> --body "<see the comment vocabulary below>"      # f)
 ```
 
-Always branch from `origin/$DEFAULT_BRANCH`, **never local HEAD**. If the branch or worktree
-already exists, use a suffixed name (`issue-<N>-b`) — and then the `bind` call is **mandatory**,
-because a lease still pointing at the default path would let the reaper mistake a live agent for a
-dead one and hand its slot to someone else.
+A new branch always starts from `origin/$DEFAULT_BRANCH`, **never local HEAD**.
+
+**An issue keeps one branch, `issue-<N>`, for its whole life.** When that branch already exists —
+locally or on origin — resume it rather than opening `issue-<N>-retry` or `issue-<N>-b`. A killed
+agent leaves its work committed there, and a suffixed branch abandons it: #193 accumulated
+`issue-193`, `issue-193-retry` and `issue-193-b` for one issue, three passes each starting over
+from the default branch while the previous attempt's commits sat unread on the branch beside them.
+A suffix is only correct when the existing worktree is genuinely in use by a live agent, and in
+that case this pass should not have been reserved a slot at all.
+
+When a suffix is unavoidable the `bind` call is **mandatory**, because a lease still pointing at
+the default path would let the reaper mistake a live agent for a dead one and hand its slot away.
 
 The ordering matters: the slot reservation is the local mutex, the label is the global claim, so
 label before worktree means an overlapping fire cannot double-pick; push before the comment means
 the branch link in the comment is never dead.
+
+**Comment vocabulary.** The comment is the only record of what happened, so it must say which of
+these it is. Post exactly one per pass, per issue.
+
+| Situation | Comment |
+| :--- | :--- |
+| Branch created | ``Claiming — branch `issue-<N>`: <url>`` |
+| Branch already had commits | ``Resuming `issue-<N>` at `<sha>` (<n> commits from a prior attempt): <url>`` |
+| Attempt ended without a merge | ``Failed: <one line of what broke>. Branch left at `<sha>`. Keeps `ai-working`; needs a human.`` |
+
+Never post on an issue that already carries `FINISHED_LABEL` — check immediately before commenting,
+not only during selection. #193 was merged and closed at 14:13 and picked up again at 14:15 by a
+pass that had decided its candidates before the merge landed.
+
+Twelve near-identical "Working on it" comments is what the old wording produced on #193, and none of
+them recorded that an earlier attempt had been killed with work still on the branch. A resume that
+does not say what it is resuming from is indistinguishable from a restart.
 
 ### STEP 4 — one sub-agent per reserved issue
 
@@ -607,8 +642,13 @@ For any sub-agent that cannot finish:
 
 1. **Leave `WORKING_LABEL` in place** so the loop does not retry it every interval.
 2. Do **not** add `FINISHED_LABEL`.
-3. Post a comment on the issue describing the exact blocker.
-4. Remove its worktree: `git worktree remove --force "$WORKTREE_DIR/issue-<N>"`.
+3. Post the `Failed:` comment from the STEP 3 vocabulary — the blocker in one line, and the SHA the
+   branch was left at. That comment is what the next attempt reads to orient itself, so "failed" on
+   its own is not enough: it has to say what broke and where the work stopped.
+4. **Commit and push whatever is on the branch first**, then remove the worktree:
+   `git worktree remove --force "$WORKTREE_DIR/issue-<N>"`. The worktree is disposable; the branch
+   is the handover. Removing a worktree with uncommitted work in it destroys the only thing a
+   resume could have started from.
 5. Release its slot: `"$SLOTS" release <N>`.
 6. Say clearly in the reply that the issue is **blocked and needs a human**.
 
