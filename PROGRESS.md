@@ -273,12 +273,10 @@ and note that CI will not confirm any of it until the Blocked item is resolved.
 
 ---
 
-## Issue #118 — SSE dashboard updates
+## Issue #114 — Pipeline Configuration Merge Completion (2026-08-02)
 
-- Completed: 2026-08-02
-- Agent/session: issue-118-b
-- Delivered: authenticated `GET /api/v1/events`; `StreamEvents` server-streaming ControlPlane RPC; PostgreSQL commit-aligned notifications from `workflow_events` and `runners`; generated stubs; EventSource-backed console snapshot updates; nginx streaming proxy settings; OpenAPI contract.
-- Tests: API handler test covers 401, event delivery, keepalive, and disconnect cancellation. Orchestrator gRPC test covers authenticated stream delivery. Web workflow test covers in-place pushed update; unavailable EventSource leaves initial fetch intact.
-- Validation: `make test-orchestrator` (594 tests), `make lint`, `make typecheck`, `make proto-check`, `docker compose config --quiet`; API suite passed in `golang:1.25`; web typecheck/lint and 196 tests passed in `node:24`.
-- Environment: direct `make test-api` cannot run because host has no `go`; direct `make test-web` cannot run because host Node 18 lacks `node:util.styleText`. Container equivalents passed.
-- Review: adversarial staged diff review found no unresolved auth, teardown, payload, or transaction-boundary defects.
+- Branch/worktree: `issue-114-1` in `.claude/worktrees/issue-114-1`.
+- Behavior: project pipeline steps persist and round-trip through protobuf, PostgreSQL, gRPC, REST/OpenAPI, and UI. Required steps populate pipeline task packets in position order.
+- Fail-closed: no required steps block immediately with `pipeline_passed = false` and `project has no required pipeline steps`; runner terminal handling also treats an empty pipeline as failed, never passed.
+- Validation: `make test-orchestrator` passed (594, 61 skipped); `ruff`, `mypy`, and `make proto-check` passed; API tests passed in `golang:1.25`; web typecheck/lint and 195 tests passed in `node:22`; CI run `30725136308` passed all jobs after one corrected integration-test assertion.
+- Review: adversarial review verified contract round-trip, transactional replacement, required-step packet filtering, empty-gate failure, and UI submission. Position preservation was fixed before review completion.

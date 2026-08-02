@@ -69,6 +69,8 @@ class WorkflowPersistence(Protocol):
         self, workflow_run_id: str
     ) -> dict[str, Any] | None: ...
 
+    async def has_required_pipeline_steps(self, workflow_run_id: str) -> bool: ...
+
 
 class ExecutionDispatcher(Protocol):
     async def dispatch(self, workflow_run_id: str, role: str) -> dict[str, Any]: ...
@@ -143,6 +145,14 @@ class PersistedWorkflowNodes:
         # on an inherited `pipeline_passed` would skip the gate exactly when the
         # previous phase claimed success, and would leave repaired work carrying
         # the verdict of the pipeline run that predates the repair.
+        has_steps = getattr(self.persistence, "has_required_pipeline_steps", None)
+        if has_steps is not None and not await _await(has_steps(_workflow_run_id(state))):
+            return await self._transition(state, "blocked", {
+                "status": "blocked",
+                "pipeline_passed": False,
+                "blocking_reason": "project has no required pipeline steps",
+                "awaiting_execution": False,
+            })
         return await self._dispatch(state, "pipeline", "local_pipeline", None)
 
     async def review(self, state: IssueWorkflowState) -> WorkflowUpdate:
