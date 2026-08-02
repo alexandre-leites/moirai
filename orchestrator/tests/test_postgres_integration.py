@@ -1416,13 +1416,13 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ("planner", 1, "completed"),
             ],
         )
+        # The developer job finished rather than being left `running` for
+        # `expire_leases` to sweep into the re-offer loop.
+        self.assertEqual(await self._job_status(job_id), "completed")
         pipeline_offer = await self.control_plane.schedule_execution(_NOW, timedelta(minutes=5))
         assert pipeline_offer is not None
         packet = await self.control_plane.build_task_packet(pipeline_offer)
         self.assertEqual(packet["pipeline"], [{"command": "true", "timeoutSeconds": 60}])
-        # The job finished with its execution rather than being left `running`
-        # for `expire_leases` to sweep into the re-offer loop.
-        self.assertEqual(await self._job_status(job_id), "completed")
         self.assertEqual(await self._outbox_statuses(workflow_run_id), ["processed", "processed"])
 
     async def test_developer_execution_recovered_from_a_lease_expiry_still_transitions(self) -> None:
