@@ -67,6 +67,9 @@ describe("ProjectsPage", () => {
     await chooseOption(selectField(document.body, /Mode/), "existing_path");
     await typeInto(field(document.body, /Local repository path/), "/srv/repos/payments");
     await typeInto(field(document.body, /Runner labels/), "go, docker");
+    await click(button(document.body, /Add pipeline step/));
+    await typeInto(document.querySelector<HTMLInputElement>("input[aria-label='Pipeline command 1']")!, "go test ./...");
+    await typeInto(document.querySelector<HTMLInputElement>("input[aria-label='Pipeline timeout 1']")!, "300");
     await submitForm(form(document.body));
 
     expect(createProject).toHaveBeenCalledWith({
@@ -76,6 +79,7 @@ describe("ProjectsPage", () => {
       localRepositoryPath: "/srv/repos/payments",
       defaultBranch: "main",
       requiredRunnerLabels: ["go", "docker"],
+      pipelineSteps: [{ command: "go test ./...", timeoutSeconds: 300, position: 0, required: true }],
     });
   });
 

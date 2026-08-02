@@ -384,6 +384,19 @@ class AsyncpgWorkflowPersistence:
         record = await self._pool.fetchrow(_OPEN_EXECUTION_REQUEST_QUERY, _uuid(workflow_run_id))
         return None if record is None else _execution_request(record, created=False)
 
+    async def has_required_pipeline_steps(self, workflow_run_id: str) -> bool:
+        return bool(await self._pool.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM app.workflow_runs AS w
+                JOIN app.project_pipeline_steps AS step ON step.project_id = w.project_id
+                WHERE w.id = $1 AND step.required = true
+            )
+            """,
+            _uuid(workflow_run_id),
+        ))
+
     async def dispatch(self, workflow_run_id: str, role: str) -> dict[str, Any]:
         """Ensures the run has an open execution request, and reports whether
         this call is the one that created it.

@@ -544,6 +544,8 @@ class _ProjectConnection:
         return _Transaction()
 
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
+        if "app.projects" in query:
+            return await self.pool.fetchrow(query, *arguments)
         if "UPDATE app.runner_registration_tokens" in query:
             token_id = str(arguments[0])
             token = next((item for item in self.pool.tokens if str(item["id"]) == token_id), None)
@@ -554,6 +556,8 @@ class _ProjectConnection:
         raise AssertionError(query)
 
     async def execute(self, query: str, *arguments: object) -> str:
+        if "project_pipeline_steps" in query:
+            return await self.pool.execute(query, *arguments)
         if "INSERT INTO app.runner_registration_tokens" in query:
             self.pool.tokens.append(
                 {
@@ -576,6 +580,7 @@ class _ProjectConnection:
 class _ProjectPool:
     def __init__(self) -> None:
         self.projects: dict[str, dict[str, object]] = {}
+        self.pipeline_steps: dict[str, list[dict[str, object]]] = {}
         self.tokens: list[dict[str, object]] = []
         self.audits: list[dict[str, object]] = []
 
@@ -583,6 +588,15 @@ class _ProjectPool:
         return _ProjectConnection(self)
 
     async def execute(self, query: str, *arguments: object) -> str:
+        if "DELETE FROM app.project_pipeline_steps" in query:
+            self.pipeline_steps[str(arguments[0])] = []
+            return "DELETE 0"
+        if "INSERT INTO app.project_pipeline_steps" in query:
+            self.pipeline_steps.setdefault(str(arguments[1]), []).append({
+                "command": arguments[4], "timeout_seconds": arguments[5],
+                "position": arguments[2], "required": arguments[6],
+            })
+            return "INSERT 0 1"
         if "INSERT INTO app.audit_events" not in query:
             raise AssertionError(query)
         self.audits.append({"actor": str(arguments[1]), "action": arguments[2], "target": arguments[4]})
@@ -620,7 +634,10 @@ class _ProjectPool:
 
     async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
         if "FROM app.projects" in query:
-            return sorted(self.projects.values(), key=lambda record: str(record["name"]))
+            return [
+                {**record, "pipeline_steps": self.pipeline_steps.get(str(record["id"]), [])}
+                for record in sorted(self.projects.values(), key=lambda record: str(record["name"]))
+            ]
         if "FROM app.runner_registration_tokens" in query:
             return list(reversed(self.tokens))
         raise AssertionError(query)
@@ -1216,12 +1233,17 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             {"linux", "docker"},
             NOW,
             "00000000-0000-0000-0000-000000000099",
+            pipeline_steps=[
+                {"command": "go test ./...", "timeout_seconds": 300, "position": 0, "required": True},
+                {"command": "go vet ./...", "timeout_seconds": 120, "position": 1, "required": False},
+            ],
         )
         self.assertTrue(created["enabled"])
         self.assertEqual(created["repository_mode"], "managed_clone")
         self.assertEqual(created["repository_url"], "https://example.test/repo.git")
         self.assertEqual(created["default_branch"], "main")
         self.assertEqual(sorted(created["required_runner_labels"]), ["docker", "linux"])
+        self.assertEqual([step["command"] for step in created["pipeline_steps"]], ["go test ./...", "go vet ./..."])
         listed = (await control_plane.list_projects())[0]
         self.assertEqual(listed["name"], "Example")
         self.assertEqual(listed["repository_mode"], "managed_clone")
@@ -1236,6 +1258,7 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
             {"linux"},
             NOW,
             "00000000-0000-0000-0000-000000000099",
+            pipeline_steps=[{"command": "make check", "timeout_seconds": 90, "position": 0, "required": True}],
         )
         self.assertEqual(updated["name"], "Renamed")
         self.assertEqual(updated["repository_mode"], "existing_path")
@@ -1243,6 +1266,7 @@ class AsyncpgControlPlaneTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["local_repository_path"], "/repositories/example")
         self.assertEqual(updated["default_branch"], "trunk")
         self.assertEqual(updated["required_runner_labels"], ["linux"])
+        self.assertEqual(updated["pipeline_steps"], [{"command": "make check", "timeout_seconds": 90, "position": 0, "required": True}])
         disabled = await control_plane.set_project_enabled(
             str(created["id"]), False, NOW, "00000000-0000-0000-0000-000000000099"
         )

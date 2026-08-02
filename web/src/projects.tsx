@@ -2,7 +2,7 @@
 // may work on — its issues, its labels, its delivery policy.
 import { useCallback, useState, type FormEvent } from "react";
 import { Link } from "react-router";
-import type { ApiClient, CredentialKind, Project, ProjectConfiguration, ProjectCredential } from "./api";
+import type { ApiClient, CredentialKind, PipelineStep, Project, ProjectConfiguration, ProjectCredential } from "./api";
 import { ApiError } from "./api";
 import { activeWorkflowFor, useConsoleData } from "./console-data";
 import { useIsAdmin } from "./auth";
@@ -138,6 +138,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   );
   const [branch, setBranch] = useState(project?.defaultBranch ?? "main");
   const [labels, setLabels] = useState((project?.requiredRunnerLabels ?? []).join(", "));
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>(project?.pipelineSteps ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -159,6 +160,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       localRepositoryPath: mode === "existing_path" ? source.trim() : undefined,
       defaultBranch: branch.trim() || "main",
       requiredRunnerLabels: labels.split(",").map((label) => label.trim()).filter(Boolean),
+      pipelineSteps: pipelineSteps.map((step, position) => ({ ...step, command: step.command.trim(), position })),
     }).then(
       () => { onDone(); onClose(); },
       (reason: unknown) => {
@@ -203,6 +205,18 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
             Runner labels
             <input value={labels} placeholder="go, docker" onChange={(event) => setLabels(event.target.value)} />
           </label>
+          <div className="wide">
+            <label>Pipeline steps</label>
+            {pipelineSteps.map((step, index) => (
+              <div className="btnrow" key={index}>
+                <input aria-label={`Pipeline command ${index + 1}`} value={step.command} placeholder="make test" onChange={(event) => setPipelineSteps(pipelineSteps.map((current, i) => i === index ? { ...current, command: event.target.value } : current))} />
+                <input aria-label={`Pipeline timeout ${index + 1}`} type="number" min="1" max="3600" value={step.timeoutSeconds} onChange={(event) => setPipelineSteps(pipelineSteps.map((current, i) => i === index ? { ...current, timeoutSeconds: Number(event.target.value) } : current))} />
+                <label><input type="checkbox" checked={step.required} onChange={(event) => setPipelineSteps(pipelineSteps.map((current, i) => i === index ? { ...current, required: event.target.checked } : current))} /> Required</label>
+                <button type="button" className="btn sm" onClick={() => setPipelineSteps(pipelineSteps.filter((_, i) => i !== index))}>Remove</button>
+              </div>
+            ))}
+            <button type="button" className="btn sm" onClick={() => setPipelineSteps([...pipelineSteps, { command: "", timeoutSeconds: 600, position: pipelineSteps.length, required: true }])}>Add pipeline step</button>
+          </div>
         </div>
         <div className="btnrow">
           <button type="submit" className="btn primary" disabled={saving}>{saving ? "Saving…" : submitLabel}</button>

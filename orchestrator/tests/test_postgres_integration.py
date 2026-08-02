@@ -808,6 +808,7 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "main",
             {label},
             _NOW,
+            pipeline_steps=[{"command": "true", "timeout_seconds": 60, "position": 0, "required": True}],
         )
         project_id = str(project["id"])
         await self.control_plane.upsert_issue(
@@ -1415,6 +1416,10 @@ class StalledRunRecoveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ("planner", 1, "completed"),
             ],
         )
+        pipeline_offer = await self.control_plane.schedule_execution(_NOW, timedelta(minutes=5))
+        assert pipeline_offer is not None
+        packet = await self.control_plane.build_task_packet(pipeline_offer)
+        self.assertEqual(packet["pipeline"], [{"command": "true", "timeoutSeconds": 60}])
         # The job finished with its execution rather than being left `running`
         # for `expire_leases` to sweep into the re-offer loop.
         self.assertEqual(await self._job_status(job_id), "completed")

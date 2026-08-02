@@ -51,6 +51,7 @@ export function project(overrides: Partial<Project> = {}): Project {
     localRepositoryPath: "",
     defaultBranch: "main",
     requiredRunnerLabels: ["go"],
+    pipelineSteps: [],
     ...overrides,
   };
 }

@@ -16,6 +16,13 @@ export type Health = {
 // orchestrator's project record verbatim, so an absent field on the wire is a
 // broken response. `requiredRunnerLabels` is always an array here — the
 // handler normalizes the protobuf's nil slice to `[]`.
+export type PipelineStep = {
+  command: string;
+  timeoutSeconds: number;
+  position: number;
+  required: boolean;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -25,9 +32,13 @@ export type Project = {
   localRepositoryPath: string;
   defaultBranch: string;
   requiredRunnerLabels: string[];
+  pipelineSteps: PipelineStep[];
 };
 
-type ProjectPayload = Omit<Project, "requiredRunnerLabels"> & { requiredRunnerLabels: string[] | null };
+type ProjectPayload = Omit<Project, "requiredRunnerLabels" | "pipelineSteps"> & {
+  requiredRunnerLabels: string[] | null;
+  pipelineSteps: PipelineStep[] | null;
+};
 
 /**
  * One workflow run. `GET /api/v1/workflows` and `GET /api/v1/workflows/{id}`
@@ -184,6 +195,7 @@ export type ProjectConfiguration = {
   localRepositoryPath?: string;
   defaultBranch: string;
   requiredRunnerLabels?: string[];
+  pipelineSteps?: PipelineStep[];
 };
 
 export class ApiError extends Error {
@@ -539,5 +551,9 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
 }
 
 function normalizeProject(project: ProjectPayload): Project {
-  return { ...project, requiredRunnerLabels: project.requiredRunnerLabels ?? [] };
+  return {
+    ...project,
+    requiredRunnerLabels: project.requiredRunnerLabels ?? [],
+    pipelineSteps: project.pipelineSteps ?? [],
+  };
 }

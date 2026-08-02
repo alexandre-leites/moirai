@@ -256,3 +256,13 @@ Targeted validation: an orchestrator test for a project whose pipeline fails and
 advance; an API handler test for round-tripping steps; a `web` test that the project form
 submits them. Run `make test-orchestrator`, `cd api && go test ./...` and `make test-web` —
 and note that CI will not confirm any of it until the Blocked item is resolved.
+
+---
+
+## Issue #114 — Project pipeline configuration (2026-08-02)
+
+- Branch/worktree: `issue-114-1` in `.claude/worktrees/issue-114-1`.
+- Delivered: pipeline steps cross protobuf, PostgreSQL, gRPC, REST/OpenAPI, and project form. Create/update replace all rows atomically; reads return ordered command, timeout, position, and required values. Pipeline packets use required steps.
+- Fail-closed decision: option (b). Pipeline node blocks with `project has no required pipeline steps`, sets `pipeline_passed = false`, and dispatches nothing. This avoids silently passing an empty deterministic gate.
+- Tests: `make test-orchestrator` passed (594, 61 skipped); `ruff` and `mypy` passed; API `go test ./...` passed in `golang:1.25`; web typecheck, lint, and 195 Vitest tests passed in `node:22`; `make proto-check` passed before final commit. Host Go is unavailable; host Node 18 cannot run ESLint 10, so container validation used per-issue caches under `/tmp/opencode/moirai-114-*`.
+- Review: adversarial contract/transaction/empty-gate/UI review found position normalization initially discarded caller positions; fixed by validating contiguous unique positions and preserving their order.

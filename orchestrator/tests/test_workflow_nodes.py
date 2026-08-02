@@ -17,15 +17,19 @@ async def _no_sleep(seconds: float) -> None:
 
 
 class _Persistence:
-    def __init__(self, open_request: dict[str, Any] | None = None) -> None:
+    def __init__(self, open_request: dict[str, Any] | None = None, required_pipeline_steps: bool = True) -> None:
         self.transitions: list[tuple[str, str, dict[str, object]]] = []
         self.open_request = open_request
+        self.required_pipeline_steps = required_pipeline_steps
 
     async def transition(self, workflow_run_id: str, status: str, updates: dict[str, object]) -> None:
         self.transitions.append((workflow_run_id, status, updates))
 
     async def get_open_execution_request(self, workflow_run_id: str) -> dict[str, Any] | None:
         return self.open_request
+
+    async def has_required_pipeline_steps(self, workflow_run_id: str) -> bool:
+        return self.required_pipeline_steps
 
 
 class _Dispatcher:
@@ -232,6 +236,14 @@ class PersistedWorkflowNodesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update["status"], "local_pipeline")
         self.assertEqual(update["execution_id"], "workflow-1-pipeline")
         self.assertEqual(self.dispatcher.dispatches, [("workflow-1", "pipeline")])
+
+    async def test_pipeline_blocks_without_required_steps(self) -> None:
+        nodes = PersistedWorkflowNodes(_Persistence(required_pipeline_steps=False), self.dispatcher)
+        update = await nodes.pipeline(self.state)
+        self.assertEqual(update["status"], "blocked")
+        self.assertFalse(update["pipeline_passed"])
+        self.assertEqual(update["blocking_reason"], "project has no required pipeline steps")
+        self.assertEqual(self.dispatcher.dispatches, [])
 
     async def test_pipeline_execution_does_not_spend_the_agent_budget(self) -> None:
         """The pipeline runs the project's commands, not an agent, so it must

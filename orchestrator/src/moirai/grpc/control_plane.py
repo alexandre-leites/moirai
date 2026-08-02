@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import grpc
 
@@ -145,6 +145,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
                 *_project_arguments(request.project),
                 self._now(),
                 session.user_id or None,
+                pipeline_steps=_pipeline_steps(request.project),
             )
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project configuration is invalid")
@@ -164,6 +165,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
                 *_project_arguments(request.project),
                 self._now(),
                 session.user_id or None,
+                pipeline_steps=_pipeline_steps(request.project),
             )
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project configuration is invalid")
@@ -669,6 +671,18 @@ def _project_arguments(
     )
 
 
+def _pipeline_steps(project: control_plane_pb2.ProjectConfiguration) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "command": step.command,
+            "timeout_seconds": step.timeout_seconds,
+            "position": step.position,
+            "required": step.required,
+        }
+        for step in project.pipeline_steps
+    )
+
+
 def _project_message(project: ProjectRecord) -> control_plane_pb2.Project:
     return control_plane_pb2.Project(
         id=project["id"],
@@ -679,6 +693,13 @@ def _project_message(project: ProjectRecord) -> control_plane_pb2.Project:
         local_repository_path=project.get("local_repository_path") or "",
         default_branch=project.get("default_branch", ""),
         required_runner_labels=list(project.get("required_runner_labels") or []),
+        pipeline_steps=[
+            control_plane_pb2.PipelineStep(
+                command=str(step["command"]), timeout_seconds=cast(int, step["timeout_seconds"]),
+                position=cast(int, step["position"]), required=bool(step["required"]),
+            )
+            for step in project.get("pipeline_steps", [])
+        ],
     )
 
 
