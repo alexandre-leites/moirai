@@ -270,3 +270,13 @@ and note that CI will not confirm any of it until the Blocked item is resolved.
 - Environment note: host `make test-api` fails because Go is absent; host `make test-web` fails
   at ESLint because Node 18 is below its required version. Container equivalents passed.
 - Next: stage generated protobuf outputs, run `make proto-check`, commit, push, open and merge PR.
+
+---
+
+## Issue #114 — Pipeline Configuration Merge Completion (2026-08-02)
+
+- Branch/worktree: `issue-114-1` in `.claude/worktrees/issue-114-1`.
+- Behavior: project pipeline steps persist and round-trip through protobuf, PostgreSQL, gRPC, REST/OpenAPI, and UI. Required steps populate pipeline task packets in position order.
+- Fail-closed: no required steps block immediately with `pipeline_passed = false` and `project has no required pipeline steps`; runner terminal handling also treats an empty pipeline as failed, never passed.
+- Validation: `make test-orchestrator` passed (594, 61 skipped); `ruff`, `mypy`, and `make proto-check` passed; API tests passed in `golang:1.25`; web typecheck/lint and 195 tests passed in `node:22`; CI run `30725136308` passed all jobs after one corrected integration-test assertion.
+- Review: adversarial review verified contract round-trip, transactional replacement, required-step packet filtering, empty-gate failure, and UI submission. Position preservation was fixed before review completion.
