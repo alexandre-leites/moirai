@@ -171,6 +171,11 @@ export const GATE_LABEL: Record<GateState, string> = {
  * Until then it lives here, and every branch is driven by a field the writer in
  * orchestrator/src/moirai/persistence/control_plane.py actually stores.
  */
+export function executionError(event: WorkflowEvent): string | null {
+  if (event.type !== "failed") return null;
+  return text(asRecord(asRecord(event.payload).payload).error) || null;
+}
+
 export function describeEvent(event: WorkflowEvent): { text: string; phase: string; warn: boolean } {
   const payload = asRecord(event.payload);
   const inner = asRecord(payload.payload);

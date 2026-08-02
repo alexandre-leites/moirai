@@ -122,8 +122,18 @@ describe("WorkflowDetailPage", () => {
     const container = await mountDetail(api);
 
     expect(container.textContent).toContain("Execution lost and requeued");
+    expect(container.textContent).not.toContain("Execution errors");
     expect(container.querySelector(".evt.warn")).not.toBeNull();
     expect(container.querySelector(".logline")?.textContent).toContain("applying plan step 3/6");
+  });
+
+  it("shows execution errors when a runner reports one", async () => {
+    const api = stubApi({
+      listWorkflowEvents: async () => ({ events: [event({ type: "failed", payload: { payload: { error: "GITHUB_TOKEN is not configured" } } })] }),
+    });
+    const container = await mountDetail(api);
+    expect(container.textContent).toContain("Execution errors");
+    expect(container.textContent).toContain("GITHUB_TOKEN is not configured");
   });
 
   it("draws the agent's colour instead of printing its escape sequences", async () => {
