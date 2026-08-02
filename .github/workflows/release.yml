@@ -189,9 +189,9 @@ jobs:
       matrix:
         include:
           - service: orchestrator
-            context: orchestrator
+            context: .
             file: orchestrator/Dockerfile
-            description: Moirai orchestrator, the Python gRPC control plane.
+            description: Moirai orchestrator, the Go gRPC control plane.
           - service: api
             context: .
             file: api/Dockerfile

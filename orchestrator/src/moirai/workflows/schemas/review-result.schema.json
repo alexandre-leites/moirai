@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["verdict","acceptanceCriteria","findings"],"properties":{"verdict":{"enum":["approved","changes_requested","human_required","invalid"]},"acceptanceCriteria":{"type":"array"},"findings":{"type":"array"}}}

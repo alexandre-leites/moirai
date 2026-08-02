@@ -10,8 +10,8 @@
 services:
   orchestrator:
     build:
-      context: ./orchestrator
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: orchestrator/Dockerfile
       args:
         MOIRAI_BUILD_VERSION: ${MOIRAI_BUILD_VERSION:-}
 

@@ -8,13 +8,34 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: None.
+- Active implementation: Go V1 orchestrator replacement.
 - Last updated: 2026-08-02
-- Agent/session identifier: full-main-content-width / 2026-08-02
+- Agent/session identifier: refactor/go-orchestrator-v1 / 2026-08-02
 
 ## In Progress
 
-_Nothing is claimed. The next agent should take the first item under Pending Implementation._
+_Nothing is claimed._
+
+## Go V1 Orchestrator Refactor
+
+- [x] Replace Python/LangGraph orchestrator with Go V1
+  - Completed: 2026-08-02
+  - Relevant files: `orchestrator/`, `Makefile`, `compose.build.yaml`, `compose.yaml`, `runner/`
+  - Behavior delivered: deleted Python/LangGraph source and tests; Go control-plane and runner-stream gRPC services preserve existing protobuf contracts, auth, projects, credentials, runner tokens, runner secret fencing, workflow events and operator controls. The state machine dispatches runner-owned worktree/OpenCode/commit/push work, creates PRs, waits for green checks, merges, and completes issues. No automatic retries or deadlines; manual retry remains. `timeoutSeconds: 0` means no runner execution deadline.
+  - Migration: standard `golang-migrate` replaces handwritten migration logic; it baselines compatible legacy `app.schema_version` databases without replaying SQL.
+  - Not implemented in V1, though specified in `PROJECT.md`: planning, deterministic local pipeline, independent AI review, repair loops, human approval. `SubmitHumanDecision` returns `FailedPrecondition`.
+
+- [x] Review remediation for the Go V1 orchestrator
+  - Completed: 2026-08-02
+  - Relevant files: `.github/workflows/ci.yml`, `.github/dependabot.yml`, `Makefile`, `orchestrator/`, `README.md`, `PROJECT.md`, `docs/architecture.md`
+  - Why: the branch reported zero CI checks and three of the suites `make test` claims to run were silently skipped, so nothing about the rewrite had actually been verified by CI.
+  - Verification fixed first: `ci.yml` was invalid YAML (one over-indented step), so Actions parsed no workflow at all; `test-runner`, `test-api` and `test-web` were `.PHONY` with no recipe, which make reports as success, so CI's web job passed without running typecheck, eslint or vitest.
+  - Correctness and safety fixed: empty or unrecognised GitHub check rollups were read as green, which squash-merged agent code before CI had run — an empty rollup is now pending and legacy `StatusContext` entries are decoded; the only task packet built was a `planner`, which the runner forbids from modifying or pushing, so the agent branch was never published and every pull request was opened from a branch the remote did not have; `RetryWorkflow` took the project lock and parked the run in a `recovering` status nothing reads, permanently wedging that project; a failed run left its issue eligible, so the scheduler re-created it every tick despite "no automatic retries"; accepting an offer had no job-status guard, so a late acceptance revived an administratively cancelled job with a fresh lease and regained secret access.
+  - Reliability added: a recovery sweep at startup and every 30s reclaims expired leases, resumes deliveries interrupted between a runner's completion and its pull request, and marks disconnected runners offline — each of those otherwise held a project lock forever with no in-product recovery. Offer-delivery cleanup is now one transaction on a shutdown-proof context. Issue sync runs on a timer instead of only when an operator presses "Sync now".
+  - Security: gRPC TLS is served again (`compose.tls.yaml` configured a certificate the Go server never read, so api and runner were told to require TLS against a plaintext listener); half-configured TLS is refused rather than downgraded; `gh` failures are redacted before reaching operator-visible fields; loader-hijacking names (`PATH`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, …) are refused as agent credential names again; `agent:blocked` and `agent:delivered` stop autonomous work again.
+  - Also: the legacy migration ledger check would have failed every startup once migration 019 landed; `GetSystemVersion` started requiring a session the API's public health endpoint cannot present, blanking the reported version; the container healthcheck dialled a hardcoded port; the unused `internal/workflow` package (whose state vocabulary the server never writes) was deleted; orchestrator tests now run under `-race`.
+  - Validation performed: `make lint`, `make typecheck`, `make test-orchestrator` (with `-race`), `make test-runner`, `make test-api`, `make test-web` (typecheck + eslint + 221 tests), `make compose`, `make compose-overlays`, `make test-release-tags` all pass; all four workflow/dependabot YAML files parse; every internal markdown link and anchor resolves; a fresh isolated Compose build reaches healthy for PostgreSQL, orchestrator, API, runner and web, and the CI smoke checks pass against it; the dispatched task packet was fed through the runner's own `taskpacket.Parse` and accepted as a developer packet with `mayPush`.
+  - Notes: the runner race suite has a pre-existing unrelated failure in `TestEventReporterRestoresEvictedEventWhenPersistFails` only when run as root.
 
 ## Done
 
@@ -276,6 +297,40 @@ complete on `main`; everything below was confirmed by it, not only locally.
   The console was checked against a live orchestrator (login, and every endpoint it reads),
   which is short of a delivery.
 - Dependency audit: `govulncheck` and `npm audit --audit-level=high` both clean
+
+## Known Issues — Go V1 orchestrator (reported, not fixed on this branch)
+
+- `StreamEvents` replays the entire `workflow_events` table when a client
+  connects without a cursor, one workflow query per row, and never emits runner
+  events, so the console's runner page has no live updates.
+- `workflow_runs.status` is an untyped string vocabulary spelled out in raw SQL
+  in several places, with no Go type and no CHECK constraint — the one status
+  column in the schema without one. The console additionally carries ten
+  statuses the orchestrator never writes.
+- `completed` means two things: "the runner finished" and "the pull request is
+  merged". They are distinguished only by whether a project lock still exists,
+  which is why the stranded-delivery sweep needs an age bound. Splitting out a
+  `delivering` status would let a partial unique index on `workflow_runs`
+  replace the hand-maintained `app.project_locks` table entirely.
+- Retry creates a new workflow run with no link to the one it replaces, so the
+  console cannot show attempts of the same logical work, and the retry toast
+  still promises prior-failure context that V1 does not carry.
+- `app.issues.eligible` now has two writers: the `agent:ready` label on first
+  sync, and the orchestrator's own lifecycle afterwards. Writing the label back
+  to the tracker, or a `superseded_at` column on the run, would restore a single
+  owner. `docs/architecture.md` records the same hazard for `runners.draining`.
+- `databaseError` collapses every cause into `"database operation failed"`, and
+  is applied to JSON decoding failures too. There is no logging in the `server`
+  package, so production failures are undiagnosable.
+- `CancelWorkflow`/`BlockWorkflow`/`SetRunnerState` update the database but never
+  send `CancelExecution`/`DrainRunner` to the runner, so in-flight work keeps
+  running until its lease lapses.
+- `existing_path` projects are accepted at creation but can neither sync issues
+  nor deliver, because both paths require a repository URL that the mode forbids.
+- The human approval gate is unimplemented while the console still renders its
+  decision panel.
+- The hex branch of `LOOP_SECRET_KEY` decoding is unreachable: a 64-character
+  hex key is also valid base64, so it decodes to 48 bytes and is rejected.
 
 ## Known Issues
 

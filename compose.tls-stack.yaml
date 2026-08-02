@@ -22,18 +22,18 @@
 # The certificate is self-signed, generated on first start into a volume, and
 # names only "orchestrator" — the service name on the internal network, which is
 # the only name anything dials it by.
-name: issue-230
+name: moirai
 networks:
   control:
     internal: true
-    name: issue-230_control
+    name: moirai_control
   database:
     internal: true
-    name: issue-230_database
+    name: moirai_database
   egress:
-    name: issue-230_egress
+    name: moirai_egress
   public:
-    name: issue-230_public
+    name: moirai_public
 services:
   api:
     cap_drop:
@@ -107,10 +107,9 @@ services:
       retries: 12
       start_period: 60s
       test:
-        - CMD-SHELL
-        - python -c "import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json'));
-          sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else
-          1)"
+        - CMD
+        - /app/orchestrator
+        - healthcheck
       timeout: 5s
     image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/orchestrator:${MOIRAI_IMAGE_TAG:-latest}
     networks:
@@ -275,8 +274,8 @@ services:
       - no-new-privileges:true
 volumes:
   postgres-data:
-    name: issue-230_postgres-data
+    name: moirai_postgres-data
   runner-data:
-    name: issue-230_runner-data
+    name: moirai_runner-data
   tls:
     name: moirai_tls

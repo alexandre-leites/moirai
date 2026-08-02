@@ -49,7 +49,11 @@ func (executor DockerExecutor) Execute(parent context.Context, request Request, 
 	}
 	defer os.Remove(environmentFile)
 	command := executor.runCommand(containerName, workspace, request, environmentFile)
-	ctx, cancel := context.WithTimeout(parent, request.Timeout)
+	ctx := parent
+	cancel := func() {}
+	if request.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, request.Timeout)
+	}
 	defer cancel()
 	done := make(chan struct{})
 	monitorDone := make(chan struct{})
@@ -108,8 +112,8 @@ func (executor DockerExecutor) validate(request Request) error {
 	if len(request.Command) == 0 || request.Command[0] == "" {
 		return errors.New("command is required")
 	}
-	if request.Timeout <= 0 {
-		return errors.New("timeout must be positive")
+	if request.Timeout < 0 {
+		return errors.New("timeout must not be negative")
 	}
 	for key, value := range request.Environment {
 		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsAny(value, "\x00\r\n") {
