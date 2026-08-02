@@ -203,6 +203,59 @@ out="$(MAX_AGENTS=1 "$SLOTS" reacquire 1102 2>&1)"
 # otherwise phrase it: the procedure says "or prints DENIED <N> at-capacity".
 expect_contains "$out" "DENIED 1102 at-capacity" "reacquiring beyond the ceiling is refused"
 
+# --- the resume queue -------------------------------------------------------
+# A reaped lease frees the slot, but the work is still half-done on a branch.
+# The claim outlives the lease so the next pass can find and resume it.
+echo "  resume: a reaped claim becomes resumable work"
+new_repo
+"$SLOTS" reserve 401 >/dev/null
+"$SLOTS" bind 401 issue-401 /tmp/wt-401 >/dev/null
+age_lease 401 120
+out="$("$SLOTS" resume 2>&1)"
+expect_contains "$out" "401" "a claim whose agent died is offered for resume"
+expect_contains "$out" "issue-401" "and carries the branch the work is on"
+expect_contains "$out" "/tmp/wt-401" "and the worktree it was using"
+expect_contains "$out" "INFLIGHT=0" "while its slot is genuinely free again"
+
+echo "  resume: a live agent is not offered for resume"
+new_repo
+"$SLOTS" reserve 402 >/dev/null
+"$SLOTS" bind 402 issue-402 /tmp/wt-402 >/dev/null
+out="$("$SLOTS" resume 2>&1)"
+expect_missing "$out" "402" "an issue with a live lease is being worked, not resumed"
+expect_contains "$out" "No work to resume." "so the queue is empty"
+
+echo "  resume: repeated deaths are counted"
+new_repo
+"$SLOTS" reserve 403 >/dev/null
+age_lease 403 120
+"$SLOTS" reap >/dev/null
+"$SLOTS" reacquire 403 >/dev/null
+age_lease 403 120
+out="$("$SLOTS" reap 2>&1)"
+expect_contains "$out" "deaths=2" "an issue that kills a second agent counts it"
+
+echo "  resume: finishing removes the claim"
+new_repo
+"$SLOTS" reserve 404 >/dev/null
+age_lease 404 120
+"$SLOTS" reap >/dev/null
+out="$("$SLOTS" resume 2>&1)"
+expect_contains "$out" "404" "orphaned work is resumable"
+"$SLOTS" release 404 >/dev/null
+out="$("$SLOTS" resume 2>&1)"
+expect_missing "$out" "404" "released work never comes back through the resume queue"
+
+echo "  resume: reacquiring keeps the claim until release"
+new_repo
+"$SLOTS" reserve 405 >/dev/null
+age_lease 405 120
+"$SLOTS" reap >/dev/null
+"$SLOTS" reacquire 405 >/dev/null
+out="$("$SLOTS" resume 2>&1)"
+expect_missing "$out" "405" "a resumed issue is live, so it leaves the resume queue"
+expect_contains "$out" "INFLIGHT=1" "and is counted against the ceiling again"
+
 # --- one registry across worktrees ------------------------------------------
 echo "  registry is shared across worktrees"
 new_repo

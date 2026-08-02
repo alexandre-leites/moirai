@@ -26,10 +26,33 @@ file as both a skill and a symlinked custom command. Do not fork it.
 | :--- | :--- |
 | `run` | Execute exactly one pass (STEP -1 → STEP 5). This is what the scheduler fires. |
 | `arm` | Register the recurring schedule, then immediately execute one `run` pass. |
-| `status` | Report in-flight count, capacity, queue contents, and open loop PRs. Claim nothing, spawn nothing. |
+| `status` | Report in-flight count, capacity, resumable work (`"$SLOTS" resume`), queue contents, and open loop PRs. Claim nothing, spawn nothing. |
 | `stop` | Cancel the recurring schedule. See **STOPPING THE LOOP**. |
 
-Any `key=value` tokens in `$ARGUMENTS` override the parameters below for this invocation.
+### Arguments
+
+Any `key=value` token in `$ARGUMENTS` overrides the matching parameter from §1 **for this
+invocation only**, in any mode and in any order alongside the mode word:
+
+```
+/gh-issue-loop run MAX_AGENTS=1          # one agent at a time, however much is queued
+/gh-issue-loop MAX_AGENTS=1              # same: mode defaults to run
+/gh-issue-loop run MAX_AGENTS=2 BATCH_SIZE=2
+/gh-issue-loop run QUEUE_LABEL=urgent    # work a different queue this pass
+/gh-issue-loop arm MAX_AGENTS=3 CRON="*/10 * * * *"
+/gh-issue-loop status                    # claims nothing, spawns nothing
+```
+
+**Apply them before writing `env.sh` and the tunables file**, because those two are what carry a
+value to everything else: the tunables file is the only way a ceiling reaches a sub-agent, and
+`env.sh` is what every later shell in the pass sources. Setting `MAX_AGENTS=1` and then writing a
+tunables file that says `5` leaves the parent believing one thing and the helper enforcing another.
+The template in §1 reads each parameter as `${NAME:-default}` precisely so an argument already in
+the environment wins and an absent one still gets its default.
+
+`MAX_AGENTS=1` is the useful one to know: it makes the loop strictly serial, which is the right
+setting when the queue's issues overlap heavily, when you are watching a single change land, or
+when you want the loop to keep an existing long-running issue alive without starting anything new.
 
 ## 1. PARAMETERS AND ENVIRONMENT
 
@@ -64,11 +87,11 @@ NAME="${SLUG##*/}"
 DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
 LOOP_DIR="$REPO/.claude/issue-loop"
 WORKTREE_DIR="$REPO/.claude/worktrees"
-QUEUE_LABEL="ai-doable"
-WORKING_LABEL="ai-working"
-FINISHED_LABEL="ai-finished"
-BATCH_SIZE=5
-export MAX_AGENTS=5 REAP_AFTER_MIN=90 STARTUP_GRACE_MIN=10
+QUEUE_LABEL="${QUEUE_LABEL:-ai-doable}"
+WORKING_LABEL="${WORKING_LABEL:-ai-working}"
+FINISHED_LABEL="${FINISHED_LABEL:-ai-finished}"
+BATCH_SIZE=${BATCH_SIZE:-5}
+export MAX_AGENTS=${MAX_AGENTS:-5} REAP_AFTER_MIN=${REAP_AFTER_MIN:-90} STARTUP_GRACE_MIN=${STARTUP_GRACE_MIN:-10}
 for c in "$REPO/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \
          "\$HOME/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \
          "\$HOME/.config/opencode/skills/gh-issue-loop/bin/loop-slots.sh"; do
@@ -196,6 +219,27 @@ $LOOP_DIR/last-run.json              the previous pass's observations (see STEP 
 
 A lease records `issue`, `branch`, `worktree`, `started`, `agent`.
 
+### Leases are liveness; claims are ownership
+
+There are two records per issue and they answer different questions.
+
+A **lease** (`$LOOP_DIR/inflight/issue-<N>.lease`) means *an agent is working on this right now*.
+It is what counts against the ceiling, and it is deliberately reaped the moment the agent goes
+quiet — that is how a slot comes back when a session limit kills its agent.
+
+A **claim** (`$LOOP_DIR/claims/issue-<N>.claim`) means *this issue is mine until it is finished*.
+Reaping a lease **archives it as a claim** rather than deleting it, so the branch, the worktree and
+the reason the agent died all survive the reap. A claim also carries `deaths`: how many agents this
+issue has consumed.
+
+That distinction is the whole point. If reaping simply deleted the record, a session limit would
+free the slot and simultaneously erase the only note of what was half-built — the next pass would
+walk past an issue carrying `WORKING_LABEL`, a pushed branch and 80% of the work, and start
+something else instead. The claim is what makes STEP 0.5 possible.
+
+A claim is removed by `release`, and only by `release` — that is, when the work is genuinely
+finished. Nothing else deletes one, so finished work can never reappear in the resume queue.
+
 ### Why a lease registry rather than deriving from worktrees plus labels
 
 Deriving in-flight state from "worktree exists AND has `WORKING_LABEL` AND no merged PR" was the
@@ -223,7 +267,12 @@ slots; the labels remain authoritative for global claims.**
 "$SLOTS" reacquire <N> [branch] [wt]    # -> re-take a counted slot for a resumed agent
 "$SLOTS" release <N> [N...]             # -> return slots; prints RELEASED or NOT-HELD
 "$SLOTS" touch <N> [N...]               # -> heartbeat; reports NOSLOT if already reaped
+"$SLOTS" resume                         # -> the resume queue: claimed, unfinished, no live agent
 ```
+
+`resume` is the one to read at the start of a pass. It lists every issue that was claimed, has not
+been released, and has **no live lease** — precisely the work whose agent died. An issue currently
+being worked has a live lease and is deliberately absent, because resuming it would run it twice.
 
 `reserve` prints exactly:
 
@@ -345,14 +394,17 @@ Exit early, cheaply, when:
 
 - **`AVAILABLE=0`** → reply `At capacity: N agents in flight (ceiling M). No slots free.`, list the
   in-flight issues from `"$SLOTS" list`, and **claim nothing and spawn nothing**.
-  **Still run STEP 0 first** — see below.
+  **Still run STEP 0 and STEP 0.5 first** — see below.
 - The default branch is unchanged **AND** no loop PR is `CONFLICTING` **AND** the eligible set is
   unchanged **AND** `last-run.json` records that the previous pass concluded every eligible issue
-  was blocked → reply `No change since last run; queue still blocked.` and STOP. Do not re-read
-  issue bodies, do not run `gh pr diff`, do not spawn anything.
+  was blocked **AND** `"$SLOTS" resume` reports no resumable work → reply
+  `No change since last run; queue still blocked.` and STOP. Do not re-read issue bodies, do not run
+  `gh pr diff`, do not spawn anything. The resume check is part of the condition because interrupted
+  work is invisible to the other three: the default branch has not moved and the eligible set has
+  not changed, yet there is a half-built branch waiting for someone to pick it up.
 
-> **At capacity still runs STEP 0.** The capacity ceiling governs *claiming new work*, not
-> *repairing existing work*. Conflicts are most frequent exactly when agents are saturated and
+> **At capacity still runs STEP 0 and STEP 0.5.** The capacity ceiling governs *claiming new work*,
+> not *repairing existing work* or *resuming work already claimed*. Conflicts are most frequent exactly when agents are saturated and
 > pushing, and nothing but this loop repairs its own PRs — skipping STEP 0 while at capacity
 > stalls the whole pipeline. Fix conflicts, then exit without claiming.
 
@@ -390,6 +442,78 @@ If a **source file** conflicts (not just the progress log), do **not** guess: re
 that PR alone.
 
 Skip any branch whose sub-agent is still running — check `"$SLOTS" list` for a live lease.
+
+### STEP 0.5 — resume what you were already working on, before claiming anything new
+
+**Finish what is started before starting more.** A pass that goes straight to STEP 1 will walk past
+an issue holding `WORKING_LABEL`, a pushed branch and most of a day's work, and claim something
+else instead — because the agent that owned it is gone and nothing else was ever going to pick it
+back up.
+
+This is the normal case, not an edge case. A session or usage limit kills every running agent at
+once, leaving their leases to be reaped and their branches half-built. The cron fire after that is
+the thing that has to notice.
+
+```bash
+"$SLOTS" resume
+```
+
+Every row is claimed, unfinished work whose agent is gone. For each one, in this order:
+
+**1. Check it is not already done.** An agent can be killed between merging and being able to say
+so. Since merge-is-done (§7), a merged PR means finished, not resumable:
+
+```bash
+gh pr list --state all --search "<N>" --json number,state,mergedAt,body \
+  | jq --argjson n <N> '[.[] | select(.body | test("[Cc]loses #\($n)\\b")) | {number,state,mergedAt}]'
+```
+
+If it merged: complete it rather than resuming it — apply `FINISHED_LABEL` if it is missing, post
+the summary comment if it is missing, then run the STEP 5 completion routine (worktree, claim,
+slot). Do **not** spawn an agent for it.
+
+**2. Stop resuming an issue that keeps killing agents.** `deaths` in the `resume` output counts how
+many agents this issue has consumed. At `deaths >= 3`, leave it alone: post a comment naming the
+blocker, report it as needing a human, and leave the claim in place so the next pass does not retry
+it either. Without this bound, one poisoned issue takes a slot every pass forever.
+
+**3. Take a slot for it.** Resumed work is real work and must be counted:
+
+```bash
+"$SLOTS" reacquire <N>
+```
+
+`DENIED <N> at-capacity` means live agents hold every slot. That is a correct refusal — leave the
+claim for the next pass and move on. **Resuming still respects the ceiling; it just gets first
+call on it.**
+
+**4. Make sure the worktree exists.** It may have been removed by a sweep, or never have existed if
+the agent died early. The branch is the durable artefact — STEP 3 pushes it immediately for exactly
+this reason — so recreate the worktree from it:
+
+```bash
+git -C "$REPO" worktree add "$WORKTREE_DIR/issue-<N>" "issue-<N>" \
+  || git -C "$REPO" worktree add "$WORKTREE_DIR/issue-<N>" -b "issue-<N>" "origin/issue-<N>"
+"$SLOTS" bind <N> "issue-<N>" "$WORKTREE_DIR/issue-<N>"
+```
+
+**5. Spawn the agent to *continue*, not to restart.** Use the STEP 3 sub-agent prompt with the
+resumption framing added: the branch already exists and already carries work, so it must read what
+is there before writing anything —
+
+> This issue was already being worked and its agent was interrupted. Branch `issue-<N>` exists and
+> holds prior work. **Before doing anything else**: read `git log origin/main..issue-<N>`, the diff
+> on that branch, and every comment on the issue — earlier attempts record where they stopped.
+> Continue from that state. Do not restart, do not revert, do not force-push, and do not duplicate
+> work already committed. If the branch already satisfies the acceptance criteria, go straight to
+> opening or updating the PR and driving it to merge.
+
+Only after every resumable issue has been placed or deliberately skipped does the pass continue to
+STEP 1 — and it does so with whatever capacity is *left*, which may be none.
+
+> **At capacity, this step still runs.** Like STEP 0, it repairs existing work rather than claiming
+> new work. Resuming is what turns a killed agent back into progress; if all slots are genuinely
+> held by live agents, `resume` prints nothing and the step costs one `ls`.
 
 ### STEP 1 — find eligible work (read only)
 
@@ -654,6 +778,11 @@ Then release the slots for every issue verified complete or verified failed:
 "$SLOTS" release <N> [N...]
 ```
 
+`release` also deletes the issue's **claim**, which is what takes it out of the resume queue for
+good. Removing the worktree and releasing the slot are two halves of one completion routine —
+worktree, then claim and slot — and skipping either leaves the issue looking like unfinished work
+to the next pass: a claim with no lease is precisely what STEP 0.5 resumes.
+
 `NOT-HELD` in that output means the lease was already reaped — the agent had been running longer
 than `REAP_AFTER_MIN` without writing, so treat it as an infrastructure kill and check §8.
 
@@ -731,6 +860,11 @@ git -C "$WORKTREE_DIR/issue-<N>" push
 ```
 
 Then resume the agent later (e.g. via `SendMessage` to the same agent id) once the limit resets.
+
+**If nobody is there to do that, the next scheduled pass does it instead.** The reap that frees this
+agent's slot archives its claim, and STEP 0.5 picks the claim up on the following fire, reacquires a
+slot and spawns an agent to continue from the branch. That is the designed path for a session limit:
+the work is not lost and does not need a human, provided the branch was pushed as above.
 
 **The slot needs deliberate handling here.** While the agent is suspended it writes nothing, so its
 lease is reaped after `REAP_AFTER_MIN` and the slot correctly returns to the pool. But that means a
@@ -856,8 +990,10 @@ Or invoke `/gh-issue-loop status`, which claims and spawns nothing.
   ```bash
   gh issue edit <N> --remove-label "$WORKING_LABEL"
   git -C "$REPO" worktree remove --force "$WORKTREE_DIR/issue-<N>"   # if it still exists
-  "$SLOTS" release <N>
+  "$SLOTS" release <N>       # frees the slot AND drops the claim, so STEP 0.5 stops resuming it
   ```
+  The `release` is what stops the loop from resuming the issue on the next fire. Removing the
+  label alone leaves the claim in place, and STEP 0.5 will keep picking it back up.
 - **Reading a run report.** Every pass reports the in-flight count and capacity. Check that number
   first: `AVAILABLE=0` with work waiting is *healthy saturation*, not a stall. Only when
   `AVAILABLE>0` and nothing is being picked up is the queue genuinely blocked — and then the report

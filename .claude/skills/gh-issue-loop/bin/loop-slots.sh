@@ -32,6 +32,7 @@ usage: loop-slots.sh <command> [arguments]
 
   count                          INFLIGHT=<n> CEILING=<n> AVAILABLE=<n>
   list                           table of live leases, liveness, and the counts
+  resume                         table of claimed work with no live agent -- the resume queue
   reap                           release stale leases, print each release
   reserve <N> [N...]             reap, recount, reserve up to AVAILABLE candidates
   bind <N> <branch> <worktree>   record the real branch/worktree once it exists
@@ -71,6 +72,11 @@ resolve_paths() {
   LOOP_DIR="$REPO/.claude/issue-loop"
   WORKTREE_DIR="$REPO/.claude/worktrees"
   INFLIGHT_DIR="$LOOP_DIR/inflight"
+  # Claims outlive leases. A lease is liveness -- it is reaped the moment an
+  # agent goes quiet, which is exactly what frees the slot. But the *work* is
+  # still half-done on a branch, so reaping archives the record here instead of
+  # deleting it, and that archive is the resume queue (SKILL.md STEP 0.5).
+  CLAIM_DIR="$LOOP_DIR/claims"
   LOCK_FILE="$LOOP_DIR/run.lock"
 }
 
@@ -107,6 +113,64 @@ load_tunables() {
 # --- lease files ------------------------------------------------------------
 
 lease_path() { printf '%s/issue-%s.lease' "$INFLIGHT_DIR" "$1"; }
+claim_path() { printf '%s/issue-%s.claim' "$CLAIM_DIR" "$1"; }
+
+# Both readers are total: a missing claim is the normal case on the first death,
+# and under `set -e` a bare sed on an absent file would abort the whole reap.
+claim_text() {
+  local path
+  path="$(claim_path "$1")"
+  [ -r "$path" ] || return 0
+  sed -n "s/^$2=//p" "$path" | head -1
+  return 0
+}
+
+claim_field() {
+  local value
+  value="$(claim_text "$1" "$2")"
+  printf '%s' "${value:-0}"
+  return 0
+}
+
+# archive_claim records that an agent died holding this issue. It is additive:
+# `deaths` counts how many agents this issue has consumed, which is what lets
+# STEP 0.5 stop resuming an issue that kills every agent it is given to.
+archive_claim() {
+  local issue="$1" reason="$2" now="$3" lease deaths temp target branch worktree claimed
+  lease="$(lease_path "$issue")"
+  deaths="$(claim_field "$issue" deaths)"
+  deaths=$(( deaths + 1 ))
+  # Prefer what the lease knows, but never let an empty lease field erase a
+  # branch the claim already recorded: a resumed agent that dies before it can
+  # `bind` has an empty lease, and the branch is the only route back to the work.
+  branch="$(lease_field "$lease" branch || true)"
+  [ -n "$branch" ] || branch="$(claim_text "$issue" branch)"
+  worktree="$(lease_field "$lease" worktree || true)"
+  [ -n "$worktree" ] || worktree="$(claim_text "$issue" worktree)"
+  claimed="$(lease_field "$lease" started || true)"
+  [ -n "$claimed" ] || claimed="$(claim_text "$issue" claimed)"
+  target="$(claim_path "$issue")"
+  temp="$(mktemp "$CLAIM_DIR/.issue-$issue.XXXXXX")"
+  {
+    printf 'issue=%s\n' "$issue"
+    printf 'branch=%s\n' "$branch"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'claimed=%s\n' "$claimed"
+    printf 'orphaned=%s\n' "$now"
+    printf 'reason=%s\n' "$reason"
+    printf 'deaths=%s\n' "$deaths"
+  } > "$temp"
+  mv -f "$temp" "$target"
+}
+
+claimed_issues() {
+  local path base
+  for path in "$CLAIM_DIR"/issue-*.claim; do
+    [ -e "$path" ] || continue
+    base="${path##*/issue-}"
+    printf '%s\n' "${base%.claim}"
+  done
+}
 
 lease_field() {
   [ -r "$1" ] || return 1
@@ -210,8 +274,9 @@ do_reap() {
   now="$(now_epoch)"
   for issue in $(held_issues); do
     if lease_is_stale "$issue" "$now"; then
+      archive_claim "$issue" "$STALE_REASON" "$now"
       rm -f "$(lease_path "$issue")"
-      printf 'REAPED=%s reason=%s\n' "$issue" "$STALE_REASON"
+      printf 'REAPED=%s reason=%s deaths=%s\n' "$issue" "$STALE_REASON" "$(claim_field "$issue" deaths)"
     fi
   done
 }
@@ -314,6 +379,10 @@ cmd_reacquire() {
   [ "$#" -ge 1 ] || die "reacquire needs an issue number"
   is_issue "$1" || die "'$1' is not an issue number"
   local issue="$1" branch="${2:-}" worktree="${3:-}"
+  # Inherit from the claim when the caller did not say: the lease was reaped, so
+  # the claim is the only remaining record of what this agent is resuming.
+  [ -n "$branch" ] || branch="$(claim_text "$issue" branch)"
+  [ -n "$worktree" ] || worktree="$(claim_text "$issue" worktree)"
 
   take_lock
   do_reap >/dev/null
@@ -349,6 +418,9 @@ cmd_release() {
   local issue
   for issue in "$@"; do
     is_issue "$issue" || die "'$issue' is not an issue number"
+    # The claim goes with it either way: release means the work is finished, and
+    # a finished issue must never come back through the resume queue.
+    rm -f "$(claim_path "$issue")"
     if [ -e "$(lease_path "$issue")" ]; then
       rm -f "$(lease_path "$issue")"
       printf 'RELEASED=%s\n' "$issue"
@@ -378,6 +450,30 @@ cmd_touch() {
 # moved. A helper that reports success without recording anything -- the stub
 # this file replaces -- passes every `[ -x ]` existence check and then strands
 # whatever the caller claimed. The loop runs this before it touches a label.
+# cmd_resume prints the resume queue: issues that were claimed, are not
+# finished, and have no live agent on them. An issue with a live lease is being
+# worked right now and is deliberately absent -- resuming it would double-run it.
+cmd_resume() {
+  take_lock
+  do_reap >/dev/null
+  local issue printed=0
+  for issue in $(claimed_issues); do
+    [ -e "$(lease_path "$issue")" ] && continue
+    if [ "$printed" -eq 0 ]; then
+      printf '%-7s %-24s %-40s %-7s %s\n' ISSUE BRANCH WORKTREE DEATHS REASON
+      printed=1
+    fi
+    printf '%-7s %-24s %-40s %-7s %s\n' \
+      "$issue" \
+      "$(sed -n 's/^branch=//p' "$(claim_path "$issue")" | head -1)" \
+      "$(sed -n 's/^worktree=//p' "$(claim_path "$issue")" | head -1)" \
+      "$(claim_field "$issue" deaths)" \
+      "$(sed -n 's/^reason=//p' "$(claim_path "$issue")" | head -1)"
+  done
+  [ "$printed" -eq 0 ] && echo "No work to resume."
+  cmd_count
+}
+
 cmd_verify() {
   take_lock
   local probe=999999999 before after
@@ -409,12 +505,13 @@ main() {
   esac
 
   resolve_paths
-  mkdir -p "$INFLIGHT_DIR"
+  mkdir -p "$INFLIGHT_DIR" "$CLAIM_DIR"
   load_tunables
 
   case "$command" in
     count)     cmd_count "$@" ;;
     list)      cmd_list "$@" ;;
+    resume)    cmd_resume "$@" ;;
     reap)      take_lock; do_reap "$@" ;;
     reserve)   cmd_reserve "$@" ;;
     bind)      cmd_bind "$@" ;;
