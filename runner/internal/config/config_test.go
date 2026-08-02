@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,6 +12,10 @@ import (
 func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 	registrationTokenFile := filepath.Join(t.TempDir(), "registration-token")
 	if err := os.WriteFile(registrationTokenFile, []byte("registration-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	headerFile := filepath.Join(t.TempDir(), "headers.json")
+	if err := os.WriteFile(headerFile, []byte(`{"CF-Access-Client-Id":"client.access","CF-Access-Client-Secret":"secret"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	environment := map[string]string{
@@ -29,6 +34,8 @@ func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 		"LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE": "/etc/loop/client.pem",
 		"LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE":  "/etc/loop/client-key.pem",
 		"LOOP_ORCHESTRATOR_TLS_SERVER_NAME":      "control.internal",
+		"LOOP_ORCHESTRATOR_HEADERS":              "invalid value ignored by file",
+		"LOOP_ORCHESTRATOR_HEADERS_FILE":         headerFile,
 		"LOOP_RUNNER_MINIMUM_FREE_BYTES":         "2147483648",
 		"LOOP_RUNNER_REDACTION_PREFIXES":         "internal_,custom-",
 		"LOOP_RUNNER_DOCKER_ENABLED":             "true",
@@ -59,6 +66,9 @@ func TestLoadUsesDefaultsAndParsesRunnerEnvironment(t *testing.T) {
 	}
 	if config.TLSCAFile != "/etc/loop/ca.pem" || config.TLSClientCertFile != "/etc/loop/client.pem" || config.TLSClientKeyFile != "/etc/loop/client-key.pem" || config.TLSServerName != "control.internal" {
 		t.Fatalf("Load() TLS configuration = %#v", config)
+	}
+	if config.OrchestratorHeadersFile != headerFile || len(config.OrchestratorHeaders) != 0 {
+		t.Fatalf("Load() orchestrator headers = %#v", config)
 	}
 	if got, want := config.IdentityPath(), "/var/lib/loop/identity/runner.json"; got != want {
 		t.Fatalf("IdentityPath() = %q, want %q", got, want)
@@ -194,6 +204,61 @@ func TestSecretValuePrefersMountedSecretFileOverPlainVariable(t *testing.T) {
 	}
 	if _, err := SecretValue(lookup(map[string]string{"GITHUB_TOKEN_FILE": "/missing/github_token"}), "GITHUB_TOKEN"); err == nil {
 		t.Fatal("SecretValue() accepted an unreadable secret file")
+	}
+}
+
+func TestLoadReadsOrchestratorHeadersFromEnvironment(t *testing.T) {
+	settings, err := Load(lookup(map[string]string{
+		"LOOP_ORCHESTRATOR_TLS":     "true",
+		"LOOP_ORCHESTRATOR_HEADERS": `{"CF-Access-Client-Id":"client.access","X-Proxy-Token":"token"}`,
+	}), func() (string, error) { return "runner", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.OrchestratorHeaders["cf-access-client-id"] != "client.access" || settings.OrchestratorHeaders["x-proxy-token"] != "token" {
+		t.Fatalf("Load() orchestrator headers = %#v", settings.OrchestratorHeaders)
+	}
+}
+
+func TestLoadRejectsOrchestratorHeadersWithoutTLSWithoutLeakingSecret(t *testing.T) {
+	secret := "do-not-log-this"
+	_, err := Load(lookup(map[string]string{"LOOP_ORCHESTRATOR_HEADERS": `{"X-Proxy-Token":"` + secret + `"}`}), func() (string, error) { return "runner", nil })
+	if err == nil || !strings.Contains(err.Error(), "require TLS") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidOrchestratorHeaders(t *testing.T) {
+	for name, headers := range map[string]string{
+		"non-object":       `[]`,
+		"empty":            `{}`,
+		"binary":           `{"token-bin":"value"}`,
+		"control value":    "{\"X-Token\":\"bad\\nvalue\"}",
+		"duplicate casing": `{"X-Token":"one","x-token":"two"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(lookup(map[string]string{"LOOP_ORCHESTRATOR_TLS": "true", "LOOP_ORCHESTRATOR_HEADERS": headers}), func() (string, error) { return "runner", nil }); err == nil {
+				t.Fatal("Load() accepted invalid orchestrator headers")
+			}
+		})
+	}
+}
+
+func TestReadOrchestratorHeadersDoesNotExposeSecret(t *testing.T) {
+	secret := "do-not-log-this"
+	path := filepath.Join(t.TempDir(), "headers.json")
+	if err := os.WriteFile(path, []byte(`{"X-Proxy-Token":"`+secret+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	headers, err := ReadOrchestratorHeaders(path)
+	if err != nil || headers["x-proxy-token"] != secret {
+		t.Fatal("ReadOrchestratorHeaders() did not return expected header")
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadOrchestratorHeaders(path); err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("ReadOrchestratorHeaders() error = %v", err)
 	}
 }
 
