@@ -17,6 +17,15 @@ dev-install:
 test-orchestrator:
 	cd orchestrator && $(GO) test ./...
 
+test-runner:
+	cd runner && $(GO) test -race ./...
+
+test-api:
+	cd api && $(GO) test ./...
+
+test-web:
+	cd web && npm ci && npm run typecheck && npm run lint && npm test
+
 lint:
 	cd orchestrator && test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard -- '*.go'))"
 

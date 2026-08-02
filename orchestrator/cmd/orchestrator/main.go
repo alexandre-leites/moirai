@@ -21,7 +21,7 @@ import (
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
-		connection, err := net.DialTimeout("tcp", "127.0.0.1:50051", time.Second)
+		connection, err := net.DialTimeout("tcp", healthcheckAddress(), time.Second)
 		if err == nil {
 			err = connection.Close()
 		}
@@ -34,6 +34,17 @@ func main() {
 		slog.Error("orchestrator stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// healthcheckAddress dials the port the server was actually told to bind, so
+// that overriding LOOP_GRPC_BIND does not leave the container permanently
+// unhealthy. The host is always loopback: the probe runs inside the container.
+func healthcheckAddress() string {
+	_, port, err := net.SplitHostPort(os.Getenv("LOOP_GRPC_BIND"))
+	if err != nil || port == "" {
+		port = "50051"
+	}
+	return net.JoinHostPort("127.0.0.1", port)
 }
 
 func run() error {
@@ -56,7 +67,16 @@ func run() error {
 		return err
 	}
 	defer listener.Close()
-	grpcServer := grpc.NewServer()
+	transport, err := cfg.ServerCredentials()
+	if err != nil {
+		return err
+	}
+	var options []grpc.ServerOption
+	if transport != nil {
+		options = append(options, grpc.Creds(transport))
+	}
+	slog.Info("serving gRPC", "bind", cfg.GRPCBind, "tls", transport != nil, "mtls", cfg.TLSClientCAFile != "")
+	grpcServer := grpc.NewServer(options...)
 	service, err := server.New(pool, os.Getenv("MOIRAI_BUILD_VERSION"))
 	if err != nil {
 		return err

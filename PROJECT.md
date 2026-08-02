@@ -2,9 +2,9 @@
 
 A self-hosted control plane for durable, autonomous software-engineering workflows.
 
-**Workflow engine:** LangGraph  
+**Workflow engine:** Go state machine with PostgreSQL-persisted workflow runs  
 **Database:** PostgreSQL  
-**Stack:** Go (API, Runner) / Python (Orchestrator) / TypeScript (Web UI)
+**Stack:** Go (Orchestrator, API, Runner) / TypeScript (Web UI)
 
 ---
 
@@ -12,7 +12,7 @@ A self-hosted control plane for durable, autonomous software-engineering workflo
 
 Moirai manages several software projects, continuously discovers eligible issues, ranks those issues globally, and assigns the highest-priority available issue to the next compatible runner. Each runner executes one job at a time. The scheduler permits only one active workflow per project, preventing two agents from modifying the same repository concurrently.
 
-Each issue is processed through a durable LangGraph workflow: planning, implementation, deterministic project validation, independent AI review, pull-request creation, GitHub checks, repair loops, optional human approval, automatic merge, and issue completion.
+Each issue is processed through a durable workflow whose state is persisted in PostgreSQL: implementation, pull-request creation, GitHub checks, automatic merge, and issue completion.
 
 The platform is designed around four boundaries:
 
@@ -56,9 +56,9 @@ Moirai solves these by treating the agent as one replaceable execution component
 - **Global scheduling.** One global queue across all enabled projects, highest numeric priority wins, creation timestamp as tie-breaker, skip projects with active workflows.
 - **Project concurrency.** One active workflow per project. Project stays locked during all phases (implementation, review, repair, waiting for checks, waiting for approval).
 - **Runner fleet.** Multiple runner containers, one job per runner at a time, outbound gRPC connections, capability/label advertisement, heartbeats, lease renewals, safe reconnection, drain/revoke support.
-- **Durable issue workflow.** LangGraph with PostgreSQL checkpoint persistence, resume after orchestrator restart, bounded repair loops, human interrupts, workflow history preserved. The graph is event-driven: it suspends after dispatching an agent execution and resumes on the runner's terminal event, so a retry budget is only spent on work that actually ran.
+- **Durable issue workflow.** A Go state machine whose every transition is persisted to PostgreSQL, so workflows survive orchestrator restart and workflow history is preserved. It is event-driven: the orchestrator dispatches an agent execution and advances the run only on the runner's terminal event. Retries are manual — there are no automatic workflow retries or execution deadlines.
 - **Portable integrations.** Generic issue-tracker interface, code-host interface, and agent-backend interface. GitHub CLI adapters for the MVP. OpenCode backend first, with local-process and Docker execution modes.
-- **Complete delivery flow.** Branch or worktree preparation, agent planning, implementation, deterministic local pipeline, independent AI review, repair cycles, push, PR creation, GitHub check monitoring, optional human approval, automatic merge, issue completion.
+- **Complete delivery flow.** Branch or worktree preparation, implementation, push, PR creation, GitHub check monitoring, automatic merge, issue completion. (Agent planning, deterministic local pipeline, independent AI review, repair cycles, and optional human approval are target scope not yet implemented in the Go V1 orchestrator.)
 - **Web administration.** Local login, project registration/configuration, runner tokens and status, global queue, workflow dashboard with phase and attempt tracking, logs and events, retry/resume/cancel/block/approve controls.
 
 ### Design principles
@@ -82,7 +82,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 - Global scheduler that selects the highest-priority eligible issue across all unlocked projects.
 - Single-project concurrency lock.
 - Runner registration via one-time tokens, outbound gRPC, heartbeats, lease renewals, reconnection, drain, and revocation.
-- LangGraph per-issue workflow: prepare, plan, implement, local pipeline, AI review, repair, push, PR, GitHub checks, human approval, merge, issue completion.
+- Per-issue workflow state machine: prepare, implement, push, PR, GitHub checks, merge, issue completion. Planning, local pipeline, AI review, repair cycles, and human approval are specified above but are **not implemented in the Go V1 orchestrator**; their schema columns and RPCs remain reserved.
 - GitHub issue-tracker adapter (via `gh` CLI).
 - GitHub code-host adapter (via `gh` CLI).
 - OpenCode agent backend.
@@ -103,7 +103,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 - Cross-repository atomic changes.
 - Native Jira, Linear, GitLab integrations.
 - Native Claude Code, Codex, or Aider integrations.
-- Arbitrary user-designed workflows or visual LangGraph editor.
+- Arbitrary user-designed workflows or a visual workflow editor.
 - Billing, cost allocation, or production credential management.
 - Object-storage log archival.
 
@@ -120,7 +120,7 @@ Browser / future mobile         Web UI (React + TypeScript)
                         │
                   internal gRPC
                         │
-        ┌─────── Orchestrator (Python + LangGraph) ───────┐
+        ┌────────────── Orchestrator (Go) ────────────────┐
         │               │                                 │
         │          PostgreSQL                      GitHub CLI adapters
         │               │                                 │
@@ -129,7 +129,7 @@ Browser / future mobile         Web UI (React + TypeScript)
 
 ### Service boundaries
 
-**Orchestrator (Python + LangGraph).** The control plane. Owns all durable state: PostgreSQL, LangGraph checkpoints, scheduler, runner registry, project locks, leases, and workflow state. Exposes internal gRPC services for API requests and runner control. Runs issue-tracker and code-host adapters.
+**Orchestrator (Go).** The control plane. Owns all durable state: PostgreSQL, workflow state, scheduler, runner registry, project locks, and leases. Exposes internal gRPC services for API requests and runner control. Runs issue-tracker and code-host adapters.
 
 **Public API (Go).** Exposes `/api/v1` REST endpoints. Authenticates users. Translates REST calls into internal gRPC calls. Forwards live events to the Web UI over SSE. Has no database access.
 
@@ -143,4 +143,4 @@ Three isolated Docker networks: `database` (postgres + orchestrator, internal), 
 
 ### Data model
 
-PostgreSQL is the single system of record. Tables cover: users and sessions, projects with JSON configuration, issue snapshots with priority and eligibility, workflow runs with phase tracking and retry counters, jobs and leases with generation fencing, runner identities and credentials, pipeline runs, AI reviews, pull requests, human approvals, and audit events. LangGraph uses a separate PostgreSQL schema for checkpoint storage.
+PostgreSQL is the single system of record. Tables cover: users and sessions, projects with JSON configuration, issue snapshots with priority and eligibility, workflow runs with phase tracking and retry counters, jobs and leases with generation fencing, runner identities and credentials, pipeline runs, AI reviews, pull requests, human approvals, and audit events.

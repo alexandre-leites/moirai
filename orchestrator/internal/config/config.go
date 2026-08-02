@@ -1,16 +1,27 @@
 package config
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"strings"
+
+	"google.golang.org/grpc/credentials"
 )
 
 type Config struct {
 	DatabaseURL string
 	GRPCBind    string
+	// TLSCertFile and TLSKeyFile are set together or not at all; when unset the
+	// gRPC endpoint is served in plaintext. TLSClientCAFile additionally
+	// requires client certificates (mTLS) and is meaningless without them.
+	TLSCertFile     string
+	TLSKeyFile      string
+	TLSClientCAFile string
 }
 
 func Load() (Config, error) {
@@ -25,7 +36,51 @@ func Load() (Config, error) {
 	if _, _, err := net.SplitHostPort(bind); err != nil {
 		return Config{}, fmt.Errorf("LOOP_GRPC_BIND must be host:port: %w", err)
 	}
-	return Config{DatabaseURL: normalizeDatabaseURL(databaseURL), GRPCBind: bind}, nil
+	certFile := strings.TrimSpace(os.Getenv("LOOP_GRPC_TLS_CERT_FILE"))
+	keyFile := strings.TrimSpace(os.Getenv("LOOP_GRPC_TLS_KEY_FILE"))
+	clientCAFile := strings.TrimSpace(os.Getenv("LOOP_GRPC_TLS_CLIENT_CA_FILE"))
+	// Half-configured TLS is refused rather than silently downgraded: an
+	// operator who set one of the pair asked for an encrypted endpoint, and
+	// serving plaintext instead would be a silent security downgrade.
+	if (certFile == "") != (keyFile == "") {
+		return Config{}, errors.New("LOOP_GRPC_TLS_CERT_FILE and LOOP_GRPC_TLS_KEY_FILE must be configured together")
+	}
+	if clientCAFile != "" && certFile == "" {
+		return Config{}, errors.New("LOOP_GRPC_TLS_CLIENT_CA_FILE requires server TLS")
+	}
+	return Config{
+		DatabaseURL:     normalizeDatabaseURL(databaseURL),
+		GRPCBind:        bind,
+		TLSCertFile:     certFile,
+		TLSKeyFile:      keyFile,
+		TLSClientCAFile: clientCAFile,
+	}, nil
+}
+
+// ServerCredentials returns the gRPC transport credentials for the configured
+// endpoint, or nil when TLS is not configured and the endpoint is plaintext.
+func (c Config) ServerCredentials() (credentials.TransportCredentials, error) {
+	if c.TLSCertFile == "" {
+		return nil, nil
+	}
+	certificate, err := tls.LoadX509KeyPair(c.TLSCertFile, c.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load gRPC TLS keypair: %w", err)
+	}
+	settings := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+	if c.TLSClientCAFile != "" {
+		authorities := x509.NewCertPool()
+		pem, err := os.ReadFile(c.TLSClientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read LOOP_GRPC_TLS_CLIENT_CA_FILE: %w", err)
+		}
+		if !authorities.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("LOOP_GRPC_TLS_CLIENT_CA_FILE %q contains no certificates", c.TLSClientCAFile)
+		}
+		settings.ClientCAs = authorities
+		settings.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return credentials.NewTLS(settings), nil
 }
 
 func value(name string) (string, error) {
