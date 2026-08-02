@@ -27,6 +27,15 @@ func TestParseAcceptsValidRolePackets(t *testing.T) {
 	}
 }
 
+func TestPacketRejectsInvalidExecutionImage(t *testing.T) {
+	packet := validPacket(RoleDeveloper)
+	packet.Constraints.MayModifyFiles = true
+	packet.ExecutionImage = "image with spaces"
+	if err := packet.Validate(); err == nil {
+		t.Fatal("Validate() accepted invalid execution image")
+	}
+}
+
 func TestParsePreservesWorkflowContext(t *testing.T) {
 	packet := validPacket(RoleReviewer)
 	packet.AcceptanceCriteria = []string{"Returns an actionable review"}

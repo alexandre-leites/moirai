@@ -784,6 +784,9 @@ components:
         pipelineSteps:
           type: array
           items: { $ref: '#/components/schemas/PipelineStep' }
+        executionImage:
+          type: string
+          description: Docker image used for agent and pipeline execution; empty uses runner environment.
     Project:
       type: object
       required: [id, name, enabled]
@@ -806,6 +809,9 @@ components:
         pipelineSteps:
           type: array
           items: { $ref: '#/components/schemas/PipelineStep' }
+        executionImage:
+          type: string
+          description: Docker image used for agent and pipeline execution; empty uses runner environment.
     PipelineStep:
       type: object
       required: [command, timeoutSeconds, position, required]
