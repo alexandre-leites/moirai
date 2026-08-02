@@ -398,6 +398,31 @@ label filter truncates. Confirm any issue about to be claimed with `gh api`.
 
 If nothing is eligible, reply exactly `No eligible <QUEUE_LABEL> issues.` and STOP.
 
+**Reclaim worktrees left behind by earlier passes.** STEP 5 removes a worktree once its PR merges,
+but a pass killed between the merge and that cleanup leaves one on disk forever, and they are full
+checkouts. Sweep them at the start of every pass — this is the self-healing half of the rule, so a
+crash costs disk rather than a permanent leak:
+
+```bash
+git -C "$REPO" worktree list --porcelain | awk '/^worktree /{print $2}' | while read -r WT; do
+  case "$WT" in "$WORKTREE_DIR"/issue-*) ;; *) continue ;; esac      # never touch the main checkout
+  N="${WT##*/issue-}"; N="${N%%-*}"
+  # First column of `list` is the issue number; a slot still held means a live
+  # agent owns this worktree and it must not be touched.
+  "$SLOTS" list | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1}' | grep -qx "$N" && continue
+  git -C "$WT" diff --quiet && git -C "$WT" diff --cached --quiet || continue
+  [ -z "$(git -C "$WT" log --branches --not --remotes --oneline)" ] || continue
+  gh pr list --state merged --search "issue-$N" --json headRefName \
+    --jq 'any(.headRefName == "issue-'"$N"'")' | grep -q true || continue
+  git -C "$REPO" worktree remove "$WT" && git -C "$REPO" branch -d "issue-$N" 2>/dev/null || true
+done
+git -C "$REPO" worktree prune
+```
+
+Every `continue` is a refusal to delete: a slot still held, uncommitted or unpushed work, or a
+branch with no merged PR all leave the worktree alone. Only a worktree whose work is demonstrably
+in the default branch is removed.
+
 ### STEP 2 — select up to BATCH_SIZE non-conflicting issues, lowest number first
 
 Build the exclusion set **first**: for every open unmerged PR, list its files with
@@ -593,6 +618,35 @@ gh api "repos/$OWNER/$NAME/issues/<N>" --jq '[.labels[].name]'
 gh pr view <PR> --json state,mergedAt,mergeCommit,mergeable,statusCheckRollup
 gh pr checks <PR>
 ```
+
+Then, for every issue whose PR you just verified **merged**, remove its worktree before releasing
+the slot:
+
+```bash
+# Only for an issue whose PR is confirmed merged by the check above.
+WT="$WORKTREE_DIR/issue-<N>"
+if [ -d "$WT" ]; then
+  # Refuse to discard work that only exists on disk. A merged PR normally means
+  # everything is pushed, but an agent killed after the merge can still leave a
+  # stray edit, and `--force` would take it with the directory.
+  if [ -n "$(git -C "$WT" status --porcelain)" ] \
+     || [ -n "$(git -C "$WT" log --branches --not --remotes --oneline)" ]; then
+    echo "SKIP issue-<N>: uncommitted or unpushed work; leaving the worktree for a human"
+  else
+    git -C "$REPO" worktree remove "$WT" && git -C "$REPO" branch -d "issue-<N>" 2>/dev/null || true
+  fi
+fi
+git -C "$REPO" worktree prune
+```
+
+The worktree is disposable once the branch has merged — the merge commit is the durable artefact,
+and a full checkout per completed issue is what turns a few dozen passes into tens of gigabytes and
+a `git worktree list` nobody can read. Note this is `worktree remove` **without** `--force` plus an
+explicit dirty check, and `branch -d` **not** `-D`: both refuse rather than discard if the state is
+not what merge-is-done implies, and the guard above reports that case instead of hiding it.
+
+Leave the worktree in place for anything **not** verified merged. §8 covers the failure path, where
+the branch is the handover and removing the worktree can destroy the only copy of the work.
 
 Then release the slots for every issue verified complete or verified failed:
 
