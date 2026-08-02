@@ -63,12 +63,14 @@ func TestRepositoryAndCheckParsing(t *testing.T) {
 func TestChecksResultNeverGuessesGreen(t *testing.T) {
 	for name, checks := range map[string][]checkRun{
 		"no checks reported yet":       {},
-		"unrecognised entry shape":     {{TypeName: "SomethingNew"}},
-		"legacy status context failed": {{TypeName: "StatusContext", State: "FAILURE"}},
-		"legacy status context error":  {{TypeName: "StatusContext", State: "ERROR"}},
-		"legacy status context queued": {{TypeName: "StatusContext", State: "PENDING"}},
-		"one green one unknown":        {{Status: "COMPLETED", Conclusion: "SUCCESS"}, {TypeName: "SomethingNew"}},
-		"one green one failing":        {{Status: "COMPLETED", Conclusion: "SUCCESS"}, {TypeName: "StatusContext", State: "FAILURE"}},
+		"unrecognised entry shape":     {{}},
+		"completed with no conclusion": {{Status: "COMPLETED"}},
+		"queued check run":             {{Status: "QUEUED"}},
+		"legacy status context failed": {{State: "FAILURE"}},
+		"legacy status context error":  {{State: "ERROR"}},
+		"legacy status context queued": {{State: "PENDING"}},
+		"one green one unknown":        {{Status: "COMPLETED", Conclusion: "SUCCESS"}, {Status: "QUEUED"}},
+		"one green one failing":        {{Status: "COMPLETED", Conclusion: "SUCCESS"}, {State: "FAILURE"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := checksResult(checks); got == checksGreen {
@@ -82,7 +84,7 @@ func TestChecksResultAcceptsSettledSuccess(t *testing.T) {
 	for name, checks := range map[string][]checkRun{
 		"completed check run":          {{Status: "COMPLETED", Conclusion: "SUCCESS"}},
 		"skipped and neutral":          {{Status: "COMPLETED", Conclusion: "SKIPPED"}, {Status: "COMPLETED", Conclusion: "NEUTRAL"}},
-		"legacy status context passed": {{TypeName: "StatusContext", State: "SUCCESS"}},
+		"legacy status context passed": {{State: "SUCCESS"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := checksResult(checks); got != checksGreen {

@@ -944,7 +944,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 }
 
 func (s *Server) releaseUndeliveredOffer(jobID, workflowID, projectID string) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1298,8 +1298,19 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 			if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=CASE WHEN $2='blocked' THEN $3 ELSE blocking_reason END,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1`, id, next, defaultReason(action, reason)); err != nil {
 				return nil, databaseError(err)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running','recovering')`, id, defaultReason(action, reason)); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running')`, id, defaultReason(action, reason)); err != nil {
 				return nil, databaseError(err)
+			}
+			// Blocking parks the issue; cancelling does not. Blocking says "stop
+			// working on this until a human says otherwise", and without parking
+			// the scheduler re-created the run from the still-eligible issue on
+			// the next one-second tick — the operator's stop button restarting
+			// the very work it stopped. Cancelling returns the issue to the
+			// queue by design, so it stays eligible.
+			if action == "block" {
+				if err := parkIssue(ctx, tx, id); err != nil {
+					return nil, err
+				}
 			}
 			// Withdraw any offer still outstanding. Offers do not age out on
 			// their own, so an offer left 'offered' is one a runner can still

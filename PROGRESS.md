@@ -300,14 +300,25 @@ complete on `main`; everything below was confirmed by it, not only locally.
 
 ## Known Issues — Go V1 orchestrator (reported, not fixed on this branch)
 
-- No automated test executes any gRPC handler, `ScheduleOnce`, the project-lock
-  lifecycle, or lease fencing. The deleted Python suite covered these against a
-  real PostgreSQL and the `test-postgres-integration` CI job went with it. This
-  is the largest outstanding gap: the orchestrator's correctness is mostly its
-  SQL, and none of that SQL is executed by a test.
 - `StreamEvents` replays the entire `workflow_events` table when a client
   connects without a cursor, one workflow query per row, and never emits runner
   events, so the console's runner page has no live updates.
+- `workflow_runs.status` is an untyped string vocabulary spelled out in raw SQL
+  in several places, with no Go type and no CHECK constraint — the one status
+  column in the schema without one. The console additionally carries ten
+  statuses the orchestrator never writes.
+- `completed` means two things: "the runner finished" and "the pull request is
+  merged". They are distinguished only by whether a project lock still exists,
+  which is why the stranded-delivery sweep needs an age bound. Splitting out a
+  `delivering` status would let a partial unique index on `workflow_runs`
+  replace the hand-maintained `app.project_locks` table entirely.
+- Retry creates a new workflow run with no link to the one it replaces, so the
+  console cannot show attempts of the same logical work, and the retry toast
+  still promises prior-failure context that V1 does not carry.
+- `app.issues.eligible` now has two writers: the `agent:ready` label on first
+  sync, and the orchestrator's own lifecycle afterwards. Writing the label back
+  to the tracker, or a `superseded_at` column on the run, would restore a single
+  owner. `docs/architecture.md` records the same hazard for `runners.draining`.
 - `databaseError` collapses every cause into `"database operation failed"`, and
   is applied to JSON decoding failures too. There is no logging in the `server`
   package, so production failures are undiagnosable.

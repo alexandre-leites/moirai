@@ -1,9 +1,10 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
 GO ?= go
 
-.PHONY: help test lint typecheck validate compose compose-overlays dev-install \
+.PHONY: help test lint typecheck validate compose compose-overlays \
         proto-lint proto-generate proto-check test-release-tags compose-tls-stack \
-        test-orchestrator test-runner test-api test-web build-orchestrator \
+        test-orchestrator test-postgres-integration test-runner test-api test-web \
+        build-orchestrator \
         build-runner build-api build-web build-images
 
 help:
@@ -11,11 +12,16 @@ help:
 
 test: test-orchestrator test-runner test-api test-web
 
-dev-install:
-	@true
-
 test-orchestrator:
 	cd orchestrator && $(GO) test -race ./...
+
+# The orchestrator's correctness is mostly its SQL -- mutual exclusion is a
+# primary key, fencing is a WHERE clause -- so these run against a real
+# PostgreSQL. The guard is deliberate: a silently skipped suite is worse than a
+# missing one.
+test-postgres-integration:
+	test -n "$(LOOP_TEST_DATABASE_URL)"
+	cd orchestrator && $(GO) test -tags integration -race -count=1 ./internal/server/
 
 test-runner:
 	cd runner && $(GO) test -race ./...

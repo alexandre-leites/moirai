@@ -36,6 +36,36 @@ jobs:
           cache-dependency-path: orchestrator/go.sum
       - run: make test-orchestrator
 
+  # The orchestrator is a thin Go shell over hand-written SQL, so its project
+  # locks, lease fencing and issue lifecycle are only observable against a real
+  # database. This is the job that would have caught a retry that wedges a
+  # project or a failure that respawns itself every second.
+  test-postgres-integration:
+    runs-on: ubuntu-latest
+    env:
+      LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: loop_test
+          POSTGRES_USER: loop
+          POSTGRES_PASSWORD: loop-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U loop -d loop_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.25.12"
+          cache-dependency-path: orchestrator/go.sum
+      - run: make test-postgres-integration
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -207,7 +237,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [test-orchestrator, lint, typecheck, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
+    needs: [test-orchestrator, test-postgres-integration, lint, typecheck, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
     # runs-on: [self-hosted, linux]
     runs-on: ubuntu-latest
     steps:

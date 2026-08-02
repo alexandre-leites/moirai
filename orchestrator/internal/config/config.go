@@ -9,13 +9,23 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/credentials"
 )
 
+// DefaultGRPCBind is the address served when LOOP_GRPC_BIND is unset. The
+// healthcheck derives its port from the same value, so both move together.
+const DefaultGRPCBind = "0.0.0.0:50051"
+
 type Config struct {
 	DatabaseURL string
 	GRPCBind    string
+	// IssueSyncInterval is how often issues are re-read from the tracker. It is
+	// configurable because the useful cadence depends on the tracker's rate
+	// limits and on how quickly a team expects a newly labelled issue to be
+	// picked up.
+	IssueSyncInterval time.Duration
 	// TLSCertFile and TLSKeyFile are set together or not at all; when unset the
 	// gRPC endpoint is served in plaintext. TLSClientCAFile additionally
 	// requires client certificates (mTLS) and is meaningless without them.
@@ -31,10 +41,21 @@ func Load() (Config, error) {
 	}
 	bind := os.Getenv("LOOP_GRPC_BIND")
 	if bind == "" {
-		bind = "0.0.0.0:50051"
+		bind = DefaultGRPCBind
 	}
 	if _, _, err := net.SplitHostPort(bind); err != nil {
 		return Config{}, fmt.Errorf("LOOP_GRPC_BIND must be host:port: %w", err)
+	}
+	// Refused rather than warned about, so a typo in the interval fails the same
+	// way a typo in the bind address does instead of silently reverting to a
+	// cadence the operator did not choose.
+	syncInterval := 2 * time.Minute
+	if value := strings.TrimSpace(os.Getenv("LOOP_ISSUE_SYNC_INTERVAL")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			return Config{}, fmt.Errorf("LOOP_ISSUE_SYNC_INTERVAL must be a positive duration, got %q", value)
+		}
+		syncInterval = parsed
 	}
 	certFile := strings.TrimSpace(os.Getenv("LOOP_GRPC_TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("LOOP_GRPC_TLS_KEY_FILE"))
@@ -49,11 +70,12 @@ func Load() (Config, error) {
 		return Config{}, errors.New("LOOP_GRPC_TLS_CLIENT_CA_FILE requires server TLS")
 	}
 	return Config{
-		DatabaseURL:     normalizeDatabaseURL(databaseURL),
-		GRPCBind:        bind,
-		TLSCertFile:     certFile,
-		TLSKeyFile:      keyFile,
-		TLSClientCAFile: clientCAFile,
+		DatabaseURL:       normalizeDatabaseURL(databaseURL),
+		GRPCBind:          bind,
+		IssueSyncInterval: syncInterval,
+		TLSCertFile:       certFile,
+		TLSKeyFile:        keyFile,
+		TLSClientCAFile:   clientCAFile,
 	}, nil
 }
 

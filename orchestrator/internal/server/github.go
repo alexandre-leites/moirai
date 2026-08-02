@@ -19,7 +19,14 @@ type Command interface {
 
 type execCommand struct{}
 
-func (execCommand) Run(ctx context.Context, args ...string) ([]byte, error) {
+// githubTimeout bounds a single gh invocation. Delivery runs inline on the
+// runner's control stream, so a gh that never returns would stall that runner's
+// heartbeats and lease renewals as well as the workflow.
+const githubTimeout = 60 * time.Second
+
+func (execCommand) Run(parent context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, githubTimeout)
+	defer cancel()
 	command := exec.CommandContext(ctx, "gh", args...)
 	if file := os.Getenv("LOOP_GITHUB_TOKEN_FILE"); file != "" {
 		token, err := os.ReadFile(file)
@@ -31,11 +38,16 @@ func (execCommand) Run(ctx context.Context, args ...string) ([]byte, error) {
 	// Stdout is captured on its own rather than combined with stderr: callers
 	// parse this as JSON, and gh writes upgrade notices and deprecation
 	// warnings to stderr, which would land inside the document being decoded.
-	var stderr strings.Builder
-	command.Stderr = &stderr
+	// Leaving command.Stderr nil lets Output capture it into a bounded buffer,
+	// which matters because the detail is truncated to 1 KiB before storage.
 	output, err := command.Output()
 	if err != nil {
-		return nil, fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, redactSecrets(strings.TrimSpace(stderr.String())))
+		var exit *exec.ExitError
+		var detail string
+		if errors.As(err, &exit) {
+			detail = strings.TrimSpace(string(exit.Stderr))
+		}
+		return nil, fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, redactSecrets(detail))
 	}
 	return output, nil
 }
@@ -94,10 +106,29 @@ const (
 // and friends) report it as a single state. Decoding only the first pair made
 // every StatusContext look like an empty — and therefore passing — entry.
 type checkRun struct {
-	TypeName   string `json:"__typename"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 	State      string `json:"state"`
+}
+
+// result reduces one entry to an outcome. The two shapes are disjoint, so the
+// populated field identifies which one this is, and anything unrecognised falls
+// to pending — including a shape GitHub has not introduced yet.
+func (check checkRun) result() checkState {
+	outcome := strings.ToUpper(strings.TrimSpace(check.State))
+	if outcome == "" {
+		if !strings.EqualFold(strings.TrimSpace(check.Status), "COMPLETED") {
+			return checksPending
+		}
+		outcome = strings.ToUpper(strings.TrimSpace(check.Conclusion))
+	}
+	switch outcome {
+	case "SUCCESS", "NEUTRAL", "SKIPPED":
+		return checksGreen
+	case "FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE", "ERROR":
+		return checksFailed
+	}
+	return checksPending
 }
 
 func NewGitHubCLI(command Command) GitHub {
@@ -258,58 +289,22 @@ func decodePRs(contents []byte) (githubPR, bool, error) {
 	return githubPR{Number: strconv.Itoa(values[0].Number), URL: values[0].URL, State: strings.ToLower(values[0].State), HeadSHA: values[0].HeadRefOID}, true, nil
 }
 
-// checksResult reduces a pull request's check rollup to a merge decision.
-//
-// An empty rollup is pending, never green. GitHub reports no checks for the
-// first seconds of a pull request's life, before it has queued the workflows a
-// push triggers, and it reports none at all for a repository whose CI has not
-// been configured yet. Treating that as success let the observer squash-merge
-// agent-written code before any CI had run — the one outcome the green-checks
-// gate exists to prevent. A caller that genuinely has no checks to wait for
-// stays pending, which is a stall an operator can see and resolve, rather than
-// an unverified merge nobody finds out about.
+// checksResult reduces a pull request's check rollup to a merge decision. An
+// empty rollup is pending, never green: GitHub reports no checks for the first
+// seconds of a pull request's life and none at all for a repository with no CI
+// configured, and reading either as success squash-merges unverified code.
 func checksResult(checks []checkRun) checkState {
 	if len(checks) == 0 {
 		return checksPending
 	}
+	result := checksGreen
 	for _, check := range checks {
-		conclusion := strings.ToUpper(check.Conclusion)
-		status := strings.ToUpper(check.Status)
-		state := strings.ToUpper(check.State)
-		// A StatusContext carries state alone; a CheckRun carries the other two.
-		// An entry that reports neither is a shape this code does not
-		// understand, and guessing "passing" for it is the dangerous guess.
-		if conclusion == "" && status == "" && state == "" {
-			return checksPending
-		}
-		if failedCheck(conclusion) || failedCheck(state) {
+		switch check.result() {
+		case checksFailed:
 			return checksFailed
-		}
-		if conclusion != "" && !passedCheck(conclusion) {
-			return checksPending
-		}
-		if state != "" && !passedCheck(state) {
-			return checksPending
-		}
-		if status != "" && status != "COMPLETED" {
-			return checksPending
+		case checksPending:
+			result = checksPending
 		}
 	}
-	return checksGreen
-}
-
-func failedCheck(value string) bool {
-	switch value {
-	case "FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE", "ERROR":
-		return true
-	}
-	return false
-}
-
-func passedCheck(value string) bool {
-	switch value {
-	case "SUCCESS", "NEUTRAL", "SKIPPED":
-		return true
-	}
-	return false
+	return result
 }

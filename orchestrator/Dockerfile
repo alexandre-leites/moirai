@@ -11,7 +11,7 @@ COPY orchestrator/internal ./orchestrator/internal
 COPY orchestrator/migrations ./orchestrator/migrations
 WORKDIR /workspace/orchestrator
 ARG MOIRAI_BUILD_VERSION
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${MOIRAI_BUILD_VERSION}" -o /out/orchestrator ./cmd/orchestrator
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/orchestrator ./cmd/orchestrator
 
 FROM debian:bookworm-slim
 ARG GH_CLI_VERSION=2.63.2
