@@ -33,8 +33,9 @@ used capacity).
 
 ### 2.1 Identity
 
-Moirai is named for the three Fates who spin, measure, and cut the thread of life; workflows run
-on LangGraph `thread_id`s. The signature element of the console is the **phase thread** (§2.6):
+Moirai is named for the three Fates who spin, measure, and cut the thread of life; each workflow
+run is a durable thread of state, carrying its own `thread_id` in `app.workflow_runs`. The
+signature element of the console is the **phase thread** (§2.6):
 each workflow drawn as a thread spun through its phases — gold where spun, dashed where ahead,
 visibly *cut* where a blocked/failed run ended. Everything else stays quiet and disciplined.
 

@@ -549,3 +549,129 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
 - Validation: focused race tests for config, dialer, control stream/reconnect, and main passed in `golang:1.25`; `make build-runner` passed in `golang:1.25`; `make lint typecheck` passed. Full control suite currently fails pre-existing `TestEventReporterRestoresEvictedEventWhenPersistFails` with `Emit(completed) = (3, disconnected), want a persist failure`.
 - Review: adversarial review found TLS refusal was masked by an unreadable header file; fixed and added coverage.
 - Pending: commit progress entry, push, PR, CI, merge.
+
+---
+
+## Issue #288 — Documentation and comments still describe the deleted Python/LangGraph engine (2026-08-03)
+
+- Branch/worktree: `issue-288` in `.claude/worktrees/issue-288`. Documentation and comments only —
+  no runtime behavior changed; the only regenerated artifact is a proto comment carried into
+  `gen/go`.
+- `AGENTS.md` (done first — it is the file that misdirects future agents):
+  - §4 "A required LangGraph node or transition" → "orchestrator workflow phase or transition";
+    §5 "LangGraph nodes without routing" → "Workflow phases the orchestrator can enter but never
+    leave"; §5 vertical-slice flow `issue → LangGraph → agent` → `issue → orchestrator state
+    machine → agent`.
+  - §6 implementation sequence: "5. Python orchestrator foundation" → "Go orchestrator
+    foundation"; "27. LangGraph workflow state" / "28. LangGraph checkpoint persistence" → "Go
+    workflow state machine" / "PostgreSQL-persisted workflow state and restart recovery"; items
+    29–32 renamed from LangGraph "node" to "phase".
+  - §7 "changed Python workflow node → run workflow routing and checkpoint tests" → "changed an
+    orchestrator workflow transition → run orchestrator state-machine and recovery tests".
+  - §17 MVP completion criterion "LangGraph persists and resumes workflows" **replaced, not
+    deleted**, with the property the Go engine actually provides: "The orchestrator's Go state
+    machine persists every workflow transition to PostgreSQL and recovers interrupted runs after a
+    restart: resuming the ones that can continue, and releasing the project lock for the ones that
+    cannot." Verified against `orchestrator/cmd/orchestrator/main.go` (`ReconcileDatabaseOnce` at
+    startup, then `RecoverOnce` every 30s and `ObserveWorkflows` every 15s) and
+    `orchestrator/internal/server/recovery.go` (`resumeStrandedDeliveries` resumes;
+    `reclaimExpiredLeases` terminates and frees the lock).
+  - The engineering rules at §12 ("structured planner, developer, and reviewer results", "bound
+    retries and repair loops") were left as-is: they name roles the task-packet contract still
+    defines (`runner/internal/taskpacket/taskpacket.go` — planner, developer, pipeline, reviewer,
+    repairer), so they are forward-looking rules rather than stale LangGraph references.
+- `runner/README.md`:
+  - `LOOP_RUNNER_MAX_CONTINUATIONS` and the "Bounds" paragraph no longer claim `timeoutSeconds`
+    bounds an execution. New paragraph states the truth: the orchestrator hardcodes
+    `timeoutSeconds: 0` (#276), `execution.Supervisor`/`execution.DockerExecutor` attach a
+    deadline only when the timeout is positive, and the zero deadline is already spent when the
+    first attempt ends, so no continuation is ever funded and an undelivered run reports
+    `execution time budget exhausted`. Verified empirically with a throwaway in-package test
+    (`TimeoutSeconds = 0` → `invocations=1 continuations=0 gateVerdict="not delivered (execution
+    time budget exhausted): the agent reported remaining work" agentTimeout=0s`); the scratch file
+    was deleted, not committed. Fixing the timeout itself is #276 and stayed out of scope.
+  - Deleted Python symbols replaced with the Go ones: `workflows/runner_events.py` → the truth
+    that `persistExecutionEvent` (`orchestrator/internal/server/server.go`) ends a run at the
+    terminal event's own type, so an agent block lands as `failed` with `blocked: true` preserved
+    in the `app.workflow_events` payload; `expire_leases` → `reclaimExpiredLeases`
+    (`orchestrator/internal/server/recovery.go`).
+  - Two more stale claims found in the same file and fixed: "A planning node is allowed two", and
+    "The orchestrator exports a series of the same name" — the Go orchestrator has no Prometheus
+    surface (`grep -rl prometheus orchestrator/` is empty).
+- `PROJECT.md`: the review/repair/approval references at the three sites without a caveat now
+  carry one, consistent with the two that already did. The approval note names the observable
+  fact — `SubmitHumanDecision` returns `FailedPrecondition "V1 has no approval phase"`
+  (`orchestrator/internal/server/management.go`).
+- `docs/design/web-console/specification.md`: §2.1 only — "workflows run on LangGraph
+  `thread_id`s" → each run is a durable thread of state carrying its own `thread_id` in
+  `app.workflow_runs` (the Go orchestrator sets it at insert, `server.go`). The approved design
+  contract was not restructured or re-scoped. Its remaining Python symbol references (§4.2
+  `persistence/control_plane.py`, §4.3 `domain/scheduling.py`, `health.py`) are deliberately
+  untouched and filed as #298.
+- `docs/design/web-console/tasks.md`: A1/A5/A8 pointed implementers at deleted Python files.
+  Pointers corrected to the Go locations; A8's acceptance criterion no longer requires parity with
+  a health file that no longer exists. No task was re-scoped.
+- Live source comments citing deleted Python paths, all comment-only:
+  `proto/control_plane.proto` (+ regenerated `gen/go/gen/control/v1/control_plane.pb.go`),
+  `api/internal/http/server.go`, `runner/internal/metrics/metrics.go`, `web/src/status.ts` (×3,
+  including the LangGraph "node"/"checkpoint" wording at `reachedPhase`), `web/src/format.ts`,
+  `web/src/runner-status.test.ts`. Also `runner/internal/dispatch/goalgate.go`, which made the
+  same unbounded-timeout claim as the README.
+- `orchestrator/migrations/001_initial.sql` and `002_langgraph_checkpointer.sql`: comments only,
+  marking the `langgraph` schema as dead-but-unrewritable so the next agent grepping `langgraph`
+  does not read it as work to do. No DDL changed.
+- Commands executed (all from the worktree):
+  - `make lint` → pass. `make typecheck` (`go vet ./...`) → pass.
+  - `make test-orchestrator` → ok (4 packages). `make test-runner` → ok (12 packages).
+    `make test-api` → ok (5 packages). `make test-web` → typecheck + lint (16 pre-existing
+    `react-refresh` warnings, 0 errors) + 221 tests in 16 files, all passing.
+  - `make proto-generate` then `make proto-check` → pass (the only `gen/go` delta is the comment).
+  - `make test-release-tags` → 21/21. `make compose` → pass. `make validate` → passes except
+    `compose-overlays`' `render-tls-stack.sh --check`, which fails **only** because
+    `docker compose config` derives the project name from the checkout directory: the rendered
+    file says `name: issue-288` where the committed one says `name: moirai`. Proven with
+    `diff <(docker compose -f compose.yaml -f compose.tls.yaml config --no-interpolate)
+    <(tail -n +25 compose.tls-stack.yaml)` — five lines, all the project name — and
+    `COMPOSE_PROJECT_NAME=moirai sh scripts/render-tls-stack.sh --check` →
+    "compose.tls-stack.yaml is up to date". A worktree-path artifact, not a regression; CI checks
+    out as `moirai`.
+- Known issues found while verifying (filed, not fixed — out of scope here):
+  - #296 — the Go orchestrator exports no Prometheus metrics, so the queue-depth, active-workflow and
+    fleet-heartbeat series #124 moved off the API and runner are exported by nobody.
+  - #297 — a runner's agent-declared block ends its run as `failed`; the orchestrator never
+    derives the terminal `blocked` status or `blocking_reason` from it.
+- Adversarial self-review of the diff (separate agent, told to hunt for corrections that are still
+  false, missed references, a deleted rather than replaced MVP criterion, and behavior smuggled
+  into a comment edit). It found five real defects in my own rewrite; all are fixed on this
+  branch:
+  1. The `describeEvent` comment claimed "every branch is driven by a field the writers actually
+     store". False: the branches were written against the Python envelope
+     (`{job_id, runner_id, …, payload: {…}}`), while `persistExecutionEvent` stores the runner's
+     payload flat and the API passes it through verbatim
+     (`api/internal/http/handlers/workflows.go`). So `executionError` reads a `payload.payload`
+     that never exists, `started` reads `runner_id`, `failed` reads `exit_code` against the
+     runner's `exitCode`, and three branches key on event types the Go orchestrator never writes
+     while `pull_request.created`/`pull_request.merged`/`delivery.failed` have no branch at all.
+     The comment now states that mismatch, `logText`'s envelope note with it, and the rendering
+     bug is filed as #300. (`log` events do still render: `EmitLog` writes a top-level `message`.)
+  2. `web/src/format.ts` claimed the unmatched hold reasons were "the specified set it is to
+     grow". They are neither: they are what the Python queue emitted
+     (`git grep provider_circuit_open 7132e24^`), and the specification names a third vocabulary
+     again. Corrected to say the map is deliberately the union.
+  3. `runner/README.md` "the planning phase is specified to allow two" — nothing specifies it in
+     V1, and the consequence was wrong: one non-delivering execution parks the issue (`parkIssue`)
+     rather than two. Reframed as the Python-era budget it was, with V1's harsher rule stated.
+  4. `VALID_EVENT_TYPES` (deleted with `workflows/runner_events.py`) survived six lines above the
+     reference I did fix, plus two live Go comments. All three now name `validEventType`.
+  5. Two internal contradictions of my own: "increments most of them" vs "never increments"
+     (never is right), and `tasks.md` A1's "plus" list naming fields `ListWorkflows` already
+     returns.
+  The review confirmed clean: no MVP criterion dropped (15 bullets before and after), and nothing
+  outside comments changed in `.go`/`.ts`/`.proto`/`.sql`/`gen` — the sole non-comment edit is one
+  `it(...)` description rename in `web/src/runner-status.test.ts`, assertions untouched.
+  It also flagged two overclaims I had already caught and fixed independently (AGENTS.md §17
+  "resumes" → recovers-and-releases, PROJECT.md's repository-change gate).
+- Second validation pass after the review fixes: `make lint`, `make typecheck`,
+  `make test-orchestrator`, `make test-runner`, `make test-api`, `make test-web` — all pass. CI on
+  PR #299 was green on the first push (12/12 including `validate`, `compose-smoke` and
+  `test-postgres-integration`) and re-ran on each subsequent push.

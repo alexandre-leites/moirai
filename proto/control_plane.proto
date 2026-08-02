@@ -150,8 +150,9 @@ message Workflow {
   string created_at = 17;
   string updated_at = 18;
   // Agent executions spent across every role. This is the counter the console's
-  // total-attempt meter is measured against; its cap lives in
-  // orchestrator/src/moirai/workflows/policy.py (RetryBudget).
+  // total-attempt meter is measured against. The Go V1 orchestrator reports the
+  // column but enforces no cap on it, so the meter's budget is a display-side
+  // constant (ATTEMPT_BUDGETS in web/src/status.ts) until retry policy exists.
   int32 total_agent_executions = 19;
 }
 message ListWorkflowsResponse { repeated Workflow workflows = 1; }

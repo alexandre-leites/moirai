@@ -54,7 +54,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 
 - **Multiple projects.** Register several projects, enable/disable independently, support managed clones and existing local paths, synchronize eligible issues from each.
 - **Global scheduling.** One global queue across all enabled projects, highest numeric priority wins, creation timestamp as tie-breaker, skip projects with active workflows.
-- **Project concurrency.** One active workflow per project. Project stays locked during all phases (implementation, review, repair, waiting for checks, waiting for approval).
+- **Project concurrency.** One active workflow per project. The project stays locked for every phase of a run — in the Go V1 orchestrator that is implementation, pull-request delivery, and waiting for checks, and it extends to review, repair, and waiting for approval when those phases are implemented.
 - **Runner fleet.** Multiple runner containers, one job per runner at a time, outbound gRPC connections, capability/label advertisement, heartbeats, lease renewals, safe reconnection, drain/revoke support.
 - **Durable issue workflow.** A Go state machine whose every transition is persisted to PostgreSQL, so workflows survive orchestrator restart and workflow history is preserved. It is event-driven: the orchestrator dispatches an agent execution and advances the run only on the runner's terminal event. Retries are manual — there are no automatic workflow retries or execution deadlines.
 - **Portable integrations.** Generic issue-tracker interface, code-host interface, and agent-backend interface. GitHub CLI adapters for the MVP. OpenCode backend first, with local-process and Docker execution modes.
@@ -66,7 +66,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 | Principle | Description |
 |---|---|
 | Orchestrator is authoritative | Runner memory, agent conversation state, and process output are not authoritative |
-| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge |
+| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the GitHub-check gate (a run merges only on green) and the runner's result-document evidence; the pipeline, AI review, and human-approval gates are not implemented in V1 |
 | Portability through interfaces | Provider-specific behavior is translated at adapter boundaries |
 | Durable state outside conversations | An agent session can be replaced without losing the task |
 | Bounded loops | Every retry loop has explicit limits (attempts, duration, executions) |
@@ -87,7 +87,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 - GitHub code-host adapter (via `gh` CLI).
 - OpenCode agent backend.
 - Local-process and Docker execution modes.
-- Web UI: login, project configuration, runner status, queue, workflow timeline, logs, approval, retry/cancel/block controls.
+- Web UI: login, project configuration, runner status, queue, workflow timeline, logs, retry/cancel/block controls. The approval control is part of the same surface, but it has nothing to act on until the approval phase exists: `SubmitHumanDecision` is refused with "V1 has no approval phase".
 - Docker Compose deployment with full network isolation.
 
 ---

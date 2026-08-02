@@ -616,7 +616,7 @@ func (loop *ControlLoop) execute(ctx context.Context, lease control.Lease) {
 		// anonymous failure throws away the most actionable signal a run can
 		// produce, so the payload keeps the distinction. The event *type* stays
 		// `failed`: it is a shared contract with the orchestrator
-		// (VALID_EVENT_TYPES), the transport, and the job status column, and a
+		// (validEventType), the transport, and the job status column, and a
 		// block is a refinement of a non-delivering outcome rather than a new
 		// kind of one. A failing process is never trusted to report a block —
 		// its own account of why it stopped is not evidence.

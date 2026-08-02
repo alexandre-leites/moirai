@@ -1815,8 +1815,9 @@ type Workflow struct {
 	CreatedAt              string                 `protobuf:"bytes,17,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt              string                 `protobuf:"bytes,18,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// Agent executions spent across every role. This is the counter the console's
-	// total-attempt meter is measured against; its cap lives in
-	// orchestrator/src/moirai/workflows/policy.py (RetryBudget).
+	// total-attempt meter is measured against. The Go V1 orchestrator reports the
+	// column but enforces no cap on it, so the meter's budget is a display-side
+	// constant (ATTEMPT_BUDGETS in web/src/status.ts) until retry policy exists.
 	TotalAgentExecutions int32 `protobuf:"varint,19,opt,name=total_agent_executions,json=totalAgentExecutions,proto3" json:"total_agent_executions,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache

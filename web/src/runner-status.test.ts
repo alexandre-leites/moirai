@@ -78,9 +78,11 @@ describe("describeHeartbeat", () => {
     expect(heartbeat.title).toContain("not-a-timestamp");
   });
 
-  it("reads the orchestrator's own timestamp format, offset and microseconds included", () => {
-    // What `datetime.isoformat()` emits for the TIMESTAMPTZ column, per
-    // orchestrator/src/moirai/grpc/control_plane.py.
+  it("honours an explicit UTC offset and sub-millisecond digits", () => {
+    // The orchestrator renders TIMESTAMPTZ columns with time.RFC3339Nano in UTC
+    // (`timestamp` in orchestrator/internal/server/server.go), so it emits the
+    // `Z` form; an explicit `+00:00` offset with microseconds is the equivalent
+    // spelling this parse must not reject.
     // 7.071s before NOW: the offset is honoured (a naive read would be hours
     // out) and the sub-millisecond digits are truncated, not rejected.
     const heartbeat = describeHeartbeat("2026-07-29T11:59:52.928921+00:00", NOW);

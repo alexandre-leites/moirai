@@ -137,7 +137,7 @@ Unless the repository is genuinely blocked or the MVP is already complete, every
 - A required API endpoint.
 - A required UI workflow.
 - A required runner capability.
-- A required LangGraph node or transition.
+- A required orchestrator workflow phase or transition.
 - A required provider adapter.
 - A required recovery mechanism.
 - A meaningful implementation that moves an acceptance criterion toward completion.
@@ -177,7 +177,7 @@ Look for:
 - UI forms without backend integration.
 - Protocol definitions without implementations.
 - Migrations without repository code.
-- LangGraph nodes without routing.
+- Workflow phases the orchestrator can enter but never leave.
 - Runner commands without orchestration support.
 
 Complete the highest-impact partial implementation.
@@ -217,7 +217,7 @@ or:
 
 ```text
 issue
-→ LangGraph
+→ orchestrator state machine
 → agent
 → pipeline
 → review
@@ -244,7 +244,7 @@ Unless existing work requires another order, progress approximately through:
 2. Shared Protocol Buffer definitions.
 3. Docker Compose development environment.
 4. PostgreSQL schema and migrations.
-5. Python orchestrator foundation.
+5. Go orchestrator foundation.
 6. Go public API foundation.
 7. Authentication and sessions.
 8. Project CRUD and project configuration.
@@ -266,12 +266,12 @@ Unless existing work requires another order, progress approximately through:
 24. Docker executor.
 25. Portable agent-backend interface.
 26. OpenCode backend.
-27. LangGraph workflow state.
-28. LangGraph checkpoint persistence.
-29. Planning node.
-30. Implementation node.
-31. Local pipeline node.
-32. Independent AI review node.
+27. Go workflow state machine.
+28. PostgreSQL-persisted workflow state and restart recovery.
+29. Planning phase.
+30. Implementation phase.
+31. Local pipeline phase.
+32. Independent AI review phase.
 33. Repair loops.
 34. Portable code-host interface.
 35. GitHub branch and push support.
@@ -312,8 +312,8 @@ changed Go runner lease logic
 changed scheduler
 → run priority and project-lock tests
 
-changed Python workflow node
-→ run workflow routing and checkpoint tests
+changed an orchestrator workflow transition
+→ run orchestrator state-machine and recovery tests
 
 changed API handler
 → run API package tests and relevant integration test
@@ -714,7 +714,7 @@ At minimum:
 - Each runner processes one job at a time.
 - Only one workflow runs per project.
 - Highest-priority eligible issues are selected globally.
-- LangGraph persists and resumes workflows.
+- The orchestrator's Go state machine persists every workflow transition to PostgreSQL and recovers interrupted runs after a restart: resuming the ones that can continue, and releasing the project lock for the ones that cannot.
 - OpenCode runs through a portable backend.
 - Local pipeline and AI review gates work.
 - Pull requests and GitHub checks are handled.
