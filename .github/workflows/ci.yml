@@ -23,7 +23,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "22"
+  NODE_VERSION: "26"
+  # Pinned explicitly: the Node image ships npm 11, and package.json declares
+  # npm@12 as this project's package manager.
+  NPM_VERSION: "12.0.2"
 
 jobs:
   test-orchestrator:
@@ -127,6 +130,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - run: npm i -g "npm@${NPM_VERSION}"
       - run: make test-web
 
   build-web:
@@ -139,6 +143,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - run: npm i -g "npm@${NPM_VERSION}"
       - run: make build-web
 
   compose-smoke:
@@ -226,6 +231,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: ${{ env.NODE_VERSION }}
+      - run: npm i -g "npm@${NPM_VERSION}"
       - name: Scan Node dependencies
         run: cd web && npm ci && npm audit --audit-level=high
       - name: Scan filesystem, secrets, and container configuration

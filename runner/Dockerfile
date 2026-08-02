@@ -20,7 +20,7 @@ ARG MOIRAI_BUILD_VERSION
 RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -trimpath -ldflags="-s -w -X main.version=${MOIRAI_BUILD_VERSION}" -o /runner ./cmd/runner
 
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
+FROM node:26-alpine@sha256:233761595746769ebfdb6090f44fc7cdf818ae0ce62d2b37e0367723b9823e36
 ARG OPENCODE_VERSION=1.18.7
 # `npm install --global opencode-ai` keeps every optional platform package it
 # downloaded (four of them on linux/amd64, ~520 MB) plus a ~425 MB npm cache,
