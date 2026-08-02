@@ -108,13 +108,22 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 			labels = append(labels, label)
 		}
 	}
-	if os.Getenv("LOOP_SEED_TOKEN_LABELS") == "" {
+	// An explicitly set but empty list means the operator supplied separators
+	// and nothing else. Storing [] would make the token match no runner at all,
+	// and the resulting rejection names neither the token nor the labels.
+	if len(labels) == 0 {
 		labels = []string{"linux"}
 	}
 	if _, err := normalizeLabels(labels); err != nil {
 		return errors.New("seed runner token labels are invalid")
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO app.runner_registration_tokens(id,token_hash,allowed_labels,expires_at) VALUES($1,$2,$3::jsonb,now()+interval '15 minutes') ON CONFLICT(token_hash) DO NOTHING`, newID(), hashSecret(token), jsonLabels(labels))
+	// Re-arm the expiry on every start, rather than DO NOTHING. The token hash
+	// is derived from a configured value and so is stable across restarts, so
+	// the row survives while its 15-minute expiry does not: with DO NOTHING the
+	// second boot leaves an expired row in place and every runner registration
+	// is refused with a message that suggests a wrong token. A token that has
+	// already been redeemed keeps its used_at and stays redeemed.
+	_, err = s.pool.Exec(ctx, `INSERT INTO app.runner_registration_tokens(id,token_hash,allowed_labels,expires_at) VALUES($1,$2,$3::jsonb,now()+interval '15 minutes') ON CONFLICT(token_hash) DO UPDATE SET allowed_labels=EXCLUDED.allowed_labels,expires_at=EXCLUDED.expires_at WHERE app.runner_registration_tokens.used_at IS NULL`, newID(), hashSecret(token), jsonLabels(labels))
 	return databaseError(err)
 }
 
@@ -451,6 +460,43 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 	return response, nil
 }
 
+// SyncProjects refreshes the issue snapshot for every enabled project. It is
+// the unattended half of SyncNow: the console's "Sync now" button covers an
+// operator who is watching, and this covers the deployments that nobody is.
+//
+// One project's failure does not abandon the rest — a repository with a revoked
+// token would otherwise stop every other project discovering work — so failures
+// are recorded per project (which is what drives the console's sync health) and
+// reported together.
+func (s *Server) SyncProjects(ctx context.Context) error {
+	rows, err := s.pool.Query(ctx, `SELECT id::text,repository_url FROM app.projects WHERE enabled`)
+	if err != nil {
+		return databaseError(err)
+	}
+	type project struct{ id, repositoryURL string }
+	var projects []project
+	for rows.Next() {
+		var id string
+		var repositoryURL *string
+		if err := rows.Scan(&id, &repositoryURL); err != nil {
+			rows.Close()
+			return databaseError(err)
+		}
+		projects = append(projects, project{id: id, repositoryURL: stringValue(repositoryURL)})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return databaseError(err)
+	}
+	var failures []error
+	for _, candidate := range projects {
+		if err := s.syncProject(ctx, candidate.id, candidate.repositoryURL); err != nil {
+			failures = append(failures, fmt.Errorf("project %s: %w", candidate.id, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
 func (s *Server) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueSyncStatusRequest) (*controlv1.IssueSyncStatusResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
@@ -504,10 +550,15 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
+	// Eligibility is label-driven only until an issue has been worked on. From
+	// its first workflow run onwards the orchestrator owns the flag — a run that
+	// ends without delivering parks the issue, and only a manual retry reopens
+	// it — so a sync pass must not hand eligibility back to the label and
+	// restart work the operator has not asked for again.
 	for _, issue := range issues {
 		labels, _ := json.Marshal(issue.Labels)
 		raw, _ := json.Marshal(issue)
-		_, err := tx.Exec(ctx, `INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,body,url,state,labels,priority,eligible,external_created_at,external_updated_at,last_synced_at,raw_snapshot) VALUES($1,$2,'github',$3,$3,$4,$5,$6,'open',$7::jsonb,$8,$9,$10,$11,now(),$12::jsonb) ON CONFLICT(project_id,provider,external_id) DO UPDATE SET display_number=EXCLUDED.display_number,title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url,state='open',labels=EXCLUDED.labels,priority=EXCLUDED.priority,eligible=EXCLUDED.eligible AND NOT EXISTS(SELECT 1 FROM app.workflow_runs w WHERE w.issue_id=app.issues.id AND w.status='completed'),external_created_at=EXCLUDED.external_created_at,external_updated_at=EXCLUDED.external_updated_at,last_synced_at=now(),raw_snapshot=EXCLUDED.raw_snapshot`, newID(), projectID, issue.ExternalID, issue.Title, issue.Body, issue.URL, string(labels), issue.Priority, issue.Eligible, issue.CreatedAt, issue.UpdatedAt, string(raw))
+		_, err := tx.Exec(ctx, `INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,body,url,state,labels,priority,eligible,external_created_at,external_updated_at,last_synced_at,raw_snapshot) VALUES($1,$2,'github',$3,$3,$4,$5,$6,'open',$7::jsonb,$8,$9,$10,$11,now(),$12::jsonb) ON CONFLICT(project_id,provider,external_id) DO UPDATE SET display_number=EXCLUDED.display_number,title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url,state='open',labels=EXCLUDED.labels,priority=EXCLUDED.priority,eligible=CASE WHEN EXISTS(SELECT 1 FROM app.workflow_runs w WHERE w.issue_id=app.issues.id) THEN app.issues.eligible ELSE EXCLUDED.eligible END,external_created_at=EXCLUDED.external_created_at,external_updated_at=EXCLUDED.external_updated_at,last_synced_at=now(),raw_snapshot=EXCLUDED.raw_snapshot`, newID(), projectID, issue.ExternalID, issue.Title, issue.Body, issue.URL, string(labels), issue.Priority, issue.Eligible, issue.CreatedAt, issue.UpdatedAt, string(raw))
 		if err != nil {
 			return databaseError(err)
 		}
@@ -630,10 +681,13 @@ func (s *Server) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedu
 	return response, nil
 }
 
-func (s *Server) GetSystemVersion(ctx context.Context, _ *controlv1.GetSystemVersionRequest) (*controlv1.GetSystemVersionResponse, error) {
-	if _, err := s.requireActor(ctx, false); err != nil {
-		return nil, err
-	}
+// GetSystemVersion is deliberately unauthenticated, as it was before the Go
+// rewrite. The API gateway calls it from its own public /api/v1/health handler,
+// which has no session to present and silently reports an empty version if the
+// call fails; requiring an actor here therefore does not protect anything, it
+// just blanks the version operators use to tell deployments apart. The response
+// carries only the build identifier, already published next to it as apiVersion.
+func (s *Server) GetSystemVersion(_ context.Context, _ *controlv1.GetSystemVersionRequest) (*controlv1.GetSystemVersionResponse, error) {
 	return &controlv1.GetSystemVersionResponse{Version: s.version}, nil
 }
 
@@ -865,7 +919,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	if err := json.Unmarshal(configuration, &config); err != nil {
 		return false, databaseError(err)
 	}
-	packet, err := plannerPacket(jobID, projectID, externalID, title, body, mode, stringValue(repositoryURL), stringValue(localPath), defaultBranch, branch, config.ExecutionImage)
+	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, stringValue(repositoryURL), stringValue(localPath), defaultBranch, branch, config.ExecutionImage)
 	if err != nil {
 		return false, err
 	}
@@ -880,26 +934,63 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	if s.enqueue(runnerID, message) {
 		return true, nil
 	}
-	if _, err := s.pool.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),recovery_reason='runner disconnected before offer delivery' WHERE id=$1 AND status='offered'`, jobID); err != nil {
-		return false, databaseError(err)
-	}
-	if _, err := s.pool.Exec(ctx, `UPDATE app.workflow_runs SET status='cancelled',current_phase='cancelled',completed_at=now(),terminal_reason='runner disconnected before offer delivery' WHERE id=$1`, workflowID); err != nil {
-		return false, databaseError(err)
-	}
-	_, err = s.pool.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID)
-	return false, databaseError(err)
+	// One transaction, on a context of its own. These three statements undo a
+	// job the runner never received, and the lock release is the one that
+	// matters: run as separate statements on the request context, a failure in
+	// either of the first two — or a shutdown cancelling the context, which is
+	// itself a plausible reason the enqueue failed — returned early and left the
+	// project locked by a workflow that no longer exists.
+	return false, s.releaseUndeliveredOffer(jobID, workflowID, projectID)
 }
 
-func plannerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string) (map[string]any, error) {
+func (s *Server) releaseUndeliveredOffer(jobID, workflowID, projectID string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 15*time.Second)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return databaseError(err)
+	}
+	defer tx.Rollback(ctx)
+	const reason = "runner disconnected before offer delivery"
+	if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),recovery_reason=$2 WHERE id=$1 AND status='offered'`, jobID, reason); err != nil {
+		return databaseError(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE app.job_offers SET status='cancelled',responded_at=now() WHERE job_id=$1 AND status='offered'`, jobID); err != nil {
+		return databaseError(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='cancelled',current_phase='cancelled',completed_at=now(),terminal_reason=$2 WHERE id=$1`, workflowID, reason); err != nil {
+		return databaseError(err)
+	}
+	// The issue stays eligible on purpose: no execution ran, so nothing was
+	// spent and the next scheduling pass should offer this work again.
+	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID); err != nil {
+		return databaseError(err)
+	}
+	return commit(tx)
+}
+
+// developerPacket builds the single execution a V1 workflow dispatches.
+//
+// The role has to be `developer`. The runner refuses to modify or push for a
+// planner, pipeline or reviewer packet, and only pushes at all for a role
+// granted mayPush — so a planner packet leaves the agent branch unpublished and
+// the delivery step that follows opens a pull request from a branch the remote
+// has never heard of. V1 has no separate planning phase, so the one execution
+// it does dispatch is the one that writes the code and publishes the branch.
+//
+// mayMerge stays false in every packet: merging is the orchestrator's decision,
+// taken after GitHub reports the checks green, and the runner rejects a packet
+// that claims otherwise.
+func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string) (map[string]any, error) {
 	if !validID(jobID) || !validID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") {
 		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
 	}
 	return map[string]any{
-		"protocolVersion": "1.0", "jobId": jobID, "executionId": jobID + "-plan", "role": "planner", "objective": "Produce an implementation plan for " + externalID + ": " + title,
+		"protocolVersion": "1.0", "jobId": jobID, "executionId": jobID + "-implement", "role": "developer", "objective": "Implement " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
 		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": 0, "environmentRefs": []any{}, "executionImage": executionImage,
-		"constraints": map[string]bool{"mayModifyFiles": false, "mayPush": false, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": []string{}, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
+		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": []string{}, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
 	}, nil
 }
 
@@ -922,14 +1013,20 @@ func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64
 	}
 	var generation int64
 	var expiresAt time.Time
-	err = tx.QueryRow(ctx, `UPDATE app.jobs SET status='preparing', accepted_at=now(), lease_expires_at=now()+$3::interval WHERE id=$1 AND runner_id=$2 RETURNING lease_generation, lease_expires_at`, jobID, runnerID, durationInterval(leaseDuration)).Scan(&generation, &expiresAt)
+	// `AND status='offered'` is load-bearing, not redundant with the offer row
+	// above. Cancelling or blocking a workflow cancels the job but leaves the
+	// offer row alone, so without this guard a late OfferAccepted drags an
+	// administratively cancelled job back to 'preparing' and hands the runner a
+	// fresh lease — which is the credential the runner presents to
+	// ResolveJobSecret to read the project's tokens.
+	err = tx.QueryRow(ctx, `UPDATE app.jobs SET status='preparing', accepted_at=now(), lease_expires_at=now()+$3::interval WHERE id=$1 AND runner_id=$2 AND status='offered' RETURNING lease_generation, lease_expires_at`, jobID, runnerID, durationInterval(leaseDuration)).Scan(&generation, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, time.Time{}, status.Error(codes.FailedPrecondition, "job offer is no longer active")
 	}
 	if err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='preparing', updated_at=now() WHERE id=(SELECT workflow_run_id FROM app.jobs WHERE id=$1)`, jobID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='preparing', updated_at=now() WHERE id=(SELECT workflow_run_id FROM app.jobs WHERE id=$1) AND status NOT IN ('completed','failed','blocked','cancelled')`, jobID); err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1003,7 +1100,11 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 	if err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events (workflow_run_id,event_type,severity,payload) VALUES ($1,$2,'info',$3::jsonb)`, workflowID, "runner."+event.GetType(), event.GetPayloadJson()); err != nil {
+	// The event type is stored unprefixed because it is a vocabulary shared with
+	// the console, which switches on bare "log", "started", "failed" and friends
+	// to build the timeline and the agent log pane. Writing "runner.log" here
+	// left every one of those rows falling through to the default branch.
+	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events (workflow_run_id,event_type,severity,payload) VALUES ($1,$2,$3,$4::jsonb)`, workflowID, event.GetType(), eventSeverity(event.GetType()), event.GetPayloadJson()); err != nil {
 		return databaseError(err)
 	}
 	if terminalEvent(event.GetType()) {
@@ -1013,6 +1114,13 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		if event.GetType() != "completed" {
 			if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); err != nil {
 				return databaseError(err)
+			}
+			// An execution that actually ran and did not succeed parks its
+			// issue. V1 has no automatic retry, so leaving the issue eligible
+			// would have the scheduler dispatch the same work again on the very
+			// next tick, forever. RetryWorkflow is what makes it eligible again.
+			if err := parkIssue(ctx, tx, workflowID); err != nil {
+				return err
 			}
 		}
 	}
@@ -1159,20 +1267,24 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 	}
 	switch action {
 	case "retry":
-		if current != "recovering" {
-			if current != "failed" && current != "blocked" && current != "cancelled" {
-				return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
-			}
-			command, err := tx.Exec(ctx, `INSERT INTO app.project_locks(project_id,workflow_run_id) VALUES($1,$2) ON CONFLICT(project_id) DO NOTHING`, projectID, id)
-			if err != nil {
-				return nil, databaseError(err)
-			}
-			if command.RowsAffected() != 1 {
-				return nil, status.Error(codes.FailedPrecondition, "project already has an active workflow")
-			}
-			if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='recovering',current_phase='recovering',completed_at=NULL,updated_at=now() WHERE id=$1`, id); err != nil {
-				return nil, databaseError(err)
-			}
+		if current != "failed" && current != "blocked" && current != "cancelled" {
+			return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
+		}
+		// Retry reopens the issue rather than reviving this run. A job is
+		// unique per workflow run (app.jobs.workflow_run_id is UNIQUE), so the
+		// run that already had its execution cannot be given another one; the
+		// scheduler picks the reopened issue up and creates a fresh run whose
+		// history stands alongside this one. The previous implementation took
+		// the project lock and parked the run in a "recovering" status nothing
+		// reads, which left the project unable to schedule anything again.
+		if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, id); err != nil {
+			return nil, databaseError(err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE app.issues SET eligible=true WHERE id=(SELECT issue_id FROM app.workflow_runs WHERE id=$1) AND state='open'`, id); err != nil {
+			return nil, databaseError(err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events(workflow_run_id,event_type,severity,payload) VALUES($1,'workflow_transition','info','{"reason":"reopened by manual retry"}'::jsonb)`, id); err != nil {
+			return nil, databaseError(err)
 		}
 	case "cancel", "block":
 		next := action + "led"
@@ -1187,6 +1299,12 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 				return nil, databaseError(err)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running','recovering')`, id, defaultReason(action, reason)); err != nil {
+				return nil, databaseError(err)
+			}
+			// Withdraw any offer still outstanding. Offers do not age out on
+			// their own, so an offer left 'offered' is one a runner can still
+			// answer after the operator has cancelled the work.
+			if _, err := tx.Exec(ctx, `UPDATE app.job_offers SET status='cancelled',responded_at=now() WHERE status='offered' AND job_id IN (SELECT id FROM app.jobs WHERE workflow_run_id=$1)`, id); err != nil {
 				return nil, databaseError(err)
 			}
 			if _, err := tx.Exec(ctx, `UPDATE app.workflow_execution_requests SET status='cancelled' WHERE workflow_run_id=$1 AND status IN ('queued','dispatched')`, id); err != nil {
@@ -1425,6 +1543,28 @@ func validEventType(event string) bool {
 		return true
 	}
 	return false
+}
+
+// eventSeverity classifies a runner event for the console, which colours the
+// timeline by severity. Everything used to be stored as "info", including the
+// failure that ended the run.
+func eventSeverity(event string) string {
+	switch event {
+	case "failed":
+		return "error"
+	case "cancelled":
+		return "warning"
+	}
+	return "info"
+}
+
+// parkIssue makes a workflow run's issue ineligible so the scheduler stops
+// offering it. It is the mechanism behind "no automatic retries": without it a
+// run that fails releases its project lock and is immediately re-created from
+// the same still-eligible issue.
+func parkIssue(ctx context.Context, tx pgx.Tx, workflowID string) error {
+	_, err := tx.Exec(ctx, `UPDATE app.issues SET eligible=false WHERE id=(SELECT issue_id FROM app.workflow_runs WHERE id=$1)`, workflowID)
+	return databaseError(err)
 }
 func defaultReason(action, reason string) string {
 	if strings.TrimSpace(reason) == "" {

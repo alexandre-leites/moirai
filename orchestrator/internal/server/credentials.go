@@ -236,9 +236,24 @@ func configuredCipher() (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
+// reservedCredentialNames are environment variables that change how a process
+// or its loader behaves rather than carrying a secret. An agent credential is
+// injected into the execution environment by name, so allowing these would turn
+// the credential store into a way to point the agent's toolchain at a different
+// binary or preload a library into everything it runs.
+var reservedCredentialNames = map[string]bool{
+	"HOME": true, "PATH": true, "TMPDIR": true, "SHELL": true, "IFS": true,
+	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true, "DYLD_INSERT_LIBRARIES": true, "DYLD_LIBRARY_PATH": true,
+	"GIT_SSH_COMMAND": true, "GIT_EXTERNAL_DIFF": true, "BASH_ENV": true, "ENV": true, "NODE_OPTIONS": true,
+}
+
+func validCredentialName(name string) bool {
+	return agentCredentialName.MatchString(name) && !reservedCredentialNames[name]
+}
+
 func validateCredential(kind, filePath string) (string, error) {
 	kind = strings.TrimSpace(kind)
-	if kind != "github_token" && kind != "ssh_private_key" && !(strings.HasPrefix(kind, "agent:") && agentCredentialName.MatchString(strings.TrimPrefix(kind, "agent:"))) {
+	if kind != "github_token" && kind != "ssh_private_key" && !(strings.HasPrefix(kind, "agent:") && validCredentialName(strings.TrimPrefix(kind, "agent:"))) {
 		return "", errors.New("credential kind is invalid")
 	}
 	if filePath == "" {
@@ -258,7 +273,7 @@ func environmentCredentialKind(name string) (string, error) {
 	case "GIT_SSH_KEY":
 		return "ssh_private_key", nil
 	}
-	if !agentCredentialName.MatchString(name) {
+	if !validCredentialName(name) {
 		return "", errors.New("credential environment reference is invalid")
 	}
 	return "agent:" + name, nil

@@ -31,6 +31,29 @@ func TestValidateLedgerReportsDirtyMigration(t *testing.T) {
 	}
 }
 
+func TestValidateLedgerAcceptsBaselinedDatabase(t *testing.T) {
+	if err := validateLedger(18, false, 18); err != nil {
+		t.Fatalf("validateLedger rejected a freshly baselined database: %v", err)
+	}
+}
+
+// A database baselined at the legacy maximum keeps that legacy row forever, so
+// every migration added after the Go rewrite leaves golang-migrate ahead of it.
+// Restarting such a database must keep working.
+func TestValidateLedgerAcceptsMigrationsAddedAfterBaseline(t *testing.T) {
+	for _, current := range []uint{19, 20, 50} {
+		if err := validateLedger(current, false, 18); err != nil {
+			t.Fatalf("validateLedger(%d, false, 18) = %v; a legacy database cannot restart once new migrations land", current, err)
+		}
+	}
+}
+
+func TestValidateLedgerRejectsLedgerBehindLegacySchema(t *testing.T) {
+	if err := validateLedger(17, false, 18); err == nil {
+		t.Fatal("validateLedger accepted a golang-migrate version behind the legacy ledger")
+	}
+}
+
 func TestSourceFSSkipsNonMigrationFiles(t *testing.T) {
 	source := sourceFS{fstest.MapFS{
 		"migrations/001_first.sql": {Data: []byte("SELECT 1;")},

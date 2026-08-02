@@ -12,7 +12,7 @@ updates:
     directory: /runner
     schedule:
       interval: weekly
-  - package-ecosystem: pip
+  - package-ecosystem: gomod
     directory: /orchestrator
     schedule:
       interval: weekly

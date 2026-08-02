@@ -72,12 +72,17 @@ func (s *Server) ObserveWorkflows(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return databaseError(err)
 	}
+	// Every workflow in the batch is attempted even if an earlier one fails.
+	// The batch is ordered by updated_at, so returning on the first error let a
+	// single persistently failing workflow sit at the head and starve every
+	// other pull request waiting on its checks.
+	var failures []error
 	for _, workflowID := range workflows {
 		if err := s.observeWorkflow(ctx, workflowID); err != nil {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
@@ -93,11 +98,16 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
+	// Merging is the exhaustive case, not the default one: a checkState this
+	// switch does not recognise must never fall through into a squash merge.
 	switch checks {
-	case checksPending:
-		return nil
+	case checksGreen:
 	case checksFailed:
 		return s.blockExternal(ctx, workflowID, errors.New("required GitHub checks failed"))
+	case checksPending:
+		return nil
+	default:
+		return nil
 	}
 	if err := s.github.MergeSquash(ctx, repository, workflow.prNumber); err != nil {
 		return s.blockExternal(ctx, workflowID, err)
@@ -175,6 +185,12 @@ func (s *Server) blockExternal(ctx context.Context, workflowID string, cause err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID); err != nil {
 		return databaseError(err)
+	}
+	// Same reason as a failed execution: without this the scheduler re-creates
+	// the run from the still-eligible issue on the next tick and delivery fails
+	// again, in a loop. A manual retry is what reopens it.
+	if err := parkIssue(ctx, tx, workflowID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events(workflow_run_id,event_type,severity,payload) VALUES($1,'delivery.failed','error',$2::jsonb)`, workflowID, fmt.Sprintf(`{"reason":%q}`, reason)); err != nil {
 		return databaseError(err)

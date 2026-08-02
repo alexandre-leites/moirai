@@ -117,12 +117,22 @@ func baselineLegacy(ctx context.Context, db *sql.DB, engine *migrate.Migrate) er
 	return nil
 }
 
+// validateLedger checks a database that still carries the legacy
+// app.schema_version table after golang-migrate has taken ownership.
+//
+// The legacy ledger is a baseline, not a running total. It is frozen at
+// whatever version the Python migrator last applied, while golang-migrate keeps
+// advancing past it with every migration added from now on. Requiring the two
+// to be equal would therefore boot fine today and fail permanently the day
+// migration 019 lands, because the legacy table is never dropped. Only a
+// golang-migrate version *behind* the legacy ledger is a genuine disagreement:
+// that would replay SQL the database demonstrably already has.
 func validateLedger(current uint, dirty bool, legacy int64) error {
 	if dirty {
 		return errors.New("golang-migrate migration is dirty; resolve it before restarting")
 	}
-	if current != uint(legacy) {
-		return errors.New("legacy and golang-migrate ledgers disagree")
+	if legacy > 0 && current < uint(legacy) {
+		return fmt.Errorf("golang-migrate is at version %d but the legacy ledger reached %d", current, legacy)
 	}
 	return nil
 }

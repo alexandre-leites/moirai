@@ -51,15 +51,54 @@ func TestRepositoryAndCheckParsing(t *testing.T) {
 	if err != nil || repository != "acme/demo" {
 		t.Fatalf("repository = %q, %v", repository, err)
 	}
-	green := checksResult([]struct {
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	}{{Status: "COMPLETED", Conclusion: "SUCCESS"}})
-	failed := checksResult([]struct {
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-	}{{Status: "COMPLETED", Conclusion: "FAILURE"}})
+	green := checksResult([]checkRun{{Status: "COMPLETED", Conclusion: "SUCCESS"}})
+	failed := checksResult([]checkRun{{Status: "COMPLETED", Conclusion: "FAILURE"}})
 	if green != checksGreen || failed != checksFailed {
 		t.Fatalf("checks = %d, %d", green, failed)
+	}
+}
+
+// Every case here previously reduced to checksGreen, and checksGreen is the
+// orchestrator's authorisation to squash-merge agent-written code.
+func TestChecksResultNeverGuessesGreen(t *testing.T) {
+	for name, checks := range map[string][]checkRun{
+		"no checks reported yet":       {},
+		"unrecognised entry shape":     {{TypeName: "SomethingNew"}},
+		"legacy status context failed": {{TypeName: "StatusContext", State: "FAILURE"}},
+		"legacy status context error":  {{TypeName: "StatusContext", State: "ERROR"}},
+		"legacy status context queued": {{TypeName: "StatusContext", State: "PENDING"}},
+		"one green one unknown":        {{Status: "COMPLETED", Conclusion: "SUCCESS"}, {TypeName: "SomethingNew"}},
+		"one green one failing":        {{Status: "COMPLETED", Conclusion: "SUCCESS"}, {TypeName: "StatusContext", State: "FAILURE"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := checksResult(checks); got == checksGreen {
+				t.Fatal("checksResult reported green; the pull request would be merged without verified checks")
+			}
+		})
+	}
+}
+
+func TestChecksResultAcceptsSettledSuccess(t *testing.T) {
+	for name, checks := range map[string][]checkRun{
+		"completed check run":          {{Status: "COMPLETED", Conclusion: "SUCCESS"}},
+		"skipped and neutral":          {{Status: "COMPLETED", Conclusion: "SKIPPED"}, {Status: "COMPLETED", Conclusion: "NEUTRAL"}},
+		"legacy status context passed": {{TypeName: "StatusContext", State: "SUCCESS"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := checksResult(checks); got != checksGreen {
+				t.Fatalf("checksResult = %d, want green", got)
+			}
+		})
+	}
+}
+
+func TestChecksDecodesLegacyStatusContexts(t *testing.T) {
+	command := &fakeCommand{outputs: [][]byte{[]byte(`{"statusCheckRollup":[{"__typename":"StatusContext","context":"ci/jenkins","state":"FAILURE"}]}`)}}
+	state, err := NewGitHubCLI(command).Checks(context.Background(), "acme/demo", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != checksFailed {
+		t.Fatalf("Checks() = %d, want failed", state)
 	}
 }

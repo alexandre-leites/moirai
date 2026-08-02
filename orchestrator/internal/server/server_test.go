@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
@@ -52,13 +54,34 @@ func TestPasswordHashCompatibility(t *testing.T) {
 	}
 }
 
-func TestPlannerPacket(t *testing.T) {
-	packet, err := plannerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "")
+func TestDeveloperPacket(t *testing.T) {
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packet["role"] != "planner" || packet["executionId"] != "1b5f4a4d-2345-4ff2-a014-189531caf2d7-plan" {
+	if packet["role"] != "developer" || packet["executionId"] != "1b5f4a4d-2345-4ff2-a014-189531caf2d7-implement" {
 		t.Fatalf("unexpected packet: %#v", packet)
+	}
+}
+
+// The delivery step opens a pull request from the agent branch, which only
+// exists on the remote if the runner was allowed to push it. The runner grants
+// that to a developer packet and refuses it for a planner, so these two
+// constraints are what stand between a scheduled job and a deliverable branch.
+func TestDeveloperPacketMayModifyAndPush(t *testing.T) {
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	constraints, ok := packet["constraints"].(map[string]bool)
+	if !ok {
+		t.Fatalf("constraints = %#v", packet["constraints"])
+	}
+	if !constraints["mayModifyFiles"] || !constraints["mayPush"] {
+		t.Fatal("the dispatched execution cannot write or publish code, so delivery can never open a pull request")
+	}
+	if constraints["mayMerge"] {
+		t.Fatal("merging is the orchestrator's decision; the runner rejects a packet that claims it")
 	}
 }
 
@@ -86,6 +109,61 @@ func TestProjectCredentialCipherAndValidation(t *testing.T) {
 	}
 	if kind, err := environmentCredentialKind("GITHUB_TOKEN"); err != nil || kind != "github_token" {
 		t.Fatalf("kind=%q err=%v", kind, err)
+	}
+}
+
+// The API gateway reports the orchestrator build on its public health endpoint
+// and has no session to present, so this call must succeed without one.
+func TestGetSystemVersionNeedsNoSession(t *testing.T) {
+	response, err := (&Server{version: "922d6e6f0a6c"}).GetSystemVersion(context.Background(), &controlv1.GetSystemVersionRequest{})
+	if err != nil {
+		t.Fatalf("GetSystemVersion() error = %v; the public health endpoint reports an empty version", err)
+	}
+	if response.GetVersion() != "922d6e6f0a6c" {
+		t.Fatalf("Version = %q", response.GetVersion())
+	}
+}
+
+func TestReservedCredentialNamesAreRefused(t *testing.T) {
+	for _, name := range []string{"PATH", "HOME", "LD_PRELOAD", "GIT_SSH_COMMAND", "NODE_OPTIONS"} {
+		if _, err := validateCredential("agent:"+name, ""); err == nil {
+			t.Fatalf("validateCredential accepted %s, which redirects the agent's toolchain rather than carrying a secret", name)
+		}
+		if _, err := environmentCredentialKind(name); err == nil {
+			t.Fatalf("environmentCredentialKind accepted %s", name)
+		}
+	}
+	if _, err := validateCredential("agent:OPENROUTER_API_KEY", ""); err != nil {
+		t.Fatalf("an ordinary credential name was refused: %v", err)
+	}
+}
+
+func TestIssueLabelsGateEligibility(t *testing.T) {
+	if _, eligible := issuePriority([]string{"agent:ready"}); !eligible {
+		t.Fatal("agent:ready did not make the issue eligible")
+	}
+	for _, label := range []string{"agent:blocked", "agent:delivered"} {
+		priority, eligible := issuePriority([]string{"agent:ready", "agent-priority:7", label})
+		if eligible {
+			t.Fatalf("%s did not stop autonomous work on the issue", label)
+		}
+		if priority != 7 {
+			t.Fatalf("priority = %d, want 7", priority)
+		}
+	}
+}
+
+func TestGitHubErrorsRedactTokens(t *testing.T) {
+	for _, secret := range []string{"ghp_0123456789abcdefghij", "github_pat_0123456789abcdefghij"} {
+		if got := redactSecrets("failed using " + secret); strings.Contains(got, secret) {
+			t.Fatalf("redactSecrets left the token in %q; it reaches operator-visible error fields", got)
+		}
+	}
+}
+
+func TestEventSeverityMarksFailures(t *testing.T) {
+	if eventSeverity("failed") != "error" || eventSeverity("cancelled") != "warning" || eventSeverity("log") != "info" {
+		t.Fatal("runner event severities are wrong")
 	}
 }
 
