@@ -570,10 +570,12 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
     orchestrator workflow transition → run orchestrator state-machine and recovery tests".
   - §17 MVP completion criterion "LangGraph persists and resumes workflows" **replaced, not
     deleted**, with the property the Go engine actually provides: "The orchestrator's Go state
-    machine persists every workflow transition to PostgreSQL and resumes interrupted runs after a
-    restart." Verified against `orchestrator/cmd/orchestrator/main.go` (`ReconcileDatabaseOnce` at
+    machine persists every workflow transition to PostgreSQL and recovers interrupted runs after a
+    restart: resuming the ones that can continue, and releasing the project lock for the ones that
+    cannot." Verified against `orchestrator/cmd/orchestrator/main.go` (`ReconcileDatabaseOnce` at
     startup, then `RecoverOnce` every 30s and `ObserveWorkflows` every 15s) and
-    `orchestrator/internal/server/recovery.go`.
+    `orchestrator/internal/server/recovery.go` (`resumeStrandedDeliveries` resumes;
+    `reclaimExpiredLeases` terminates and frees the lock).
   - The engineering rules at §12 ("structured planner, developer, and reviewer results", "bound
     retries and repair loops") were left as-is: they name roles the task-packet contract still
     defines (`runner/internal/taskpacket/taskpacket.go` — planner, developer, pipeline, reviewer,

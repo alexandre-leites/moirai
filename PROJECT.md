@@ -66,7 +66,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 | Principle | Description |
 |---|---|
 | Orchestrator is authoritative | Runner memory, agent conversation state, and process output are not authoritative |
-| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the repository-change and GitHub-check gates; the pipeline, AI review, and human-approval gates are not implemented in V1 |
+| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the GitHub-check gate (a run merges only on green) and the runner's result-document evidence; the pipeline, AI review, and human-approval gates are not implemented in V1 |
 | Portability through interfaces | Provider-specific behavior is translated at adapter boundaries |
 | Durable state outside conversations | An agent session can be replaced without losing the task |
 | Bounded loops | Every retry loop has explicit limits (attempts, duration, executions) |

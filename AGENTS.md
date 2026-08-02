@@ -714,7 +714,7 @@ At minimum:
 - Each runner processes one job at a time.
 - Only one workflow runs per project.
 - Highest-priority eligible issues are selected globally.
-- The orchestrator's Go state machine persists every workflow transition to PostgreSQL and resumes interrupted runs after a restart.
+- The orchestrator's Go state machine persists every workflow transition to PostgreSQL and recovers interrupted runs after a restart: resuming the ones that can continue, and releasing the project lock for the ones that cannot.
 - OpenCode runs through a portable backend.
 - Local pipeline and AI review gates work.
 - Pull requests and GitHub checks are handled.
