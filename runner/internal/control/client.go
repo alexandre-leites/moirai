@@ -44,8 +44,8 @@ func (s grpcService) Connect(ctx context.Context) (Stream, error) {
 }
 
 type Client struct {
-	service  ControlService
-	identity Identity
+	service      ControlService
+	identity     Identity
 	mu           sync.Mutex
 	stream       Stream
 	streamCancel context.CancelFunc

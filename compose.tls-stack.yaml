@@ -22,18 +22,18 @@
 # The certificate is self-signed, generated on first start into a volume, and
 # names only "orchestrator" — the service name on the internal network, which is
 # the only name anything dials it by.
-name: moirai
+name: issue-230
 networks:
   control:
     internal: true
-    name: moirai_control
+    name: issue-230_control
   database:
     internal: true
-    name: moirai_database
+    name: issue-230_database
   egress:
-    name: moirai_egress
+    name: issue-230_egress
   public:
-    name: moirai_public
+    name: issue-230_public
 services:
   api:
     cap_drop:
@@ -87,6 +87,7 @@ services:
         condition: service_completed_successfully
         required: true
     environment:
+      - LOOP_AGENT_CREDENTIAL_REFS=${MOIRAI_AGENT_CREDENTIAL_REFS-}
       - LOOP_DATABASE_URL=postgresql+asyncpg://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop
       - LOOP_GITHUB_TOKEN=${MOIRAI_GITHUB_TOKEN-}
       - LOOP_GRPC_BIND=0.0.0.0:50051
@@ -176,15 +177,17 @@ services:
           cpus: ${MOIRAI_RUNNER_CPUS:-2}
           memory: ${MOIRAI_RUNNER_MEMORY:-4g}
     environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
       - GITHUB_TOKEN=${MOIRAI_GITHUB_TOKEN-}
       - LOOP_ORCHESTRATOR_ENDPOINT=orchestrator:50051
       - LOOP_RUNNER_AGENT_ARGUMENTS=${MOIRAI_AGENT_ARGUMENTS:---model,opencode/deepseek-v4-flash-free,--auto}
-      - LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN,GIT_SSH_KEY
+      - LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN,GIT_SSH_KEY${MOIRAI_AGENT_CREDENTIAL_NAMES:+,${MOIRAI_AGENT_CREDENTIAL_NAMES}}
       - LOOP_RUNNER_CAPACITY=${MOIRAI_RUNNER_CAPACITY:-1}
       - LOOP_RUNNER_KEY_DIR=/run/moirai/keys
       - LOOP_RUNNER_LABELS=${MOIRAI_RUNNER_LABELS:-linux}
       - LOOP_RUNNER_NAME=${MOIRAI_RUNNER_NAME:-runner-1}
       - LOOP_RUNNER_REGISTRATION_TOKEN=${MOIRAI_RUNNER_TOKEN:-moirai-local-runner-registration-token}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY-}
       - LOOP_ORCHESTRATOR_TLS=true
       - LOOP_ORCHESTRATOR_TLS_CA_FILE=/tls/ca.crt
       - LOOP_ORCHESTRATOR_TLS_SERVER_NAME=orchestrator
@@ -272,8 +275,8 @@ services:
       - no-new-privileges:true
 volumes:
   postgres-data:
-    name: moirai_postgres-data
+    name: issue-230_postgres-data
   runner-data:
-    name: moirai_runner-data
+    name: issue-230_runner-data
   tls:
     name: moirai_tls

@@ -1113,6 +1113,139 @@ func (x *ResolveJobSecretResponse) GetDelivery() string {
 	return ""
 }
 
+type StoreJobSecretRequest struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	RunnerId        string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
+	Credential      string                 `protobuf:"bytes,2,opt,name=credential,proto3" json:"credential,omitempty"`
+	JobId           string                 `protobuf:"bytes,3,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	LeaseGeneration int64                  `protobuf:"varint,4,opt,name=lease_generation,json=leaseGeneration,proto3" json:"lease_generation,omitempty"`
+	// The task packet's EnvironmentRef name. Only an agent credential can be
+	// rotated; the git kinds are not the runner's to rewrite.
+	Name          string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
+	Value         string `protobuf:"bytes,6,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreJobSecretRequest) Reset() {
+	*x = StoreJobSecretRequest{}
+	mi := &file_proto_runner_control_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreJobSecretRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreJobSecretRequest) ProtoMessage() {}
+
+func (x *StoreJobSecretRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_runner_control_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreJobSecretRequest.ProtoReflect.Descriptor instead.
+func (*StoreJobSecretRequest) Descriptor() ([]byte, []int) {
+	return file_proto_runner_control_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *StoreJobSecretRequest) GetRunnerId() string {
+	if x != nil {
+		return x.RunnerId
+	}
+	return ""
+}
+
+func (x *StoreJobSecretRequest) GetCredential() string {
+	if x != nil {
+		return x.Credential
+	}
+	return ""
+}
+
+func (x *StoreJobSecretRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *StoreJobSecretRequest) GetLeaseGeneration() int64 {
+	if x != nil {
+		return x.LeaseGeneration
+	}
+	return 0
+}
+
+func (x *StoreJobSecretRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *StoreJobSecretRequest) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+type StoreJobSecretResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// False means the project has no credential of that name to rotate. The
+	// runner reports it and carries on rather than failing the execution: the
+	// value it holds is still the working one for this run.
+	Stored        bool `protobuf:"varint,1,opt,name=stored,proto3" json:"stored,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoreJobSecretResponse) Reset() {
+	*x = StoreJobSecretResponse{}
+	mi := &file_proto_runner_control_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoreJobSecretResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoreJobSecretResponse) ProtoMessage() {}
+
+func (x *StoreJobSecretResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_runner_control_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoreJobSecretResponse.ProtoReflect.Descriptor instead.
+func (*StoreJobSecretResponse) Descriptor() ([]byte, []int) {
+	return file_proto_runner_control_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *StoreJobSecretResponse) GetStored() bool {
+	if x != nil {
+		return x.Stored
+	}
+	return false
+}
+
 var File_proto_runner_control_proto protoreflect.FileDescriptor
 
 const file_proto_runner_control_proto_rawDesc = "" +
@@ -1191,11 +1324,23 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\x04name\x18\x05 \x01(\tR\x04name\"L\n" +
 	"\x18ResolveJobSecretResponse\x12\x14\n" +
 	"\x05value\x18\x01 \x01(\tR\x05value\x12\x1a\n" +
-	"\bdelivery\x18\x02 \x01(\tR\bdelivery2\xb2\x02\n" +
+	"\bdelivery\x18\x02 \x01(\tR\bdelivery\"\xc0\x01\n" +
+	"\x15StoreJobSecretRequest\x12\x1b\n" +
+	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x1e\n" +
+	"\n" +
+	"credential\x18\x02 \x01(\tR\n" +
+	"credential\x12\x15\n" +
+	"\x06job_id\x18\x03 \x01(\tR\x05jobId\x12)\n" +
+	"\x10lease_generation\x18\x04 \x01(\x03R\x0fleaseGeneration\x12\x12\n" +
+	"\x04name\x18\x05 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x06 \x01(\tR\x05value\"0\n" +
+	"\x16StoreJobSecretResponse\x12\x16\n" +
+	"\x06stored\x18\x01 \x01(\bR\x06stored2\x93\x03\n" +
 	"\rRunnerControl\x12_\n" +
 	"\x0eRegisterRunner\x12%.loop.runner.v1.RegisterRunnerRequest\x1a&.loop.runner.v1.RegisterRunnerResponse\x12Y\n" +
 	"\aConnect\x12$.loop.runner.v1.RunnerToOrchestrator\x1a$.loop.runner.v1.OrchestratorToRunner(\x010\x01\x12e\n" +
-	"\x10ResolveJobSecret\x12'.loop.runner.v1.ResolveJobSecretRequest\x1a(.loop.runner.v1.ResolveJobSecretResponseB>Z<github.com/loop-engineering/contracts/gen/runner/v1;runnerv1b\x06proto3"
+	"\x10ResolveJobSecret\x12'.loop.runner.v1.ResolveJobSecretRequest\x1a(.loop.runner.v1.ResolveJobSecretResponse\x12_\n" +
+	"\x0eStoreJobSecret\x12%.loop.runner.v1.StoreJobSecretRequest\x1a&.loop.runner.v1.StoreJobSecretResponseB>Z<github.com/loop-engineering/contracts/gen/runner/v1;runnerv1b\x06proto3"
 
 var (
 	file_proto_runner_control_proto_rawDescOnce sync.Once
@@ -1209,7 +1354,7 @@ func file_proto_runner_control_proto_rawDescGZIP() []byte {
 	return file_proto_runner_control_proto_rawDescData
 }
 
-var file_proto_runner_control_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_proto_runner_control_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_proto_runner_control_proto_goTypes = []any{
 	(*RegisterRunnerRequest)(nil),    // 0: loop.runner.v1.RegisterRunnerRequest
 	(*RegisterRunnerResponse)(nil),   // 1: loop.runner.v1.RegisterRunnerResponse
@@ -1227,6 +1372,8 @@ var file_proto_runner_control_proto_goTypes = []any{
 	(*ExecutionEvent)(nil),           // 13: loop.runner.v1.ExecutionEvent
 	(*ResolveJobSecretRequest)(nil),  // 14: loop.runner.v1.ResolveJobSecretRequest
 	(*ResolveJobSecretResponse)(nil), // 15: loop.runner.v1.ResolveJobSecretResponse
+	(*StoreJobSecretRequest)(nil),    // 16: loop.runner.v1.StoreJobSecretRequest
+	(*StoreJobSecretResponse)(nil),   // 17: loop.runner.v1.StoreJobSecretResponse
 }
 var file_proto_runner_control_proto_depIdxs = []int32{
 	4,  // 0: loop.runner.v1.RunnerToOrchestrator.heartbeat:type_name -> loop.runner.v1.Heartbeat
@@ -1242,11 +1389,13 @@ var file_proto_runner_control_proto_depIdxs = []int32{
 	0,  // 10: loop.runner.v1.RunnerControl.RegisterRunner:input_type -> loop.runner.v1.RegisterRunnerRequest
 	2,  // 11: loop.runner.v1.RunnerControl.Connect:input_type -> loop.runner.v1.RunnerToOrchestrator
 	14, // 12: loop.runner.v1.RunnerControl.ResolveJobSecret:input_type -> loop.runner.v1.ResolveJobSecretRequest
-	1,  // 13: loop.runner.v1.RunnerControl.RegisterRunner:output_type -> loop.runner.v1.RegisterRunnerResponse
-	3,  // 14: loop.runner.v1.RunnerControl.Connect:output_type -> loop.runner.v1.OrchestratorToRunner
-	15, // 15: loop.runner.v1.RunnerControl.ResolveJobSecret:output_type -> loop.runner.v1.ResolveJobSecretResponse
-	13, // [13:16] is the sub-list for method output_type
-	10, // [10:13] is the sub-list for method input_type
+	16, // 13: loop.runner.v1.RunnerControl.StoreJobSecret:input_type -> loop.runner.v1.StoreJobSecretRequest
+	1,  // 14: loop.runner.v1.RunnerControl.RegisterRunner:output_type -> loop.runner.v1.RegisterRunnerResponse
+	3,  // 15: loop.runner.v1.RunnerControl.Connect:output_type -> loop.runner.v1.OrchestratorToRunner
+	15, // 16: loop.runner.v1.RunnerControl.ResolveJobSecret:output_type -> loop.runner.v1.ResolveJobSecretResponse
+	17, // 17: loop.runner.v1.RunnerControl.StoreJobSecret:output_type -> loop.runner.v1.StoreJobSecretResponse
+	14, // [14:18] is the sub-list for method output_type
+	10, // [10:14] is the sub-list for method input_type
 	10, // [10:10] is the sub-list for extension type_name
 	10, // [10:10] is the sub-list for extension extendee
 	0,  // [0:10] is the sub-list for field type_name
@@ -1277,7 +1426,7 @@ func file_proto_runner_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_runner_control_proto_rawDesc), len(file_proto_runner_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -15,6 +15,15 @@ service RunnerControl {
   // resolves from its own environment -- and simply has no per-project
   // credentials.
   rpc ResolveJobSecret(ResolveJobSecretRequest) returns (ResolveJobSecretResponse);
+
+  // Persists a credential the agent harness rotated while running the job.
+  //
+  // A subscription credential is an access token that expires, and the harness
+  // refreshes it inside the execution. Without somewhere durable to put the new
+  // value, every execution redoes the authorization dance or starts failing.
+  // Fenced exactly like ResolveJobSecret, and an update only: a runner may
+  // replace a credential the project already gave it and nothing else.
+  rpc StoreJobSecret(StoreJobSecretRequest) returns (StoreJobSecretResponse);
 }
 
 message RegisterRunnerRequest { string token = 1; string name = 2; repeated string labels = 3; string protocol_version = 4; int32 capacity = 5; }
@@ -68,4 +77,21 @@ message ResolveJobSecretResponse {
   // see; "file" means the runner writes it to a private path and passes that
   // path instead, which is what an SSH key needs.
   string delivery = 2;
+}
+
+message StoreJobSecretRequest {
+  string runner_id = 1;
+  string credential = 2;
+  string job_id = 3;
+  int64 lease_generation = 4;
+  // The task packet's EnvironmentRef name. Only an agent credential can be
+  // rotated; the git kinds are not the runner's to rewrite.
+  string name = 5;
+  string value = 6;
+}
+message StoreJobSecretResponse {
+  // False means the project has no credential of that name to rotate. The
+  // runner reports it and carries on rather than failing the execution: the
+  // value it holds is still the working one for this run.
+  bool stored = 1;
 }

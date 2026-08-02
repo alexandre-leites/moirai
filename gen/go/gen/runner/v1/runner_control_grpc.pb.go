@@ -22,6 +22,7 @@ const (
 	RunnerControl_RegisterRunner_FullMethodName   = "/loop.runner.v1.RunnerControl/RegisterRunner"
 	RunnerControl_Connect_FullMethodName          = "/loop.runner.v1.RunnerControl/Connect"
 	RunnerControl_ResolveJobSecret_FullMethodName = "/loop.runner.v1.RunnerControl/ResolveJobSecret"
+	RunnerControl_StoreJobSecret_FullMethodName   = "/loop.runner.v1.RunnerControl/StoreJobSecret"
 )
 
 // RunnerControlClient is the client API for RunnerControl service.
@@ -40,6 +41,14 @@ type RunnerControlClient interface {
 	// resolves from its own environment -- and simply has no per-project
 	// credentials.
 	ResolveJobSecret(ctx context.Context, in *ResolveJobSecretRequest, opts ...grpc.CallOption) (*ResolveJobSecretResponse, error)
+	// Persists a credential the agent harness rotated while running the job.
+	//
+	// A subscription credential is an access token that expires, and the harness
+	// refreshes it inside the execution. Without somewhere durable to put the new
+	// value, every execution redoes the authorization dance or starts failing.
+	// Fenced exactly like ResolveJobSecret, and an update only: a runner may
+	// replace a credential the project already gave it and nothing else.
+	StoreJobSecret(ctx context.Context, in *StoreJobSecretRequest, opts ...grpc.CallOption) (*StoreJobSecretResponse, error)
 }
 
 type runnerControlClient struct {
@@ -83,6 +92,16 @@ func (c *runnerControlClient) ResolveJobSecret(ctx context.Context, in *ResolveJ
 	return out, nil
 }
 
+func (c *runnerControlClient) StoreJobSecret(ctx context.Context, in *StoreJobSecretRequest, opts ...grpc.CallOption) (*StoreJobSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StoreJobSecretResponse)
+	err := c.cc.Invoke(ctx, RunnerControl_StoreJobSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerControlServer is the server API for RunnerControl service.
 // All implementations must embed UnimplementedRunnerControlServer
 // for forward compatibility.
@@ -99,6 +118,14 @@ type RunnerControlServer interface {
 	// resolves from its own environment -- and simply has no per-project
 	// credentials.
 	ResolveJobSecret(context.Context, *ResolveJobSecretRequest) (*ResolveJobSecretResponse, error)
+	// Persists a credential the agent harness rotated while running the job.
+	//
+	// A subscription credential is an access token that expires, and the harness
+	// refreshes it inside the execution. Without somewhere durable to put the new
+	// value, every execution redoes the authorization dance or starts failing.
+	// Fenced exactly like ResolveJobSecret, and an update only: a runner may
+	// replace a credential the project already gave it and nothing else.
+	StoreJobSecret(context.Context, *StoreJobSecretRequest) (*StoreJobSecretResponse, error)
 	mustEmbedUnimplementedRunnerControlServer()
 }
 
@@ -117,6 +144,9 @@ func (UnimplementedRunnerControlServer) Connect(grpc.BidiStreamingServer[RunnerT
 }
 func (UnimplementedRunnerControlServer) ResolveJobSecret(context.Context, *ResolveJobSecretRequest) (*ResolveJobSecretResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ResolveJobSecret not implemented")
+}
+func (UnimplementedRunnerControlServer) StoreJobSecret(context.Context, *StoreJobSecretRequest) (*StoreJobSecretResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StoreJobSecret not implemented")
 }
 func (UnimplementedRunnerControlServer) mustEmbedUnimplementedRunnerControlServer() {}
 func (UnimplementedRunnerControlServer) testEmbeddedByValue()                       {}
@@ -182,6 +212,24 @@ func _RunnerControl_ResolveJobSecret_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerControl_StoreJobSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StoreJobSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerControlServer).StoreJobSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerControl_StoreJobSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerControlServer).StoreJobSecret(ctx, req.(*StoreJobSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerControl_ServiceDesc is the grpc.ServiceDesc for RunnerControl service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -196,6 +244,10 @@ var RunnerControl_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveJobSecret",
 			Handler:    _RunnerControl_ResolveJobSecret_Handler,
+		},
+		{
+			MethodName: "StoreJobSecret",
+			Handler:    _RunnerControl_StoreJobSecret_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -648,3 +648,104 @@ func newEventReporter(t *testing.T, client EventClient, maxPending int) *EventRe
 func eventLease() Lease {
 	return Lease{JobID: "job-1", Generation: 2, Packet: taskpacket.Packet{JobID: "job-1", ExecutionID: "execution-1"}}
 }
+
+// A provider key matches none of the token prefixes the redactor knows, which
+// is why the redaction set is fed by the values actually resolved for a job.
+// Issue #230: a run against a paid model must complete with the key never
+// appearing in a log.
+func TestEventReporterRedactsAJobsResolvedCredentialValues(t *testing.T) {
+	client := &eventClient{}
+	reporter := newEventReporter(t, client, 4)
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	// The key is registered before anything can be emitted for the job, which
+	// is the ordering the dispatcher enforces: resolve, register, then run.
+	reporter.RedactSecrets(lease.JobID, []string{"or-v1-9f2c1d4e8a7b6c5d"})
+
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "log", map[string]any{
+		"message": "provider replied 401 for key or-v1-9f2c1d4e8a7b6c5d",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := client.events[0].PayloadJson
+	if strings.Contains(payload, "or-v1-9f2c1d4e8a7b6c5d") {
+		t.Fatalf("provider key leaked in %s", payload)
+	}
+	if !strings.Contains(payload, "[REDACTED]") {
+		t.Fatalf("expected a redaction in %s", payload)
+	}
+}
+
+// Release happens in Finish rather than when the execution returns, because the
+// terminal event carrying the agent's own summary is built after that.
+func TestAJobsCredentialsStayRedactedUntilTheJobIsFinished(t *testing.T) {
+	client := &eventClient{}
+	reporter := newEventReporter(t, client, 4)
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	reporter.RedactSecrets(lease.JobID, []string{"or-v1-9f2c1d4e8a7b6c5d"})
+
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "failed", map[string]any{
+		"error": "agent exited: bad key or-v1-9f2c1d4e8a7b6c5d",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(client.events[0].PayloadJson, "or-v1-9f2c1d4e8a7b6c5d") {
+		t.Fatalf("provider key leaked in the terminal payload %s", client.events[0].PayloadJson)
+	}
+
+	// Finish is the end of the job on every path, so the set does not grow
+	// without bound across a long-lived runner.
+	if !reporter.Finish(lease.JobID, lease.Generation) {
+		t.Fatal("Finish() did not report the lease closed")
+	}
+	prefixes, literals := reporter.redaction.snapshot()
+	if len(literals) != 0 {
+		t.Fatalf("literals = %#v, want none after Finish", literals)
+	}
+	if len(prefixes) != len(reporter.redaction.prefixes) {
+		t.Fatalf("configured prefixes were disturbed: %#v", prefixes)
+	}
+}
+
+// Two executions may resolve the same deployment credential; the first to
+// finish must not un-redact it for the other.
+func TestARedactedValueSurvivesAnotherJobFinishing(t *testing.T) {
+	client := &eventClient{}
+	reporter := newEventReporter(t, client, 4)
+	reporter.RedactSecrets("job-a", []string{"or-v1-9f2c1d4e8a7b6c5d"})
+	reporter.RedactSecrets("job-b", []string{"or-v1-9f2c1d4e8a7b6c5d"})
+
+	reporter.redaction.release("job-a")
+
+	_, literals := reporter.redaction.snapshot()
+	if len(literals) != 1 || literals[0] != "or-v1-9f2c1d4e8a7b6c5d" {
+		t.Fatalf("literals = %#v, want the value still held by job-b", literals)
+	}
+}
+
+// Redacting "1" or "true" would blank most of a log and hide nothing.
+func TestAValueTooShortToBeACredentialIsNotRedacted(t *testing.T) {
+	client := &eventClient{}
+	reporter := newEventReporter(t, client, 4)
+	lease := eventLease()
+	if err := reporter.Begin(lease); err != nil {
+		t.Fatal(err)
+	}
+	reporter.RedactSecrets(lease.JobID, []string{"true"})
+
+	if _, err := reporter.Emit(lease.JobID, lease.Generation, "log", map[string]any{
+		"message": "the gate verdict was true",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(client.events[0].PayloadJson, "true") {
+		t.Fatalf("an ordinary word was redacted: %s", client.events[0].PayloadJson)
+	}
+}

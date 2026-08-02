@@ -185,9 +185,34 @@ export type ProjectCredential = {
   kind: CredentialKind;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Where the harness reads this credential from, relative to the home
+   * directory the runner builds for the execution. Empty means it arrives as an
+   * environment variable. A destination, not a secret — which is why this one
+   * field of a credential does come back.
+   */
+  filePath?: string;
 };
 
-export type CredentialKind = "github_token" | "ssh_private_key";
+/**
+ * The two git kinds are fixed because the tools that consume them are. An agent
+ * credential is named by whoever configures it: `agent:OPENROUTER_API_KEY` is
+ * delivered to the agent as `$OPENROUTER_API_KEY`.
+ */
+export type GitCredentialKind = "github_token" | "ssh_private_key";
+export type AgentCredentialKind = `agent:${string}`;
+export type CredentialKind = GitCredentialKind | AgentCredentialKind;
+
+export const AGENT_CREDENTIAL_PREFIX = "agent:";
+export const AGENT_CREDENTIAL_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
+
+export function isAgentCredentialKind(kind: CredentialKind): kind is AgentCredentialKind {
+  return kind.startsWith(AGENT_CREDENTIAL_PREFIX);
+}
+
+export function agentCredentialName(kind: AgentCredentialKind): string {
+  return kind.slice(AGENT_CREDENTIAL_PREFIX.length);
+}
 
 export type ProjectConfiguration = {
   name: string;
@@ -246,7 +271,9 @@ export type ApiClient = {
   updateProject(id: string, data: ProjectConfiguration): Promise<Project>;
   setProjectEnabled(id: string, enabled: boolean): Promise<Project>;
   listProjectCredentials(id: string, signal?: AbortSignal): Promise<ProjectCredential[]>;
-  setProjectCredential(id: string, kind: CredentialKind, value: string): Promise<ProjectCredential[]>;
+  setProjectCredential(
+    id: string, kind: CredentialKind, value: string, filePath?: string
+  ): Promise<ProjectCredential[]>;
   clearProjectCredential(id: string, kind: CredentialKind): Promise<ProjectCredential[]>;
 
   listRunners(signal?: AbortSignal): Promise<Runner[]>;
@@ -427,14 +454,16 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       return body.credentials;
     },
 
-    async setProjectCredential(id: string, kind: CredentialKind, value: string): Promise<ProjectCredential[]> {
+    async setProjectCredential(
+      id: string, kind: CredentialKind, value: string, filePath = ""
+    ): Promise<ProjectCredential[]> {
       const res = await fetchClient(
         `/api/v1/projects/${encodeURIComponent(id)}/credentials/${encodeURIComponent(kind)}`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json", ...csrfHeaders() },
           credentials: "include",
-          body: JSON.stringify({ value }),
+          body: JSON.stringify({ value, filePath }),
         }
       );
       const body: { credentials?: ProjectCredential[] } = await json(res);

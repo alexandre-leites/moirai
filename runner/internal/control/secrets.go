@@ -83,6 +83,47 @@ func (r *SecretResolver) Resolve(ctx context.Context, jobID string, generation i
 	return response.GetValue(), written, nil
 }
 
+// ErrRotationNotStored means the control plane had no credential of that name
+// to replace. It is not a failure of the execution: the value the runner is
+// already using still works for this run. It is reported so an operator can see
+// that a rotation happened with nowhere durable to land -- the next execution
+// will re-authorize.
+var ErrRotationNotStored = errors.New("the control plane has no credential of this name to rotate")
+
+// Store persists a credential the agent harness refreshed during the job.
+//
+// The other direction of Resolve, and gated the same way: TLS, the runner's
+// identity, and the lease fence. A subscription token expires inside a run --
+// a developer packet is budgeted at an hour -- so the refreshed value has to go
+// somewhere every runner can see it, or the next execution starts from a token
+// that is already dead.
+func (r *SecretResolver) Store(ctx context.Context, jobID string, generation int64, name, value string) error {
+	if r == nil || r.client == nil {
+		return ErrNoControlPlaneSecret
+	}
+	response, err := r.client.StoreJobSecret(ctx, &runnerv1.StoreJobSecretRequest{
+		RunnerId:        r.runnerID,
+		Credential:      r.credential,
+		JobId:           jobID,
+		LeaseGeneration: generation,
+		Name:            name,
+		Value:           value,
+	})
+	if err != nil {
+		switch status.Code(err) {
+		case codes.Unimplemented:
+			// An orchestrator older than this runner. Nothing to write back to.
+			return ErrNoControlPlaneSecret
+		default:
+			return fmt.Errorf("store %s in the control plane: %w", name, err)
+		}
+	}
+	if !response.GetStored() {
+		return ErrRotationNotStored
+	}
+	return nil
+}
+
 // writeKey materialises a value ssh can read. ssh takes a path, not a variable,
 // and refuses a key file other users can read -- hence 0600 in a directory only
 // this runner owns.

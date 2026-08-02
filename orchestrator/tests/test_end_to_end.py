@@ -116,6 +116,13 @@ class _ExecutionPool:
     async def fetchrow(self, query: str, *arguments: object) -> dict[str, object] | None:
         return await _DurableConnection(self).fetchrow(query, *arguments)
 
+    async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
+        # This project stores no provider credential, so its packets request
+        # none beyond whatever the deployment declares.
+        if "FROM app.project_credentials" in query:
+            return []
+        raise AssertionError(query)
+
 
 class _ExecutionFakeControlPlane:
     def __init__(self) -> None:

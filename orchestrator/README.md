@@ -196,8 +196,18 @@ Labels are reconciled against a single authoritative workflow run per issue — 
 | `LOOP_SEED_ISSUE_TITLE` | unset | Optional initial issue title. |
 | `LOOP_SEED_ISSUE_BODY` | unset | Initial issue body. |
 | `LOOP_ALLOW_NO_CHECKPOINTER` | unset | Permit an unavailable checkpointer only when `true`, `yes`, or `1`. Workflows then cannot resume after dispatching an execution, so runs suspend permanently; tests and reduced-capability environments only. |
+| `LOOP_SECRET_KEY` or `LOOP_SECRET_KEY_FILE` | unset | 32-byte key (base64 or hex) encrypting per-project credentials at rest. Without it, storing or reading one is refused with a message naming this variable. |
+| `LOOP_AGENT_CREDENTIAL_REFS` | unset | Provider credentials every task packet asks the runner for, comma separated. Names, never values: `OPENROUTER_API_KEY`, or `NAME=relative/path` to have it delivered as a file below the agent's home directory instead of as a variable. An invalid entry stops startup rather than producing packets that quietly request nothing. |
 
 Secret values accept direct or `_FILE` forms, but not both. Secret files must be regular files no larger than 16 KiB.
+
+### Provider credentials
+
+Model selection is `LOOP_RUNNER_AGENT_ARGUMENTS` on the runner; the credential that selection needs is declared here. A name in `LOOP_AGENT_CREDENTIAL_REFS` becomes an `environmentRef` in every task packet, alongside whatever the project itself has stored under `agent:<NAME>` — the project's declaration wins on a collision, and so does its value, because the control plane is asked before the runner's own environment.
+
+The names a project has stored are read from `app.project_credentials` when the packet is built, so storing a credential is the only step: there is no second list to keep in step with it, and therefore no way for a stored credential to go unrequested.
+
+`ResolveJobSecret` and `StoreJobSecret` both refuse to run over an insecure channel, so per-project provider credentials — like per-project git credentials — need `compose.tls.yaml`. `StoreJobSecret` is the write-back for a token the agent harness rotated mid-execution; it updates an existing credential and never creates one, so a runner cannot introduce a name nobody configured.
 
 Planner and reviewer result schemas are package resources in `src/moirai/workflows/schemas/`, so an image built with `orchestrator/` as its Docker context contains the schemas it validates.
 

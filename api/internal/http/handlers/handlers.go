@@ -172,6 +172,12 @@ func (h *ProjectHandlers) listCredentials(w http.ResponseWriter, r *http.Request
 func (h *ProjectHandlers) setCredential(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Value string `json:"value"`
+		// Only meaningful for an "agent:<NAME>" kind: where the harness reads
+		// this credential from, relative to the home directory the runner gives
+		// the execution. Empty delivers it as an environment variable. A
+		// destination, never a secret -- which is why, unlike the value, it is
+		// also reported back.
+		FilePath string `json:"filePath"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -183,7 +189,7 @@ func (h *ProjectHandlers) setCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	resp, err := h.client.SetProjectCredential(
-		requestContext(r), r.PathValue("project_id"), r.PathValue("kind"), body.Value,
+		requestContext(r), r.PathValue("project_id"), r.PathValue("kind"), body.Value, body.FilePath,
 	)
 	if err != nil {
 		writeClientError(w, err)
@@ -210,6 +216,7 @@ func credentialsPayload(credentials []*controlv1.ProjectCredential) map[string]a
 			"kind":      credential.GetKind(),
 			"createdAt": credential.GetCreatedAt(),
 			"updatedAt": credential.GetUpdatedAt(),
+			"filePath":  credential.GetFilePath(),
 		})
 	}
 	return map[string]any{"credentials": entries}

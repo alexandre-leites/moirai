@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -50,12 +51,12 @@ type leaseState struct {
 }
 
 type EventReporter struct {
-	client            EventClient
-	maxPending        int
-	redactionPrefixes []string
-	outbox            *eventOutbox
-	maxPayloadBytes   int
-	logChunkBytes     int
+	client          EventClient
+	maxPending      int
+	redaction       *redactionSet
+	outbox          *eventOutbox
+	maxPayloadBytes int
+	logChunkBytes   int
 
 	Logger *slog.Logger
 
@@ -84,16 +85,16 @@ func NewEventReporterWithLimits(client EventClient, maxPending int, prefixes []s
 		return nil, ErrEventReporterConfiguration
 	}
 	reporter := &EventReporter{
-		client:            client,
-		maxPending:        maxPending,
-		redactionPrefixes: append([]string(nil), prefixes...),
-		leases:            map[string]*leaseState{},
-		expired:           map[expiredLeaseKey]*leaseState{},
-		maxPayloadBytes:   maxPayloadBytes,
-		logChunkBytes:     logChunkBytes,
+		client:          client,
+		maxPending:      maxPending,
+		redaction:       newRedactionSet(prefixes),
+		leases:          map[string]*leaseState{},
+		expired:         map[expiredLeaseKey]*leaseState{},
+		maxPayloadBytes: maxPayloadBytes,
+		logChunkBytes:   logChunkBytes,
 	}
 	reporter.cond = sync.NewCond(&reporter.mu)
-	if _, err := marshalEventPayloadWithLimit(map[string]any{"message": "", "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, prefixes, maxPayloadBytes); err != nil {
+	if _, err := marshalEventPayloadWithLimit(map[string]any{"message": "", "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, reporter.redaction, maxPayloadBytes); err != nil {
 		return nil, ErrEventReporterConfiguration
 	}
 	if outboxPath == "" {
@@ -188,6 +189,10 @@ func (r *EventReporter) RecoverTerminal(lease Lease, eventType string, payload m
 }
 
 func (r *EventReporter) Finish(jobID string, generation int64) bool {
+	// The job is over on every path through here, including the ones that
+	// report no matching lease, so its credentials stop being redacted only
+	// once nothing more can be emitted for it.
+	r.redaction.release(jobID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.expired[expiredLeaseKey{jobID: jobID, generation: generation}]; ok {
@@ -206,7 +211,7 @@ func (r *EventReporter) Emit(jobID string, generation int64, eventType string, p
 	if !validEventType(eventType) {
 		return 0, fmt.Errorf("%w: type %q", ErrInvalidExecutionEvent, eventType)
 	}
-	contents, err := marshalEventPayloadWithLimit(payload, r.redactionPrefixes, r.maxPayloadBytes)
+	contents, err := marshalEventPayloadWithLimit(payload, r.redaction, r.maxPayloadBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -473,7 +478,7 @@ func (r *EventReporter) logChunks(message string) []string {
 		}
 		for end > 0 {
 			chunk := message[:end]
-			if _, err := marshalEventPayloadWithLimit(map[string]any{"message": chunk, "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, r.redactionPrefixes, r.maxPayloadBytes); err == nil {
+			if _, err := marshalEventPayloadWithLimit(map[string]any{"message": chunk, "chunkIndex": int64(^uint64(0) >> 1), "chunkCount": int64(^uint64(0) >> 1)}, r.redaction, r.maxPayloadBytes); err == nil {
 				chunks = append(chunks, chunk)
 				message = message[end:]
 				break
@@ -494,14 +499,15 @@ func (r *EventReporter) logChunks(message string) []string {
 }
 
 func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) ([]byte, error) {
-	return marshalEventPayloadWithLimit(payload, prefixes, maxExecutionEventPayloadBytes)
+	return marshalEventPayloadWithLimit(payload, newRedactionSet(prefixes), maxExecutionEventPayloadBytes)
 }
 
-func marshalEventPayloadWithLimit(payload map[string]any, prefixes []string, maxPayloadBytes int) ([]byte, error) {
+func marshalEventPayloadWithLimit(payload map[string]any, redaction *redactionSet, maxPayloadBytes int) ([]byte, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
-	contents, err := json.Marshal(redactPayloadWithPrefixes(payload, prefixes))
+	prefixes, literals := redaction.snapshot()
+	contents, err := json.Marshal(redactPayloadWithPrefixes(payload, prefixes, literals))
 	if err != nil {
 		return nil, fmt.Errorf("%w: encode payload: %w", ErrInvalidExecutionEvent, err)
 	}
@@ -511,7 +517,7 @@ func marshalEventPayloadWithLimit(payload map[string]any, prefixes []string, max
 	return contents, nil
 }
 
-func redactPayloadWithPrefixes(value any, prefixes []string) any {
+func redactPayloadWithPrefixes(value any, prefixes []string, literals []string) any {
 	switch current := value.(type) {
 	case map[string]any:
 		redacted := make(map[string]any, len(current))
@@ -520,23 +526,23 @@ func redactPayloadWithPrefixes(value any, prefixes []string) any {
 				redacted[key] = "[REDACTED]"
 				continue
 			}
-			redacted[key] = redactPayloadWithPrefixes(item, prefixes)
+			redacted[key] = redactPayloadWithPrefixes(item, prefixes, literals)
 		}
 		return redacted
 	case []any:
 		redacted := make([]any, len(current))
 		for index, item := range current {
-			redacted[index] = redactPayloadWithPrefixes(item, prefixes)
+			redacted[index] = redactPayloadWithPrefixes(item, prefixes, literals)
 		}
 		return redacted
 	case []string:
 		redacted := make([]string, len(current))
 		for index, item := range current {
-			redacted[index] = redactKnownSecretValues(item, prefixes)
+			redacted[index] = redactKnownSecretValues(item, prefixes, literals)
 		}
 		return redacted
 	case string:
-		return redactKnownSecretValues(current, prefixes)
+		return redactKnownSecretValues(current, prefixes, literals)
 	default:
 		return current
 	}
@@ -551,7 +557,15 @@ func validRedactionPrefixes(prefixes []string) bool {
 	return true
 }
 
-func redactKnownSecretValues(value string, configured []string) string {
+func redactKnownSecretValues(value string, configured []string, literals []string) string {
+	// Literals first, and by plain substring: a resolved credential is redacted
+	// because it is *this deployment's* secret, not because it happens to look
+	// like one. A provider key that matches no known prefix -- most of them --
+	// is invisible to the scan below and would otherwise stream out verbatim
+	// the moment a harness echoed its own configuration.
+	for _, literal := range literals {
+		value = strings.ReplaceAll(value, literal, "[REDACTED]")
+	}
 	prefixes := append([]string{"ghp_", "github_pat_", "glpat-", "sk-"}, configured...)
 	for _, prefix := range prefixes {
 		searched := 0
@@ -609,4 +623,99 @@ func splitUTF8Chunks(value string, maximum int) []string {
 		value = value[end:]
 	}
 	return append(chunks, value)
+}
+
+// redactionSet is what must never appear in an event payload: the prefixes an
+// operator configured, plus the literal credential values of the executions
+// currently running.
+//
+// The literals are held rather than listed because they arrive with a job and
+// have to be gone when it ends -- and because they are registered *before* the
+// value can reach a harness, which is the only ordering that makes redaction
+// mean anything. A value shorter than this minimum is not registered: redacting
+// "1" or "true" would blank most of a log and hide nothing worth hiding.
+const minimumRedactableSecret = 8
+
+type redactionSet struct {
+	mu       sync.RWMutex
+	prefixes []string
+	literals map[string]int
+	byJob    map[string][]string
+}
+
+func newRedactionSet(prefixes []string) *redactionSet {
+	return &redactionSet{
+		prefixes: append([]string(nil), prefixes...),
+		literals: map[string]int{},
+		byJob:    map[string][]string{},
+	}
+}
+
+func (s *redactionSet) snapshot() ([]string, []string) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.literals) == 0 {
+		return s.prefixes, nil
+	}
+	literals := make([]string, 0, len(s.literals))
+	for literal := range s.literals {
+		literals = append(literals, literal)
+	}
+	// Longest first: a refresh token that contains an access token as a prefix
+	// must be redacted whole rather than leaving its tail in the log.
+	sort.Slice(literals, func(i, j int) bool { return len(literals[i]) > len(literals[j]) })
+	return s.prefixes, literals
+}
+
+// hold registers values against the job that resolved them. Refcounted:
+// two concurrent executions may resolve the same deployment credential, and the
+// first to finish must not un-redact it for the other.
+func (s *redactionSet) hold(jobID string, values []string) {
+	if s == nil || jobID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, value := range values {
+		if len(value) < minimumRedactableSecret {
+			continue
+		}
+		s.literals[value]++
+		s.byJob[jobID] = append(s.byJob[jobID], value)
+	}
+}
+
+func (s *redactionSet) release(jobID string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	held := s.byJob[jobID]
+	delete(s.byJob, jobID)
+	for _, value := range held {
+		if s.literals[value] <= 1 {
+			delete(s.literals, value)
+			continue
+		}
+		s.literals[value]--
+	}
+}
+
+// RedactSecrets keeps a job's resolved credential values out of every event
+// this reporter sends, until Finish reports that job over.
+//
+// Registered by the dispatcher the moment the values are resolved, which is
+// before any of them can reach a harness -- redaction that starts after the
+// agent has already echoed its configuration protects nothing. Release happens
+// in Finish rather than when the execution returns, because the terminal event
+// carrying the agent's own summary is built after that.
+func (r *EventReporter) RedactSecrets(jobID string, values []string) {
+	if r == nil {
+		return
+	}
+	r.redaction.hold(jobID, values)
 }

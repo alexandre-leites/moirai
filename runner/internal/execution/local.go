@@ -148,6 +148,18 @@ func MinimalEnvironment(overrides map[string]string, workspace string) []string 
 	return environment
 }
 
+// MinimalEnvironmentMap builds an execution's environment from nothing rather
+// than inheriting the runner's, so a credential set on the runner host cannot
+// reach an agent that was never granted it. Everything an execution is allowed
+// to see arrives through `overrides`, which the dispatcher fills from the task
+// packet's resolved environment references.
+//
+// HOME here is a floor, not a decision. It defaults to the workspace so a
+// process always has *some* writable home, and the dispatcher overrides it with
+// a directory outside the checkout (see dispatch.executionHome) -- which is
+// where a file-delivered credential is placed, and the reason a harness looking
+// under ~ finds one. Anything an image baked into its own HOME is deliberately
+// still not found: an agent inherits nothing it was not given.
 func MinimalEnvironmentMap(overrides map[string]string, workspace string) map[string]string {
 	environment := map[string]string{
 		"HOME":   workspace,

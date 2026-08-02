@@ -427,6 +427,10 @@ class _DurablePool:
         self.execution_request_status = "none"
         self.execution_role = "developer"
         self.pipeline_steps: list[dict[str, object]] = []
+        # What `project_agent_credential_refs` reads: the provider credentials
+        # a project has stored, which become environment references in its
+        # packets.
+        self.agent_credentials: list[dict[str, object]] = []
         self.dispatched_requests: list[tuple[str, str, int]] = []
         self.project_circuit: dict[str, object] | None = None
         self.provider_circuit: dict[str, object] | None = None
@@ -534,6 +538,8 @@ class _DurablePool:
     async def fetch(self, query: str, *arguments: object) -> list[dict[str, object]]:
         if "FROM app.project_pipeline_steps" in query:
             return self.pipeline_steps
+        if "FROM app.project_credentials" in query:
+            return self.agent_credentials
         raise AssertionError(query)
 
 

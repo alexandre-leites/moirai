@@ -58,7 +58,17 @@ func (osEnvironmentResolver) Resolve(_ context.Context, _ dispatch.SecretScope, 
 			return nil, fmt.Errorf("environment reference %q cannot be read on this runner: %w", reference.Name, err)
 		}
 		if value == "" {
-			return nil, fmt.Errorf("environment reference %q is not configured on this runner", reference.Name)
+			// The message has to name the fix, because by this point three
+			// different places could supply it and the operator cannot see
+			// which were tried. A provider key that is simply absent used to
+			// surface as an agent failing against a paid model with no
+			// explanation at all.
+			return nil, fmt.Errorf(
+				"environment reference %q is not configured on this runner: set %s (or %s_FILE) on the runner, "+
+					"or store it for the project as the credential %q -- which additionally needs the TLS overlay, "+
+					"because the control plane will not send a credential over an insecure channel",
+				reference.Name, reference.Name, reference.Name, reference.SecretRef,
+			)
 		}
 		resolved[reference.Name] = value
 	}
@@ -348,6 +358,15 @@ func run(ctx context.Context) error {
 	// served registry if the server is ever built with a recorder of its own.
 	loop.UseMetrics(metricsServer.Recorder())
 	dispatcher.EmitLog = loop.Reporter.EmitLog
+	// Every credential an execution resolves is registered for redaction before
+	// the execution can use it, and released by Reporter.Finish once the job's
+	// terminal event has been built. A provider key matches none of the token
+	// prefixes the redactor knows -- that is the whole point of a redaction set
+	// fed by what was actually resolved.
+	dispatcher.RedactSecrets = loop.Reporter.RedactSecrets
+	dispatcher.StoreSecret = func(ctx context.Context, scope dispatch.SecretScope, name, value string) error {
+		return secrets.Store(ctx, scope.JobID, scope.LeaseGeneration, name, value)
+	}
 	streamSettings := newReloadableStreamSettings(settings)
 	reloadSignal := make(chan os.Signal, 1)
 	signal.Notify(reloadSignal, syscall.SIGHUP)

@@ -20,7 +20,7 @@ All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LO
 | `LOOP_RUNNER_REGISTRATION_TOKEN` | | One-time registration token. |
 | `LOOP_RUNNER_LABELS` | | Comma-separated capability labels. |
 | `LOOP_RUNNER_CAPACITY` | `1` | Concurrent execution capacity. |
-| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | | Comma-separated task environment variable allow-list; set `GITHUB_TOKEN` for GitHub-backed projects. |
+| `LOOP_RUNNER_ALLOWED_ENVIRONMENT` | | Comma-separated task environment variable allow-list; set `GITHUB_TOKEN` for GitHub-backed projects, plus any provider key name the agent needs (`OPENROUTER_API_KEY`, ...). |
 | `LOOP_RUNNER_HEARTBEAT_INTERVAL` | `10s` | Heartbeat, local lease-expiry, and offer-reservation expiry check interval. |
 | `LOOP_RUNNER_RECONNECT_MIN` / `LOOP_RUNNER_RECONNECT_MAX` | `1s` / `1m` | Control-stream exponential-backoff bounds. |
 | `LOOP_RUNNER_RECONNECT_GRACE` | `1m` | Reconnection grace configuration. |
@@ -60,6 +60,32 @@ A reference that is missing from `LOOP_RUNNER_ALLOWED_ENVIRONMENT`, or that the 
 `GITHUB_TOKEN` must be included in the allowed task environment for GitHub-backed projects. Delivery configures Git's GitHub HTTPS authorization header from this environment without putting the token in the `git push` argument list. Docker task secrets are supplied through a temporary `0600` env-file rather than Docker command-line environment arguments.
 
 In Compose the runner receives it as `GITHUB_TOKEN_FILE=/run/secrets/github_token` with `LOOP_RUNNER_ALLOWED_ENVIRONMENT=GITHUB_TOKEN`.
+
+### Provider credentials
+
+A model provider key is the same mechanism: the packet declares it as an `environmentRef`, and the runner resolves it from the project's own credential first and its own environment second. Nothing about it is GitHub-specific except the name.
+
+The orchestrator decides *which* names to request (`LOOP_AGENT_CREDENTIAL_REFS`, plus whatever the project has stored); the runner decides which it will *accept* (`LOOP_RUNNER_ALLOWED_ENVIRONMENT`). A name requested but not allowed fails the execution with an error naming this variable and listing what is currently on it — it is the first thing an operator hits after adding a key to a project.
+
+Every resolved value is registered with the event reporter's redaction set before the workspace is prepared, so it cannot appear in a log, a task packet, or an error message. Values shorter than 8 characters are not registered: redacting `true` would blank a log and hide nothing.
+
+### File-delivered credentials and HOME
+
+An execution's environment is built from nothing rather than inherited (`MinimalEnvironment`), and `HOME` is set to a directory the runner creates for the execution — a sibling of the checkout, not the checkout itself, so nothing a tool writes to `~` lands in the tree the agent is about to commit. It is discarded with the workspace.
+
+That is also why `opencode auth login` baked into an image is not found at run time: the agent's `~` is not the image's. A credential that has to arrive as a file therefore declares a destination, and the runner writes it there, `0600`, below that home:
+
+```json
+{"name": "OPENCODE_AUTH", "secretRef": "agent:OPENCODE_AUTH", "path": ".local/share/opencode/auth.json"}
+```
+
+The variable named by `name` then carries the *path*, never the contents. Delivered credential files are removed when the execution ends, including when the workspace is retained for forensics.
+
+### Rotating credentials
+
+A subscription access token expires, and the harness refreshes it inside the run. The runner re-reads each file-delivered credential every 30 seconds and once more when the execution ends; a changed value is registered for redaction and then sent to the control plane (`StoreJobSecret`), fenced on the same lease as resolution.
+
+The write-back is an update, never an insert: a runner may replace a credential the project already gave it and nothing else. A project with no stored credential of that name has nowhere durable to write to, so the rotation stays local to the run and the next execution re-authorizes; that is logged, not fatal.
 
 
 

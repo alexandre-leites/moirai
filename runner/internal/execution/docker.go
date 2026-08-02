@@ -138,6 +138,14 @@ func (executor DockerExecutor) runCommand(containerName, workspace string, reque
 	if keyPath := request.Environment["GIT_SSH_KEY"]; filepath.IsAbs(keyPath) {
 		command = append(command, "--mount", "type=bind,src="+keyPath+",dst="+keyPath+",readonly")
 	}
+	// HOME is a directory the runner created outside the checkout, and the
+	// environment file above names it by its host path. Without this mount the
+	// container's HOME points at nothing: a harness reading credentials from
+	// under ~ finds none, and anything it writes there is lost. Writable, not
+	// read-only, because a rotated credential is written back into it.
+	if home := request.Environment["HOME"]; filepath.IsAbs(home) && home != workspace {
+		command = append(command, "--mount", "type=bind,src="+home+",dst="+home)
+	}
 	command = append(command, executor.Image)
 	return append(command, request.Command...)
 }

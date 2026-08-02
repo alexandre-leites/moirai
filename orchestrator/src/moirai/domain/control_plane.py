@@ -9,7 +9,13 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
-from .credentials import CREDENTIAL_DELIVERY, CREDENTIAL_KIND_BY_ENVIRONMENT_NAME
+from .credentials import (
+    CREDENTIAL_DELIVERY,
+    credential_kind_for_environment,
+    is_agent_credential_kind,
+    normalize_credential_file_path,
+    validate_credential_kind,
+)
 from .leases import StaleLeaseError, accept_event, renew_lease
 from .models import ExecutionEvent, Issue, JobLease, Project, Runner, Workflow, WorkflowStatus
 from .scheduling import Assignment, select_assignment
@@ -74,7 +80,7 @@ class InMemoryControlPlane:
         self._offers: dict[str, JobOffer] = {}
         self._leases: dict[str, JobLease] = {}
         self._project_locks: dict[str, str] = {}
-        self._project_credentials: dict[tuple[str, str], str] = {}
+        self._project_credentials: dict[tuple[str, str], tuple[str, str]] = {}
         self._audit: list[tuple[str | None, str, str, str, str, datetime]] = []
 
     @staticmethod
@@ -244,26 +250,52 @@ class InMemoryControlPlane:
         tests that never set one get None, which is the "fall back to the
         runner's own environment" answer.
         """
-        kind = CREDENTIAL_KIND_BY_ENVIRONMENT_NAME.get(name)
+        kind = credential_kind_for_environment(name)
         if kind is None:
             raise ValueError(f"no project credential backs the environment reference {name!r}")
         with self._lock:
-            offer = self._offers.get(job_id)
-            lease = self._leases.get(job_id)
-            if (
-                offer is None
-                or offer.accepted_at is None
-                or offer.runner_id != runner_id
-                or lease is None
-                or lease.generation != generation
-                or lease.expires_at <= now
-            ):
-                raise StaleLeaseError("runner does not hold this job at this lease generation")
-            workflow = self._workflows[offer.workflow_id]
-            value = self._project_credentials.get((workflow.project_id, kind))
-        if value is None:
+            project_id = self._fenced_job_project(runner_id, job_id, generation, now)
+            stored = self._project_credentials.get((project_id, kind))
+        if stored is None:
             return None
+        value, file_path = stored
+        if is_agent_credential_kind(kind):
+            return value, "file" if file_path else "environment"
         return value, CREDENTIAL_DELIVERY[kind]
+
+    def store_job_secret(
+        self, runner_id: str, job_id: str, generation: int, name: str, value: str, now: datetime
+    ) -> bool:
+        """The in-memory twin of the asyncpg write-back, fenced the same way."""
+        kind = credential_kind_for_environment(name)
+        if kind is None or not is_agent_credential_kind(kind):
+            raise ValueError(f"{name!r} is not a rotatable agent credential")
+        if not value:
+            raise ValueError("refusing to store an empty credential")
+        with self._lock:
+            project_id = self._fenced_job_project(runner_id, job_id, generation, now)
+            existing = self._project_credentials.get((project_id, kind))
+            if existing is None:
+                return False
+            self._project_credentials[(project_id, kind)] = (value, existing[1])
+            return True
+
+    def _fenced_job_project(
+        self, runner_id: str, job_id: str, generation: int, now: datetime
+    ) -> str:
+        """Caller holds `self._lock`."""
+        offer = self._offers.get(job_id)
+        lease = self._leases.get(job_id)
+        if (
+            offer is None
+            or offer.accepted_at is None
+            or offer.runner_id != runner_id
+            or lease is None
+            or lease.generation != generation
+            or lease.expires_at <= now
+        ):
+            raise StaleLeaseError("runner does not hold this job at this lease generation")
+        return self._workflows[offer.workflow_id].project_id
 
     def append_audit(
         self,
@@ -283,12 +315,14 @@ class InMemoryControlPlane:
         with self._lock:
             self._audit.append((actor_user_id, action, resource_type, resource_id, outcome, now))
 
-    def set_project_credential(self, project_id: str, kind: str, value: str) -> None:
+    def set_project_credential(
+        self, project_id: str, kind: str, value: str, file_path: str = ""
+    ) -> None:
         """Test seam: the real control plane seals this, here it is just held."""
-        if kind not in CREDENTIAL_DELIVERY:
-            raise ValueError(f"unknown credential kind: {kind}")
+        validate_credential_kind(kind)
+        file_path = normalize_credential_file_path(kind, file_path)
         with self._lock:
-            self._project_credentials[(project_id, kind)] = value
+            self._project_credentials[(project_id, kind)] = (value, file_path)
 
     def expire_offers(self, now: datetime) -> tuple[str, ...]:
         expired: list[str] = []

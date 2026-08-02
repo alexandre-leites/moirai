@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Literal, cast
+
+from moirai.domain.credentials import (
+    MAX_CREDENTIAL_FILE_PATH_LENGTH,
+    agent_credential_kind,
+    normalize_credential_file_path,
+)
 
 ExecutionRole = Literal["planner", "developer", "pipeline", "reviewer", "verifier", "repairer"]
 
@@ -21,21 +28,49 @@ class PipelineCommand:
 class EnvironmentRef:
     """A credential the runner must resolve before executing the task.
 
-    Only the name and the reference travel in the packet, never a value. The
-    runner resolves it either from the control plane -- which answers from the
-    project's own credential, over TLS, for a job the runner currently holds --
-    or, failing that, from its own environment under the same name.
+    Only the name, the reference and -- for a file-delivered credential -- the
+    destination travel in the packet, never a value. The runner resolves it
+    either from the control plane -- which answers from the project's own
+    credential, over TLS, for a job the runner currently holds -- or, failing
+    that, from its own environment under the same name.
+
+    ``path``, when set, is where the resolved value has to be written *relative
+    to the home directory the runner builds for the execution*, and the variable
+    named by ``name`` then carries that path rather than the value. It exists
+    because a subscription harness reads its credentials from a file under
+    ``~`` and the runner overrides HOME, so nothing baked into an image at
+    ``~/...`` is ever found. A path is not a secret; it is safe in the packet.
     """
 
     name: str
     secret_ref: str
+    path: str = ""
 
     def packet(self) -> dict[str, str]:
-        return {"name": self.name, "secretRef": self.secret_ref}
+        return {"name": self.name, "secretRef": self.secret_ref, "path": self.path}
 
 
 GITHUB_TOKEN_REF = EnvironmentRef(name="GITHUB_TOKEN", secret_ref="github_token")
 SSH_KEY_REF = EnvironmentRef(name="GIT_SSH_KEY", secret_ref="ssh_private_key")
+
+
+def agent_environment_refs(
+    declarations: Iterable[tuple[str, str]],
+) -> tuple[EnvironmentRef, ...]:
+    """The provider credentials an execution should ask for, in order.
+
+    ``declarations`` is (name, file path) pairs from two sources: what the
+    deployment declares for every project, and what the project itself has
+    stored. The project's own declaration wins on a name collision -- it is the
+    more specific one, and its value is served by the control plane, which is
+    what makes a per-project key take precedence over the deployment default.
+    """
+    refs: dict[str, EnvironmentRef] = {}
+    for name, file_path in declarations:
+        refs[name] = EnvironmentRef(
+            name=name, secret_ref=agent_credential_kind(name), path=file_path
+        )
+    return tuple(refs.values())
 
 
 def _is_ssh_remote(repository_url: str | None) -> bool:
@@ -143,6 +178,7 @@ def task_execution(
     failed_checks: tuple[str, ...] = (),
     review_findings: tuple[str, ...] = (),
     environment_refs: tuple[EnvironmentRef, ...] | None = None,
+    agent_credential_refs: tuple[EnvironmentRef, ...] = (),
     execution_image: str = "",
 ) -> TaskExecutionRequest:
     if repository_mode not in {"managed_clone", "existing_path"}:
@@ -157,6 +193,15 @@ def task_execution(
     if environment_refs is None:
         environment_refs = environment_refs_for(
             repository_mode=mode, may_push=may_push, repository_url=repository_url
+        )
+    # Agent credentials are appended rather than merged into the git decision:
+    # every role runs an agent, including the read-only ones that are given no
+    # repository credential at all, and a planner without its provider key is
+    # exactly as stuck as a developer without one.
+    if agent_credential_refs:
+        declared = {reference.name for reference in environment_refs}
+        environment_refs = environment_refs + tuple(
+            reference for reference in agent_credential_refs if reference.name not in declared
         )
     return TaskExecutionRequest(
         job_id=job_id,
@@ -211,6 +256,7 @@ def pipeline_task_execution(
     diff_summary: str = "",
     failed_checks: tuple[str, ...] = (),
     review_findings: tuple[str, ...] = (),
+    agent_credential_refs: tuple[EnvironmentRef, ...] = (),
     execution_image: str = "",
 ) -> TaskExecutionRequest:
     request = task_execution(
@@ -233,6 +279,7 @@ def pipeline_task_execution(
         diff_summary=diff_summary,
         failed_checks=failed_checks,
         review_findings=review_findings,
+        agent_credential_refs=agent_credential_refs,
         execution_image=execution_image,
     )
     return replace(request, pipeline=pipeline)
@@ -251,6 +298,7 @@ def planner_task_execution(
     default_branch: str,
     timeout_seconds: int = 1800,
     acceptance_criteria: tuple[str, ...] = (),
+    agent_credential_refs: tuple[EnvironmentRef, ...] = (),
     execution_image: str = "",
 ) -> TaskExecutionRequest:
     return task_execution(
@@ -267,6 +315,7 @@ def planner_task_execution(
         default_branch=default_branch,
         timeout_seconds=timeout_seconds,
         acceptance_criteria=acceptance_criteria,
+        agent_credential_refs=agent_credential_refs,
         execution_image=execution_image,
     )
 
@@ -281,6 +330,15 @@ def _validate_environment_refs(references: tuple[EnvironmentRef, ...]) -> None:
         secret_ref = reference.secret_ref
         if not secret_ref or secret_ref.strip() != secret_ref or len(secret_ref) > 512:
             raise ValueError("task environment references are invalid")
+        if reference.path:
+            # A destination the runner would refuse is a packet it cannot
+            # execute; catching it here fails the dispatch instead of the run.
+            if len(reference.path) > MAX_CREDENTIAL_FILE_PATH_LENGTH:
+                raise ValueError("task environment references are invalid")
+            try:
+                normalize_credential_file_path(reference.secret_ref, reference.path)
+            except ValueError as error:
+                raise ValueError("task environment references are invalid") from error
         names.add(reference.name)
 
 

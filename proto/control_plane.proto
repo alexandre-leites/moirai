@@ -86,9 +86,16 @@ message SetProjectEnabledResponse { Project project = 1; }
 // message describing what is configured rather than what it is.
 message SetProjectCredentialRequest {
   string project_id = 1;
-  // "github_token" or "ssh_private_key".
+  // "github_token", "ssh_private_key", or "agent:<NAME>" where <NAME> is the
+  // environment variable an agent harness reads the credential from, e.g.
+  // "agent:OPENROUTER_API_KEY".
   string kind = 2;
   string value = 3;
+  // Only for an "agent:" kind, and only when the harness wants a file rather
+  // than a variable: where to write it, relative to the home directory the
+  // runner builds for the execution. Empty means environment delivery. This is
+  // a destination, not a secret.
+  string file_path = 4;
 }
 message ClearProjectCredentialRequest {
   string project_id = 1;
@@ -99,6 +106,8 @@ message ProjectCredential {
   string kind = 1;
   string created_at = 2;
   string updated_at = 3;
+  // Empty for environment delivery. Never a value.
+  string file_path = 4;
 }
 // One response type per RPC, each carrying the same summary: what the project
 // has configured, never a value.
