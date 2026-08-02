@@ -17,6 +17,7 @@ export type Polled<T> = {
   loading: boolean;
   /** Abandons any in-flight request and starts a clean load. */
   refresh: () => void;
+  update: (next: (current: T) => T) => void;
 };
 
 export type PollOptions = {
@@ -46,6 +47,9 @@ export function usePolled<T>(
   useEffect(() => { fallback.current = fallbackMessage; }, [fallbackMessage]);
 
   const refresh = useCallback(() => setReloadToken((token) => token + 1), []);
+  const update = useCallback((next: (current: T) => T) => {
+    setData((current) => current === null ? current : next(current));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,5 +108,5 @@ export function usePolled<T>(
     };
   }, [load, intervalMs, poll, reloadToken]);
 
-  return { data, error, loading, refresh };
+  return { data, error, loading, refresh, update };
 }

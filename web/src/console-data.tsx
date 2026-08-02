@@ -4,8 +4,9 @@
 // overview, and at least one view each. Fetching them per view would mean the
 // same four requests several times over on one screen; fetching them here in
 // parallel keeps it to one round of four (specification.md §6, "Performance").
-import { createContext, useCallback, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, type ReactNode } from "react";
 import type { ApiClient, Project, QueueEntry, Runner, Workflow } from "./api";
+import { subscribeEvents } from "./events";
 import { usePolled, type Polled } from "./poll";
 import { describeHeartbeat } from "./runner-status";
 import { NEEDS_ATTENTION_STATUSES, isTerminal } from "./status";
@@ -24,6 +25,12 @@ export type ConsoleData = Polled<ConsoleSnapshot> & {
 
 const ConsoleDataContext = createContext<ConsoleData | null>(null);
 
+function replaceByID<T extends { id: string }>(items: T[], next: T): T[] {
+  const index = items.findIndex((item) => item.id === next.id);
+  if (index < 0) return [next, ...items];
+  return items.map((item) => item.id === next.id ? next : item);
+}
+
 export function ConsoleDataProvider({ api, children }: { api: ApiClient; children: ReactNode }) {
   const load = useCallback(
     async (signal: AbortSignal): Promise<ConsoleSnapshot> => {
@@ -39,6 +46,19 @@ export function ConsoleDataProvider({ api, children }: { api: ApiClient; childre
   );
 
   const polled = usePolled(load, "The control plane could not be reached.");
+  const { update } = polled;
+
+  useEffect(() => subscribeEvents((event) => {
+    update((snapshot) => {
+      if (event.workflow) {
+        return { ...snapshot, workflows: replaceByID(snapshot.workflows, event.workflow) };
+      }
+      if (event.runner) {
+        return { ...snapshot, runners: replaceByID(snapshot.runners, event.runner) };
+      }
+      return snapshot;
+    });
+  }), [update]);
 
   const value = useMemo<ConsoleData>(() => {
     const names = new Map((polled.data?.projects ?? []).map((project) => [project.id, project.name]));

@@ -573,3 +573,21 @@ class GetSchedulerMetricsResponse(_message.Message):
     active_workflows: int
     scheduled_jobs: int
     def __init__(self, queue_depth: _Optional[int] = ..., active_workflows: _Optional[int] = ..., scheduled_jobs: _Optional[int] = ...) -> None: ...
+
+class StreamEventsRequest(_message.Message):
+    __slots__ = ("last_event_id",)
+    LAST_EVENT_ID_FIELD_NUMBER: _ClassVar[int]
+    last_event_id: str
+    def __init__(self, last_event_id: _Optional[str] = ...) -> None: ...
+
+class ControlPlaneEvent(_message.Message):
+    __slots__ = ("id", "event_type", "workflow", "runner")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    EVENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    WORKFLOW_FIELD_NUMBER: _ClassVar[int]
+    RUNNER_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    event_type: str
+    workflow: Workflow
+    runner: Runner
+    def __init__(self, id: _Optional[str] = ..., event_type: _Optional[str] = ..., workflow: _Optional[_Union[Workflow, _Mapping]] = ..., runner: _Optional[_Union[Runner, _Mapping]] = ...) -> None: ...

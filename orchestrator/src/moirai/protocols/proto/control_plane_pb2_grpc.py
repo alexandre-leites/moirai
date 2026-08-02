@@ -149,6 +149,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.FromString,
                 _registered_method=True)
+        self.StreamEvents = channel.unary_stream(
+                '/loop.control.v1.ControlPlane/StreamEvents',
+                request_serializer=proto_dot_control__plane__pb2.StreamEventsRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.ControlPlaneEvent.FromString,
+                _registered_method=True)
 
 
 class ControlPlaneServicer:
@@ -316,6 +321,12 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StreamEvents(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ControlPlaneServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -453,6 +464,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.GetSchedulerMetrics,
                     request_deserializer=proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.SerializeToString,
+            ),
+            'StreamEvents': grpc.unary_stream_rpc_method_handler(
+                    servicer.StreamEvents,
+                    request_deserializer=proto_dot_control__plane__pb2.StreamEventsRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.ControlPlaneEvent.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -1184,6 +1200,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/GetSchedulerMetrics',
             proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.SerializeToString,
             proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StreamEvents(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/StreamEvents',
+            proto_dot_control__plane__pb2.StreamEventsRequest.SerializeToString,
+            proto_dot_control__plane__pb2.ControlPlaneEvent.FromString,
             options,
             channel_credentials,
             insecure,

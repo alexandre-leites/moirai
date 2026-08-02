@@ -45,6 +45,10 @@ func Collectors() []prometheus.Collector {
 	return []prometheus.Collector{orchestratorCalls}
 }
 
+type EventStream interface {
+	Recv() (*controlv1.ControlPlaneEvent, error)
+}
+
 type Client struct {
 	conn   *grpc.ClientConn
 	client controlv1.ControlPlaneClient
@@ -334,6 +338,14 @@ func (c *Client) GetSchedulerMetrics(ctx context.Context) (*controlv1.GetSchedul
 		return nil, mapError(err)
 	}
 	return resp, nil
+}
+
+func (c *Client) StreamEvents(ctx context.Context, lastEventID string) (EventStream, error) {
+	stream, err := c.client.StreamEvents(ctx, &controlv1.StreamEventsRequest{LastEventId: lastEventID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return stream, nil
 }
 
 func (c *Client) SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error) {
