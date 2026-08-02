@@ -226,6 +226,10 @@ func TestLoadRejectsOrchestratorHeadersWithoutTLSWithoutLeakingSecret(t *testing
 	if err == nil || !strings.Contains(err.Error(), "require TLS") || strings.Contains(err.Error(), secret) {
 		t.Fatalf("Load() error = %v", err)
 	}
+	_, err = Load(lookup(map[string]string{"LOOP_ORCHESTRATOR_HEADERS_FILE": "/missing/headers.json"}), func() (string, error) { return "runner", nil })
+	if err == nil || !strings.Contains(err.Error(), "require TLS") {
+		t.Fatalf("Load() file error = %v", err)
+	}
 }
 
 func TestLoadRejectsInvalidOrchestratorHeaders(t *testing.T) {

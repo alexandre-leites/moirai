@@ -147,18 +147,26 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		TLSServerName:        envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_SERVER_NAME"),
 		MetricsBind:          envOrDefault(lookupEnv, "LOOP_RUNNER_METRICS_BIND", ":9091"),
 	}
+	if config.TLS, err = boolEnv(lookupEnv, "LOOP_ORCHESTRATOR_TLS", false); err != nil {
+		return Config{}, err
+	}
 	if config.RegistrationToken, err = secretFileValue(lookupEnv, "LOOP_RUNNER_REGISTRATION_TOKEN"); err != nil {
 		return Config{}, err
 	}
 	if config.OrchestratorHeadersFile, err = headerFilePath(lookupEnv); err != nil {
 		return Config{}, err
 	}
-	if config.OrchestratorHeadersFile != "" {
-		if _, err := ReadOrchestratorHeaders(config.OrchestratorHeadersFile); err != nil {
+	if config.OrchestratorHeadersFile != "" || envValue(lookupEnv, "LOOP_ORCHESTRATOR_HEADERS") != "" {
+		if !config.TLS {
+			return Config{}, errors.New("runner orchestrator headers require TLS because credentials must not be sent over an insecure connection")
+		}
+		if config.OrchestratorHeadersFile != "" {
+			if _, err := ReadOrchestratorHeaders(config.OrchestratorHeadersFile); err != nil {
+				return Config{}, err
+			}
+		} else if config.OrchestratorHeaders, err = parseOrchestratorHeaders(envValue(lookupEnv, "LOOP_ORCHESTRATOR_HEADERS")); err != nil {
 			return Config{}, err
 		}
-	} else if config.OrchestratorHeaders, err = parseOrchestratorHeaders(envValue(lookupEnv, "LOOP_ORCHESTRATOR_HEADERS")); err != nil {
-		return Config{}, err
 	}
 	if config.Labels, err = parseLabels(envValue(lookupEnv, "LOOP_RUNNER_LABELS")); err != nil {
 		return Config{}, err
@@ -223,9 +231,6 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 	config.DockerCPULimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_CPU_LIMIT")
 	config.DockerMemoryLimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_MEMORY_LIMIT")
 	config.DockerNetwork = envOrDefault(lookupEnv, "LOOP_RUNNER_DOCKER_NETWORK", config.DockerNetwork)
-	if config.TLS, err = boolEnv(lookupEnv, "LOOP_ORCHESTRATOR_TLS", false); err != nil {
-		return Config{}, err
-	}
 	if config.DockerEnabled, err = boolEnv(lookupEnv, "LOOP_RUNNER_DOCKER_ENABLED", false); err != nil {
 		return Config{}, err
 	}
