@@ -126,6 +126,29 @@ describe("WorkflowDetailPage", () => {
     expect(container.querySelector(".logline")?.textContent).toContain("applying plan step 3/6");
   });
 
+  it("draws the agent's colour instead of printing its escape sequences", async () => {
+    // Verbatim from workflow 9d1dddb2: opencode formats for a TTY, so every log
+    // event arrives with SGR sequences in it. Rendered as text they showed up as
+    // `[0m` litter in both cards.
+    const line = "\u001b[0m\u001b[0mGrep \"agent:ready\"\u001b[90m 79 matches\u001b[0m";
+    const api = stubApi({
+      listWorkflowEvents: async () => ({
+        events: [event({ id: "12", type: "log", payload: { payload: { message: line } }, createdAt: NOW })],
+      }),
+    });
+    const container = await mountDetail(api);
+
+    const log = container.querySelector(".logline")!;
+    expect(log.textContent).toContain('Grep "agent:ready" 79 matches');
+    expect(log.textContent).not.toContain("[0m");
+    expect(log.querySelector("span")?.getAttribute("style")).toContain("var(--ansi-8)");
+
+    // The timeline reads as sentences, so it takes the same text without colour.
+    const timeline = container.querySelector(".evt .tx")!;
+    expect(timeline.textContent).toBe('Grep "agent:ready" 79 matches');
+    expect(timeline.querySelector("span")).toBeNull();
+  });
+
   it("pages older events once and then stops offering to", async () => {
     // The last page comes back without a cursor. Falling back to the live page's
     // cursor there would re-request the same rows forever.

@@ -13,6 +13,7 @@ import {
   Age, Banner, Card, CardHeader, Empty, ErrorBlock, GateRow, KV, KVRow, Meter, Skeleton,
   StatusPill, useConfirm, useToast,
 } from "./ui";
+import { AnsiLog } from "./ui/ansi";
 import { PhaseThread, ThreadLegend } from "./ui/thread";
 
 const EVENT_PAGE = 50;
@@ -389,7 +390,7 @@ function History({ api, workflowId }: { api: ApiClient; workflowId: string }) {
           {error && !data && <ErrorBlock title="The agent log could not be loaded." detail={error} />}
           {!(error && !data) && (lines.length === 0
             ? <Empty>The agent has not written any log output.</Empty>
-            : <pre className="logline">{lines.join("\n")}</pre>)}
+            : <AnsiLog className="logline" text={lines.join("\n")} />)}
         </div>
       </Card>
     </>

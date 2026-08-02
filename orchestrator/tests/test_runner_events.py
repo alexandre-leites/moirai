@@ -174,6 +174,7 @@ class WorkflowTransitionTests(unittest.TestCase):
         summary_text: str | None = None,
         remaining_work: list[str] | None = None,
         changed_files: list[str] | None = None,
+        pipeline_command_count: int | None = None,
     ) -> RunnerEventSummary:
         return RunnerEventSummary(
             event_type=event_type,
@@ -186,6 +187,7 @@ class WorkflowTransitionTests(unittest.TestCase):
             blocked=blocked,
             summary_text=summary_text,
             remaining_work=list(remaining_work or []),
+            pipeline_command_count=pipeline_command_count,
         )
 
     def test_non_terminal_event_returns_none(self) -> None:
@@ -275,6 +277,13 @@ class WorkflowTransitionTests(unittest.TestCase):
         assert transition is not None
         self.assertEqual(transition.new_status, "local_pipeline")
         self.assertIs(transition.state_updates["pipeline_passed"], False)
+
+    def test_empty_pipeline_is_a_failed_gate(self) -> None:
+        summary = self._summary("completed", "job-1-pipeline", pipeline_command_count=0)
+        transition = workflow_transition_for_terminal_event(summary, "local_pipeline", role="pipeline")
+        assert transition is not None
+        self.assertFalse(transition.state_updates["pipeline_passed"])
+        self.assertEqual(transition.state_updates["blocking_reason"], "no_pipeline_steps_configured")
 
     def test_unmarked_failure_still_recovers_rather_than_blocking(self) -> None:
         summary = self._summary("failed", "job-1-implement", exit_code=1)

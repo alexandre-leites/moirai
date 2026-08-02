@@ -80,6 +80,7 @@ class FakeControlPlane:
                 "local_repository_path": None,
                 "default_branch": "main",
                 "required_runner_labels": ["docker", "linux"],
+                "pipeline_steps": [],
             }
         ]
 
@@ -93,9 +94,10 @@ class FakeControlPlane:
         labels: tuple[str, ...],
         now: datetime,
         actor_user_id: str | None,
+        pipeline_steps: tuple[dict[str, object], ...] = (),
     ) -> dict[str, object]:
-        del repository_mode, repository_url, local_repository_path, default_branch, labels, now, actor_user_id
-        return {"id": "project-2", "name": name, "enabled": True}
+        del repository_mode, repository_url, local_repository_path, default_branch, labels, now, actor_user_id, pipeline_steps
+        return {"id": "project-2", "name": name, "enabled": True, "pipeline_steps": []}
 
     async def update_project(
         self,
@@ -108,9 +110,10 @@ class FakeControlPlane:
         labels: tuple[str, ...],
         now: datetime,
         actor_user_id: str | None,
+        pipeline_steps: tuple[dict[str, object], ...] = (),
     ) -> dict[str, object]:
-        del repository_mode, repository_url, local_repository_path, default_branch, labels, now, actor_user_id
-        return {"id": project_id, "name": name, "enabled": True}
+        del repository_mode, repository_url, local_repository_path, default_branch, labels, now, actor_user_id, pipeline_steps
+        return {"id": project_id, "name": name, "enabled": True, "pipeline_steps": []}
 
     async def set_project_enabled(
         self, project_id: str, enabled: bool, now: datetime, actor_user_id: str | None

@@ -1026,9 +1026,7 @@ func TestControlLoopDeliversTerminalEventAfterLeaseExpiryWhileDisconnected(t *te
 	client.mu.Lock()
 	client.sendErr = nil
 	client.mu.Unlock()
-	if err := loop.FlushEvents(); err != nil {
-		t.Fatalf("FlushEvents() error = %v", err)
-	}
+	waitForTerminalEvent(t, loop, client, "cancelled")
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.events) != 1 || client.events[0].GetType() != "cancelled" {
@@ -1088,9 +1086,7 @@ func TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconne
 	client.mu.Lock()
 	client.sendErr = nil
 	client.mu.Unlock()
-	if err := loop.FlushEvents(); err != nil {
-		t.Fatalf("FlushEvents() error = %v", err)
-	}
+	waitForTerminalEvent(t, loop, client, "completed")
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	if len(client.events) == 0 || client.events[len(client.events)-1].GetType() != "completed" {
@@ -1099,6 +1095,24 @@ func TestControlLoopDeliversTerminalEventAfterLogsSaturateTheBufferWhileDisconne
 	if _, err := os.Stat(outboxPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("event outbox was not drained: %v", err)
 	}
+}
+
+func waitForTerminalEvent(t *testing.T, loop *ControlLoop, client *loopClient, eventType string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := loop.FlushEvents(); err != nil {
+			t.Fatalf("FlushEvents() error = %v", err)
+		}
+		client.mu.Lock()
+		delivered := len(client.events) > 0 && client.events[len(client.events)-1].GetType() == eventType
+		client.mu.Unlock()
+		if delivered {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("terminal event %q was not delivered", eventType)
 }
 
 func waitForOutboxEvent(t *testing.T, path, eventType string) {

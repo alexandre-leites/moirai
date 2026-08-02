@@ -257,6 +257,20 @@ advance; an API handler test for round-tripping steps; a `web` test that the pro
 submits them. Run `make test-orchestrator`, `cd api && go test ./...` and `make test-web` —
 and note that CI will not confirm any of it until the Blocked item is resolved.
 
+## Issue #114 — Project Pipeline Steps
+
+- Status: implemented; awaiting final commit and PR.
+- Fail-closed decision: option (b). A terminal pipeline event with
+  `pipelineCommandCount: 0` writes `pipeline_passed = false` and
+  `blocking_reason = no_pipeline_steps_configured`, routing to repair rather than review.
+- Delivered: typed pipeline steps across protobuf, persistence, gRPC, REST, and project UI;
+  create/update atomically replace ordered rows in `app.project_pipeline_steps`.
+- Validation: `make test-orchestrator` passed; API `go test ./...` passed in `golang:1.25`;
+  web typecheck/lint/tests passed in `node:24`; `make lint` passed; `make typecheck` passed.
+- Environment note: host `make test-api` fails because Go is absent; host `make test-web` fails
+  at ESLint because Node 18 is below its required version. Container equivalents passed.
+- Next: stage generated protobuf outputs, run `make proto-check`, commit, push, open and merge PR.
+
 ---
 
 ## Issue #118 — SSE dashboard updates

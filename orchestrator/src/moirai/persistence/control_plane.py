@@ -373,6 +373,7 @@ class AsyncpgControlPlane:
         required_runner_labels: Iterable[str],
         now: datetime,
         actor_user_id: str | None = None,
+        pipeline_steps: Iterable[dict[str, object]] = (),
     ) -> ProjectRecord:
         normalized = _project_configuration(
             name,
@@ -382,28 +383,33 @@ class AsyncpgControlPlane:
             default_branch,
             required_runner_labels,
         )
+        steps = _pipeline_steps(pipeline_steps)
         project_id = uuid4()
-        record = await self._pool.fetchrow(
-            """
-            INSERT INTO app.projects
-                (id, name, enabled, repository_mode, repository_url, local_repository_path,
-                 default_branch, configuration, created_at, updated_at)
-            VALUES ($1, $2, true, $3, $4, $5, $6, $7::jsonb, $8, $8)
-            RETURNING id, name, enabled, repository_mode, repository_url,
-                      local_repository_path, default_branch, configuration
-            """,
-            project_id,
-            normalized["name"],
-            normalized["repository_mode"],
-            normalized["repository_url"],
-            normalized["local_repository_path"],
-            normalized["default_branch"],
-            json.dumps({"required_runner_labels": normalized["required_runner_labels"]}),
-            now,
-        )
-        if record is None:
-            raise ValueError("project could not be created")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    INSERT INTO app.projects
+                        (id, name, enabled, repository_mode, repository_url, local_repository_path,
+                         default_branch, configuration, created_at, updated_at)
+                    VALUES ($1, $2, true, $3, $4, $5, $6, $7::jsonb, $8, $8)
+                    RETURNING id, name, enabled, repository_mode, repository_url,
+                              local_repository_path, default_branch, configuration
+                    """,
+                    project_id,
+                    normalized["name"],
+                    normalized["repository_mode"],
+                    normalized["repository_url"],
+                    normalized["local_repository_path"],
+                    normalized["default_branch"],
+                    json.dumps({"required_runner_labels": normalized["required_runner_labels"]}),
+                    now,
+                )
+                if record is None:
+                    raise ValueError("project could not be created")
+                await _replace_pipeline_steps(connection, project_id, steps)
         project = _project_record(record)
+        project["pipeline_steps"] = list(steps)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.create", "project", project["id"], "succeeded", now)
         return project
@@ -411,10 +417,20 @@ class AsyncpgControlPlane:
     async def list_projects(self) -> list[ProjectRecord]:
         records = await self._pool.fetch(
             """
-            SELECT id, name, enabled, repository_mode, repository_url,
-                   local_repository_path, default_branch, configuration
-            FROM app.projects
-            ORDER BY name ASC, id ASC
+            SELECT p.id, p.name, p.enabled, p.repository_mode, p.repository_url,
+                   p.local_repository_path, p.default_branch, p.configuration,
+                   COALESCE((
+                       SELECT jsonb_agg(jsonb_build_object(
+                           'command', s.command,
+                           'timeout_seconds', s.timeout_seconds,
+                           'position', s.position,
+                           'required', s.required
+                       ) ORDER BY s.position, s.id)
+                       FROM app.project_pipeline_steps AS s
+                       WHERE s.project_id = p.id
+                   ), '[]'::jsonb) AS pipeline_steps
+            FROM app.projects AS p
+            ORDER BY p.name ASC, p.id ASC
             """
         )
         return [_project_record(record) for record in records]
@@ -724,6 +740,7 @@ class AsyncpgControlPlane:
         required_runner_labels: Iterable[str],
         now: datetime,
         actor_user_id: str | None = None,
+        pipeline_steps: Iterable[dict[str, object]] = (),
     ) -> ProjectRecord:
         normalized = _project_configuration(
             name,
@@ -733,32 +750,37 @@ class AsyncpgControlPlane:
             default_branch,
             required_runner_labels,
         )
-        record = await self._pool.fetchrow(
-            """
-            UPDATE app.projects
-            SET name = $2,
-                repository_mode = $3,
-                repository_url = $4,
-                local_repository_path = $5,
-                default_branch = $6,
-                configuration = $7::jsonb,
-                updated_at = $8
-            WHERE id = $1
-            RETURNING id, name, enabled, repository_mode, repository_url,
-                      local_repository_path, default_branch, configuration
-            """,
-            _uuid(project_id),
-            normalized["name"],
-            normalized["repository_mode"],
-            normalized["repository_url"],
-            normalized["local_repository_path"],
-            normalized["default_branch"],
-            json.dumps({"required_runner_labels": normalized["required_runner_labels"]}),
-            now,
-        )
-        if record is None:
-            raise ValueError("project is unknown")
+        steps = _pipeline_steps(pipeline_steps)
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                record = await connection.fetchrow(
+                    """
+                    UPDATE app.projects
+                    SET name = $2,
+                        repository_mode = $3,
+                        repository_url = $4,
+                        local_repository_path = $5,
+                        default_branch = $6,
+                        configuration = $7::jsonb,
+                        updated_at = $8
+                    WHERE id = $1
+                    RETURNING id, name, enabled, repository_mode, repository_url,
+                              local_repository_path, default_branch, configuration
+                    """,
+                    _uuid(project_id),
+                    normalized["name"],
+                    normalized["repository_mode"],
+                    normalized["repository_url"],
+                    normalized["local_repository_path"],
+                    normalized["default_branch"],
+                    json.dumps({"required_runner_labels": normalized["required_runner_labels"]}),
+                    now,
+                )
+                if record is None:
+                    raise ValueError("project is unknown")
+                await _replace_pipeline_steps(connection, _uuid(project_id), steps)
         project = _project_record(record)
+        project["pipeline_steps"] = list(steps)
         if actor_user_id is not None:
             await self.append_audit(actor_user_id, "project.update", "project", project["id"], "succeeded", now)
         return project
@@ -770,7 +792,17 @@ class AsyncpgControlPlane:
             """
             UPDATE app.projects SET enabled = $2, updated_at = $3 WHERE id = $1
             RETURNING id, name, enabled, repository_mode, repository_url,
-                      local_repository_path, default_branch, configuration
+                      local_repository_path, default_branch, configuration,
+                      COALESCE((
+                          SELECT jsonb_agg(jsonb_build_object(
+                              'command', s.command,
+                              'timeout_seconds', s.timeout_seconds,
+                              'position', s.position,
+                              'required', s.required
+                          ) ORDER BY s.position, s.id)
+                          FROM app.project_pipeline_steps AS s
+                          WHERE s.project_id = app.projects.id
+                      ), '[]'::jsonb) AS pipeline_steps
             """,
             _uuid(project_id),
             enabled,
@@ -3357,11 +3389,62 @@ def _project_configuration(
     raise ValueError("repository mode is invalid")
 
 
+async def _replace_pipeline_steps(connection: Any, project_id: UUID, steps: tuple[dict[str, object], ...]) -> None:
+    await connection.execute("DELETE FROM app.project_pipeline_steps WHERE project_id = $1", project_id)
+    for step in steps:
+        await connection.execute(
+            """
+            INSERT INTO app.project_pipeline_steps
+                (id, project_id, position, name, command, timeout_seconds, required)
+            VALUES (gen_random_uuid(), $1, $2, $3, $3, $4, $5)
+            """,
+            project_id,
+            step["position"],
+            step["command"],
+            step["timeout_seconds"],
+            step["required"],
+        )
+
+
+def _pipeline_steps(steps: Iterable[dict[str, object]]) -> tuple[dict[str, object], ...]:
+    normalized: list[dict[str, object]] = []
+    positions: set[int] = set()
+    for step in steps:
+        command = step.get("command")
+        timeout = step.get("timeout_seconds")
+        position = step.get("position")
+        required = step.get("required")
+        if (
+            not isinstance(command, str)
+            or not command.strip()
+            or not isinstance(timeout, int)
+            or timeout <= 0
+            or not isinstance(position, int)
+            or position < 0
+            or position in positions
+            or not isinstance(required, bool)
+        ):
+            raise ValueError("pipeline steps are invalid")
+        positions.add(position)
+        normalized.append(
+            {
+                "command": command.strip(),
+                "timeout_seconds": timeout,
+                "position": position,
+                "required": required,
+            }
+        )
+    return tuple(sorted(normalized, key=lambda step: cast(int, step["position"])))
+
+
 def _project_record(record: dict[str, Any]) -> ProjectRecord:
     configuration = record["configuration"]
     if isinstance(configuration, str):
         configuration = json.loads(configuration)
     labels = configuration.get("required_runner_labels") if isinstance(configuration, dict) else None
+    steps = record.get("pipeline_steps", [])
+    if isinstance(steps, str):
+        steps = json.loads(steps)
     return {
         "id": str(record["id"]),
         "name": str(record["name"]),
@@ -3371,6 +3454,7 @@ def _project_record(record: dict[str, Any]) -> ProjectRecord:
         "local_repository_path": _optional_text(record["local_repository_path"]),
         "default_branch": str(record["default_branch"]),
         "required_runner_labels": list(labels) if isinstance(labels, list) else [],
+        "pipeline_steps": list(steps) if isinstance(steps, list) else [],
     }
 
 

@@ -38,6 +38,7 @@ class RunnerEventSummary:
     blocked: bool = False
     summary_text: str | None = None
     remaining_work: list[str] = field(default_factory=list)
+    pipeline_command_count: int | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -73,6 +74,13 @@ def validate_runner_event(
     result: dict[str, Any] | None = None
     summary_text: str | None = None
     remaining_work: list[str] = []
+    pipeline_command_count: int | None = None
+
+    raw_pipeline_command_count = payload.get("pipelineCommandCount")
+    if raw_pipeline_command_count is not None:
+        if not isinstance(raw_pipeline_command_count, int) or raw_pipeline_command_count < 0:
+            raise RunnerEventError("runner event pipelineCommandCount must be a non-negative integer")
+        pipeline_command_count = raw_pipeline_command_count
 
     raw_blocked = payload.get("blocked")
     if raw_blocked is not None and not isinstance(raw_blocked, bool):
@@ -130,6 +138,7 @@ def validate_runner_event(
         blocked=bool(raw_blocked) and event_type == "failed",
         summary_text=summary_text,
         remaining_work=remaining_work,
+        pipeline_command_count=pipeline_command_count,
     )
 
 
@@ -331,6 +340,15 @@ def _terminal_event_transition(
     # another role's exit code (an agent process exiting 0 is evidence that the
     # process ended, not that the change builds or passes its tests).
     if resolved_role == "pipeline":
+        if summary.pipeline_command_count == 0:
+            return WorkflowTransition(
+                new_status="local_pipeline",
+                state_updates={
+                    "status": "local_pipeline",
+                    "pipeline_passed": False,
+                    "blocking_reason": "no_pipeline_steps_configured",
+                },
+            )
         return WorkflowTransition(
             new_status="local_pipeline",
             state_updates={"status": "local_pipeline", "pipeline_passed": summary.succeeded},
