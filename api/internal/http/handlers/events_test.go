@@ -14,6 +14,32 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
+type synchronizedRecorder struct {
+	*httptest.ResponseRecorder
+	mu    sync.Mutex
+	wrote chan struct{}
+}
+
+func newSynchronizedRecorder() *synchronizedRecorder {
+	return &synchronizedRecorder{ResponseRecorder: httptest.NewRecorder(), wrote: make(chan struct{}, 8)}
+}
+
+func (r *synchronizedRecorder) Write(data []byte) (int, error) {
+	r.mu.Lock()
+	n, err := r.ResponseRecorder.Write(data)
+	r.mu.Unlock()
+	r.wrote <- struct{}{}
+	return n, err
+}
+
+func (r *synchronizedRecorder) Flush() {}
+
+func (r *synchronizedRecorder) body() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Body.String()
+}
+
 type fakeEventClient struct {
 	events chan *controlv1.ControlPlaneEvent
 	ctx    context.Context
@@ -60,33 +86,29 @@ func TestEventRouteRequiresSession(t *testing.T) {
 func TestEventStreamDeliversWorkflowAndTearsDown(t *testing.T) {
 	client := &fakeEventClient{events: make(chan *controlv1.ControlPlaneEvent, 1)}
 	handler := NewEventHandlers(client)
-	handler.keepAliveInterval = time.Millisecond
+	handler.keepAliveInterval = time.Hour
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "session"})
-	rec := httptest.NewRecorder()
+	rec := newSynchronizedRecorder()
 	finished := make(chan struct{})
 	go func() {
 		mux.ServeHTTP(rec, req)
 		close(finished)
 	}()
+	<-rec.wrote
 
 	client.events <- &controlv1.ControlPlaneEvent{
 		Id: "42", EventType: "workflow",
 		Workflow: &controlv1.Workflow{Id: "wf-1", ProjectId: "p-1", Status: "implementing", Phase: "implementing"},
 	}
-	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(rec.Body.String(), "id: 42") && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
-		t.Fatalf("content type %q", got)
-	}
-	if !strings.Contains(rec.Body.String(), `"status":"implementing"`) {
-		t.Fatalf("workflow event missing: %q", rec.Body.String())
+	select {
+	case <-rec.wrote:
+	case <-time.After(time.Second):
+		t.Fatal("workflow event was not written")
 	}
 	cancel()
 	select {
@@ -99,6 +121,12 @@ func TestEventStreamDeliversWorkflowAndTearsDown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("orchestrator stream context was not cancelled")
 	}
+	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type %q", got)
+	}
+	if !strings.Contains(rec.body(), `"status":"implementing"`) {
+		t.Fatalf("workflow event missing: %q", rec.body())
+	}
 }
 
 func TestEventStreamKeepAlive(t *testing.T) {
@@ -109,14 +137,13 @@ func TestEventStreamKeepAlive(t *testing.T) {
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
 	req = req.WithContext(auth.WithSessionToken(req.Context(), "session"))
-	rec := httptest.NewRecorder()
+	rec := newSynchronizedRecorder()
 	finished := make(chan struct{})
 	go func() { handler.stream(rec, req); close(finished) }()
-	deadline := time.Now().Add(time.Second)
-	for !strings.Contains(rec.Body.String(), ": keepalive") && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !strings.Contains(rec.Body.String(), ": keepalive") {
+	<-rec.wrote
+	select {
+	case <-rec.wrote:
+	case <-time.After(time.Second):
 		t.Fatal("keepalive was not written")
 	}
 	cancel()
