@@ -333,7 +333,9 @@ cmd_reacquire() {
   local inflight
   inflight="$(inflight_count)"
   if [ "$inflight" -ge "$MAX_AGENTS" ]; then
-    printf 'NOSLOT=%s\n' "$issue"
+    # Spelled exactly as SKILL.md §9 tells the agent to expect it, so the
+    # instruction "or prints DENIED <N> at-capacity" stays literally true.
+    printf 'DENIED %s at-capacity\n' "$issue"
     cmd_count
     exit 1
   fi

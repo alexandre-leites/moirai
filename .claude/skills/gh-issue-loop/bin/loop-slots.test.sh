@@ -199,7 +199,9 @@ out="$("$SLOTS" count)"
 expect_contains "$out" "INFLIGHT=1" "without taking a second one"
 
 out="$(MAX_AGENTS=1 "$SLOTS" reacquire 1102 2>&1)"
-expect_contains "$out" "NOSLOT=1102" "reacquiring beyond the ceiling is refused"
+# Spelled as SKILL.md §9 tells the agent to expect, not as this file would
+# otherwise phrase it: the procedure says "or prints DENIED <N> at-capacity".
+expect_contains "$out" "DENIED 1102 at-capacity" "reacquiring beyond the ceiling is refused"
 
 # --- one registry across worktrees ------------------------------------------
 echo "  registry is shared across worktrees"

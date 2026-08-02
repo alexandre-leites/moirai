@@ -1,3 +1,12 @@
+---
+name: gh-issue-loop
+description: Autonomous GitHub issue-working loop. Picks eligible labelled issues, claims them, runs one sub-agent per issue in its own git worktree, and drives each PR all the way to merge under a hard concurrency ceiling. Use ONLY when the user explicitly asks to arm, run, stop, or check this loop.
+argument-hint: "[arm|run|status|stop] [key=value ...]"
+disable-model-invocation: true
+disallowed-tools: AskUserQuestion
+allowed-tools: Bash Read Write Edit Grep Glob Agent SendMessage CronCreate CronList CronDelete WebFetch
+---
+
 # Autonomous GitHub issue-working loop
 
 One pass: find eligible issues, claim them, work them concurrently in isolated worktrees, and
@@ -11,7 +20,7 @@ file as both a skill and a symlinked custom command. Do not fork it.
 
 ## 0. MODE
 
-`run` selects the mode. Default when empty is `run`.
+`$ARGUMENTS` selects the mode. Default when empty is `run`.
 
 | Mode | Meaning |
 | :--- | :--- |
@@ -20,7 +29,7 @@ file as both a skill and a symlinked custom command. Do not fork it.
 | `status` | Report in-flight count, capacity, queue contents, and open loop PRs. Claim nothing, spawn nothing. |
 | `stop` | Cancel the recurring schedule. See **STOPPING THE LOOP**. |
 
-Any `key=value` tokens in `run` override the parameters below for this invocation.
+Any `key=value` tokens in `$ARGUMENTS` override the parameters below for this invocation.
 
 ## 1. PARAMETERS AND ENVIRONMENT
 
