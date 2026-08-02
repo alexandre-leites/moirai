@@ -110,6 +110,7 @@ class TaskExecutionRequest:
     may_push: bool
     may_merge: bool
     environment_refs: tuple[EnvironmentRef, ...] = ()
+    execution_image: str = ""
     pipeline: tuple[PipelineCommand, ...] = ()
     acceptance_criteria: tuple[str, ...] = ()
     plan: tuple[str, ...] = ()
@@ -142,12 +143,15 @@ def task_execution(
     failed_checks: tuple[str, ...] = (),
     review_findings: tuple[str, ...] = (),
     environment_refs: tuple[EnvironmentRef, ...] | None = None,
+    execution_image: str = "",
 ) -> TaskExecutionRequest:
     if repository_mode not in {"managed_clone", "existing_path"}:
         raise ValueError("task packet repository mode is invalid")
     mode = cast(Literal["managed_clone", "existing_path"], repository_mode)
     if role not in {"planner", "developer", "pipeline", "reviewer", "verifier", "repairer"}:
         raise ValueError("task packet execution role is invalid")
+    if execution_image.strip() != execution_image or len(execution_image) > 512 or any(char.isspace() for char in execution_image):
+        raise ValueError("task execution image is invalid")
     read_only = role in {"planner", "pipeline", "reviewer", "verifier"}
     may_push = role == "developer"
     if environment_refs is None:
@@ -175,6 +179,7 @@ def task_execution(
         may_push=may_push,
         may_merge=False,
         environment_refs=environment_refs,
+        execution_image=execution_image,
         acceptance_criteria=acceptance_criteria,
         plan=plan,
         previous_failures=previous_failures,
@@ -206,6 +211,7 @@ def pipeline_task_execution(
     diff_summary: str = "",
     failed_checks: tuple[str, ...] = (),
     review_findings: tuple[str, ...] = (),
+    execution_image: str = "",
 ) -> TaskExecutionRequest:
     request = task_execution(
         job_id=job_id,
@@ -227,6 +233,7 @@ def pipeline_task_execution(
         diff_summary=diff_summary,
         failed_checks=failed_checks,
         review_findings=review_findings,
+        execution_image=execution_image,
     )
     return replace(request, pipeline=pipeline)
 
@@ -244,6 +251,7 @@ def planner_task_execution(
     default_branch: str,
     timeout_seconds: int = 1800,
     acceptance_criteria: tuple[str, ...] = (),
+    execution_image: str = "",
 ) -> TaskExecutionRequest:
     return task_execution(
         job_id=job_id,
@@ -259,6 +267,7 @@ def planner_task_execution(
         default_branch=default_branch,
         timeout_seconds=timeout_seconds,
         acceptance_criteria=acceptance_criteria,
+        execution_image=execution_image,
     )
 
 
@@ -317,6 +326,7 @@ def build_task_packet(request: TaskExecutionRequest) -> dict[str, object]:
         "expectedOutput": ".loop/result.json",
         "timeoutSeconds": request.timeout_seconds,
         "environmentRefs": [reference.packet() for reference in request.environment_refs],
+        "executionImage": request.execution_image,
         "pipeline": [
             {"command": command.command, "timeoutSeconds": command.timeout_seconds}
             for command in request.pipeline

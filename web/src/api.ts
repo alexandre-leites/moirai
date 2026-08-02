@@ -33,6 +33,7 @@ export type Project = {
   defaultBranch: string;
   requiredRunnerLabels: string[];
   pipelineSteps: PipelineStep[];
+  executionImage: string;
 };
 
 type ProjectPayload = Omit<Project, "requiredRunnerLabels" | "pipelineSteps"> & {
@@ -196,6 +197,7 @@ export type ProjectConfiguration = {
   defaultBranch: string;
   requiredRunnerLabels?: string[];
   pipelineSteps?: PipelineStep[];
+  executionImage?: string;
 };
 
 export class ApiError extends Error {
@@ -555,5 +557,6 @@ function normalizeProject(project: ProjectPayload): Project {
     ...project,
     requiredRunnerLabels: project.requiredRunnerLabels ?? [],
     pipelineSteps: project.pipelineSteps ?? [],
+    executionImage: project.executionImage ?? "",
   };
 }

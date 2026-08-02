@@ -280,3 +280,13 @@ and note that CI will not confirm any of it until the Blocked item is resolved.
 - Fail-closed: no required steps block immediately with `pipeline_passed = false` and `project has no required pipeline steps`; runner terminal handling also treats an empty pipeline as failed, never passed.
 - Validation: `make test-orchestrator` passed (594, 61 skipped); `ruff`, `mypy`, and `make proto-check` passed; API tests passed in `golang:1.25`; web typecheck/lint and 195 tests passed in `node:22`; CI run `30725136308` passed all jobs after one corrected integration-test assertion.
 - Review: adversarial review verified contract round-trip, transactional replacement, required-step packet filtering, empty-gate failure, and UI submission. Position preservation was fixed before review completion.
+
+---
+
+## Issue #219 — Per-project execution images (2026-08-02)
+
+- Branch/worktree: `issue-219-b` in `.claude/worktrees/issue-219-b`.
+- Delivered: `executionImage` round-trips through project API, gRPC, persistence configuration, and task packets. A configured image selects Docker for both agent and pipeline; empty keeps existing runner-selected execution. Resolved credentials are passed to both; SSH key paths are mounted read-only and key cleanup remains dispatcher-owned.
+- Refusal: unavailable Docker returns `execution image <name> cannot run on this runner: Docker executable is unavailable` before workspace preparation.
+- Validation: `make test-orchestrator` passed (597, 61 skipped); focused runner packages and integration passed; API Go suite passed; web typecheck, focused 57 tests, and lint passed (16 existing warnings); `git diff --check` passed.
+- Pending: commit, push, PR, CI, squash merge.

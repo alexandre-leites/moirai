@@ -146,6 +146,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
                 self._now(),
                 session.user_id or None,
                 pipeline_steps=_pipeline_steps(request.project),
+                execution_image=request.project.execution_image,
             )
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project configuration is invalid")
@@ -166,6 +167,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
                 self._now(),
                 session.user_id or None,
                 pipeline_steps=_pipeline_steps(request.project),
+                execution_image=request.project.execution_image,
             )
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "project configuration is invalid")
@@ -712,8 +714,8 @@ def _project_message(project: ProjectRecord) -> control_plane_pb2.Project:
         local_repository_path=project.get("local_repository_path") or "",
         default_branch=project.get("default_branch", ""),
         required_runner_labels=list(project.get("required_runner_labels") or []),
-        pipeline_steps=[
-            control_plane_pb2.PipelineStep(
+        execution_image=str(project.get("execution_image") or ""),
+        pipeline_steps=[            control_plane_pb2.PipelineStep(
                 command=str(step["command"]),
                 timeout_seconds=cast(int, step["timeout_seconds"]),
                 position=cast(int, step["position"]),

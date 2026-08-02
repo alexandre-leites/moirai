@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 	"sync/atomic"
@@ -162,6 +163,23 @@ func pipelineRunner(settings config.Config) pipeline.Runner {
 	return pipeline.LocalRunner{}
 }
 
+func executionEnvironment(settings config.Config) func(string) (agents.Backend, pipeline.Runner, error) {
+	return func(image string) (agents.Backend, pipeline.Runner, error) {
+		if _, err := exec.LookPath("docker"); err != nil {
+			return nil, nil, fmt.Errorf("execution image %q cannot run on this runner: Docker executable is unavailable", image)
+		}
+		executor := execution.DockerExecutor{Image: image, CPULimit: settings.DockerCPULimit, MemoryLimit: settings.DockerMemoryLimit, Network: settings.DockerNetwork, StopTimeout: settings.DockerStopTimeout}
+		arguments := append([]string(nil), settings.AgentArguments...)
+		switch settings.AgentBackend {
+		case "cli":
+			arguments = append([]string{settings.AgentBinary}, arguments...)
+		case "opencode":
+			arguments = append([]string{"opencode", "run"}, arguments...)
+		}
+		return agents.DockerCLIBackend{Image: image, Arguments: arguments, Executor: executor}, pipeline.DockerRunner{Executor: executor}, nil
+	}
+}
+
 func agentBackend(settings config.Config) agents.Backend {
 	if settings.AgentBackend == "cli" {
 		return agents.CLIBackend{NameValue: "cli", Binary: settings.AgentBinary, Arguments: settings.AgentArguments}
@@ -277,21 +295,22 @@ func run(ctx context.Context) error {
 	projects := dispatch.NewProjectConcurrencyGuard()
 	repositories := repository.Manager{DataDirectory: settings.DataDir, CleanupAttempts: settings.CleanupAttempts, CleanupRetryDelay: settings.CleanupRetryDelay, LockPollInterval: settings.RepositoryLockPoll, GitCommitterName: settings.GitCommitterName, GitCommitterEmail: settings.GitCommitterEmail}
 	dispatcher := &dispatch.Dispatcher{
-		Workspaces:         repositories,
-		RevisionInspector:  repositories,
-		Delivery:           repositories,
-		Backend:            agentBackend(settings),
-		Pipeline:           pipelineRunner(settings),
-		Environment:        controlPlaneResolver{secrets: secrets},
-		AllowedEnvironment: settings.AllowedEnvironment,
-		MinimumFreeBytes:   settings.MinimumFreeBytes,
-		DiskPath:           settings.DataDir,
-		AvailableBytes:     health.AvailableBytes,
-		Retention:          retentionPolicy(settings),
-		PushWorkInProgress: settings.PushWorkInProgress,
-		MaxContinuations:   settings.MaxContinuations,
-		Projects:           projects,
-		Active:             dispatch.NewActiveWorkspaces(),
+		Workspaces:           repositories,
+		RevisionInspector:    repositories,
+		Delivery:             repositories,
+		Backend:              agentBackend(settings),
+		ExecutionEnvironment: executionEnvironment(settings),
+		Pipeline:             pipelineRunner(settings),
+		Environment:          controlPlaneResolver{secrets: secrets},
+		AllowedEnvironment:   settings.AllowedEnvironment,
+		MinimumFreeBytes:     settings.MinimumFreeBytes,
+		DiskPath:             settings.DataDir,
+		AvailableBytes:       health.AvailableBytes,
+		Retention:            retentionPolicy(settings),
+		PushWorkInProgress:   settings.PushWorkInProgress,
+		MaxContinuations:     settings.MaxContinuations,
+		Projects:             projects,
+		Active:               dispatch.NewActiveWorkspaces(),
 	}
 	// Retained workspaces age while the runner is idle, so the age bound is also
 	// applied once at startup rather than only before the next execution.

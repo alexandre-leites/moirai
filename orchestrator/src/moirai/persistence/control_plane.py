@@ -374,6 +374,7 @@ class AsyncpgControlPlane:
         now: datetime,
         actor_user_id: str | None = None,
         pipeline_steps: Iterable[dict[str, object]] = (),
+        execution_image: str = "",
     ) -> ProjectRecord:
         normalized = _project_configuration(
             name,
@@ -384,6 +385,7 @@ class AsyncpgControlPlane:
             required_runner_labels,
         )
         steps = _pipeline_steps(pipeline_steps)
+        execution_image = _execution_image(execution_image)
         project_id = uuid4()
         async with self._pool.acquire() as connection:
             async with connection.transaction():
@@ -402,7 +404,7 @@ class AsyncpgControlPlane:
                     normalized["repository_url"],
                     normalized["local_repository_path"],
                     normalized["default_branch"],
-                    json.dumps({"required_runner_labels": normalized["required_runner_labels"]}),
+                    json.dumps({"required_runner_labels": normalized["required_runner_labels"], "execution_image": execution_image}),
                     now,
                 )
                 if record is None:
@@ -741,6 +743,7 @@ class AsyncpgControlPlane:
         now: datetime,
         actor_user_id: str | None = None,
         pipeline_steps: Iterable[dict[str, object]] = (),
+        execution_image: str = "",
     ) -> ProjectRecord:
         normalized = _project_configuration(
             name,
@@ -751,6 +754,7 @@ class AsyncpgControlPlane:
             required_runner_labels,
         )
         steps = _pipeline_steps(pipeline_steps)
+        execution_image = _execution_image(execution_image)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 record = await connection.fetchrow(
@@ -773,7 +777,7 @@ class AsyncpgControlPlane:
                     normalized["repository_url"],
                     normalized["local_repository_path"],
                     normalized["default_branch"],
-                    json.dumps({"required_runner_labels": normalized["required_runner_labels"]}),
+                    json.dumps({"required_runner_labels": normalized["required_runner_labels"], "execution_image": execution_image}),
                     now,
                 )
                 if record is None:
@@ -1538,7 +1542,7 @@ class AsyncpgControlPlane:
             """
             SELECT j.id AS job_id, i.external_id, i.title, i.body, p.id AS project_id,
                     p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
-                    w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
+                    p.configuration, w.current_commit, w.last_failure_fingerprint, w.blocking_reason,
                     w.last_gate_verdict, w.remaining_work, w.human_guidance,
                     planner.result AS planner_result, review.result AS review_result,
                     pipeline.result AS pipeline_result, latest.execution_type AS latest_execution_type,
@@ -1613,6 +1617,8 @@ class AsyncpgControlPlane:
         repository_url = _optional_text(record["repository_url"])
         local_repository_path = _optional_text(record["local_repository_path"])
         default_branch = str(record["default_branch"])
+        configuration = _json_object(record.get("configuration"))
+        execution_image = str(configuration.get("execution_image", ""))
         planner_execution_result = _json_object(record.get("planner_result"))
         planner_result = _schema_result(planner_execution_result.get("result"), "planner-result")
         review_result = _json_object(record.get("review_result"))
@@ -1643,6 +1649,7 @@ class AsyncpgControlPlane:
                     local_repository_path=local_repository_path,
                     default_branch=default_branch,
                     acceptance_criteria=acceptance_criteria,
+                    execution_image=execution_image,
                 )
             )
         if role == "pipeline":
@@ -1679,6 +1686,7 @@ class AsyncpgControlPlane:
                     diff_summary=diff_summary,
                     failed_checks=failed_checks,
                     review_findings=review_findings,
+                    execution_image=execution_image,
                 )
             )
         if role not in {"planner", "developer", "reviewer", "repairer"}:
@@ -1703,6 +1711,7 @@ class AsyncpgControlPlane:
                 diff_summary=diff_summary,
                 failed_checks=failed_checks,
                 review_findings=review_findings,
+                execution_image=execution_image,
             )
         )
 
@@ -3437,6 +3446,12 @@ def _pipeline_steps(steps: Iterable[dict[str, object]]) -> tuple[dict[str, objec
     return tuple(sorted(normalized, key=lambda step: cast(int, step["position"])))
 
 
+def _execution_image(value: str) -> str:
+    if value.strip() != value or len(value) > 512 or any(char.isspace() for char in value):
+        raise ValueError("execution image is invalid")
+    return value
+
+
 def _project_record(record: dict[str, Any]) -> ProjectRecord:
     configuration = record["configuration"]
     if isinstance(configuration, str):
@@ -3455,6 +3470,7 @@ def _project_record(record: dict[str, Any]) -> ProjectRecord:
         "default_branch": str(record["default_branch"]),
         "required_runner_labels": list(labels) if isinstance(labels, list) else [],
         "pipeline_steps": list(steps) if isinstance(steps, list) else [],
+        "execution_image": str(configuration.get("execution_image", "")) if isinstance(configuration, dict) else "",
     }
 
 

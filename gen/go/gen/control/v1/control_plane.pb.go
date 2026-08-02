@@ -504,6 +504,7 @@ type Project struct {
 	DefaultBranch        string                 `protobuf:"bytes,7,opt,name=default_branch,json=defaultBranch,proto3" json:"default_branch,omitempty"`
 	RequiredRunnerLabels []string               `protobuf:"bytes,8,rep,name=required_runner_labels,json=requiredRunnerLabels,proto3" json:"required_runner_labels,omitempty"`
 	PipelineSteps        []*PipelineStep        `protobuf:"bytes,9,rep,name=pipeline_steps,json=pipelineSteps,proto3" json:"pipeline_steps,omitempty"`
+	ExecutionImage       string                 `protobuf:"bytes,10,opt,name=execution_image,json=executionImage,proto3" json:"execution_image,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -601,6 +602,13 @@ func (x *Project) GetPipelineSteps() []*PipelineStep {
 	return nil
 }
 
+func (x *Project) GetExecutionImage() string {
+	if x != nil {
+		return x.ExecutionImage
+	}
+	return ""
+}
+
 type ListProjectsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Projects      []*Project             `protobuf:"bytes,1,rep,name=projects,proto3" json:"projects,omitempty"`
@@ -654,6 +662,7 @@ type ProjectConfiguration struct {
 	DefaultBranch        string                 `protobuf:"bytes,5,opt,name=default_branch,json=defaultBranch,proto3" json:"default_branch,omitempty"`
 	RequiredRunnerLabels []string               `protobuf:"bytes,6,rep,name=required_runner_labels,json=requiredRunnerLabels,proto3" json:"required_runner_labels,omitempty"`
 	PipelineSteps        []*PipelineStep        `protobuf:"bytes,7,rep,name=pipeline_steps,json=pipelineSteps,proto3" json:"pipeline_steps,omitempty"`
+	ExecutionImage       string                 `protobuf:"bytes,8,opt,name=execution_image,json=executionImage,proto3" json:"execution_image,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -735,6 +744,13 @@ func (x *ProjectConfiguration) GetPipelineSteps() []*PipelineStep {
 		return x.PipelineSteps
 	}
 	return nil
+}
+
+func (x *ProjectConfiguration) GetExecutionImage() string {
+	if x != nil {
+		return x.ExecutionImage
+	}
+	return ""
 }
 
 type CreateProjectRequest struct {
@@ -3753,7 +3769,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12'\n" +
 	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\x12\x1a\n" +
 	"\bposition\x18\x03 \x01(\x05R\bposition\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired\"\xee\x02\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired\"\x97\x03\n" +
 	"\aProject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -3763,9 +3779,11 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x15local_repository_path\x18\x06 \x01(\tR\x13localRepositoryPath\x12%\n" +
 	"\x0edefault_branch\x18\a \x01(\tR\rdefaultBranch\x124\n" +
 	"\x16required_runner_labels\x18\b \x03(\tR\x14requiredRunnerLabels\x12D\n" +
-	"\x0epipeline_steps\x18\t \x03(\v2\x1d.loop.control.v1.PipelineStepR\rpipelineSteps\"L\n" +
+	"\x0epipeline_steps\x18\t \x03(\v2\x1d.loop.control.v1.PipelineStepR\rpipelineSteps\x12'\n" +
+	"\x0fexecution_image\x18\n" +
+	" \x01(\tR\x0eexecutionImage\"L\n" +
 	"\x14ListProjectsResponse\x124\n" +
-	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\xd1\x02\n" +
+	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\xfa\x02\n" +
 	"\x14ProjectConfiguration\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12'\n" +
 	"\x0frepository_mode\x18\x02 \x01(\tR\x0erepositoryMode\x12%\n" +
@@ -3773,7 +3791,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x15local_repository_path\x18\x04 \x01(\tR\x13localRepositoryPath\x12%\n" +
 	"\x0edefault_branch\x18\x05 \x01(\tR\rdefaultBranch\x124\n" +
 	"\x16required_runner_labels\x18\x06 \x03(\tR\x14requiredRunnerLabels\x12D\n" +
-	"\x0epipeline_steps\x18\a \x03(\v2\x1d.loop.control.v1.PipelineStepR\rpipelineSteps\"W\n" +
+	"\x0epipeline_steps\x18\a \x03(\v2\x1d.loop.control.v1.PipelineStepR\rpipelineSteps\x12'\n" +
+	"\x0fexecution_image\x18\b \x01(\tR\x0eexecutionImage\"W\n" +
 	"\x14CreateProjectRequest\x12?\n" +
 	"\aproject\x18\x01 \x01(\v2%.loop.control.v1.ProjectConfigurationR\aproject\"K\n" +
 	"\x15CreateProjectResponse\x122\n" +

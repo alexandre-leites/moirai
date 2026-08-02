@@ -37,6 +37,7 @@ type Packet struct {
 	ExpectedOutput     string            `json:"expectedOutput"`
 	TimeoutSeconds     int               `json:"timeoutSeconds"`
 	EnvironmentRefs    []EnvironmentRef  `json:"environmentRefs"`
+	ExecutionImage     string            `json:"executionImage"`
 	Constraints        Constraints       `json:"constraints"`
 	Pipeline           []PipelineCommand `json:"pipeline"`
 	AcceptanceCriteria []string          `json:"acceptanceCriteria"`
@@ -116,6 +117,9 @@ func (packet Packet) Validate() error {
 	}
 	if err := validateEnvironmentRefs(packet.EnvironmentRefs); err != nil {
 		return err
+	}
+	if !safeExecutionImage(packet.ExecutionImage) {
+		return errors.New("task packet execution image is invalid")
 	}
 	if err := validatePipeline(packet.Pipeline); err != nil {
 		return err
@@ -226,6 +230,10 @@ func safeRepositoryURL(url string) bool {
 
 func safeBranch(branch string) bool {
 	return safeText(branch, 255) && !strings.HasPrefix(branch, "-") && !strings.Contains(branch, "..") && !strings.Contains(branch, "//") && !strings.HasSuffix(branch, "/")
+}
+
+func safeExecutionImage(image string) bool {
+	return len(image) <= 512 && strings.TrimSpace(image) == image && !strings.ContainsAny(image, " \t\r\n\x00")
 }
 
 func safeIdentifier(value string) bool {
