@@ -290,3 +290,15 @@ and note that CI will not confirm any of it until the Blocked item is resolved.
 - Refusal: unavailable Docker returns `execution image <name> cannot run on this runner: Docker executable is unavailable` before workspace preparation.
 - Validation: `make test-orchestrator` passed (597, 61 skipped); focused runner packages and integration passed; API Go suite passed; web typecheck, focused 57 tests, and lint passed (16 existing warnings); `git diff --check` passed.
 - Pending: commit, push, PR, CI, squash merge.
+
+---
+
+## Issue #226 — Orchestrator proxy headers (2026-08-02)
+
+- Branch/worktree: `issue-226-b` in `.claude/worktrees/issue-226-b`.
+- Delivered: `LOOP_ORCHESTRATOR_HEADERS` and preferred `_FILE` JSON sources; metadata keys normalize to lowercase, `PerRPCCredentials` adds them to unary and stream RPCs, and file values reload at each RPC for token rotation and reconnect.
+- Safety: headers reject without TLS during load even when their file is unreadable; header file failures expose no values; authentication statuses stay permanent while transport statuses retry through existing stream supervision.
+- Documentation: `runner/README.md` has Cloudflare Access service-token and HTTP/2 Tunnel origin example.
+- Validation: focused race tests for config, dialer, control stream/reconnect, and main passed in `golang:1.25`; `make build-runner` passed in `golang:1.25`; `make lint typecheck` passed. Full control suite currently fails pre-existing `TestEventReporterRestoresEvictedEventWhenPersistFails` with `Emit(completed) = (3, disconnected), want a persist failure`.
+- Review: adversarial review found TLS refusal was masked by an unreadable header file; fixed and added coverage.
+- Pending: commit progress entry, push, PR, CI, merge.
