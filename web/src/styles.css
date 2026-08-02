@@ -212,8 +212,6 @@ input, select, textarea { font: inherit; }
 .quiet-button:hover { color: var(--ink); }
 
 .main { flex: 1; min-width: 0; width: 100%; padding: 26px 32px 64px; }
-.main > * { width: 90%; }
-
 .view-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 0 0 4px; }
 .view-head h1 { margin: 0; font: 600 26px/1.2 var(--serif); letter-spacing: .01em; text-wrap: balance; }
 .view-head .crumb { color: var(--ink-3); font-size: 13px; }
