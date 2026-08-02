@@ -1,0 +1,274 @@
+package server
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"path"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
+)
+
+var agentCredentialName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+
+func (s *Server) SetProjectCredential(ctx context.Context, request *controlv1.SetProjectCredentialRequest) (*controlv1.SetProjectCredentialResponse, error) {
+	actor, err := s.requireMutation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	kind, err := validateCredential(request.GetKind(), request.GetFilePath())
+	if err != nil || !validID(request.GetProjectId()) || request.GetValue() == "" || len(request.GetValue()) > 64*1024 {
+		return nil, status.Error(codes.InvalidArgument, "project credential is invalid")
+	}
+	aead, err := configuredCipher()
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, status.Error(codes.Internal, "generate credential nonce")
+	}
+	ciphertext := aead.Seal(nil, nonce, []byte(request.GetValue()), nil)
+	command, err := s.pool.Exec(ctx, `INSERT INTO app.project_credentials(project_id,kind,ciphertext,nonce,file_path) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM app.projects WHERE id=$1) ON CONFLICT(project_id,kind) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,nonce=EXCLUDED.nonce,file_path=EXCLUDED.file_path,updated_at=now()`, request.GetProjectId(), kind, ciphertext, nonce, request.GetFilePath())
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	if command.RowsAffected() != 1 {
+		return nil, status.Error(codes.NotFound, "project is unknown")
+	}
+	if err := audit(ctx, s.pool, actor.id, "project.credential.set", "project", request.GetProjectId()); err != nil {
+		return nil, err
+	}
+	credentials, err := s.projectCredentials(ctx, request.GetProjectId())
+	if err != nil {
+		return nil, err
+	}
+	return &controlv1.SetProjectCredentialResponse{Credentials: credentials}, nil
+}
+
+func (s *Server) ClearProjectCredential(ctx context.Context, request *controlv1.ClearProjectCredentialRequest) (*controlv1.ClearProjectCredentialResponse, error) {
+	actor, err := s.requireMutation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	kind, err := validateCredential(request.GetKind(), "")
+	if err != nil || !validID(request.GetProjectId()) {
+		return nil, status.Error(codes.InvalidArgument, "project credential is invalid")
+	}
+	command, err := s.pool.Exec(ctx, `DELETE FROM app.project_credentials WHERE project_id=$1 AND kind=$2`, request.GetProjectId(), kind)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	if command.RowsAffected() > 0 {
+		if err := audit(ctx, s.pool, actor.id, "project.credential.clear", "project", request.GetProjectId()); err != nil {
+			return nil, err
+		}
+	}
+	credentials, err := s.projectCredentials(ctx, request.GetProjectId())
+	if err != nil {
+		return nil, err
+	}
+	return &controlv1.ClearProjectCredentialResponse{Credentials: credentials}, nil
+}
+
+func (s *Server) ListProjectCredentials(ctx context.Context, request *controlv1.ListProjectCredentialsRequest) (*controlv1.ListProjectCredentialsResponse, error) {
+	if _, err := s.requireActor(ctx, false); err != nil {
+		return nil, err
+	}
+	credentials, err := s.projectCredentials(ctx, request.GetProjectId())
+	if err != nil {
+		return nil, err
+	}
+	return &controlv1.ListProjectCredentialsResponse{Credentials: credentials}, nil
+}
+
+func (s *Server) ResolveJobSecret(ctx context.Context, request *runnerv1.ResolveJobSecretRequest) (*runnerv1.ResolveJobSecretResponse, error) {
+	if !secureContext(ctx) {
+		return nil, status.Error(codes.FailedPrecondition, "the control plane will not serve a secret over an insecure channel")
+	}
+	if !validID(request.GetRunnerId()) || !validID(request.GetJobId()) || request.GetCredential() == "" || request.GetLeaseGeneration() < 1 {
+		return nil, status.Error(codes.InvalidArgument, "secret resolution request is invalid")
+	}
+	if err := s.authenticateRunner(ctx, request.GetRunnerId(), request.GetCredential()); err != nil {
+		return nil, err
+	}
+	kind, err := environmentCredentialKind(request.GetName())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	projectID, err := s.fencedJobProject(ctx, request.GetJobId(), request.GetRunnerId(), request.GetLeaseGeneration())
+	if err != nil {
+		return nil, err
+	}
+	var ciphertext, nonce []byte
+	var filePath string
+	err = s.pool.QueryRow(ctx, `SELECT ciphertext,nonce,file_path FROM app.project_credentials WHERE project_id=$1 AND kind=$2`, projectID, kind).Scan(&ciphertext, &nonce, &filePath)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, status.Error(codes.NotFound, "no credential is configured for this project")
+	}
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	aead, err := configuredCipher()
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, "stored secret could not be opened")
+	}
+	delivery := "environment"
+	if kind == "ssh_private_key" || filePath != "" {
+		delivery = "file"
+	}
+	return &runnerv1.ResolveJobSecretResponse{Value: string(plaintext), Delivery: delivery}, nil
+}
+
+func (s *Server) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobSecretRequest) (*runnerv1.StoreJobSecretResponse, error) {
+	if !secureContext(ctx) {
+		return nil, status.Error(codes.FailedPrecondition, "the control plane will not accept a secret over an insecure channel")
+	}
+	if !validID(request.GetRunnerId()) || !validID(request.GetJobId()) || request.GetCredential() == "" || request.GetLeaseGeneration() < 1 || request.GetValue() == "" || len(request.GetValue()) > 64*1024 {
+		return nil, status.Error(codes.InvalidArgument, "secret storage request is invalid")
+	}
+	if err := s.authenticateRunner(ctx, request.GetRunnerId(), request.GetCredential()); err != nil {
+		return nil, err
+	}
+	kind, err := environmentCredentialKind(request.GetName())
+	if err != nil || !strings.HasPrefix(kind, "agent:") {
+		return nil, status.Error(codes.InvalidArgument, "secret is not a rotatable agent credential")
+	}
+	projectID, err := s.fencedJobProject(ctx, request.GetJobId(), request.GetRunnerId(), request.GetLeaseGeneration())
+	if err != nil {
+		return nil, err
+	}
+	aead, err := configuredCipher()
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, status.Error(codes.Internal, "generate credential nonce")
+	}
+	ciphertext := aead.Seal(nil, nonce, []byte(request.GetValue()), nil)
+	command, err := s.pool.Exec(ctx, `UPDATE app.project_credentials SET ciphertext=$3,nonce=$4,updated_at=now() WHERE project_id=$1 AND kind=$2`, projectID, kind, ciphertext, nonce)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	return &runnerv1.StoreJobSecretResponse{Stored: command.RowsAffected() == 1}, nil
+}
+
+func (s *Server) fencedJobProject(ctx context.Context, jobID, runnerID string, generation int64) (string, error) {
+	var projectID string
+	err := s.pool.QueryRow(ctx, `SELECT project_id::text FROM app.jobs WHERE id=$1 AND runner_id=$2 AND lease_generation=$3 AND status IN ('preparing','running') AND lease_expires_at>now()`, jobID, runnerID, generation).Scan(&projectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", status.Error(codes.FailedPrecondition, "runner does not hold this job")
+	}
+	if err != nil {
+		return "", databaseError(err)
+	}
+	return projectID, nil
+}
+
+func (s *Server) projectCredentials(ctx context.Context, projectID string) ([]*controlv1.ProjectCredential, error) {
+	if !validID(projectID) {
+		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app.projects WHERE id=$1)`, projectID).Scan(&exists); err != nil {
+		return nil, databaseError(err)
+	}
+	if !exists {
+		return nil, status.Error(codes.NotFound, "project is unknown")
+	}
+	rows, err := s.pool.Query(ctx, `SELECT kind,created_at,updated_at,file_path FROM app.project_credentials WHERE project_id=$1 ORDER BY kind`, projectID)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	defer rows.Close()
+	credentials := []*controlv1.ProjectCredential{}
+	for rows.Next() {
+		credential := &controlv1.ProjectCredential{}
+		var created, updated time.Time
+		if err := rows.Scan(&credential.Kind, &created, &updated, &credential.FilePath); err != nil {
+			return nil, databaseError(err)
+		}
+		credential.CreatedAt, credential.UpdatedAt = timestamp(created), timestamp(updated)
+		credentials = append(credentials, credential)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, databaseError(err)
+	}
+	return credentials, nil
+}
+
+func configuredCipher() (cipher.AEAD, error) {
+	value, configured, err := optionalSecret("LOOP_SECRET_KEY")
+	if err != nil || !configured {
+		return nil, errors.New("LOOP_SECRET_KEY is required for project credentials")
+	}
+	var key []byte
+	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+		key = decoded
+	} else if decoded, err := hex.DecodeString(value); err == nil {
+		key = decoded
+	}
+	if len(key) != 32 {
+		return nil, errors.New("secret key must decode to 32 bytes from base64 or hex")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+func validateCredential(kind, filePath string) (string, error) {
+	kind = strings.TrimSpace(kind)
+	if kind != "github_token" && kind != "ssh_private_key" && !(strings.HasPrefix(kind, "agent:") && agentCredentialName.MatchString(strings.TrimPrefix(kind, "agent:"))) {
+		return "", errors.New("credential kind is invalid")
+	}
+	if filePath == "" {
+		return kind, nil
+	}
+	if !strings.HasPrefix(kind, "agent:") || len(filePath) > 256 || strings.TrimSpace(filePath) != filePath || strings.ContainsAny(filePath, " \t\r\n") || path.IsAbs(filePath) || path.Clean(filePath) != filePath || strings.HasPrefix(filePath, "~") || strings.Contains(filePath, "\\") || strings.Contains(filePath, "//") || strings.HasSuffix(filePath, "/") || strings.HasPrefix(filePath, "../") || filePath == "." || filePath == ".." {
+		return "", errors.New("credential file path is invalid")
+	}
+	return kind, nil
+}
+
+func environmentCredentialKind(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	switch name {
+	case "GITHUB_TOKEN":
+		return "github_token", nil
+	case "GIT_SSH_KEY":
+		return "ssh_private_key", nil
+	}
+	if !agentCredentialName.MatchString(name) {
+		return "", errors.New("credential environment reference is invalid")
+	}
+	return "agent:" + name, nil
+}
+
+func secureContext(ctx context.Context) bool {
+	peer, ok := peer.FromContext(ctx)
+	if !ok {
+		return false
+	}
+	_, ok = peer.AuthInfo.(credentials.TLSInfo)
+	return ok
+}

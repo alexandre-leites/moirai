@@ -27,6 +27,15 @@ func TestParseAcceptsValidRolePackets(t *testing.T) {
 	}
 }
 
+func TestPacketAllowsNoDeadline(t *testing.T) {
+	packet := validPacket(RoleDeveloper)
+	packet.Constraints.MayModifyFiles = true
+	packet.TimeoutSeconds = 0
+	if err := packet.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestPacketRejectsInvalidExecutionImage(t *testing.T) {
 	packet := validPacket(RoleDeveloper)
 	packet.Constraints.MayModifyFiles = true

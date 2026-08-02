@@ -4,7 +4,7 @@ Moirai is a self-hosted control plane for durable, autonomous software-engineeri
 
 ## Architecture
 
-- `orchestrator/` is the Python gRPC control plane. It owns PostgreSQL state, scheduling, issue synchronization, and workflow recovery.
+- `orchestrator/` is the Go gRPC control plane. It owns PostgreSQL state, scheduling, issue synchronization, and workflow delivery.
 - `runner/` is the Go execution agent. It registers with the control plane and performs one or more eligible executions according to its configured capacity.
 - `api/` is the Go HTTP gateway. It authenticates browser sessions and proxies management operations to the orchestrator over gRPC.
 - `web/` is a React dashboard served by nginx. In Compose, nginx proxies `/api/` to the API service.

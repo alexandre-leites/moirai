@@ -114,7 +114,7 @@ services:
     # Reports healthy only once the database is reachable and migrations have
     # run, which is what the api and runner below actually need.
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import json,sys,time; d=json.load(open('/tmp/loop-orchestrator-health.json')); sys.exit(0 if d.get('db_ok') and time.time()-d.get('updated_at',0)<45 else 1)\""]
+      test: ["CMD", "/app/orchestrator", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 12

@@ -23,121 +23,36 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.12"
   NODE_VERSION: "22"
-  UV_VERSION: "0.11.33"
 
 jobs:
   test-orchestrator:
-    # runs-on: [self-hosted, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          version: ${{ env.UV_VERSION }}
-      - name: Provision Python ${{ env.PYTHON_VERSION }}
-        run: |
-          set -euo pipefail
-          uv python install "$PYTHON_VERSION"
-          # --system excludes virtualenvs from the lookup. A leftover .venv in the
-          # workspace is itself built from the managed interpreter, so it would
-          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
-          # PATH ahead of everything. Assigning before dirname matters too:
-          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
-          # lookup fails, which would silently prepend the repo root to PATH.
-          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
-          test -x "$interpreter"
-          "$interpreter" --version
-          dirname "$interpreter" >> "$GITHUB_PATH"
+          go-version: "1.25.12"
+          cache-dependency-path: orchestrator/go.sum
       - run: make test-orchestrator
 
-  test-postgres-integration:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
-    env:
-      LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: loop_test
-          POSTGRES_USER: loop
-          POSTGRES_PASSWORD: loop-test-password
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U loop -d loop_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        with:
-          version: ${{ env.UV_VERSION }}
-      - name: Provision Python ${{ env.PYTHON_VERSION }}
-        run: |
-          set -euo pipefail
-          uv python install "$PYTHON_VERSION"
-          # --system excludes virtualenvs from the lookup. A leftover .venv in the
-          # workspace is itself built from the managed interpreter, so it would
-          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
-          # PATH ahead of everything. Assigning before dirname matters too:
-          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
-          # lookup fails, which would silently prepend the repo root to PATH.
-          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
-          test -x "$interpreter"
-          "$interpreter" --version
-          dirname "$interpreter" >> "$GITHUB_PATH"
-      - run: make test-postgres-integration
-
   lint:
-    # runs-on: [self-hosted, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          version: ${{ env.UV_VERSION }}
-      - name: Provision Python ${{ env.PYTHON_VERSION }}
-        run: |
-          set -euo pipefail
-          uv python install "$PYTHON_VERSION"
-          # --system excludes virtualenvs from the lookup. A leftover .venv in the
-          # workspace is itself built from the managed interpreter, so it would
-          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
-          # PATH ahead of everything. Assigning before dirname matters too:
-          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
-          # lookup fails, which would silently prepend the repo root to PATH.
-          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
-          test -x "$interpreter"
-          "$interpreter" --version
-          dirname "$interpreter" >> "$GITHUB_PATH"
+          go-version: "1.25.12"
       - run: make lint
 
   typecheck:
-    # runs-on: [self-hosted, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          version: ${{ env.UV_VERSION }}
-      - name: Provision Python ${{ env.PYTHON_VERSION }}
-        run: |
-          set -euo pipefail
-          uv python install "$PYTHON_VERSION"
-          # --system excludes virtualenvs from the lookup. A leftover .venv in the
-          # workspace is itself built from the managed interpreter, so it would
-          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
-          # PATH ahead of everything. Assigning before dirname matters too:
-          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
-          # lookup fails, which would silently prepend the repo root to PATH.
-          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
-          test -x "$interpreter"
-          "$interpreter" --version
-          dirname "$interpreter" >> "$GITHUB_PATH"
+          go-version: "1.25.12"
+          cache-dependency-path: orchestrator/go.sum
       - run: make typecheck
 
   runner:
@@ -272,40 +187,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.25.12"
-      - name: Scan Go dependencies
-        run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          cd api && govulncheck ./...
-          cd ../runner && govulncheck ./...
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
-        with:
-          version: ${{ env.UV_VERSION }}
-      - name: Provision Python ${{ env.PYTHON_VERSION }}
-        run: |
-          set -euo pipefail
-          uv python install "$PYTHON_VERSION"
-          # --system excludes virtualenvs from the lookup. A leftover .venv in the
-          # workspace is itself built from the managed interpreter, so it would
-          # otherwise win and put .venv/bin -- ruff, mypy and pytest shims -- on
-          # PATH ahead of everything. Assigning before dirname matters too:
-          # `dirname "$(uv python find ...)"` reports "." and exits 0 when the
-          # lookup fails, which would silently prepend the repo root to PATH.
-          interpreter="$(uv python find --system --managed-python "$PYTHON_VERSION")"
-          test -x "$interpreter"
-          "$interpreter" --version
-          dirname "$interpreter" >> "$GITHUB_PATH"
-      - name: Scan Python lockfile dependencies
-        run: |
-          python3 - <<'PY' > .audit-requirements.txt
-          import tomllib
-          from pathlib import Path
-
-          lock = tomllib.loads(Path("orchestrator/uv.lock").read_text())
-          for package in sorted(lock["package"], key=lambda package: package["name"]):
-              if "registry" in package.get("source", {}):
-                  print(f'{package["name"]}=={package["version"]}')
-          PY
-          uv tool run pip-audit --requirement .audit-requirements.txt
+       - name: Scan Go dependencies
+         run: |
+           go install golang.org/x/vuln/cmd/govulncheck@latest
+           cd api && govulncheck ./...
+           cd ../runner && govulncheck ./...
+           cd ../orchestrator && govulncheck ./...
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: ${{ env.NODE_VERSION }}

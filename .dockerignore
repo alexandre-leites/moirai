@@ -1,6 +1,4 @@
-# Root build context. Only api/Dockerfile and runner/Dockerfile build from here;
-# web/ and orchestrator/ build from their own directories and carry their own
-# .dockerignore, which is why both are excluded below.
+# Root build context serves API, runner, and orchestrator builds.
 .git/
 .github/
 .claude/
@@ -26,6 +24,5 @@ secrets/
 **/.pytest_cache/
 **/.ruff_cache/
 **/.mypy_cache/
-orchestrator/
 web/
 *.md

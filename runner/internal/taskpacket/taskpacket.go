@@ -121,7 +121,7 @@ func (packet Packet) Validate() error {
 	if !taskPath(packet.PromptPath) || packet.ExpectedOutput != ".loop/result.json" {
 		return errors.New("task packet artifact paths are invalid")
 	}
-	if packet.TimeoutSeconds < 1 || packet.TimeoutSeconds > 86400 {
+	if packet.TimeoutSeconds < 0 || packet.TimeoutSeconds > 86400 {
 		return errors.New("task packet timeout is invalid")
 	}
 	if err := validateEnvironmentRefs(packet.EnvironmentRefs); err != nil {

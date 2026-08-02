@@ -8,13 +8,24 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: None.
+- Active implementation: Go V1 orchestrator replacement.
 - Last updated: 2026-08-02
-- Agent/session identifier: full-main-content-width / 2026-08-02
+- Agent/session identifier: refactor/go-orchestrator-v1 / 2026-08-02
 
 ## In Progress
 
-_Nothing is claimed. The next agent should take the first item under Pending Implementation._
+_Nothing is claimed._
+
+## Go V1 Orchestrator Refactor
+
+- [x] Replace Python/LangGraph orchestrator with Go V1
+  - Completed: 2026-08-02
+  - Relevant files: `orchestrator/`, `Makefile`, `compose.build.yaml`, `compose.yaml`, `runner/`
+  - Behavior delivered: deleted Python/LangGraph source and tests; Go control-plane and runner-stream gRPC services preserve existing protobuf contracts, auth, projects, credentials, runner tokens, runner secret fencing, workflow events and operator controls. The simple state machine dispatches runner-owned worktree/OpenCode/commit/push work, creates PRs, waits for green checks, merges, and completes issues. No automatic retries or deadlines; manual retry remains. `timeoutSeconds: 0` means no runner execution deadline.
+  - Migration: standard `golang-migrate` replaces handwritten migration logic; it baselines compatible legacy `app.schema_version` databases without replaying SQL.
+  - Validation performed: Dockerized Go orchestrator test and vet pass; API Go suite pass; Web typecheck and 221 tests pass; protobuf check and Compose configuration pass; fresh isolated Compose build/start reaches healthy state for PostgreSQL, Go orchestrator, API, runner and Web; login smoke passes through runner network to API and Go control plane.
+  - Commands executed: Docker `go test -race ./...` and `go vet ./...` in `orchestrator`; Docker `go test ./...` in `api`; Docker Node 24 `npm ci`, `npm run typecheck`, `npm test`; `make proto-check`; `make compose`; `docker compose -p moirai-go-refactor -f compose.yaml -f compose.build.yaml up --build --wait`.
+  - Notes: full runner race suite has pre-existing unrelated failure in `TestEventReporterRestoresEvictedEventWhenPersistFails`; focused runner no-deadline packages pass.
 
 ## Done
 

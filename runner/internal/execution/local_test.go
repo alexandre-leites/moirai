@@ -66,6 +66,18 @@ func TestSupervisorReportsStartedProcessID(t *testing.T) {
 	}
 }
 
+func TestSupervisorAllowsNoDeadline(t *testing.T) {
+	result, err := NewSupervisor().Execute(context.Background(), Request{
+		ExecutionID: "execution-no-deadline",
+		Workspace:   t.TempDir(),
+		Command:     []string{"true"},
+		Timeout:     0,
+	}, nil, nil)
+	if err != nil || result.ExitCode != 0 {
+		t.Fatalf("Execute() = (%+v, %v)", result, err)
+	}
+}
+
 func TestSupervisorTimeoutTerminatesProcess(t *testing.T) {
 	workspace := t.TempDir()
 	supervisor := NewSupervisor()
