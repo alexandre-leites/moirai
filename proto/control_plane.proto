@@ -44,6 +44,12 @@ message UpdateAccountRequest {
 }
 message UpdateAccountResponse { string user_id = 1; string username = 2; string role = 3; string email = 4; string display_name = 5; }
 message ListProjectsRequest {}
+message PipelineStep {
+  string command = 1;
+  int32 timeout_seconds = 2;
+  int32 position = 3;
+  bool required = 4;
+}
 message Project {
   string id = 1;
   string name = 2;
@@ -53,6 +59,7 @@ message Project {
   string local_repository_path = 6;
   string default_branch = 7;
   repeated string required_runner_labels = 8;
+  repeated PipelineStep pipeline_steps = 9;
 }
 message ListProjectsResponse { repeated Project projects = 1; }
 message ProjectConfiguration {
@@ -62,6 +69,7 @@ message ProjectConfiguration {
   string local_repository_path = 4;
   string default_branch = 5;
   repeated string required_runner_labels = 6;
+  repeated PipelineStep pipeline_steps = 7;
 }
 message CreateProjectRequest { ProjectConfiguration project = 1; }
 message CreateProjectResponse { Project project = 1; }

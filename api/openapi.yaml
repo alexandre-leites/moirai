@@ -763,6 +763,9 @@ components:
         requiredRunnerLabels:
           type: array
           items: { type: string }
+        pipelineSteps:
+          type: array
+          items: { $ref: '#/components/schemas/PipelineStep' }
     Project:
       type: object
       required: [id, name, enabled]
@@ -782,6 +785,17 @@ components:
         requiredRunnerLabels:
           type: array
           items: { type: string }
+        pipelineSteps:
+          type: array
+          items: { $ref: '#/components/schemas/PipelineStep' }
+    PipelineStep:
+      type: object
+      required: [command, timeoutSeconds, position, required]
+      properties:
+        command: { type: string }
+        timeoutSeconds: { type: integer, minimum: 1 }
+        position: { type: integer, minimum: 0 }
+        required: { type: boolean }
     ProjectCredentialList:
       type: object
       required: [credentials]

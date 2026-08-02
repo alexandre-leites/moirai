@@ -158,6 +158,7 @@ func (f *fakeControlPlane) CreateProject(ctx context.Context, req *controlv1.Cre
 		LocalRepositoryPath:  req.Project.LocalRepositoryPath,
 		DefaultBranch:        req.Project.DefaultBranch,
 		RequiredRunnerLabels: req.Project.RequiredRunnerLabels,
+		PipelineSteps:        req.Project.PipelineSteps,
 	}
 	f.projects[project.Id] = project
 	return &controlv1.CreateProjectResponse{Project: project}, nil
@@ -182,6 +183,7 @@ func (f *fakeControlPlane) UpdateProject(ctx context.Context, req *controlv1.Upd
 	project.LocalRepositoryPath = req.Project.LocalRepositoryPath
 	project.DefaultBranch = req.Project.DefaultBranch
 	project.RequiredRunnerLabels = req.Project.RequiredRunnerLabels
+	project.PipelineSteps = req.Project.PipelineSteps
 	return &controlv1.UpdateProjectResponse{Project: project}, nil
 }
 
@@ -334,7 +336,7 @@ func TestListProjectsRedactsURLUserinfo(t *testing.T) {
 func TestCreateProjectSuccessReturnsConfiguration(t *testing.T) {
 	mux, fake := startProjectServer(t)
 	req := mutateRequest(t, http.MethodPost, "/api/v1/projects",
-		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","requiredRunnerLabels":["linux"]}`,
+		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","requiredRunnerLabels":["linux"],"pipelineSteps":[{"command":"make lint","timeoutSeconds":60,"position":0,"required":true},{"command":"make test","timeoutSeconds":300,"position":1,"required":true}]}`,
 		"admin-session")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -351,6 +353,13 @@ func TestCreateProjectSuccessReturnsConfiguration(t *testing.T) {
 	fake.mu.Unlock()
 	if !ok || stored.RepositoryUrl != "git@github.com:acme/ledger.git" {
 		t.Errorf("stored project = %#v, want the submitted URL persisted", stored)
+	}
+	if len(stored.PipelineSteps) != 2 || stored.PipelineSteps[1].Command != "make test" {
+		t.Errorf("pipeline steps = %#v, want ordered submitted steps", stored.PipelineSteps)
+	}
+	steps, ok := project["pipelineSteps"].([]any)
+	if !ok || len(steps) != 2 {
+		t.Errorf("pipelineSteps = %#v, want two returned steps", project["pipelineSteps"])
 	}
 }
 
