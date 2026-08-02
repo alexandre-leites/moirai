@@ -5,7 +5,18 @@ import { WorkflowsPage, matchesFilter, matchesQuery } from "./workflows";
 import { click, unmountAll } from "./test-dom";
 import { mountView, stubApi, workflow } from "./test-console";
 
-afterEach(unmountAll);
+afterEach(() => {
+  vi.unstubAllGlobals();
+  return unmountAll();
+});
+
+class FakeEventSource {
+  static current: FakeEventSource | null = null;
+  listeners = new Map<string, (event: Event) => void>();
+  constructor() { FakeEventSource.current = this; }
+  addEventListener(type: string, listener: (event: Event) => void) { this.listeners.set(type, listener); }
+  close() {}
+}
 
 const RUNS = [
   workflow({ id: "wf-1", status: "implementing", issueExternalId: "#103", issueTitle: "Close execution requests" }),
@@ -50,6 +61,20 @@ describe("WorkflowsPage", () => {
     expect(container.textContent).not.toContain("Migrate session storage");
     expect(container.querySelectorAll(".minithread")).toHaveLength(2);
     expect(container.querySelector(".meter")).not.toBeNull();
+  });
+
+  it("updates a workflow from the event stream without a reload", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const api = stubApi({ listWorkflows: async () => RUNS });
+    const container = await mountView(<WorkflowsPage />, api, { route: "/workflows", path: "/workflows" });
+
+    await act(async () => {
+      FakeEventSource.current?.listeners.get("workflow")?.(new MessageEvent("workflow", {
+        data: JSON.stringify({ type: "workflow", workflow: { ...RUNS[0], issueTitle: "Pushed update" } }),
+      }));
+    });
+
+    expect(container.textContent).toContain("Pushed update");
   });
 
   it("reads the filter out of the query string", async () => {

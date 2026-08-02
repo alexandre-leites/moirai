@@ -518,6 +518,24 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '504':
           $ref: '#/components/responses/OrchestratorTimeout'
+  /api/v1/events:
+    get:
+      summary: Stream workflow and runner state changes
+      description: |
+        Long-lived Server-Sent Events stream. Browser EventSource reconnects with
+        the most recent event ID through the Last-Event-ID header. Events are
+        named `workflow` and `runner`; keep-alive comments are not events.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Event stream remains open until client disconnect or shutdown
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/v1/workflows:
     get:
       summary: List workflows

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import PurePath
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
         QueueEntryRecord,
         RegistrationTokenRecord,
         RunnerRecord,
+        StreamEventRecord,
         WorkflowDetailRecord,
         WorkflowEventRecord,
     )
@@ -1181,6 +1183,51 @@ class AsyncpgControlPlane:
             }
             for record in records
         ]
+
+    async def stream_events(self, last_event_id: str) -> AsyncIterator[StreamEventRecord]:
+        queue: asyncio.Queue[str] = asyncio.Queue()
+
+        def notify(_: Any, __: int, ___: str, payload: str) -> None:
+            queue.put_nowait(payload)
+
+        async with self._pool.acquire() as connection:
+            await connection.add_listener("moirai_dashboard_events", notify)
+            try:
+                while True:
+                    payload = json.loads(await queue.get())
+                    if payload.get("id") == last_event_id:
+                        continue
+                    if payload.get("event_type") == "workflow":
+                        workflow = await self.get_workflow(str(payload["workflow_run_id"]))
+                        if workflow is not None:
+                            yield {
+                                "id": str(payload["id"]),
+                                "event_type": "workflow",
+                                "workflow": workflow,
+                                "runner": None,
+                            }
+                        continue
+                    runner = payload.get("runner")
+                    if not isinstance(runner, dict):
+                        continue
+                    yield {
+                        "id": str(payload["id"]),
+                        "event_type": "runner",
+                        "workflow": None,
+                        "runner": {
+                            "id": str(runner["id"]),
+                            "name": str(runner["name"]),
+                            "enabled": bool(runner["enabled"]),
+                            "draining": bool(runner["draining"]),
+                            "status": str(runner["status"]),
+                            "labels": _labels(runner["labels"]),
+                            "last_seen_at": datetime.fromisoformat(runner["last_seen_at"])
+                            if runner.get("last_seen_at")
+                            else None,
+                        },
+                    }
+            finally:
+                await connection.remove_listener("moirai_dashboard_events", notify)
 
     async def set_runner_state(
         self, runner_id: str, state: str, actor_user_id: str | None, now: datetime

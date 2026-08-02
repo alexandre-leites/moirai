@@ -3521,6 +3521,118 @@ func (x *GetSchedulerMetricsResponse) GetScheduledJobs() int32 {
 	return 0
 }
 
+type StreamEventsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	LastEventId   string                 `protobuf:"bytes,1,opt,name=last_event_id,json=lastEventId,proto3" json:"last_event_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StreamEventsRequest) Reset() {
+	*x = StreamEventsRequest{}
+	mi := &file_proto_control_plane_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StreamEventsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StreamEventsRequest) ProtoMessage() {}
+
+func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
+func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *StreamEventsRequest) GetLastEventId() string {
+	if x != nil {
+		return x.LastEventId
+	}
+	return ""
+}
+
+type ControlPlaneEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	EventType     string                 `protobuf:"bytes,2,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"`
+	Workflow      *Workflow              `protobuf:"bytes,3,opt,name=workflow,proto3" json:"workflow,omitempty"`
+	Runner        *Runner                `protobuf:"bytes,4,opt,name=runner,proto3" json:"runner,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ControlPlaneEvent) Reset() {
+	*x = ControlPlaneEvent{}
+	mi := &file_proto_control_plane_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ControlPlaneEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ControlPlaneEvent) ProtoMessage() {}
+
+func (x *ControlPlaneEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ControlPlaneEvent.ProtoReflect.Descriptor instead.
+func (*ControlPlaneEvent) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{65}
+}
+
+func (x *ControlPlaneEvent) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ControlPlaneEvent) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
+}
+
+func (x *ControlPlaneEvent) GetWorkflow() *Workflow {
+	if x != nil {
+		return x.Workflow
+	}
+	return nil
+}
+
+func (x *ControlPlaneEvent) GetRunner() *Runner {
+	if x != nil {
+		return x.Runner
+	}
+	return nil
+}
+
 var File_proto_control_plane_proto protoreflect.FileDescriptor
 
 const file_proto_control_plane_proto_rawDesc = "" +
@@ -3770,7 +3882,15 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\vqueue_depth\x18\x01 \x01(\x05R\n" +
 	"queueDepth\x12)\n" +
 	"\x10active_workflows\x18\x02 \x01(\x05R\x0factiveWorkflows\x12%\n" +
-	"\x0escheduled_jobs\x18\x03 \x01(\x05R\rscheduledJobs2\xe5\x15\n" +
+	"\x0escheduled_jobs\x18\x03 \x01(\x05R\rscheduledJobs\"9\n" +
+	"\x13StreamEventsRequest\x12\"\n" +
+	"\rlast_event_id\x18\x01 \x01(\tR\vlastEventId\"\xaa\x01\n" +
+	"\x11ControlPlaneEvent\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\x02 \x01(\tR\teventType\x125\n" +
+	"\bworkflow\x18\x03 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow\x12/\n" +
+	"\x06runner\x18\x04 \x01(\v2\x17.loop.control.v1.RunnerR\x06runner2\xc1\x16\n" +
 	"\fControlPlane\x12F\n" +
 	"\x05Login\x12\x1d.loop.control.v1.LoginRequest\x1a\x1e.loop.control.v1.LoginResponse\x12I\n" +
 	"\x06WhoAmI\x12\x1e.loop.control.v1.WhoAmIRequest\x1a\x1f.loop.control.v1.WhoAmIResponse\x12^\n" +
@@ -3798,7 +3918,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\rRetryWorkflow\x12%.loop.control.v1.RetryWorkflowRequest\x1a&.loop.control.v1.RetryWorkflowResponse\x12a\n" +
 	"\x0eCancelWorkflow\x12&.loop.control.v1.CancelWorkflowRequest\x1a'.loop.control.v1.CancelWorkflowResponse\x12^\n" +
 	"\rBlockWorkflow\x12%.loop.control.v1.BlockWorkflowRequest\x1a&.loop.control.v1.BlockWorkflowResponse\x12p\n" +
-	"\x13GetSchedulerMetrics\x12+.loop.control.v1.GetSchedulerMetricsRequest\x1a,.loop.control.v1.GetSchedulerMetricsResponseB@Z>github.com/loop-engineering/contracts/gen/control/v1;controlv1b\x06proto3"
+	"\x13GetSchedulerMetrics\x12+.loop.control.v1.GetSchedulerMetricsRequest\x1a,.loop.control.v1.GetSchedulerMetricsResponse\x12Z\n" +
+	"\fStreamEvents\x12$.loop.control.v1.StreamEventsRequest\x1a\".loop.control.v1.ControlPlaneEvent0\x01B@Z>github.com/loop-engineering/contracts/gen/control/v1;controlv1b\x06proto3"
 
 var (
 	file_proto_control_plane_proto_rawDescOnce sync.Once
@@ -3812,7 +3933,7 @@ func file_proto_control_plane_proto_rawDescGZIP() []byte {
 	return file_proto_control_plane_proto_rawDescData
 }
 
-var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 64)
+var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 66)
 var file_proto_control_plane_proto_goTypes = []any{
 	(*LoginRequest)(nil),                          // 0: loop.control.v1.LoginRequest
 	(*LoginResponse)(nil),                         // 1: loop.control.v1.LoginResponse
@@ -3878,6 +3999,8 @@ var file_proto_control_plane_proto_goTypes = []any{
 	(*BlockWorkflowResponse)(nil),                 // 61: loop.control.v1.BlockWorkflowResponse
 	(*GetSchedulerMetricsRequest)(nil),            // 62: loop.control.v1.GetSchedulerMetricsRequest
 	(*GetSchedulerMetricsResponse)(nil),           // 63: loop.control.v1.GetSchedulerMetricsResponse
+	(*StreamEventsRequest)(nil),                   // 64: loop.control.v1.StreamEventsRequest
+	(*ControlPlaneEvent)(nil),                     // 65: loop.control.v1.ControlPlaneEvent
 }
 var file_proto_control_plane_proto_depIdxs = []int32{
 	7,  // 0: loop.control.v1.ListProjectsResponse.projects:type_name -> loop.control.v1.Project
@@ -3903,65 +4026,69 @@ var file_proto_control_plane_proto_depIdxs = []int32{
 	31, // 20: loop.control.v1.RetryWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
 	31, // 21: loop.control.v1.CancelWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
 	31, // 22: loop.control.v1.BlockWorkflowResponse.workflow:type_name -> loop.control.v1.Workflow
-	0,  // 23: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
-	2,  // 24: loop.control.v1.ControlPlane.WhoAmI:input_type -> loop.control.v1.WhoAmIRequest
-	4,  // 25: loop.control.v1.ControlPlane.UpdateAccount:input_type -> loop.control.v1.UpdateAccountRequest
-	6,  // 26: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
-	10, // 27: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
-	12, // 28: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
-	14, // 29: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
-	16, // 30: loop.control.v1.ControlPlane.SetProjectCredential:input_type -> loop.control.v1.SetProjectCredentialRequest
-	17, // 31: loop.control.v1.ControlPlane.ClearProjectCredential:input_type -> loop.control.v1.ClearProjectCredentialRequest
-	18, // 32: loop.control.v1.ControlPlane.ListProjectCredentials:input_type -> loop.control.v1.ListProjectCredentialsRequest
-	23, // 33: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
-	26, // 34: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
-	28, // 35: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
-	30, // 36: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
-	33, // 37: loop.control.v1.ControlPlane.GetWorkflow:input_type -> loop.control.v1.GetWorkflowRequest
-	36, // 38: loop.control.v1.ControlPlane.ListWorkflowEvents:input_type -> loop.control.v1.ListWorkflowEventsRequest
-	38, // 39: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
-	41, // 40: loop.control.v1.ControlPlane.ListQueue:input_type -> loop.control.v1.ListQueueRequest
-	44, // 41: loop.control.v1.ControlPlane.SyncNow:input_type -> loop.control.v1.SyncNowRequest
-	47, // 42: loop.control.v1.ControlPlane.IssueSyncStatus:input_type -> loop.control.v1.IssueSyncStatusRequest
-	50, // 43: loop.control.v1.ControlPlane.SetRunnerState:input_type -> loop.control.v1.SetRunnerStateRequest
-	52, // 44: loop.control.v1.ControlPlane.Logout:input_type -> loop.control.v1.LogoutRequest
-	54, // 45: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
-	56, // 46: loop.control.v1.ControlPlane.RetryWorkflow:input_type -> loop.control.v1.RetryWorkflowRequest
-	58, // 47: loop.control.v1.ControlPlane.CancelWorkflow:input_type -> loop.control.v1.CancelWorkflowRequest
-	60, // 48: loop.control.v1.ControlPlane.BlockWorkflow:input_type -> loop.control.v1.BlockWorkflowRequest
-	62, // 49: loop.control.v1.ControlPlane.GetSchedulerMetrics:input_type -> loop.control.v1.GetSchedulerMetricsRequest
-	1,  // 50: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
-	3,  // 51: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
-	5,  // 52: loop.control.v1.ControlPlane.UpdateAccount:output_type -> loop.control.v1.UpdateAccountResponse
-	8,  // 53: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
-	11, // 54: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
-	13, // 55: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
-	15, // 56: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
-	20, // 57: loop.control.v1.ControlPlane.SetProjectCredential:output_type -> loop.control.v1.SetProjectCredentialResponse
-	21, // 58: loop.control.v1.ControlPlane.ClearProjectCredential:output_type -> loop.control.v1.ClearProjectCredentialResponse
-	22, // 59: loop.control.v1.ControlPlane.ListProjectCredentials:output_type -> loop.control.v1.ListProjectCredentialsResponse
-	24, // 60: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
-	27, // 61: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
-	29, // 62: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
-	32, // 63: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
-	34, // 64: loop.control.v1.ControlPlane.GetWorkflow:output_type -> loop.control.v1.GetWorkflowResponse
-	37, // 65: loop.control.v1.ControlPlane.ListWorkflowEvents:output_type -> loop.control.v1.ListWorkflowEventsResponse
-	40, // 66: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
-	43, // 67: loop.control.v1.ControlPlane.ListQueue:output_type -> loop.control.v1.ListQueueResponse
-	46, // 68: loop.control.v1.ControlPlane.SyncNow:output_type -> loop.control.v1.SyncNowResponse
-	49, // 69: loop.control.v1.ControlPlane.IssueSyncStatus:output_type -> loop.control.v1.IssueSyncStatusResponse
-	51, // 70: loop.control.v1.ControlPlane.SetRunnerState:output_type -> loop.control.v1.SetRunnerStateResponse
-	53, // 71: loop.control.v1.ControlPlane.Logout:output_type -> loop.control.v1.LogoutResponse
-	55, // 72: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
-	57, // 73: loop.control.v1.ControlPlane.RetryWorkflow:output_type -> loop.control.v1.RetryWorkflowResponse
-	59, // 74: loop.control.v1.ControlPlane.CancelWorkflow:output_type -> loop.control.v1.CancelWorkflowResponse
-	61, // 75: loop.control.v1.ControlPlane.BlockWorkflow:output_type -> loop.control.v1.BlockWorkflowResponse
-	63, // 76: loop.control.v1.ControlPlane.GetSchedulerMetrics:output_type -> loop.control.v1.GetSchedulerMetricsResponse
-	50, // [50:77] is the sub-list for method output_type
-	23, // [23:50] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	31, // 23: loop.control.v1.ControlPlaneEvent.workflow:type_name -> loop.control.v1.Workflow
+	39, // 24: loop.control.v1.ControlPlaneEvent.runner:type_name -> loop.control.v1.Runner
+	0,  // 25: loop.control.v1.ControlPlane.Login:input_type -> loop.control.v1.LoginRequest
+	2,  // 26: loop.control.v1.ControlPlane.WhoAmI:input_type -> loop.control.v1.WhoAmIRequest
+	4,  // 27: loop.control.v1.ControlPlane.UpdateAccount:input_type -> loop.control.v1.UpdateAccountRequest
+	6,  // 28: loop.control.v1.ControlPlane.ListProjects:input_type -> loop.control.v1.ListProjectsRequest
+	10, // 29: loop.control.v1.ControlPlane.CreateProject:input_type -> loop.control.v1.CreateProjectRequest
+	12, // 30: loop.control.v1.ControlPlane.UpdateProject:input_type -> loop.control.v1.UpdateProjectRequest
+	14, // 31: loop.control.v1.ControlPlane.SetProjectEnabled:input_type -> loop.control.v1.SetProjectEnabledRequest
+	16, // 32: loop.control.v1.ControlPlane.SetProjectCredential:input_type -> loop.control.v1.SetProjectCredentialRequest
+	17, // 33: loop.control.v1.ControlPlane.ClearProjectCredential:input_type -> loop.control.v1.ClearProjectCredentialRequest
+	18, // 34: loop.control.v1.ControlPlane.ListProjectCredentials:input_type -> loop.control.v1.ListProjectCredentialsRequest
+	23, // 35: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:input_type -> loop.control.v1.CreateRunnerRegistrationTokenRequest
+	26, // 36: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:input_type -> loop.control.v1.ListRunnerRegistrationTokensRequest
+	28, // 37: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:input_type -> loop.control.v1.RevokeRunnerRegistrationTokenRequest
+	30, // 38: loop.control.v1.ControlPlane.ListWorkflows:input_type -> loop.control.v1.ListWorkflowsRequest
+	33, // 39: loop.control.v1.ControlPlane.GetWorkflow:input_type -> loop.control.v1.GetWorkflowRequest
+	36, // 40: loop.control.v1.ControlPlane.ListWorkflowEvents:input_type -> loop.control.v1.ListWorkflowEventsRequest
+	38, // 41: loop.control.v1.ControlPlane.ListRunners:input_type -> loop.control.v1.ListRunnersRequest
+	41, // 42: loop.control.v1.ControlPlane.ListQueue:input_type -> loop.control.v1.ListQueueRequest
+	44, // 43: loop.control.v1.ControlPlane.SyncNow:input_type -> loop.control.v1.SyncNowRequest
+	47, // 44: loop.control.v1.ControlPlane.IssueSyncStatus:input_type -> loop.control.v1.IssueSyncStatusRequest
+	50, // 45: loop.control.v1.ControlPlane.SetRunnerState:input_type -> loop.control.v1.SetRunnerStateRequest
+	52, // 46: loop.control.v1.ControlPlane.Logout:input_type -> loop.control.v1.LogoutRequest
+	54, // 47: loop.control.v1.ControlPlane.SubmitHumanDecision:input_type -> loop.control.v1.SubmitHumanDecisionRequest
+	56, // 48: loop.control.v1.ControlPlane.RetryWorkflow:input_type -> loop.control.v1.RetryWorkflowRequest
+	58, // 49: loop.control.v1.ControlPlane.CancelWorkflow:input_type -> loop.control.v1.CancelWorkflowRequest
+	60, // 50: loop.control.v1.ControlPlane.BlockWorkflow:input_type -> loop.control.v1.BlockWorkflowRequest
+	62, // 51: loop.control.v1.ControlPlane.GetSchedulerMetrics:input_type -> loop.control.v1.GetSchedulerMetricsRequest
+	64, // 52: loop.control.v1.ControlPlane.StreamEvents:input_type -> loop.control.v1.StreamEventsRequest
+	1,  // 53: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
+	3,  // 54: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
+	5,  // 55: loop.control.v1.ControlPlane.UpdateAccount:output_type -> loop.control.v1.UpdateAccountResponse
+	8,  // 56: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
+	11, // 57: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
+	13, // 58: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
+	15, // 59: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
+	20, // 60: loop.control.v1.ControlPlane.SetProjectCredential:output_type -> loop.control.v1.SetProjectCredentialResponse
+	21, // 61: loop.control.v1.ControlPlane.ClearProjectCredential:output_type -> loop.control.v1.ClearProjectCredentialResponse
+	22, // 62: loop.control.v1.ControlPlane.ListProjectCredentials:output_type -> loop.control.v1.ListProjectCredentialsResponse
+	24, // 63: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
+	27, // 64: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
+	29, // 65: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
+	32, // 66: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
+	34, // 67: loop.control.v1.ControlPlane.GetWorkflow:output_type -> loop.control.v1.GetWorkflowResponse
+	37, // 68: loop.control.v1.ControlPlane.ListWorkflowEvents:output_type -> loop.control.v1.ListWorkflowEventsResponse
+	40, // 69: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
+	43, // 70: loop.control.v1.ControlPlane.ListQueue:output_type -> loop.control.v1.ListQueueResponse
+	46, // 71: loop.control.v1.ControlPlane.SyncNow:output_type -> loop.control.v1.SyncNowResponse
+	49, // 72: loop.control.v1.ControlPlane.IssueSyncStatus:output_type -> loop.control.v1.IssueSyncStatusResponse
+	51, // 73: loop.control.v1.ControlPlane.SetRunnerState:output_type -> loop.control.v1.SetRunnerStateResponse
+	53, // 74: loop.control.v1.ControlPlane.Logout:output_type -> loop.control.v1.LogoutResponse
+	55, // 75: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
+	57, // 76: loop.control.v1.ControlPlane.RetryWorkflow:output_type -> loop.control.v1.RetryWorkflowResponse
+	59, // 77: loop.control.v1.ControlPlane.CancelWorkflow:output_type -> loop.control.v1.CancelWorkflowResponse
+	61, // 78: loop.control.v1.ControlPlane.BlockWorkflow:output_type -> loop.control.v1.BlockWorkflowResponse
+	63, // 79: loop.control.v1.ControlPlane.GetSchedulerMetrics:output_type -> loop.control.v1.GetSchedulerMetricsResponse
+	65, // 80: loop.control.v1.ControlPlane.StreamEvents:output_type -> loop.control.v1.ControlPlaneEvent
+	53, // [53:81] is the sub-list for method output_type
+	25, // [25:53] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_proto_control_plane_proto_init() }
@@ -3975,7 +4102,7 @@ func file_proto_control_plane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_control_plane_proto_rawDesc), len(file_proto_control_plane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   64,
+			NumMessages:   66,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

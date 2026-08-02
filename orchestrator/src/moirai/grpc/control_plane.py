@@ -405,6 +405,25 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             next_cursor=events[-1]["id"] if len(events) == (request.limit or 100) else "",
         )
 
+    async def StreamEvents(
+        self,
+        request: control_plane_pb2.StreamEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ):
+        await self._require_session(context)
+        try:
+            async for event in self._control_plane.stream_events(request.last_event_id):
+                response = control_plane_pb2.ControlPlaneEvent(
+                    id=event["id"], event_type=event["event_type"]
+                )
+                if event["workflow"] is not None:
+                    response.workflow.CopyFrom(_workflow_detail_message(event["workflow"]))
+                if event["runner"] is not None:
+                    response.runner.CopyFrom(_runner_message(event["runner"]))
+                yield response
+        except asyncio.CancelledError:
+            return
+
     async def ListRunners(
         self,
         request: control_plane_pb2.ListRunnersRequest,

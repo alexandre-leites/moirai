@@ -184,6 +184,15 @@ class FakeControlPlane:
         self.event_request = (workflow_run_id, after_id, limit)
         return [{"id": "8", "event_type": "log", "payload_json": '{"message":"agent output"}', "created_at": NOW}]
 
+    async def stream_events(self, last_event_id: str):
+        self.last_event_id = last_event_id
+        yield {
+            "id": "11",
+            "event_type": "workflow",
+            "workflow": await self.get_workflow("workflow-1"),
+            "runner": None,
+        }
+
     async def record_human_decision(
         self, workflow_run_id: str, decision: str, comment: str | None, actor_user_id: str | None, now: datetime
     ) -> dict[str, object]:
@@ -437,6 +446,17 @@ class ControlPlaneGrpcTests(unittest.IsolatedAsyncioTestCase):
                 metadata=(("x-loop-session", "admin-session"), ("x-loop-csrf", "csrf-token")),
             )
         self.assertEqual(invalid.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+
+    async def test_stream_events_forwards_workflow_notifications(self) -> None:
+        stream = self.client.StreamEvents(
+            control_plane_pb2.StreamEventsRequest(last_event_id="10"),
+            metadata=(("x-loop-session", "admin-session"),),
+        )
+        event = await stream.read()
+        self.assertEqual(event.id, "11")
+        self.assertEqual(event.event_type, "workflow")
+        self.assertEqual(event.workflow.status, "blocked")
+        self.assertEqual(self.control_plane.last_event_id, "10")
 
     async def test_requires_session_and_administrator_for_control_operations(self) -> None:
         with self.assertRaises(grpc.aio.AioRpcError) as anonymous:

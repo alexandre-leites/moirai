@@ -256,3 +256,15 @@ Targeted validation: an orchestrator test for a project whose pipeline fails and
 advance; an API handler test for round-tripping steps; a `web` test that the project form
 submits them. Run `make test-orchestrator`, `cd api && go test ./...` and `make test-web` —
 and note that CI will not confirm any of it until the Blocked item is resolved.
+
+---
+
+## Issue #118 — SSE dashboard updates
+
+- Completed: 2026-08-02
+- Agent/session: issue-118-b
+- Delivered: authenticated `GET /api/v1/events`; `StreamEvents` server-streaming ControlPlane RPC; PostgreSQL commit-aligned notifications from `workflow_events` and `runners`; generated stubs; EventSource-backed console snapshot updates; nginx streaming proxy settings; OpenAPI contract.
+- Tests: API handler test covers 401, event delivery, keepalive, and disconnect cancellation. Orchestrator gRPC test covers authenticated stream delivery. Web workflow test covers in-place pushed update; unavailable EventSource leaves initial fetch intact.
+- Validation: `make test-orchestrator` (594 tests), `make lint`, `make typecheck`, `make proto-check`, `docker compose config --quiet`; API suite passed in `golang:1.25`; web typecheck/lint and 196 tests passed in `node:24`.
+- Environment: direct `make test-api` cannot run because host has no `go`; direct `make test-web` cannot run because host Node 18 lacks `node:util.styleText`. Container equivalents passed.
+- Review: adversarial staged diff review found no unresolved auth, teardown, payload, or transaction-boundary defects.

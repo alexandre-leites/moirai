@@ -30,6 +30,7 @@ service ControlPlane {
   rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
   rpc BlockWorkflow(BlockWorkflowRequest) returns (BlockWorkflowResponse);
   rpc GetSchedulerMetrics(GetSchedulerMetricsRequest) returns (GetSchedulerMetricsResponse);
+  rpc StreamEvents(StreamEventsRequest) returns (stream ControlPlaneEvent);
 }
 
 message LoginRequest { string username = 1; string password = 2; }
@@ -195,3 +196,10 @@ message BlockWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
 message BlockWorkflowResponse { Workflow workflow = 1; }
 message GetSchedulerMetricsRequest {}
 message GetSchedulerMetricsResponse { int32 queue_depth = 1; int32 active_workflows = 2; int32 scheduled_jobs = 3; }
+message StreamEventsRequest { string last_event_id = 1; }
+message ControlPlaneEvent {
+  string id = 1;
+  string event_type = 2;
+  Workflow workflow = 3;
+  Runner runner = 4;
+}

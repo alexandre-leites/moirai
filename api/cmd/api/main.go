@@ -55,6 +55,7 @@ func main() {
 	handlers.NewQueueHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewSyncHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewWorkflowHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewEventHandlers(client).RegisterRoutes(srv.Mux())
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

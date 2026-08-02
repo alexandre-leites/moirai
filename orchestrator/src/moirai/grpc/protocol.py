@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
@@ -73,6 +74,13 @@ class RunnerRecord(TypedDict):
     status: str
     labels: list[str]
     last_seen_at: datetime | None
+
+
+class StreamEventRecord(TypedDict):
+    id: str
+    event_type: str
+    workflow: WorkflowDetailRecord | None
+    runner: RunnerRecord | None
 
 
 class QueueEntryRecord(TypedDict):
@@ -170,6 +178,8 @@ class ControlPlane(Protocol):
     async def list_workflow_events(
         self, workflow_run_id: str, after_id: int, limit: int
     ) -> list[WorkflowEventRecord]: ...
+
+    def stream_events(self, last_event_id: str) -> AsyncIterator[StreamEventRecord]: ...
 
     async def record_human_decision(
         self,

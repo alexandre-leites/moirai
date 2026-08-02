@@ -46,6 +46,7 @@ const (
 	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
 	ControlPlane_BlockWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/BlockWorkflow"
 	ControlPlane_GetSchedulerMetrics_FullMethodName           = "/loop.control.v1.ControlPlane/GetSchedulerMetrics"
+	ControlPlane_StreamEvents_FullMethodName                  = "/loop.control.v1.ControlPlane/StreamEvents"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -79,6 +80,7 @@ type ControlPlaneClient interface {
 	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
 	BlockWorkflow(ctx context.Context, in *BlockWorkflowRequest, opts ...grpc.CallOption) (*BlockWorkflowResponse, error)
 	GetSchedulerMetrics(ctx context.Context, in *GetSchedulerMetricsRequest, opts ...grpc.CallOption) (*GetSchedulerMetricsResponse, error)
+	StreamEvents(ctx context.Context, in *StreamEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ControlPlaneEvent], error)
 }
 
 type controlPlaneClient struct {
@@ -359,6 +361,25 @@ func (c *controlPlaneClient) GetSchedulerMetrics(ctx context.Context, in *GetSch
 	return out, nil
 }
 
+func (c *controlPlaneClient) StreamEvents(ctx context.Context, in *StreamEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ControlPlaneEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlPlane_ServiceDesc.Streams[0], ControlPlane_StreamEvents_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StreamEventsRequest, ControlPlaneEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlPlane_StreamEventsClient = grpc.ServerStreamingClient[ControlPlaneEvent]
+
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -390,6 +411,7 @@ type ControlPlaneServer interface {
 	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
 	BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error)
 	GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error)
+	StreamEvents(*StreamEventsRequest, grpc.ServerStreamingServer[ControlPlaneEvent]) error
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -480,6 +502,9 @@ func (UnimplementedControlPlaneServer) BlockWorkflow(context.Context, *BlockWork
 }
 func (UnimplementedControlPlaneServer) GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSchedulerMetrics not implemented")
+}
+func (UnimplementedControlPlaneServer) StreamEvents(*StreamEventsRequest, grpc.ServerStreamingServer[ControlPlaneEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamEvents not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -988,6 +1013,17 @@ func _ControlPlane_GetSchedulerMetrics_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_StreamEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(StreamEventsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ControlPlaneServer).StreamEvents(m, &grpc.GenericServerStream[StreamEventsRequest, ControlPlaneEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlPlane_StreamEventsServer = grpc.ServerStreamingServer[ControlPlaneEvent]
+
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1104,6 +1140,12 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ControlPlane_GetSchedulerMetrics_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamEvents",
+			Handler:       _ControlPlane_StreamEvents_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "proto/control_plane.proto",
 }
