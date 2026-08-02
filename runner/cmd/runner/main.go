@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -23,10 +24,18 @@ import (
 	"github.com/loop-engineering/runner/internal/pipeline"
 	"github.com/loop-engineering/runner/internal/repository"
 	"github.com/loop-engineering/runner/internal/taskpacket"
+	"github.com/loop-engineering/runner/internal/toolchain"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	if handled, err := toolchainCommand(os.Args[1:], toolchain.DefaultManifestPath, os.Stdout); handled {
+		if err != nil {
+			slog.Error("runner toolchain declaration is not usable", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := probe(os.Args[1:]); handled {
 		if err != nil {
 			slog.Error("runner probe failed", "error", err)
@@ -200,6 +209,47 @@ func agentBackend(settings config.Config) agents.Backend {
 	return agents.OpenCodeBackend{Arguments: settings.AgentArguments}
 }
 
+// toolchainCommand implements `runner toolchain [--verify]`.
+//
+// It exists so the image's declaration of what it offers the agent has one
+// implementation with three readers: the image build, which runs --verify and
+// fails rather than shipping a manifest that lies; CI, which runs the same
+// check against the built image, closing the gap left by an assertion that only
+// covered the programs the *runner* shells out to; and anyone -- an operator or
+// an agent inside the image -- who wants to read the declaration back.
+//
+// It is answered before configuration is loaded, because the question is about
+// the image rather than about a deployment, and the answer has to be available
+// during the build, when nothing is configured yet.
+func toolchainCommand(arguments []string, manifestPath string, out io.Writer) (bool, error) {
+	if len(arguments) == 0 || arguments[0] != "toolchain" {
+		return false, nil
+	}
+	verify := false
+	switch {
+	case len(arguments) == 1:
+	case len(arguments) == 2 && arguments[1] == "--verify":
+		verify = true
+	default:
+		return true, errors.New("usage: runner toolchain [--verify]")
+	}
+	manifest, err := toolchain.Load(manifestPath)
+	if err != nil {
+		return true, err
+	}
+	if verify {
+		// Verified against the PATH the agent is given rather than the one this
+		// process happens to hold. A tool the runner can reach and the agent
+		// cannot is exactly the kind of absence this is here to prevent.
+		agentPath := execution.MinimalEnvironmentMap(nil, os.TempDir())["PATH"]
+		if err := manifest.Verify(func(name string) bool { return toolchain.LookupIn(agentPath, name) }); err != nil {
+			return true, err
+		}
+	}
+	_, err = fmt.Fprint(out, manifest.Declaration())
+	return true, err
+}
+
 func probe(arguments []string) (bool, error) {
 	if len(arguments) == 0 {
 		return false, nil
@@ -260,13 +310,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("reconcile runner executions: %w", err)
 	}
-	service, connection, err := control.Dial(ctx, settings.OrchestratorEndpoint, control.TLSOptions{
+	service, connection, err := control.DialWithHeaders(ctx, settings.OrchestratorEndpoint, control.TLSOptions{
 		Enabled:        settings.TLS,
 		CAFile:         settings.TLSCAFile,
 		ClientCertFile: settings.TLSClientCertFile,
 		ClientKeyFile:  settings.TLSClientKeyFile,
 		ServerName:     settings.TLSServerName,
-	})
+	}, control.HeaderOptions{Headers: settings.OrchestratorHeaders, File: settings.OrchestratorHeadersFile})
 	if err != nil {
 		return fmt.Errorf("dial orchestrator: %w", err)
 	}
