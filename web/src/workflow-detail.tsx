@@ -7,7 +7,7 @@ import { ApiError } from "./api";
 import { useConsoleData } from "./console-data";
 import { absolute, clock } from "./format";
 import { usePolled } from "./poll";
-import { attemptRows, deriveGates, describeEvent, isTerminal, logText, statusMeta, PHASE_LABEL } from "./status";
+import { attemptRows, deriveGates, describeEvent, executionError, isTerminal, logText, statusMeta, PHASE_LABEL } from "./status";
 import { useIsAdmin } from "./auth";
 import {
   Age, Banner, Card, CardHeader, Empty, ErrorBlock, GateRow, KV, KVRow, Meter, Skeleton,
@@ -349,6 +349,10 @@ function History({ api, workflowId }: { api: ApiClient; workflowId: string }) {
       .reverse(),
     [events]
   );
+  const errors = useMemo(
+    () => [...new Set(events.map(executionError).filter((error): error is string => error !== null))],
+    [events]
+  );
 
   return (
     <>
@@ -380,6 +384,15 @@ function History({ api, workflowId }: { api: ApiClient; workflowId: string }) {
           </div>
         )}
       </Card>
+
+      {errors.length > 0 && (
+        <Card>
+          <CardHeader title="Execution errors" />
+          <div className="card-b">
+            {errors.map((error) => <ErrorBlock key={error} title={error} />)}
+          </div>
+        </Card>
+      )}
 
       {/* The runner already redacts and size-caps what it streams; specification
           task A4 adds a tail endpoint, at which point this stops reassembling the

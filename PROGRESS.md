@@ -8,15 +8,22 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: Unknown system-version fallback for remote Docker builds.
+- Active implementation: None.
 - Last updated: 2026-08-02
-- Agent/session identifier: system-versions-unknown / 2026-08-02
+- Agent/session identifier: workflow-error-ui / 2026-08-02
 
 ## In Progress
 
 _Nothing is claimed. The next agent should take the first item under Pending Implementation._
 
 ## Done
+
+- [x] Workflow execution-error visibility
+  - Completed: 2026-08-02
+  - Relevant files: `web/src/status.ts`, `web/src/workflow-detail.tsx`, `web/src/workflow-detail.test.tsx`
+  - Behavior delivered: workflow detail deduplicates and renders terminal runner error payloads in an `Execution errors` card; no card appears when events have no error.
+  - Validation performed: focused workflow-detail test (15 pass), TypeScript typecheck, ESLint (0 errors; 16 existing warnings), `git diff --check`.
+  - Commands executed: `npm test -- workflow-detail.test.tsx`, `npm run typecheck`, `npm run lint`, `git diff --check`.
 
 - [x] Unknown system-version fallback
   - Completed: 2026-08-02
