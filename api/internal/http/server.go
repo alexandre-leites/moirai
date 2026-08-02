@@ -66,8 +66,10 @@ func (c Config) Validate() error {
 // state derived from the database, and the API has no database access
 // (PROJECT.md, "Service boundaries"). Those three names used to be registered
 // here as gauges set to zero once at construction and never written again,
-// which made an alert on them permanently unfireable; the orchestrator exports
-// the real ones (`moirai/observability.py`). See issue #124.
+// which made an alert on them permanently unfireable; only the service that
+// owns the state may export them. See issue #124. The Go orchestrator has no
+// Prometheus surface of its own yet, so today nobody exports them — which is
+// still better than a series that can never fire.
 type Server struct {
 	cfg      Config
 	mux      *http.ServeMux

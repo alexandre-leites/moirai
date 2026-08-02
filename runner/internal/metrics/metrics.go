@@ -5,8 +5,9 @@
 // the fleet-wide runner heartbeat age — are deliberately absent: the runner
 // cannot populate them, and exporting a constant zero for them is worse than
 // exporting nothing, because an alert on a series that never changes can never
-// fire (issue #124). The orchestrator exports the real ones from the database
-// it owns (`moirai/observability.py`).
+// fire (issue #124). They belong to the orchestrator, which owns that database;
+// the Go orchestrator has no Prometheus surface of its own yet, so they are
+// currently exported by nothing rather than exported wrongly here.
 package metrics
 
 import (

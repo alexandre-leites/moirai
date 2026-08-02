@@ -16,9 +16,9 @@ tests at each layer (spec §4).
 ## Phase A — Contracts and read APIs (backend, no UI changes)
 
 - [ ] **A1 (M) Widen the `Workflow` proto message and `GET /api/v1/workflows`.**
-  Spec §4.2. Carry everything `list_workflows()` already returns (PR id/url, blocking reason,
-  five attempt counters) plus project name, issue number/title, runner id, branch, timestamps,
-  budgets; add `filter`, `projectId`, `q`, pagination params.
+  Spec §4.2. Carry everything the orchestrator's `ListWorkflows` RPC already returns (PR id/url,
+  blocking reason, five attempt counters) plus project name, issue number/title, runner id,
+  branch, timestamps, budgets; add `filter`, `projectId`, `q`, pagination params.
   *Accept:* response matches spec shape; `filter=needs_attention` returns exactly
   `waiting_human ∪ blocked`; old 4-field consumers keep working during migration.
 
@@ -39,9 +39,10 @@ tests at each layer (spec §4).
   *Accept:* plain-text response, size-capped, empty 200 when no logs.
 
 - [ ] **A5 (M) Queue read API with hold reasons.**
-  Spec §4.3: `GET /api/v1/queue` in true scheduler order (reuse `domain/scheduling.py`
-  ordering), computing `holdReason` (`project_busy`, `circuit_open` + probe ETA,
-  `no_compatible_runner`, `behind_in_project`, `none`).
+  Spec §4.3: `GET /api/v1/queue` in true scheduler order (reuse the ordering the scheduler's
+  claim query uses in `orchestrator/internal/server/server.go`), computing `holdReason`
+  (`project_busy`, `circuit_open` + probe ETA, `no_compatible_runner`, `behind_in_project`,
+  `none`).
   *Accept:* order matches the scheduler for the same fixtures; each hold reason covered by a test.
 
 - [ ] **A6 (S) Issue-sync state read API.**
@@ -54,11 +55,12 @@ tests at each layer (spec §4).
   *Accept:* returns open/half-open/closed rows from both tables with scope tags.
 
 - [ ] **A8 (M) System health over gRPC.**
-  Spec §4.3: expose the `health.py` snapshot via a `GetSystemHealth` RPC +
+  Spec §4.3: expose an orchestrator health snapshot via a `GetSystemHealth` RPC +
   `GET /api/v1/system/health`, plus counters: outbox pending/processing, open execution
-  requests, oldest dispatched-request age (the F7 signal).
-  *Accept:* endpoint serves the same fields the health file contains today, without reading
-  the file through the API container.
+  requests, oldest dispatched-request age (the F7 signal). The health file the retired Python
+  orchestrator wrote is gone with #247, so the snapshot is derived in Go from the database and
+  the background loops.
+  *Accept:* endpoint serves the snapshot over gRPC; the API container reads no health file.
 
 - [ ] **A9 (S) Outcome and queue-depth stats.**
   Spec §4.3: `GET /stats/outcomes?days=` (per-day delivered/blocked/failed from

@@ -71,9 +71,11 @@ export function statusMeta(status: string): StatusMeta {
 
 export const isTerminal = (status: string): boolean => TERMINAL_STATUSES.has(status);
 
-// Mirrors RetryBudget in orchestrator/src/moirai/workflows/policy.py. The API
-// reports how much of each budget a run has spent but not the cap, which is a
-// deployment-wide constant rather than per-run state.
+// The meters' denominators. The API reports how much of each budget a run has
+// spent but not the cap, so the console carries one: these are the caps the
+// retired Python orchestrator enforced (RetryBudget), kept as the display
+// budget because the Go V1 orchestrator has no retry policy — it neither caps
+// these counters nor increments most of them (see `reachedPhase`).
 export const ATTEMPT_BUDGETS = {
   planning: 2,
   implementation: 3,
@@ -104,11 +106,16 @@ const phaseIndex = (phase: Phase): number => PHASES.indexOf(phase);
  * `workflow_runs.current_phase` tracks the status column and is overwritten with
  * `blocked`/`failed`/`cancelled` when a run ends badly, so it cannot say where a
  * terminal run stopped. The attempt counters and the pull request can: each one
- * is only ever incremented by the node that owns that phase. Everything here is
- * therefore evidence of a phase having been entered, never an assumption.
+ * is only ever written by the phase that owns it. Everything here is therefore
+ * evidence of a phase having been entered, never an assumption.
  *
- * Specification task A2 replaces this with gate state derived server-side from
- * the checkpoint; this function is the seam that change lands on.
+ * The Go V1 orchestrator writes only `offered`, `preparing`,
+ * `waiting_github_checks` and the terminal statuses, and it never increments the
+ * attempt counters, so today the pull request and the live status carry this on
+ * their own.
+ *
+ * Specification task A2 replaces this with gate state derived server-side; this
+ * function is the seam that change lands on.
  */
 export function reachedPhase(workflow: Workflow): number {
   let reached = 0;
@@ -168,8 +175,9 @@ export const GATE_LABEL: Record<GateState, string> = {
  *
  * The events API returns the raw `event_type` and payload; specification task A3
  * moves this rendering to the orchestrator so every client agrees on the wording.
- * Until then it lives here, and every branch is driven by a field the writer in
- * orchestrator/src/moirai/persistence/control_plane.py actually stores.
+ * Until then it lives here, and every branch is driven by a field the writers in
+ * orchestrator/internal/server (`persistExecutionEvent`, `delivery.go`) actually
+ * store in `app.workflow_events`.
  */
 export function executionError(event: WorkflowEvent): string | null {
   if (event.type !== "failed") return null;

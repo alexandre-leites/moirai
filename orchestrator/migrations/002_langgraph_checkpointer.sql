@@ -1,5 +1,10 @@
 -- LangGraph checkpoint tables (PostgresSaver schema)
 -- https://langchain-ai.github.io/langgraph/how-to/persistence/
+--
+-- Dead schema, kept only because an applied migration cannot be rewritten: #247
+-- replaced the Python/LangGraph orchestrator with the Go state machine, which
+-- persists workflow state in app.workflow_runs and writes nothing here. Nothing
+-- in the codebase reads or writes these tables — do not build against them.
 
 CREATE TABLE IF NOT EXISTS langgraph.checkpoints (
     thread_id TEXT NOT NULL,

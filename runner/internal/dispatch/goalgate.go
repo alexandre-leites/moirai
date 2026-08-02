@@ -41,6 +41,10 @@ import (
 // starting with. The packet's timeoutSeconds bounds the *total* agent wall
 // clock of an execution, continuations included, so the last slice of that
 // budget can be too small to do anything but launch a process and SIGTERM it.
+//
+// A packet that carries timeoutSeconds: 0 — what the orchestrator sends today,
+// issue #276 — bounds nothing, and its shared deadline is already spent when
+// the first attempt ends, so no continuation is ever funded.
 const minimumContinuationRuntime = 5 * time.Second
 
 // gateReason names one piece of missing evidence. The vocabulary is closed and

@@ -62,8 +62,11 @@ export function plural(count: number, singular: string, pluralForm = `${singular
 
 /**
  * The queue's `blockedReason` enum in operator English. The reasons come from
- * the orchestrator's scheduler (domain/scheduling.py); an unrecognized value is
- * passed through rather than swallowed, so a new reason shows up as itself.
+ * the orchestrator's queue query (`ListQueue` in orchestrator/internal/server/
+ * server.go), which emits `project_disabled`, `project_locked` or nothing at
+ * all today; the rest of the vocabulary below is the specified set it is to
+ * grow. An unrecognized value is passed through rather than swallowed, so a new
+ * reason shows up as itself.
  */
 const HOLD_REASONS: Record<string, string> = {
   "": "Next to schedule",

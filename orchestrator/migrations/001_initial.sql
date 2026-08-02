@@ -1,4 +1,6 @@
 CREATE SCHEMA IF NOT EXISTS app;
+-- Unused since #247: it holds only the checkpoint tables of the retired
+-- Python/LangGraph orchestrator (see 002_langgraph_checkpointer.sql).
 CREATE SCHEMA IF NOT EXISTS langgraph;
 
 CREATE TABLE IF NOT EXISTS app.users (
