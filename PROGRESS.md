@@ -10,13 +10,21 @@
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
 - Active implementation: none.
 - Last updated: 2026-08-02
-- Agent/session identifier: system-versions / 2026-08-02
+- Agent/session identifier: ci-deploy-webhook / 2026-08-02
 
 ## In Progress
 
 _Nothing is claimed. The next agent should take the first item under Pending Implementation._
 
 ## Done
+
+- [x] CI deployment webhook notification
+  - Completed: 2026-08-02
+  - Relevant files: `.github/workflows/ci.yml`
+  - Behavior delivered: successful `main` CI aggregate validation posts repository, ref, SHA, actor, and run ID to `DEPLOY_WEBHOOK_URL`, with optional Cloudflare Access service-token headers.
+  - Validation performed: Python YAML parse and `git diff --check` pass.
+  - Commands executed: `python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/ci.yml"))'`, `git diff --check`.
+
 
 - [x] System-version reporting
   - Completed: 2026-08-02
