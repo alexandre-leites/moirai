@@ -10,13 +10,21 @@
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
 - Active implementation: None.
 - Last updated: 2026-08-02
-- Agent/session identifier: workflow-error-ui / 2026-08-02
+- Agent/session identifier: main-content-width / 2026-08-02
 
 ## In Progress
 
 _Nothing is claimed. The next agent should take the first item under Pending Implementation._
 
 ## Done
+
+- [x] #244 — use 90% available width for main app content
+  - Completed: 2026-08-02
+  - Relevant files: `web/src/styles.css`
+  - Behavior delivered: removed 1240px cap; all main children now use 90% of main-pane width.
+  - Research: existing grid, table, form, detail, log, sidebar, padding, and mobile breakpoint rules remain parent-relative or independent of this width.
+  - Validation performed: TypeScript typecheck, ESLint (0 errors; 16 existing warnings), production build, and `git diff --check`.
+  - Commands executed: `npm run typecheck`, `npm run lint`, `npm run build`, `git diff --check`.
 
 - [x] Workflow execution-error visibility
   - Completed: 2026-08-02
@@ -245,6 +253,7 @@ are fixed in `f15d6ef` and `238a9c4`, and run `30701717203` is green across all 
 CI run `30701717203` on `238a9c4` — **all 12 jobs green**. This is the first CI run to
 complete on `main`; everything below was confirmed by it, not only locally.
 
+- #244 targeted validation: `npm run typecheck`, `npm run lint` (0 errors; 16 existing warnings), `npm run build`, and `git diff --check` pass.
 - Targeted tests: `web` — 195 vitest tests
 - Service tests: `api`; `runner` under `-race`; `orchestrator` — 577 tests
 - Postgres integration: 55 tests against a real database, re-runnable and verified against a
