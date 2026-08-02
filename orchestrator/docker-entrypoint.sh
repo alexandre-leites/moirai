@@ -69,4 +69,4 @@ if [ -f "$secret_dir/secret_key" ]; then
   export LOOP_SECRET_KEY_FILE="$secret_dir/secret_key"
 fi
 
-exec gosu loop python -m moirai.main "$@"
+exec gosu loop /app/orchestrator "$@"
