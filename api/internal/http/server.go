@@ -33,6 +33,8 @@ type Config struct {
 	// reachable. When nil, health/readiness routes assume it is (used by tests
 	// and any caller that has not wired an orchestrator client yet).
 	OrchestratorHealthy func() bool
+	Version             string
+	OrchestratorVersion func() string
 }
 
 func DefaultConfig() Config {
@@ -155,9 +157,15 @@ func (s *Server) registerHealthRoutes() {
 			apiStatus = "degraded"
 			orchestratorStatus = "unreachable"
 		}
+		orchestratorVersion := ""
+		if s.cfg.OrchestratorVersion != nil {
+			orchestratorVersion = s.cfg.OrchestratorVersion()
+		}
 		WriteJSON(w, status, map[string]any{
-			"status":       apiStatus,
-			"orchestrator": orchestratorStatus,
+			"status":              apiStatus,
+			"orchestrator":        orchestratorStatus,
+			"apiVersion":          s.cfg.Version[:min(len(s.cfg.Version), 12)],
+			"orchestratorVersion": orchestratorVersion[:min(len(orchestratorVersion), 12)],
 		})
 	})
 }

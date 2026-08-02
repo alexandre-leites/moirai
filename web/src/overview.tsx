@@ -162,10 +162,27 @@ export function OverviewPage({ api }: { api: ApiClient }) {
         </div>
 
         <div className="stack">
+          <SystemVersions health={vitals.data?.health} runners={runners} />
           <RecentEvents api={api} workflows={active} />
         </div>
       </div>
     </div>
+  );
+}
+
+function SystemVersions({ health, runners }: { health?: Health; runners: import("./api").Runner[] }) {
+  const versions = [
+    ["Web", import.meta.env.VITE_BUILD_VERSION],
+    ["API", health?.apiVersion],
+    ["Orchestrator", health?.orchestratorVersion],
+    ...runners.map((runner) => [`Runner: ${runner.name}`, runner.version]),
+  ].filter(([, version]) => Boolean(version?.trim())).map(([name, version]) => [name, version!.trim().slice(0, 12)]);
+
+  return (
+    <Card>
+      <CardHeader title="System versions" />
+      {versions.map(([name, version]) => <div className="row-line" key={name}><span>{name}</span><code>{version}</code></div>)}
+    </Card>
   );
 }
 

@@ -133,7 +133,7 @@ class InMemoryControlPlane:
                 raise AuthenticationError("runner credential is invalid")
             return runner
 
-    def heartbeat(self, runner_id: str, credential: str, now: datetime) -> Runner:
+    def heartbeat(self, runner_id: str, credential: str, now: datetime, version: str = "") -> Runner:
         with self._lock:
             runner = self.authenticate_runner(runner_id, credential, now)
             updated = replace(runner, connected=True, healthy=True)

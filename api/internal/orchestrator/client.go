@@ -301,6 +301,14 @@ func (c *Client) RevokeRunnerRegistrationToken(ctx context.Context, tokenID stri
 	return resp, nil
 }
 
+func (c *Client) SystemVersion(ctx context.Context) (string, error) {
+	resp, err := c.client.GetSystemVersion(ctx, &controlv1.GetSystemVersionRequest{})
+	if err != nil {
+		return "", mapError(err)
+	}
+	return resp.Version, nil
+}
+
 func (c *Client) ListRunners(ctx context.Context) (*controlv1.ListRunnersResponse, error) {
 	resp, err := c.client.ListRunners(ctx, &controlv1.ListRunnersRequest{})
 	if err != nil {

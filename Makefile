@@ -5,7 +5,7 @@ MYPY_CACHE ?= /tmp/moirai-mypy-cache
 .PHONY: help test lint typecheck validate compose compose-overlays dev-install \
         proto-lint proto-generate proto-check test-release-tags compose-tls-stack \
         test-orchestrator test-postgres-integration test-runner test-api test-web \
-        build-runner build-api build-web
+         build-runner build-api build-web build-images
 
 help:
 	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run orchestrator tests.' '  make test-runner       Run runner tests with the race detector.' '  make test-api          Run API tests.' '  make test-web          Install web dependencies and run typecheck, lint, and unit tests.' '  make lint              Run orchestrator lint.' '  make typecheck         Run orchestrator type checks.' '  make validate          Run test, lint, typecheck, Compose, and proto checks.' '  make compose           Validate the Compose configuration.' '  make compose-overlays  Validate the build and secrets Compose overlays.' '  make test-release-tags Check the release trigger to image tag mapping.' '  make proto-check       Lint, generate, and verify protobuf outputs.'
@@ -51,6 +51,9 @@ build-api:
 
 build-web:
 	cd web && npm ci && npm run build
+
+build-images:
+	MOIRAI_BUILD_VERSION="$$(git rev-parse --short=12 HEAD)" docker compose -f compose.yaml -f compose.build.yaml build
 
 compose:
 	docker compose config

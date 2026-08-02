@@ -59,6 +59,19 @@ describe("OverviewPage", () => {
     expect(container.textContent).toContain("1 offline");
   });
 
+  it("shows component and reported runner commits", async () => {
+    const client = stubApi({
+      health: async () => ({ status: "healthy", orchestrator: "reachable", apiVersion: "1234567890abcdef", orchestratorVersion: "abcdef1234567890" }),
+      listRunners: async () => [runner({ name: "loom-01", version: "fedcba9876543210" }), runner({ name: "loom-02" })],
+    });
+    const container = await mountView(<OverviewPage api={client} />, client);
+    expect(container.textContent).toContain("System versions");
+    expect(container.textContent).toContain("1234567890ab");
+    expect(container.textContent).toContain("abcdef123456");
+    expect(container.textContent).toContain("fedcba987654");
+    expect(container.textContent).not.toContain("Runner: loom-02");
+  });
+
   it("lists what needs a human, newest concern first", async () => {
     const client = api();
     const container = await mountView(<OverviewPage api={client} />, client);

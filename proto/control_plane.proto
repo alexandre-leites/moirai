@@ -30,6 +30,7 @@ service ControlPlane {
   rpc CancelWorkflow(CancelWorkflowRequest) returns (CancelWorkflowResponse);
   rpc BlockWorkflow(BlockWorkflowRequest) returns (BlockWorkflowResponse);
   rpc GetSchedulerMetrics(GetSchedulerMetricsRequest) returns (GetSchedulerMetricsResponse);
+  rpc GetSystemVersion(GetSystemVersionRequest) returns (GetSystemVersionResponse);
   rpc StreamEvents(StreamEventsRequest) returns (stream ControlPlaneEvent);
 }
 
@@ -165,7 +166,7 @@ message WorkflowEvent {
 message ListWorkflowEventsRequest { string workflow_run_id = 1; int64 after_id = 2; int32 limit = 3; }
 message ListWorkflowEventsResponse { repeated WorkflowEvent events = 1; string next_cursor = 2; }
 message ListRunnersRequest {}
-message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; }
+message Runner { string id = 1; string name = 2; bool enabled = 3; bool draining = 4; string status = 5; repeated string labels = 6; string last_seen_at = 7; string version = 8; }
 message ListRunnersResponse { repeated Runner runners = 1; }
 message ListQueueRequest { int32 limit = 1; }
 message QueueEntry {
@@ -215,6 +216,8 @@ message BlockWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
 message BlockWorkflowResponse { Workflow workflow = 1; }
 message GetSchedulerMetricsRequest {}
 message GetSchedulerMetricsResponse { int32 queue_depth = 1; int32 active_workflows = 2; int32 scheduled_jobs = 3; }
+message GetSystemVersionRequest {}
+message GetSystemVersionResponse { string version = 1; }
 message StreamEventsRequest { string last_event_id = 1; }
 message ControlPlaneEvent {
   string id = 1;

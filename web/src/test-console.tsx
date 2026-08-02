@@ -64,6 +64,7 @@ export function runner(overrides: Partial<Runner> = {}): Runner {
     enabled: true,
     draining: false,
     status: "online",
+    version: "",
     labels: ["go", "docker"],
     lastSeenAt: new Date().toISOString(),
     ...overrides,

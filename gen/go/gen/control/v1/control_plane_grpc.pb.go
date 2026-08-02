@@ -46,6 +46,7 @@ const (
 	ControlPlane_CancelWorkflow_FullMethodName                = "/loop.control.v1.ControlPlane/CancelWorkflow"
 	ControlPlane_BlockWorkflow_FullMethodName                 = "/loop.control.v1.ControlPlane/BlockWorkflow"
 	ControlPlane_GetSchedulerMetrics_FullMethodName           = "/loop.control.v1.ControlPlane/GetSchedulerMetrics"
+	ControlPlane_GetSystemVersion_FullMethodName              = "/loop.control.v1.ControlPlane/GetSystemVersion"
 	ControlPlane_StreamEvents_FullMethodName                  = "/loop.control.v1.ControlPlane/StreamEvents"
 )
 
@@ -80,6 +81,7 @@ type ControlPlaneClient interface {
 	CancelWorkflow(ctx context.Context, in *CancelWorkflowRequest, opts ...grpc.CallOption) (*CancelWorkflowResponse, error)
 	BlockWorkflow(ctx context.Context, in *BlockWorkflowRequest, opts ...grpc.CallOption) (*BlockWorkflowResponse, error)
 	GetSchedulerMetrics(ctx context.Context, in *GetSchedulerMetricsRequest, opts ...grpc.CallOption) (*GetSchedulerMetricsResponse, error)
+	GetSystemVersion(ctx context.Context, in *GetSystemVersionRequest, opts ...grpc.CallOption) (*GetSystemVersionResponse, error)
 	StreamEvents(ctx context.Context, in *StreamEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ControlPlaneEvent], error)
 }
 
@@ -361,6 +363,16 @@ func (c *controlPlaneClient) GetSchedulerMetrics(ctx context.Context, in *GetSch
 	return out, nil
 }
 
+func (c *controlPlaneClient) GetSystemVersion(ctx context.Context, in *GetSystemVersionRequest, opts ...grpc.CallOption) (*GetSystemVersionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSystemVersionResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_GetSystemVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *controlPlaneClient) StreamEvents(ctx context.Context, in *StreamEventsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ControlPlaneEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &ControlPlane_ServiceDesc.Streams[0], ControlPlane_StreamEvents_FullMethodName, cOpts...)
@@ -411,6 +423,7 @@ type ControlPlaneServer interface {
 	CancelWorkflow(context.Context, *CancelWorkflowRequest) (*CancelWorkflowResponse, error)
 	BlockWorkflow(context.Context, *BlockWorkflowRequest) (*BlockWorkflowResponse, error)
 	GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error)
+	GetSystemVersion(context.Context, *GetSystemVersionRequest) (*GetSystemVersionResponse, error)
 	StreamEvents(*StreamEventsRequest, grpc.ServerStreamingServer[ControlPlaneEvent]) error
 	mustEmbedUnimplementedControlPlaneServer()
 }
@@ -502,6 +515,9 @@ func (UnimplementedControlPlaneServer) BlockWorkflow(context.Context, *BlockWork
 }
 func (UnimplementedControlPlaneServer) GetSchedulerMetrics(context.Context, *GetSchedulerMetricsRequest) (*GetSchedulerMetricsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetSchedulerMetrics not implemented")
+}
+func (UnimplementedControlPlaneServer) GetSystemVersion(context.Context, *GetSystemVersionRequest) (*GetSystemVersionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetSystemVersion not implemented")
 }
 func (UnimplementedControlPlaneServer) StreamEvents(*StreamEventsRequest, grpc.ServerStreamingServer[ControlPlaneEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method StreamEvents not implemented")
@@ -1013,6 +1029,24 @@ func _ControlPlane_GetSchedulerMetrics_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ControlPlane_GetSystemVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSystemVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).GetSystemVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_GetSystemVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).GetSystemVersion(ctx, req.(*GetSystemVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ControlPlane_StreamEvents_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(StreamEventsRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -1138,6 +1172,10 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSchedulerMetrics",
 			Handler:    _ControlPlane_GetSchedulerMetrics_Handler,
+		},
+		{
+			MethodName: "GetSystemVersion",
+			Handler:    _ControlPlane_GetSystemVersion_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

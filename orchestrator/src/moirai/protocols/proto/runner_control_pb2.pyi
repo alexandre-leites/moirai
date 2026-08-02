@@ -61,12 +61,14 @@ class OrchestratorToRunner(_message.Message):
     def __init__(self, offer: _Optional[_Union[JobOffer, _Mapping]] = ..., cancel: _Optional[_Union[CancelExecution, _Mapping]] = ..., lease_acknowledged: _Optional[_Union[LeaseAcknowledged, _Mapping]] = ..., drain: _Optional[_Union[DrainRunner, _Mapping]] = ...) -> None: ...
 
 class Heartbeat(_message.Message):
-    __slots__ = ("labels", "busy")
+    __slots__ = ("labels", "busy", "version")
     LABELS_FIELD_NUMBER: _ClassVar[int]
     BUSY_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
     labels: _containers.RepeatedScalarFieldContainer[str]
     busy: bool
-    def __init__(self, labels: _Optional[_Iterable[str]] = ..., busy: _Optional[bool] = ...) -> None: ...
+    version: str
+    def __init__(self, labels: _Optional[_Iterable[str]] = ..., busy: _Optional[bool] = ..., version: _Optional[str] = ...) -> None: ...
 
 class JobOffer(_message.Message):
     __slots__ = ("job_id", "lease_generation", "task_packet_json")

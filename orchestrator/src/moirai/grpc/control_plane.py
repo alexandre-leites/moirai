@@ -42,6 +42,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         workflow_runtime: Any | None = None,
         runner_control: Any | None = None,
         issue_sync: Any | None = None,
+        version: str = "",
     ) -> None:
         if registration_token_ttl <= timedelta():
             raise ValueError("registration token TTL must be positive")
@@ -51,6 +52,7 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
         self._workflow_runtime = workflow_runtime
         self._runner_control = runner_control
         self._issue_sync = issue_sync
+        self._version = version[:12]
 
     async def Login(
         self,
@@ -482,6 +484,14 @@ class ControlPlaneService(control_plane_pb2_grpc.ControlPlaneServicer):
             scheduled_jobs=int(snapshot["scheduled_jobs"]),
         )
 
+    async def GetSystemVersion(
+        self,
+        request: control_plane_pb2.GetSystemVersionRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> control_plane_pb2.GetSystemVersionResponse:
+        del request, context
+        return control_plane_pb2.GetSystemVersionResponse(version=self._version)
+
     async def SyncNow(
         self,
         request: control_plane_pb2.SyncNowRequest,
@@ -763,6 +773,7 @@ def _runner_message(runner: RunnerRecord) -> control_plane_pb2.Runner:
         enabled=runner["enabled"],
         draining=runner["draining"],
         status=runner["status"],
+        version=runner.get("version", ""),
         labels=runner["labels"],
         last_seen_at=_optional_timestamp(runner["last_seen_at"]),
     )

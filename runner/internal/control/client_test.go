@@ -102,6 +102,24 @@ func TestRegisterAndConnectSendsAuthenticatedLeaseMessages(t *testing.T) {
 	}
 }
 
+func TestClientHeartbeatReportsBuildVersion(t *testing.T) {
+	service := &fakeService{stream: &fakeStream{}}
+	client, err := NewClient(service, Identity{RunnerID: "runner-1", Credential: "credential-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetVersion("1234567890abcdef")
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Heartbeat(nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := service.stream.sent[0].GetHeartbeat().GetVersion(); got != "1234567890abcdef" {
+		t.Fatalf("heartbeat version = %q", got)
+	}
+}
+
 func TestClientDisconnectCancelsStreamContext(t *testing.T) {
 	service := &fakeService{stream: &fakeStream{}}
 	client, err := NewClient(service, Identity{RunnerID: "runner-1", Credential: "credential-1"})

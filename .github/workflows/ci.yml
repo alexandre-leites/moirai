@@ -211,7 +211,7 @@ jobs:
       # the last release produced. The defaults in compose.yaml are enough to
       # start the stack, so nothing has to be prepared first.
       - name: Build and start stack
-        run: docker compose -f compose.yaml -f compose.build.yaml up --build --detach --wait --wait-timeout 240
+        run: MOIRAI_BUILD_VERSION="$(git rev-parse --short=12 HEAD)" docker compose -f compose.yaml -f compose.build.yaml up --build --detach --wait --wait-timeout 240
       - name: Verify readiness endpoints
         run: |
           curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/
