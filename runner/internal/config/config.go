@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,7 +14,10 @@ import (
 	"unicode"
 )
 
-var environmentName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+var (
+	environmentName        = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
+	orchestratorHeaderName = regexp.MustCompile(`^[0-9A-Za-z_.-]{1,128}$`)
+)
 
 const (
 	defaultDataDir = "/data"
@@ -32,52 +36,54 @@ const (
 )
 
 type Config struct {
-	OrchestratorEndpoint string
-	DataDir              string
-	KeyDir               string
-	RunnerName           string
-	Labels               []string
-	AllowedEnvironment   []string
-	RegistrationToken    string
-	HeartbeatInterval    time.Duration
-	ReconnectMin         time.Duration
-	ReconnectMax         time.Duration
-	TLS                  bool
-	TLSCAFile            string
-	TLSClientCertFile    string
-	TLSClientKeyFile     string
-	TLSServerName        string
-	MinimumFreeBytes     uint64
-	Capacity             int
-	RedactionPrefixes    []string
-	DockerEnabled        bool
-	WorkspaceRetention   []string
-	RetentionMaxAge      time.Duration
-	RetentionMaxCount    int
-	PushWorkInProgress   bool
-	AgentBackend         string
-	AgentBinary          string
-	AgentArguments       []string
-	AgentDockerImage     string
-	MetricsBind          string
-	GitCommitterName     string
-	GitCommitterEmail    string
-	LeaseDuration        time.Duration
-	LeaseRenewalLead     time.Duration
-	OfferTimeout         time.Duration
-	ReconnectGrace       time.Duration
-	EventBufferSize      int
-	EventPayloadBytes    int
-	LogChunkBytes        int
-	MaxLogBytes          int
-	TerminationGrace     time.Duration
-	DockerCPULimit       string
-	DockerMemoryLimit    string
-	DockerNetwork        string
-	DockerStopTimeout    time.Duration
-	RepositoryLockPoll   time.Duration
-	CleanupAttempts      int
-	CleanupRetryDelay    time.Duration
+	OrchestratorEndpoint    string
+	DataDir                 string
+	KeyDir                  string
+	RunnerName              string
+	Labels                  []string
+	AllowedEnvironment      []string
+	RegistrationToken       string
+	HeartbeatInterval       time.Duration
+	ReconnectMin            time.Duration
+	ReconnectMax            time.Duration
+	TLS                     bool
+	TLSCAFile               string
+	TLSClientCertFile       string
+	TLSClientKeyFile        string
+	TLSServerName           string
+	OrchestratorHeaders     map[string]string
+	OrchestratorHeadersFile string
+	MinimumFreeBytes        uint64
+	Capacity                int
+	RedactionPrefixes       []string
+	DockerEnabled           bool
+	WorkspaceRetention      []string
+	RetentionMaxAge         time.Duration
+	RetentionMaxCount       int
+	PushWorkInProgress      bool
+	AgentBackend            string
+	AgentBinary             string
+	AgentArguments          []string
+	AgentDockerImage        string
+	MetricsBind             string
+	GitCommitterName        string
+	GitCommitterEmail       string
+	LeaseDuration           time.Duration
+	LeaseRenewalLead        time.Duration
+	OfferTimeout            time.Duration
+	ReconnectGrace          time.Duration
+	EventBufferSize         int
+	EventPayloadBytes       int
+	LogChunkBytes           int
+	MaxLogBytes             int
+	TerminationGrace        time.Duration
+	DockerCPULimit          string
+	DockerMemoryLimit       string
+	DockerNetwork           string
+	DockerStopTimeout       time.Duration
+	RepositoryLockPoll      time.Duration
+	CleanupAttempts         int
+	CleanupRetryDelay       time.Duration
 	// MaxContinuations bounds how many times one execution re-engages its agent
 	// after the runner's goal gate finds the objective unmet. Zero switches the
 	// goal loop off. Continuations run inside a single lease and share the
@@ -141,8 +147,26 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		TLSServerName:        envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_SERVER_NAME"),
 		MetricsBind:          envOrDefault(lookupEnv, "LOOP_RUNNER_METRICS_BIND", ":9091"),
 	}
+	if config.TLS, err = boolEnv(lookupEnv, "LOOP_ORCHESTRATOR_TLS", false); err != nil {
+		return Config{}, err
+	}
 	if config.RegistrationToken, err = secretFileValue(lookupEnv, "LOOP_RUNNER_REGISTRATION_TOKEN"); err != nil {
 		return Config{}, err
+	}
+	if config.OrchestratorHeadersFile, err = headerFilePath(lookupEnv); err != nil {
+		return Config{}, err
+	}
+	if config.OrchestratorHeadersFile != "" || envValue(lookupEnv, "LOOP_ORCHESTRATOR_HEADERS") != "" {
+		if !config.TLS {
+			return Config{}, errors.New("runner orchestrator headers require TLS because credentials must not be sent over an insecure connection")
+		}
+		if config.OrchestratorHeadersFile != "" {
+			if _, err := ReadOrchestratorHeaders(config.OrchestratorHeadersFile); err != nil {
+				return Config{}, err
+			}
+		} else if config.OrchestratorHeaders, err = parseOrchestratorHeaders(envValue(lookupEnv, "LOOP_ORCHESTRATOR_HEADERS")); err != nil {
+			return Config{}, err
+		}
 	}
 	if config.Labels, err = parseLabels(envValue(lookupEnv, "LOOP_RUNNER_LABELS")); err != nil {
 		return Config{}, err
@@ -207,9 +231,6 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 	config.DockerCPULimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_CPU_LIMIT")
 	config.DockerMemoryLimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_MEMORY_LIMIT")
 	config.DockerNetwork = envOrDefault(lookupEnv, "LOOP_RUNNER_DOCKER_NETWORK", config.DockerNetwork)
-	if config.TLS, err = boolEnv(lookupEnv, "LOOP_ORCHESTRATOR_TLS", false); err != nil {
-		return Config{}, err
-	}
 	if config.DockerEnabled, err = boolEnv(lookupEnv, "LOOP_RUNNER_DOCKER_ENABLED", false); err != nil {
 		return Config{}, err
 	}
@@ -253,6 +274,9 @@ func (c Config) Validate() error {
 	}
 	if err := validateTLS(c); err != nil {
 		return err
+	}
+	if (len(c.OrchestratorHeaders) > 0 || c.OrchestratorHeadersFile != "") && !c.TLS {
+		return errors.New("runner orchestrator headers require TLS because credentials must not be sent over an insecure connection")
 	}
 	if c.AgentBackend != "opencode" && c.AgentBackend != "cli" && c.AgentBackend != "docker" {
 		return errors.New("runner agent backend is invalid")
@@ -304,6 +328,66 @@ func validateTLS(config Config) error {
 		return errors.New("runner TLS server name is invalid")
 	}
 	return nil
+}
+
+func parseOrchestratorHeaders(value string) (map[string]string, error) {
+	if value == "" {
+		return nil, nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(value), &headers); err != nil || !validOrchestratorHeaders(headers) {
+		return nil, errors.New("runner orchestrator headers are invalid")
+	}
+	return normalizeOrchestratorHeaders(headers), nil
+}
+
+func headerFilePath(lookupEnv func(string) (string, bool)) (string, error) {
+	path := envValue(lookupEnv, "LOOP_ORCHESTRATOR_HEADERS_FILE")
+	if path == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(path) || hasUnsafeText(path) {
+		return "", errors.New("runner orchestrator headers file path is invalid")
+	}
+	return path, nil
+}
+
+func ReadOrchestratorHeaders(path string) (map[string]string, error) {
+	metadata, err := os.Stat(path)
+	if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 16_384 {
+		return nil, errors.New("runner orchestrator headers file cannot be read")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("runner orchestrator headers file cannot be read")
+	}
+	return parseOrchestratorHeaders(string(contents))
+}
+
+func validOrchestratorHeaders(headers map[string]string) bool {
+	if len(headers) == 0 || len(headers) > 32 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(headers))
+	for name, value := range headers {
+		lowerName := strings.ToLower(name)
+		if !orchestratorHeaderName.MatchString(name) || strings.HasSuffix(lowerName, "-bin") || value == "" || len(value) > 8_192 || strings.IndexFunc(value, unicode.IsControl) >= 0 {
+			return false
+		}
+		if _, exists := seen[lowerName]; exists {
+			return false
+		}
+		seen[lowerName] = struct{}{}
+	}
+	return true
+}
+
+func normalizeOrchestratorHeaders(headers map[string]string) map[string]string {
+	normalized := make(map[string]string, len(headers))
+	for name, value := range headers {
+		normalized[strings.ToLower(name)] = value
+	}
+	return normalized
 }
 
 // SecretValue resolves a named secret, preferring the Docker-style
