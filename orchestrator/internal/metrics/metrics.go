@@ -202,7 +202,11 @@ func (r *Recorder) RecordLoopRun(loop string, err error) {
 // clock that genuinely runs backwards, since no consumer of an age has a
 // meaning for a negative one.
 func (r *Recorder) loopSuccessAge(loop string) float64 {
-	last := r.lastSuccess[loop].Load()
+	stored, known := r.lastSuccess[loop]
+	if !known {
+		return 0
+	}
+	last := stored.Load()
 	if last == nil {
 		return 0
 	}
@@ -249,9 +253,13 @@ func (c *collector) Collect(ch chan<- prometheus.Metric) {
 
 // collectState emits the database-derived series, or none of them.
 func (c *collector) collectState(ch chan<- prometheus.Metric) {
-	// A scrape must not be able to take the orchestrator down. A panic raised
-	// below would otherwise unwind through the registry's gather goroutine,
-	// which is not the caller's goroutine and has no recovery of its own.
+	// The registry already recovers a panicking collector (safeCollect), so
+	// this is not what keeps the process alive. It is what keeps the *rest of
+	// the response* alive: the registry turns the panic into a gather error,
+	// and promhttp's default error handling then answers 500 and serves no
+	// body at all — losing the loop series and the scrape-error counter, which
+	// are precisely the series that would tell an operator something is wrong.
+	// Contained here, one bad read costs the state series and nothing else.
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			c.recorder.scrapeErrors.Add(1)
@@ -304,7 +312,16 @@ func NewWithClock(bind string, source Source, now func() time.Time) *Server {
 		&collector{source: source, recorder: recorder, timeout: scrapeTimeout},
 	)
 	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+	// MaxRequestsInFlight bounds how many scrapes may hold a database
+	// connection at once. Without it the endpoint is an unauthenticated way to
+	// drain the connection pool: every concurrent GET runs a query that holds
+	// one pooled connection for up to scrapeTimeout, and the pool is shared
+	// with the scheduler tick, runner heartbeats and job events. Two, so a
+	// second Prometheus (a rolling replacement, a one-off curl) is served
+	// rather than refused, and the pool — max(4, NumCPU) — keeps headroom for
+	// the control plane. Anything beyond that gets 503, which is the honest
+	// answer to "scrape faster than I can read".
+	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{MaxRequestsInFlight: 2}))
 	return &Server{
 		bind:     bind,
 		recorder: recorder,
@@ -324,7 +341,12 @@ func (s *Server) Recorder() *Recorder {
 }
 
 // Handler returns the metrics handler, for callers that serve it themselves.
-func (s *Server) Handler() http.Handler { return s.server.Handler }
+func (s *Server) Handler() http.Handler {
+	if s == nil {
+		return http.NotFoundHandler()
+	}
+	return s.server.Handler
+}
 
 // Addr is the address actually bound, which is not the configured one when the
 // configured port was 0. Empty until Start succeeds.

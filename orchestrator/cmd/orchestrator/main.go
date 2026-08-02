@@ -152,11 +152,15 @@ func run() error {
 		return err
 	}
 	if metricsServer.Enabled() {
-		slog.Info("serving metrics", "bind", cfg.MetricsBind, "path", "/metrics")
+		// The bound address, not the configured one: they differ when the
+		// configured port was 0, and the address a scraper needs is the one
+		// that was actually taken.
+		slog.Info("serving metrics", "bind", metricsServer.Addr(), "path", "/metrics")
 		// Deferred, so /metrics stays scrapeable for the whole of the gRPC
-		// graceful drain below and stops only once there is nothing left to
-		// report. The database pool is closed by an earlier defer, which
-		// therefore runs after this one.
+		// graceful drain below. The pool is closed by an earlier defer, so it
+		// outlives this one; a scrape still running when Shutdown's own
+		// deadline expires can still lose its connection under it, which the
+		// collector reports as a failed scrape rather than a crash.
 		defer func() {
 			shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

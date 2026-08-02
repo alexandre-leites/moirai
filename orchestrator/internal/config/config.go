@@ -20,9 +20,11 @@ const DefaultGRPCBind = "0.0.0.0:50051"
 
 // DefaultMetricsBind is the address /metrics is served on when
 // LOOP_METRICS_BIND is unset. It is the port the previous orchestrator used, so
-// a scrape configuration written against it keeps working, and it is distinct
-// from the runner's LOOP_RUNNER_METRICS_BIND (`:9091`) so both can run on one
-// host.
+// an existing scrape target still resolves — though two of its series were
+// renamed on the way (moirai_active_workflow_count and
+// moirai_scheduled_job_count; see orchestrator/README.md), so queries written
+// against those names need updating. It is distinct from the runner's
+// LOOP_RUNNER_METRICS_BIND (`:9091`) so both can run on one host.
 const DefaultMetricsBind = "0.0.0.0:9090"
 
 type Config struct {
@@ -66,8 +68,15 @@ func Load() (Config, error) {
 		metricsBind = strings.TrimSpace(configured)
 	}
 	if metricsBind != "" {
-		if _, _, err := net.SplitHostPort(metricsBind); err != nil {
+		// The port is checked separately because SplitHostPort accepts an empty
+		// one: "0.0.0.0:" would pass, bind an ephemeral port nothing is
+		// configured to scrape, and look healthy while exporting to nobody.
+		_, port, err := net.SplitHostPort(metricsBind)
+		if err != nil {
 			return Config{}, fmt.Errorf("LOOP_METRICS_BIND must be host:port: %w", err)
+		}
+		if port == "" {
+			return Config{}, fmt.Errorf("LOOP_METRICS_BIND must name a port, got %q", metricsBind)
 		}
 	}
 	// Refused rather than warned about, so a typo in the interval fails the same

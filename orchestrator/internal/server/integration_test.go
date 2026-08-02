@@ -473,9 +473,10 @@ func TestCancelledWorkCannotBeAcceptedLater(t *testing.T) {
 	_ = time.Now
 }
 
-// metricSample reads one series out of Prometheus exposition text, reporting
-// whether it was exported at all.
-func metricSample(body, series string) (float64, bool) {
+// metricSample reads one series out of Prometheus exposition text as written,
+// reporting whether it was exported at all. The value is returned unparsed so
+// that "absent" and "exported as something unparseable" stay different answers.
+func metricSample(body, series string) (string, bool) {
 	for line := range strings.Lines(body) {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") {
@@ -485,13 +486,22 @@ func metricSample(body, series string) (float64, bool) {
 		if !found || name != series {
 			continue
 		}
-		parsed, err := strconv.ParseFloat(value, 64)
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
+		return value, true
 	}
-	return 0, false
+	return "", false
+}
+
+func mustMetricSample(t *testing.T, body, series string) float64 {
+	t.Helper()
+	value, exported := metricSample(body, series)
+	if !exported {
+		t.Fatalf("%s was not exported; body:\n%s", series, body)
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		t.Fatalf("%s was exported as %q, which is not a number", series, value)
+	}
+	return parsed
 }
 
 // The series #124 moved off the API and the runner have to carry the database's
@@ -591,24 +601,15 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 		"moirai_scheduled_jobs":   1,
 		"moirai_enabled_runners":  2,
 	} {
-		got, exported := metricSample(body, series)
-		if !exported {
-			t.Errorf("%s was not exported; body:\n%s", series, body)
-			continue
-		}
-		if got != want {
+		if got := mustMetricSample(t, body, series); got != want {
 			t.Errorf("%s = %v, want %v", series, got, want)
 		}
 	}
-	age, exported := metricSample(body, "moirai_runner_heartbeat_age_seconds")
-	if !exported {
-		t.Fatalf("moirai_runner_heartbeat_age_seconds was not exported; body:\n%s", body)
-	}
-	if age < 590 || age > 900 {
+	if age := mustMetricSample(t, body, "moirai_runner_heartbeat_age_seconds"); age < 590 || age > 900 {
 		t.Errorf("moirai_runner_heartbeat_age_seconds = %v, want ~600", age)
 	}
-	if errors, _ := metricSample(body, "moirai_orchestrator_metrics_scrape_errors_total"); errors != 0 {
-		t.Errorf("moirai_orchestrator_metrics_scrape_errors_total = %v after a healthy scrape, want 0", errors)
+	if failures := mustMetricSample(t, body, "moirai_orchestrator_metrics_scrape_errors_total"); failures != 0 {
+		t.Errorf("moirai_orchestrator_metrics_scrape_errors_total = %v after a healthy scrape, want 0", failures)
 	}
 }
 
@@ -638,11 +639,34 @@ func TestScrapeSurvivesAnUnreachableDatabase(t *testing.T) {
 	if value, exported := metricSample(body, "moirai_queue_depth"); exported {
 		t.Errorf("moirai_queue_depth = %v with no database, want the series to be absent rather than zero", value)
 	}
-	if count, _ := metricSample(body, "moirai_orchestrator_metrics_scrape_errors_total"); count != 1 {
+	if count := mustMetricSample(t, body, "moirai_orchestrator_metrics_scrape_errors_total"); count != 1 {
 		t.Errorf("moirai_orchestrator_metrics_scrape_errors_total = %v, want 1", count)
 	}
 	// The process is still serving, and the healthy harness pool is untouched.
 	if _, err := h.MetricsSnapshot(context.Background()); err != nil {
 		t.Fatalf("MetricsSnapshot on a live pool after a failed scrape: %v", err)
+	}
+}
+
+// A runner that registered and never connected has no heartbeat to age from.
+// Ignoring it would let a fleet that never came up report the age of the one
+// runner that did, so its age is counted from registration instead -- the same
+// rule the runner applies to itself, where the age counts from process start
+// until the first heartbeat.
+func TestHeartbeatAgeCountsANeverConnectedRunnerFromRegistration(t *testing.T) {
+	h := newHarness(t)
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at,registered_at) VALUES($1,$2,'offline','1','[]'::jsonb,NULL,now()-interval '3000 seconds')`, newID(), "never-connected")
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '10 seconds')`, newID(), "connected")
+
+	snapshot, err := h.MetricsSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("MetricsSnapshot: %v", err)
+	}
+
+	if snapshot.EnabledRunners != 2 {
+		t.Errorf("EnabledRunners = %d, want 2", snapshot.EnabledRunners)
+	}
+	if age := snapshot.OldestHeartbeatAge; age < 2990*time.Second || age > 3300*time.Second {
+		t.Errorf("OldestHeartbeatAge = %s, want ~3000s: a runner that never connected is not fresh, and not invisible", age)
 	}
 }

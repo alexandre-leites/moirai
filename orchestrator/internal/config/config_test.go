@@ -230,10 +230,19 @@ func TestEmptyMetricsBindDisablesTheListener(t *testing.T) {
 }
 
 // A typo must stop the process, not silently serve somewhere else -- the same
-// treatment LOOP_GRPC_BIND gets.
+// treatment LOOP_GRPC_BIND gets. "0.0.0.0:" is the interesting one:
+// SplitHostPort accepts it, and it would bind an ephemeral port that nothing is
+// configured to scrape while the process reported itself as serving metrics.
 func TestMetricsBindRejectsAnAddressWithoutAPort(t *testing.T) {
-	t.Setenv("LOOP_METRICS_BIND", "9090")
-	if _, err := loadWith(t, nil); err == nil {
-		t.Fatal("Load() accepted a metrics bind with no port")
+	for name, bind := range map[string]string{
+		"no separator": "9090",
+		"empty port":   "0.0.0.0:",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("LOOP_METRICS_BIND", bind)
+			if _, err := loadWith(t, nil); err == nil {
+				t.Fatalf("Load() accepted %q as a metrics bind", bind)
+			}
+		})
 	}
 }

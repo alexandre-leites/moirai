@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -698,7 +699,7 @@ type schedulerSnapshot struct {
 // cannot make a heartbeat look fresher than it is.
 func (s *Server) readSchedulerSnapshot(ctx context.Context) (schedulerSnapshot, error) {
 	var snapshot schedulerSnapshot
-	err := s.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id=i.project_id WHERE p.enabled AND i.eligible AND i.state='open'), (SELECT COUNT(*) FROM app.workflow_runs WHERE status NOT IN ('completed','blocked','failed','cancelled')), (SELECT COUNT(*) FROM app.jobs WHERE status IN ('offered','preparing','running')), (SELECT COUNT(*) FROM app.runners WHERE enabled AND revoked_at IS NULL), (SELECT EXTRACT(EPOCH FROM now()-MIN(COALESCE(last_seen_at,registered_at)))::double precision FROM app.runners WHERE enabled AND revoked_at IS NULL)`).
+	err := s.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id=i.project_id WHERE p.enabled AND i.eligible AND i.state='open'), (SELECT COUNT(*) FROM app.workflow_runs WHERE status NOT IN (`+terminalStatusList+`)), (SELECT COUNT(*) FROM app.jobs WHERE status IN ('offered','preparing','running')), (SELECT COUNT(*) FROM app.runners WHERE enabled AND revoked_at IS NULL), (SELECT EXTRACT(EPOCH FROM now()-MIN(COALESCE(last_seen_at,registered_at)))::double precision FROM app.runners WHERE enabled AND revoked_at IS NULL)`).
 		Scan(&snapshot.queueDepth, &snapshot.activeWorkflows, &snapshot.scheduledJobs, &snapshot.enabledRunners, &snapshot.oldestHeartbeatAge)
 	if err != nil {
 		return schedulerSnapshot{}, databaseError(err)
@@ -1613,8 +1614,20 @@ func hashSecret(value string) string {
 	return hex.EncodeToString(digest[:])
 }
 func jsonLabels(labels []string) string { encoded, _ := json.Marshal(labels); return string(encoded) }
+
+// terminalStatuses are the workflow-run statuses a run never leaves. Both the
+// Go predicate below and the SQL the active-workflow gauge counts with are
+// derived from this one list: they were independent copies, and a fifth
+// terminal status added to one and not the other would have left the gauge
+// counting finished work as active, with nothing to catch it.
+var terminalStatuses = []string{"completed", "failed", "blocked", "cancelled"}
+
+// terminalStatusList renders them as the SQL literal list `'a','b'`. Built from
+// the constants above, never from input.
+var terminalStatusList = "'" + strings.Join(terminalStatuses, "','") + "'"
+
 func terminalStatus(state string) bool {
-	return state == "completed" || state == "failed" || state == "blocked" || state == "cancelled"
+	return slices.Contains(terminalStatuses, state)
 }
 func terminalEvent(event string) bool {
 	return event == "completed" || event == "failed" || event == "cancelled"

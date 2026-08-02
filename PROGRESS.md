@@ -748,6 +748,7 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
     because it is the same query.
 - Relevant files: `orchestrator/internal/metrics/metrics.go` (+ `metrics_test.go`),
   `orchestrator/internal/config/config.go` (+ test), `orchestrator/internal/server/server.go`,
+  `orchestrator/migrations/020_metrics_indexes.sql`,
   `orchestrator/internal/server/integration_test.go`, `orchestrator/cmd/orchestrator/main.go`
   (+ `main_test.go`, covering `observed`'s success, failure and cancelled-pass paths),
   `orchestrator/go.mod`/`go.sum` (adds `prometheus/client_golang v1.24.1`, the version the API and
@@ -758,19 +759,22 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   `.github/workflows/ci.yml` (compose smoke now scrapes the running orchestrator container).
 - Validation performed — commands and their results, all from the worktree:
   - `make lint` → pass. `make typecheck` (`go vet ./...`) → pass.
-  - `make test-orchestrator` → ok, 5 packages (11 new tests in `internal/metrics`, 4 in
+  - `make test-orchestrator` → ok, 5 packages (12 new tests in `internal/metrics`, 4 in
     `internal/config`, 2 in `cmd/orchestrator`). `make test-runner` → ok, 12 packages.
     `make test-api` → ok, 5 packages.
   - `make test-postgres-integration` against a throwaway PostgreSQL on a **unique** port
     (`docker run -d --name moirai-pg-issue-296 -p 55296:5432 postgres:16-alpine`,
     `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:55296/loop_test`) → ok.
-    Two new cases: `TestMetricsSnapshotReportsTheDatabaseState` seeds a state where every count
+    Three new cases: `TestMetricsSnapshotReportsTheDatabaseState` seeds a state where every count
     differs (queue 2, active workflows 1, scheduled jobs 1, enabled runners 2) plus four runners —
     enabled at 600 s, enabled at 5 s, disabled at 9 h, revoked at 20 h — and asserts the exported
     age is ~600 s, so picking the newest enabled runner or an out-of-service one fails it; it then
     starts a real listener and scrapes it over HTTP. `TestScrapeSurvivesAnUnreachableDatabase`
     scrapes with a closed pool and asserts the state series are absent, the error counter is 1, the
     response is still 200, and a live pool still answers afterwards.
+    `TestHeartbeatAgeCountsANeverConnectedRunnerFromRegistration` covers the `COALESCE` branch: an
+    enabled runner registered 3000 s ago that never heartbeated is the fleet's oldest, not
+    invisible.
   - **End-to-end against the built container image** (`docker build -f orchestrator/Dockerfile`,
     run against the throwaway database), the same check CI now runs:
     `docker exec … curl -fsS http://127.0.0.1:9090/metrics` →
@@ -799,6 +803,65 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   - `make test-web` was not run: nothing under `web/` changed.
   - Throwaway containers `moirai-pg-issue-296` and `moirai-orch-issue296` and the local image were
     removed after validation.
+- Adversarial self-review of the diff (separate agent, told to hunt specifically for a gauge that
+  reports a constant or wrong value under real data, a heartbeat age over all runners rather than
+  enabled ones or newest rather than oldest, a scrape that opens or leaks a connection, a metrics
+  server with no shutdown path or one that blocks startup, a scrape that panics, and claims the
+  code does not support). It found ten real defects; every one is fixed on this branch:
+  1. **Both status counts sequential-scanned tables that only grow.** `workflow_runs.status NOT IN
+     (...)` and `jobs.status IN (...)` had no usable index — `jobs_runner_status_idx` leads with
+     `runner_id`, which `019_recovery_indexes.sql` already says in as many words. The query used to
+     run only when an operator opened the console and now runs on every scrape, which is precisely
+     the situation 019 was written for. Fixed by `020_metrics_indexes.sql`, two partial indexes
+     sized to the in-flight set. Verified with `SET enable_seqscan=off; EXPLAIN …` → `Bitmap Index
+     Scan on jobs_in_flight_idx` and `on workflow_runs_active_idx`.
+  2. **Concurrent scrapes could drain the pgx pool.** `promhttp.HandlerOpts{}` means unlimited
+     requests in flight, each holding a pooled connection for up to five seconds, against a pool of
+     `max(4, NumCPU)` shared with the scheduler tick and the runner streams. Now
+     `MaxRequestsInFlight: 2`; beyond that the endpoint answers 503. `TestConcurrentScrapesAreBounded`
+     holds two scrapes inside the collector and asserts the third is refused.
+  3. **Two series were silently renamed.** The Python surface exported
+     `moirai_active_workflow_count` and `moirai_scheduled_job_count`; keeping its port while
+     changing its names means an existing panel returns no data, which looks exactly like an
+     exporter that is down. The renames (and why: the issue names one, both match the proto fields,
+     `_count` is reserved) are now called out in `orchestrator/README.md` and in the
+     `DefaultMetricsBind` comment that claimed old configurations "keep working".
+  4. **The panic-recovery comment was wrong about the library.** `client_golang` v1.24.1 recovers
+     collector panics itself (`registry.go`, `safeCollect`), so the local recover is not what keeps
+     the process alive — it is what keeps the *rest of the response* alive, since the registry
+     turns the panic into a gather error and promhttp then answers 500 with no body, losing the
+     loop series and the scrape-error counter. Comment corrected to say that. `loopSuccessAge` also
+     gained a map-existence check so a future loop name added to one list and not the other cannot
+     dereference a missing entry on the gather path.
+  5. **`Handler()` was the one method that panicked on a nil receiver** while `Enabled`,
+     `Recorder`, `Addr` and `Shutdown` all guarded it. It now returns a 404 handler.
+  6. **`LOOP_METRICS_BIND=0.0.0.0:` passed validation**, because `net.SplitHostPort` accepts an
+     empty port: it would have bound an ephemeral port nothing is configured to scrape and reported
+     itself as serving metrics. Now refused, with a case in
+     `TestMetricsBindRejectsAnAddressWithoutAPort`.
+  7. **The startup log printed the configured bind, not the bound one**, which differ when the
+     configured port is 0 — the reason `Addr()` exists. It now logs `metricsServer.Addr()`.
+  8. **The terminal-status list was duplicated** into the active-workflow predicate with nothing
+     keeping the copies in sync. Both `terminalStatus` and the SQL literal are now derived from one
+     `terminalStatuses` slice.
+  9. **`COALESCE(last_seen_at, registered_at)` was untested**, and it is the branch that decides
+     whether a runner that registered and never connected is invisible or counted from
+     registration. `TestHeartbeatAgeCountsANeverConnectedRunnerFromRegistration` pins it at ~3000 s,
+     and a live scrape showed `moirai_runner_heartbeat_age_seconds 3013.632523` for exactly that
+     row.
+  10. **Two test-quality holes**: `sample()`/`metricSample()` returned `(0, false)` when a value
+      failed to parse, conflating "absent" with "exported as garbage" and making every
+      series-is-absent assertion passable by a malformed export; and
+      `TestListenerServesAndShutsDown` used the process-wide default transport. Both fixed — the
+      helpers return the raw text and parse in `mustSample`, and the test uses a client with
+      keep-alives disabled.
+  The review also confirmed clean: no connection leak (`readSchedulerSnapshot` is one
+  `QueryRow(...).Scan(...)` with no path that abandons the row), no goroutine leak or delayed
+  startup, no reachable data race, no CI false pass (`grep -qE "^$metric "` cannot match a `# HELP`
+  line and the trailing space rules out prefix collisions), and no overlap with #297, #298 or #300.
+  Its one open observation, recorded rather than fixed: the compose-smoke step proves the four
+  series are *present*, not that they *move* — a regression to constant zero would pass it. The
+  integration suite is what pins the values.
 - Known issues / notes for the next agent:
   - The orchestrator publishes no port in `compose.yaml`, so `/metrics` is reachable from inside
     the Compose networks only. That is deliberate — the console's published surface is port 3000 —

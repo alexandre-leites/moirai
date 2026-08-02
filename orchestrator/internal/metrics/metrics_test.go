@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -44,9 +45,12 @@ func scrape(t *testing.T, server *Server) string {
 	return recorder.Body.String()
 }
 
-// sample returns the value of one exported series, and reports whether it was
-// exported at all. Absence is a meaningful outcome here, not a test failure.
-func sample(body, series string) (float64, bool) {
+// sample returns one exported series' value as written, and reports whether it
+// was exported at all. Absence is a meaningful outcome here, not a test
+// failure, so it is returned rather than raised — and the value is returned
+// unparsed so that "absent" and "exported as something unparseable" stay
+// different answers.
+func sample(body, series string) (string, bool) {
 	for line := range strings.Lines(body) {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "#") {
@@ -56,13 +60,9 @@ func sample(body, series string) (float64, bool) {
 		if !found || name != series {
 			continue
 		}
-		parsed, err := strconv.ParseFloat(value, 64)
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
+		return value, true
 	}
-	return 0, false
+	return "", false
 }
 
 func mustSample(t *testing.T, body, series string) float64 {
@@ -71,7 +71,11 @@ func mustSample(t *testing.T, body, series string) float64 {
 	if !exported {
 		t.Fatalf("%s was not exported; body:\n%s", series, body)
 	}
-	return value
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		t.Fatalf("%s was exported as %q, which is not a number", series, value)
+	}
+	return parsed
 }
 
 // The whole point of the exporter: the numbers a scrape reads are the numbers
@@ -304,7 +308,11 @@ func TestListenerServesAndShutsDown(t *testing.T) {
 	}
 	url := "http://" + server.Addr() + "/metrics"
 
-	response, err := http.Get(url)
+	// A client of its own, with keep-alives off: the shared default transport
+	// would let a pooled connection from another test decide whether the
+	// post-shutdown request below is refused or merely fails on write.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	response, err := client.Get(url)
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
@@ -325,7 +333,7 @@ func TestListenerServesAndShutsDown(t *testing.T) {
 	if err := server.Shutdown(shutdown); err != nil {
 		t.Fatalf("Shutdown() = %v", err)
 	}
-	if _, err := http.Get(url); err == nil {
+	if _, err := client.Get(url); err == nil {
 		t.Error("the listener still answered after Shutdown")
 	}
 }
@@ -342,4 +350,81 @@ func TestUnknownLoopHasNoAgeSeries(t *testing.T) {
 	if _, exported := sample(body, `moirai_orchestrator_loop_runs_total{loop="unknown",result="success"}`); !exported {
 		t.Error("the unknown bucket lost its counter as well as its age")
 	}
+}
+
+// The endpoint reads the database on every request and the pool it reads
+// through is the one the scheduler and the runner streams use, so the number of
+// scrapes that may be in flight at once is bounded. Beyond the bound the
+// endpoint answers 503 rather than queueing another database read.
+func TestConcurrentScrapesAreBounded(t *testing.T) {
+	release := make(chan struct{})
+	releaseAll := sync.OnceFunc(func() { close(release) })
+	entered := make(chan struct{}, 8)
+	server := New("127.0.0.1:0", blockingSource{entered: entered, release: release})
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	defer func() {
+		releaseAll()
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	url := "http://" + server.Addr() + "/metrics"
+
+	// Fill the allowance, and wait until both requests are actually inside the
+	// collector rather than merely dispatched.
+	codes := make(chan int, 3)
+	for range 2 {
+		go func() {
+			response, err := client.Get(url)
+			if err != nil {
+				codes <- 0
+				return
+			}
+			response.Body.Close()
+			codes <- response.StatusCode
+		}()
+	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a scrape never reached the source")
+		}
+	}
+
+	response, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("third scrape: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("third concurrent scrape = %d, want 503: an unauthenticated endpoint must not be able to drain the pool", response.StatusCode)
+	}
+
+	releaseAll()
+	for range 2 {
+		if code := <-codes; code != http.StatusOK {
+			t.Errorf("scrape within the allowance = %d, want 200", code)
+		}
+	}
+}
+
+// blockingSource holds each read open until it is released, so a test can have
+// two scrapes genuinely in flight at once.
+type blockingSource struct {
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s blockingSource) MetricsSnapshot(ctx context.Context) (Snapshot, error) {
+	s.entered <- struct{}{}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return Snapshot{}, ctx.Err()
+	}
+	return Snapshot{QueueDepth: 1}, nil
 }

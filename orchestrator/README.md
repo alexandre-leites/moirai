@@ -30,7 +30,7 @@ Every secret below can be supplied either directly or as `<NAME>_FILE` pointing 
 |---|---|---|
 | `LOOP_DATABASE_URL` | yes | PostgreSQL connection URL. A `postgresql+asyncpg://` scheme is accepted and normalised, so connection strings written for the previous Python orchestrator keep working. |
 | `LOOP_GRPC_BIND` | no | `host:port` to serve gRPC on. Defaults to `0.0.0.0:50051`. The container healthcheck derives its port from this. |
-| `LOOP_METRICS_BIND` | no | `host:port` to serve Prometheus metrics on. Defaults to `0.0.0.0:9090`; set it to an empty value to serve none. A port that cannot be bound stops the process rather than being logged and ignored. |
+| `LOOP_METRICS_BIND` | no | `host:port` to serve Prometheus metrics on. Defaults to `0.0.0.0:9090`; set it to an empty or blank value to serve none. A value without a port, or a port that cannot be bound, stops the process rather than being logged and ignored. |
 | `LOOP_SECRET_KEY` | for credentials | 32-byte key, base64 or hex, used to encrypt project credentials at rest. Storing a credential without it is refused. |
 | `LOOP_INITIAL_ADMIN_USERNAME` / `LOOP_INITIAL_ADMIN_PASSWORD` | first boot | Seeds the first admin account. |
 | `RUNNER_REGISTRATION_TOKEN` | no | Seeds a single-use runner registration token valid for 15 minutes. Its expiry is re-armed on every start, so a restart does not leave an expired token behind. |
@@ -57,11 +57,15 @@ Every secret below can be supplied either directly or as `<NAME>_FILE` pointing 
 Four properties are deliberate:
 
 - **The state series are read at scrape time, from the same single query `GetSchedulerMetrics` runs**, so the console and Prometheus cannot report different numbers for the same word, and neither can serve a value a background timer left behind. The previous orchestrator refreshed four gauges from a snapshot loop that raised on every tick, so all four served their initial zero for the life of the process ([#195](https://github.com/alexandre-leites/moirai/issues/195)); a collector has no tick to fail.
-- **A failed read omits the state series rather than reporting zero**, and counts the omission in `moirai_orchestrator_metrics_scrape_errors_total`. "The database did not answer" and "the queue is empty" must not look the same. The scrape reuses the shared connection pool, is bounded by a five-second timeout, and cannot take the process down: a panic below it is contained and counted.
+- **A failed read omits the state series rather than reporting zero**, and counts the omission in `moirai_orchestrator_metrics_scrape_errors_total`. "The database did not answer" and "the queue is empty" must not look the same. The scrape reuses the shared connection pool rather than opening a connection of its own, is bounded by a five-second timeout, and cannot take the process down: a panic below it is contained and counted. At most two scrapes may read the database at once — beyond that the endpoint answers `503` rather than letting an unauthenticated endpoint drain the pool the scheduler and the runner streams share.
 - **The heartbeat age is the oldest, over enabled and unrevoked runners only.** A fleet where one runner is healthy and nine are gone is a broken fleet, so a maximum or an average would hide exactly the case worth alerting on; runners an operator disabled or revoked are excluded, or the series would be permanently and correctly alarming. It is computed by PostgreSQL from its own clock, so orchestrator clock skew cannot make a heartbeat look fresher than it is.
 - **`moirai_runner_heartbeat_age_seconds` is also exported by each runner**, where it means that runner's own heartbeat rather than the fleet's oldest. Prometheus separates them by `job`/`instance`.
 
 `LOOP_RUNNER_METRICS_BIND` (default `:9091`) is the runner's equivalent knob, and the API serves its own metrics on its HTTP port.
+
+**Renamed since the Python orchestrator.** It served the same four state series on this port, and two carry different names now: `moirai_active_workflow_count` → `moirai_active_workflows` and `moirai_scheduled_job_count` → `moirai_scheduled_jobs`. Both match their proto fields, and `_count` is a suffix Prometheus reserves for summaries and histograms. The scrape target is unchanged; a query written against either old name returns no data and has to be updated.
+
+The endpoint is unauthenticated, as the API's and the runner's are. It exposes counts and ages only — no issue titles, project names, or identifiers — and `compose.yaml` publishes no port for the orchestrator, so it is reachable only from the Compose networks. Attach Prometheus to the `control` network rather than publishing 9090.
 
 ### TLS
 
