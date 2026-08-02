@@ -10,7 +10,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-fund --no-audit
 COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
-RUN test -n "${VITE_BUILD_VERSION}" && npm run build
+RUN npm run build
 
 FROM nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
 RUN chown -R nginx:nginx /var/cache/nginx /var/log/nginx /etc/nginx/conf.d \
