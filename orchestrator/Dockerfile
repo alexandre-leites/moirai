@@ -17,7 +17,6 @@ FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea5
 ARG GH_CLI_VERSION=2.63.2
 ARG MOIRAI_BUILD_VERSION
 ENV MOIRAI_BUILD_VERSION=${MOIRAI_BUILD_VERSION}
-RUN test -n "${MOIRAI_BUILD_VERSION}"
 WORKDIR /app
 RUN addgroup --system --gid 65532 loop \
     && adduser --system --uid 65532 --gid 65532 loop \

@@ -171,12 +171,15 @@ export function OverviewPage({ api }: { api: ApiClient }) {
 }
 
 function SystemVersions({ health, runners }: { health?: Health; runners: import("./api").Runner[] }) {
-  const versions = [
-    ["Web", import.meta.env.VITE_BUILD_VERSION],
-    ["API", health?.apiVersion],
-    ["Orchestrator", health?.orchestratorVersion],
-    ...runners.map((runner) => [`Runner: ${runner.name}`, runner.version]),
-  ].filter(([, version]) => Boolean(version?.trim())).map(([name, version]) => [name, version!.trim().slice(0, 12)]);
+  const version = (value?: string): string => value?.trim().slice(0, 12) || "Unknown";
+  const versions: Array<[string, string]> = [
+    ["Web", version(import.meta.env.VITE_BUILD_VERSION)],
+    ["API", version(health?.apiVersion)],
+    ["Orchestrator", version(health?.orchestratorVersion)],
+    ...runners
+      .filter((runner) => Boolean(runner.version?.trim()))
+      .map((runner) => [`Runner: ${runner.name}`, version(runner.version)] as [string, string]),
+  ];
 
   return (
     <Card>

@@ -72,6 +72,13 @@ describe("OverviewPage", () => {
     expect(container.textContent).not.toContain("Runner: loom-02");
   });
 
+  it("shows Unknown for component versions omitted by a remote build", async () => {
+    const client = stubApi();
+    const container = await mountView(<OverviewPage api={client} />, client);
+    expect(container.textContent).toContain("System versions");
+    expect(container.textContent).toContain("Unknown");
+  });
+
   it("lists what needs a human, newest concern first", async () => {
     const client = api();
     const container = await mountView(<OverviewPage api={client} />, client);

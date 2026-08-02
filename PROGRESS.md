@@ -8,15 +8,22 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: none.
+- Active implementation: Unknown system-version fallback for remote Docker builds.
 - Last updated: 2026-08-02
-- Agent/session identifier: ci-warn-deploy-webhook / 2026-08-02
+- Agent/session identifier: system-versions-unknown / 2026-08-02
 
 ## In Progress
 
 _Nothing is claimed. The next agent should take the first item under Pending Implementation._
 
 ## Done
+
+- [x] Unknown system-version fallback
+  - Completed: 2026-08-02
+  - Behavior delivered: remote Git-context Docker builds no longer require a build SHA; core
+    System versions rows render `Unknown` when metadata is absent, while blank runner versions stay hidden.
+  - Validation performed: `docker compose -f compose.yaml -f compose.build.yaml build api web` with no SHA;
+    12 overview tests and web typecheck.
 
 - [x] Non-blocking CI deployment webhook
   - Completed: 2026-08-02
