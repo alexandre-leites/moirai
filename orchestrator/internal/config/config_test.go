@@ -188,3 +188,52 @@ func TestLoadRejectsAmbiguousSecret(t *testing.T) {
 		t.Fatal("Load() accepted both database URL sources")
 	}
 }
+
+// Metrics are on unless an operator turns them off: queue depth and the
+// fleet-wide runner heartbeat age are exported by no other service, so a
+// deployment that says nothing about metrics still publishes them.
+func TestMetricsBindDefaultsToTheServedPort(t *testing.T) {
+	// t.Setenv first so the variable is restored on cleanup, then unset it:
+	// "unset" is the case under test and testing has no t.Unsetenv.
+	t.Setenv("LOOP_METRICS_BIND", "127.0.0.1:19090")
+	os.Unsetenv("LOOP_METRICS_BIND")
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsBind != DefaultMetricsBind {
+		t.Fatalf("MetricsBind = %q, want %q", cfg.MetricsBind, DefaultMetricsBind)
+	}
+}
+
+func TestMetricsBindHonoursAnOverride(t *testing.T) {
+	t.Setenv("LOOP_METRICS_BIND", " 127.0.0.1:19090 ")
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsBind != "127.0.0.1:19090" {
+		t.Fatalf("MetricsBind = %q, want 127.0.0.1:19090", cfg.MetricsBind)
+	}
+}
+
+// An explicitly empty value is the documented way to serve no metrics at all.
+func TestEmptyMetricsBindDisablesTheListener(t *testing.T) {
+	t.Setenv("LOOP_METRICS_BIND", "")
+	cfg, err := loadWith(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MetricsBind != "" {
+		t.Fatalf("MetricsBind = %q, want an empty bind", cfg.MetricsBind)
+	}
+}
+
+// A typo must stop the process, not silently serve somewhere else -- the same
+// treatment LOOP_GRPC_BIND gets.
+func TestMetricsBindRejectsAnAddressWithoutAPort(t *testing.T) {
+	t.Setenv("LOOP_METRICS_BIND", "9090")
+	if _, err := loadWith(t, nil); err == nil {
+		t.Fatal("Load() accepted a metrics bind with no port")
+	}
+}

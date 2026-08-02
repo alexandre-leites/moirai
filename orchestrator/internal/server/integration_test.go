@@ -14,7 +14,12 @@ package server
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
 	"google.golang.org/grpc/metadata"
 )
@@ -465,4 +471,178 @@ func TestCancelledWorkCannotBeAcceptedLater(t *testing.T) {
 		t.Fatal("cancelling did not release the project lock")
 	}
 	_ = time.Now
+}
+
+// metricSample reads one series out of Prometheus exposition text, reporting
+// whether it was exported at all.
+func metricSample(body, series string) (float64, bool) {
+	for line := range strings.Lines(body) {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, found := strings.Cut(line, " ")
+		if !found || name != series {
+			continue
+		}
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
+}
+
+// The series #124 moved off the API and the runner have to carry the database's
+// real numbers here, or they are placeholders again in a new place. This seeds
+// a state where every count is different, so a snapshot that reported the same
+// value for two of them would fail.
+func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	// Two eligible open issues in enabled projects: the queue depth.
+	queuedProject, _ := h.project()
+	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, newID(), queuedProject)
+	// Neither of these counts: one project is disabled, one issue is closed.
+	disabledProject, _ := h.project()
+	h.exec(`UPDATE app.projects SET enabled=false WHERE id=$1`, disabledProject)
+	h.exec(`UPDATE app.issues SET state='closed' WHERE project_id=$1`, queuedProject)
+	h.exec(`UPDATE app.issues SET state='open' WHERE project_id=$1 AND external_id IN ('42','43')`, queuedProject)
+
+	// One active workflow run and one that finished; only the first is active.
+	activeRun, doneRun := newID(), newID()
+	var issueID string
+	if err := h.pool.QueryRow(ctx, `SELECT id::text FROM app.issues WHERE project_id=$1 LIMIT 1`, queuedProject).Scan(&issueID); err != nil {
+		t.Fatal(err)
+	}
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'running','implementation')`, activeRun, queuedProject, issueID, "thread-"+activeRun)
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'completed','done')`, doneRun, queuedProject, issueID, "thread-"+doneRun)
+	// One scheduled job, and one that has finished.
+	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'running')`, newID(), activeRun, queuedProject)
+	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'completed')`, newID(), doneRun, queuedProject)
+
+	// Four runners. The heartbeat age must be the oldest *enabled* one: 600s.
+	// The disabled and revoked runners are far older, and picking either the
+	// newest enabled runner or an out-of-service one is the failure this pins.
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '600 seconds')`, newID(), "stale-"+newID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '5 seconds')`, newID(), "fresh-"+newID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,enabled,status,version,labels,last_seen_at) VALUES($1,$2,false,'offline','1','[]'::jsonb,now()-interval '9 hours')`, newID(), "disabled-"+newID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at,revoked_at) VALUES($1,$2,'offline','1','[]'::jsonb,now()-interval '20 hours',now())`, newID(), "revoked-"+newID()[:8])
+
+	snapshot, err := h.MetricsSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("MetricsSnapshot: %v", err)
+	}
+	if snapshot.QueueDepth != 2 {
+		t.Errorf("QueueDepth = %d, want 2", snapshot.QueueDepth)
+	}
+	if snapshot.ActiveWorkflows != 1 {
+		t.Errorf("ActiveWorkflows = %d, want 1", snapshot.ActiveWorkflows)
+	}
+	if snapshot.ScheduledJobs != 1 {
+		t.Errorf("ScheduledJobs = %d, want 1", snapshot.ScheduledJobs)
+	}
+	if snapshot.EnabledRunners != 2 {
+		t.Errorf("EnabledRunners = %d, want 2", snapshot.EnabledRunners)
+	}
+	if !snapshot.HeartbeatKnown {
+		t.Fatal("HeartbeatKnown = false with two enabled runners")
+	}
+	if age := snapshot.OldestHeartbeatAge; age < 590*time.Second || age > 900*time.Second {
+		t.Errorf("OldestHeartbeatAge = %s, want ~600s: the oldest enabled runner, not the newest and not an out-of-service one", age)
+	}
+
+	// The console RPC and the Prometheus surface run the same query, so they
+	// cannot disagree about what "queue depth" means.
+	rpc, err := h.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
+	if err != nil {
+		t.Fatalf("GetSchedulerMetrics: %v", err)
+	}
+	if int64(rpc.GetQueueDepth()) != snapshot.QueueDepth || int64(rpc.GetActiveWorkflows()) != snapshot.ActiveWorkflows || int64(rpc.GetScheduledJobs()) != snapshot.ScheduledJobs {
+		t.Errorf("GetSchedulerMetrics() = %+v, disagrees with the exported snapshot %+v", rpc, snapshot)
+	}
+
+	// End to end: a real listener, scraped over HTTP, serving those numbers.
+	exporter := metrics.New("127.0.0.1:0", h.Server)
+	if err := exporter.Start(); err != nil {
+		t.Fatalf("start metrics listener: %v", err)
+	}
+	defer func() {
+		shutdown, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := exporter.Shutdown(shutdown); err != nil {
+			t.Errorf("Shutdown() = %v", err)
+		}
+	}()
+	response, err := http.Get("http://" + exporter.Addr() + "/metrics")
+	if err != nil {
+		t.Fatalf("scrape: %v", err)
+	}
+	defer response.Body.Close()
+	scraped, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(scraped)
+	for series, want := range map[string]float64{
+		"moirai_queue_depth":      2,
+		"moirai_active_workflows": 1,
+		"moirai_scheduled_jobs":   1,
+		"moirai_enabled_runners":  2,
+	} {
+		got, exported := metricSample(body, series)
+		if !exported {
+			t.Errorf("%s was not exported; body:\n%s", series, body)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", series, got, want)
+		}
+	}
+	age, exported := metricSample(body, "moirai_runner_heartbeat_age_seconds")
+	if !exported {
+		t.Fatalf("moirai_runner_heartbeat_age_seconds was not exported; body:\n%s", body)
+	}
+	if age < 590 || age > 900 {
+		t.Errorf("moirai_runner_heartbeat_age_seconds = %v, want ~600", age)
+	}
+	if errors, _ := metricSample(body, "moirai_orchestrator_metrics_scrape_errors_total"); errors != 0 {
+		t.Errorf("moirai_orchestrator_metrics_scrape_errors_total = %v after a healthy scrape, want 0", errors)
+	}
+}
+
+// A scrape must not be able to take the orchestrator down, and must not report
+// zeros it did not measure, when the database is gone.
+func TestScrapeSurvivesAnUnreachableDatabase(t *testing.T) {
+	h := newHarness(t)
+	url := os.Getenv("LOOP_TEST_DATABASE_URL")
+	pool, err := pgxpool.New(context.Background(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewWithGitHub(pool, "test", stubGitHub{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exporter := metrics.New("", server)
+	pool.Close()
+
+	recorder := httptest.NewRecorder()
+	exporter.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /metrics = %d against a closed pool, want 200", recorder.Code)
+	}
+	body := recorder.Body.String()
+	if value, exported := metricSample(body, "moirai_queue_depth"); exported {
+		t.Errorf("moirai_queue_depth = %v with no database, want the series to be absent rather than zero", value)
+	}
+	if count, _ := metricSample(body, "moirai_orchestrator_metrics_scrape_errors_total"); count != 1 {
+		t.Errorf("moirai_orchestrator_metrics_scrape_errors_total = %v, want 1", count)
+	}
+	// The process is still serving, and the healthy harness pool is untouched.
+	if _, err := h.MetricsSnapshot(context.Background()); err != nil {
+		t.Fatalf("MetricsSnapshot on a live pool after a failed scrape: %v", err)
+	}
 }

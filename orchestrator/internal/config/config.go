@@ -18,9 +18,20 @@ import (
 // healthcheck derives its port from the same value, so both move together.
 const DefaultGRPCBind = "0.0.0.0:50051"
 
+// DefaultMetricsBind is the address /metrics is served on when
+// LOOP_METRICS_BIND is unset. It is the port the previous orchestrator used, so
+// a scrape configuration written against it keeps working, and it is distinct
+// from the runner's LOOP_RUNNER_METRICS_BIND (`:9091`) so both can run on one
+// host.
+const DefaultMetricsBind = "0.0.0.0:9090"
+
 type Config struct {
 	DatabaseURL string
 	GRPCBind    string
+	// MetricsBind is the host:port the Prometheus surface is served on, or
+	// empty when LOOP_METRICS_BIND was explicitly set to nothing and the
+	// listener is disabled.
+	MetricsBind string
 	// IssueSyncInterval is how often issues are re-read from the tracker. It is
 	// configurable because the useful cadence depends on the tracker's rate
 	// limits and on how quickly a team expects a newly labelled issue to be
@@ -45,6 +56,19 @@ func Load() (Config, error) {
 	}
 	if _, _, err := net.SplitHostPort(bind); err != nil {
 		return Config{}, fmt.Errorf("LOOP_GRPC_BIND must be host:port: %w", err)
+	}
+	// Unset means the default, so a deployment that says nothing about metrics
+	// still exports them: queue depth and the fleet-wide heartbeat age exist
+	// nowhere else, and an observability surface nobody remembered to turn on
+	// is one nobody has. Explicitly empty is the way to turn the listener off.
+	metricsBind := DefaultMetricsBind
+	if configured, set := os.LookupEnv("LOOP_METRICS_BIND"); set {
+		metricsBind = strings.TrimSpace(configured)
+	}
+	if metricsBind != "" {
+		if _, _, err := net.SplitHostPort(metricsBind); err != nil {
+			return Config{}, fmt.Errorf("LOOP_METRICS_BIND must be host:port: %w", err)
+		}
 	}
 	// Refused rather than warned about, so a typo in the interval fails the same
 	// way a typo in the bind address does instead of silently reverting to a
@@ -72,6 +96,7 @@ func Load() (Config, error) {
 	return Config{
 		DatabaseURL:       normalizeDatabaseURL(databaseURL),
 		GRPCBind:          bind,
+		MetricsBind:       metricsBind,
 		IssueSyncInterval: syncInterval,
 		TLSCertFile:       certFile,
 		TLSKeyFile:        keyFile,

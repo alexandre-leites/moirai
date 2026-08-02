@@ -8,7 +8,7 @@ All values are optional unless noted. Comma-separated lists ignore surrounding w
 - `LOOP_ORCHESTRATOR_ENDPOINT`: Orchestrator address (default `orchestrator:50051`).
 - `LOOP_RUNNER_DATA_DIR`: Data directory (default `/data`).
 - `LOOP_RUNNER_REGISTRATION_TOKEN`: Token for registration.
-- `LOOP_RUNNER_METRICS_BIND`: Metrics listener (default `:9091`), serving `/metrics`.
+- `LOOP_RUNNER_METRICS_BIND`: Metrics listener (default `:9091`), serving `/metrics`. The orchestrator serves its own on `LOOP_METRICS_BIND` (default `0.0.0.0:9090`).
 - `LOOP_ORCHESTRATOR_TLS`: Enable TLS to the orchestrator. Configure CA, client certificate, client key, and server name with the matching `LOOP_ORCHESTRATOR_TLS_*` variables when required.
 All runner settings use `LOOP_RUNNER_*`; orchestrator transport settings use `LOOP_ORCHESTRATOR_*`.
 
@@ -238,7 +238,9 @@ The orchestrator remains authoritative: it fences every event on the lease gener
 
 ## Metrics
 
-`LOOP_RUNNER_METRICS_BIND` (default `:9091`) serves `GET /metrics` in the Prometheus text format. The runner exports only values it holds itself; queue depth and active workflow counts are orchestrator-owned state it cannot populate, and it no longer exports placeholders for them ([#124](https://github.com/alexandre-leites/moirai/issues/124)).
+`LOOP_RUNNER_METRICS_BIND` (default `:9091`) serves `GET /metrics` in the Prometheus text format. The runner exports only values it holds itself; queue depth, active workflow counts and the fleet-wide runner heartbeat age are orchestrator-owned state it cannot populate, and it no longer exports placeholders for them ([#124](https://github.com/alexandre-leites/moirai/issues/124)). Those series are served by the orchestrator on `LOOP_METRICS_BIND` (default `0.0.0.0:9090`) — see [orchestrator/README.md](../orchestrator/README.md#metrics).
+
+`moirai_runner_heartbeat_age_seconds` exists on both surfaces and means different things: here it is *this* runner's own heartbeat, and on the orchestrator it is the oldest heartbeat across the enabled fleet. Prometheus keeps them apart by `job`/`instance`; a dashboard that sums them does not.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -267,7 +269,7 @@ Both label sets are closed: an unrecognised value is counted as `unknown` rather
 
 One drop path is **not** yet counted: when agent output arrives faster than it can be forwarded, the runner's in-process log forwarder discards chunks before they reach the event buffer, and reports that only as a `runner log events dropped` warning at the end of the execution. See [#124](https://github.com/alexandre-leites/moirai/issues/124).
 
-Note that this runner's `moirai_runner_heartbeat_age_seconds` reports *its own* last heartbeat, never the fleet's. The fleet-wide age is orchestrator-owned state, and the Go orchestrator has no Prometheus surface yet, so nothing exports it today; should it gain one and reuse the name, the scrape's `job`/`instance` labels are what distinguish the two.
+Note that this runner's `moirai_runner_heartbeat_age_seconds` reports *its own* last heartbeat, never the fleet's. The fleet-wide age is orchestrator-owned state, and the orchestrator exports it under the same name from its own listener ([#296](https://github.com/alexandre-leites/moirai/issues/296)), where it means the oldest heartbeat across enabled runners; the scrape's `job`/`instance` labels are what distinguish the two.
 
 ## Health Probes
 

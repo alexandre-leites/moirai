@@ -675,3 +675,124 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   `make test-orchestrator`, `make test-runner`, `make test-api`, `make test-web` — all pass. CI on
   PR #299 was green on the first push (12/12 including `validate`, `compose-smoke` and
   `test-postgres-integration`) and re-ran on each subsequent push.
+
+## Issue #296 — The orchestrator exports no Prometheus metrics (2026-08-03)
+
+- Agent/session identifier: gh-issue-loop agent, branch `issue-296`, worktree
+  `.claude/worktrees/issue-296`, started from `origin/main` at `8b47529`.
+- Problem, verified before writing anything: `grep -rl prometheus orchestrator/` returned nothing.
+  #124 removed `moirai_queue_depth`, `moirai_active_workflow_count` and
+  `moirai_runner_heartbeat_age_seconds` from the API and the runner because they were gauges
+  `Set(0)` once at construction and never written again, on the grounds that only the orchestrator
+  — which owns the database — may export them. #247 then deleted the Python orchestrator that did
+  (`orchestrator/src/moirai/observability.py`, confirmed with `git show 7132e24^:...`), and the Go
+  rewrite shipped with no metrics surface at all. So the three series existed nowhere.
+- Behavior delivered — the orchestrator now serves Prometheus metrics:
+  - `orchestrator/internal/metrics/metrics.go` (new package). A `prometheus.Collector` that reads
+    the database **at scrape time** and emits `moirai_queue_depth`, `moirai_active_workflows`,
+    `moirai_scheduled_jobs`, `moirai_enabled_runners` and the fleet-wide
+    `moirai_runner_heartbeat_age_seconds`, plus process-side
+    `moirai_orchestrator_loop_runs_total{loop,result}`,
+    `moirai_orchestrator_loop_last_success_age_seconds{loop}` and
+    `moirai_orchestrator_metrics_scrape_errors_total`. `Server.Start()` binds eagerly and serves in
+    a goroutine; `Shutdown(ctx)` stops it.
+  - `orchestrator/internal/config/config.go`: `LOOP_METRICS_BIND`, defaulting to `0.0.0.0:9090` —
+    the port the deleted Python orchestrator used, so an existing scrape config keeps working, and
+    distinct from the runner's `:9091`. `os.LookupEnv`, not `os.Getenv`: unset means the default
+    (metrics are on unless turned off, because nothing else exports these series), and an
+    explicitly empty value disables the listener. A value that is not `host:port` is refused the
+    same way `LOOP_GRPC_BIND` is.
+  - `orchestrator/internal/server/server.go`: `GetSchedulerMetrics`'s query became
+    `readSchedulerSnapshot`, now also returning the enabled-runner count and the oldest enabled
+    heartbeat age; `MetricsSnapshot` maps it for the exporter. **One query, one round trip, shared
+    by both callers** — the RPC and the scrape cannot disagree about what "queue depth" means, and
+    no second query path was added.
+  - `orchestrator/cmd/orchestrator/main.go`: starts the listener after bootstrap and before
+    `grpcServer.Serve`, shuts it down in a `defer` placed so `/metrics` stays scrapeable through
+    the whole gRPC graceful drain and closes before the pool does. The recovery sweep and issue
+    sync are wrapped by `observed(...)`, which reports each pass and passes the error through
+    untouched.
+- Decisions, and why:
+  - **Read at scrape time, never cached.** The previous orchestrator refreshed four gauges from a
+    snapshot loop that raised on every tick, so all four served their initial zero for the life of
+    the process (#195). A collector has no tick to fail.
+  - **A failed read omits the state series instead of exporting zero**, and counts it in
+    `moirai_orchestrator_metrics_scrape_errors_total`. Exporting zero would say "the queue is
+    empty" and "every runner just checked in", which is the exact lie #124 exists to remove. The
+    loop series survive a failed read, because they come from process state.
+  - **Heartbeat age is `MIN` over `enabled AND revoked_at IS NULL`** — oldest, not newest, and not
+    over runners an operator took out of service. Computed by PostgreSQL from its own clock, so
+    orchestrator clock skew cannot make a heartbeat look fresher than it is. With no enabled
+    runner the series is absent rather than zero; `moirai_enabled_runners` is what makes that
+    absence readable.
+  - **A bind failure stops the process** rather than being logged and dropped (the runner's metrics
+    server discards its `ListenAndServe` error). An endpoint that silently never listens is
+    indistinguishable from a healthy one nothing is scraping — the same failure mode as this issue.
+    `LOOP_METRICS_BIND=""` is the supported way to serve none.
+  - **The scrape-error counter is emitted by the collector, not registered as a `prometheus.Counter`.**
+    A registered counter is gathered concurrently with the collector that increments it, so the
+    scrape that failed could report the count from *before* its own failure. This was caught by a
+    failing integration test, not by inspection.
+  - **No age series for the `unknown` loop bucket.** It absorbs a mislabelled count; nothing ever
+    succeeds under that name, so its age would grow forever by construction and fire any alert
+    written against the family. Caught while reading a live scrape.
+  - `moirai_active_workflows`, not the Python-era `moirai_active_workflow_count`: the issue
+    specifies the shorter name, it matches the proto field, and `_count` is a reserved suffix.
+- Relevant files: `orchestrator/internal/metrics/metrics.go` (+ `metrics_test.go`),
+  `orchestrator/internal/config/config.go` (+ test), `orchestrator/internal/server/server.go`,
+  `orchestrator/internal/server/integration_test.go`, `orchestrator/cmd/orchestrator/main.go`,
+  `orchestrator/go.mod`/`go.sum` (adds `prometheus/client_golang v1.24.1`, the version the API and
+  runner already pin; `golang.org/x/net` moved 0.56.0 → 0.57.0 indirectly, matching those two
+  modules), `orchestrator/README.md`, `runner/README.md`, `api/README.md`,
+  `runner/internal/metrics/metrics.go` and `api/internal/http/server.go` (comments #288 left saying
+  nobody exports these series now point at the orchestrator's surface),
+  `.github/workflows/ci.yml` (compose smoke now scrapes the running orchestrator container).
+- Validation performed — commands and their results, all from the worktree:
+  - `make lint` → pass. `make typecheck` (`go vet ./...`) → pass.
+  - `make test-orchestrator` → ok, 4 packages (12 new tests in `internal/metrics`, 4 in
+    `internal/config`). `make test-runner` → ok, 12 packages. `make test-api` → ok, 5 packages.
+  - `make test-postgres-integration` against a throwaway PostgreSQL on a **unique** port
+    (`docker run -d --name moirai-pg-issue-296 -p 55296:5432 postgres:16-alpine`,
+    `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:55296/loop_test`) → ok.
+    Two new cases: `TestMetricsSnapshotReportsTheDatabaseState` seeds a state where every count
+    differs (queue 2, active workflows 1, scheduled jobs 1, enabled runners 2) plus four runners —
+    enabled at 600 s, enabled at 5 s, disabled at 9 h, revoked at 20 h — and asserts the exported
+    age is ~600 s, so picking the newest enabled runner or an out-of-service one fails it; it then
+    starts a real listener and scrapes it over HTTP. `TestScrapeSurvivesAnUnreachableDatabase`
+    scrapes with a closed pool and asserts the state series are absent, the error counter is 1, the
+    response is still 200, and a live pool still answers afterwards.
+  - **End-to-end against the built container image** (`docker build -f orchestrator/Dockerfile`,
+    run against the throwaway database), the same check CI now runs:
+    `docker exec … curl -fsS http://127.0.0.1:9090/metrics` →
+    `moirai_active_workflows 1`, `moirai_enabled_runners 2`, `moirai_queue_depth 2`,
+    `moirai_runner_heartbeat_age_seconds 660.169329`, `moirai_scheduled_jobs 1`.
+  - **The values are live, not constant.** Against the local binary on `127.0.0.1:19296`: first
+    scrape `moirai_queue_depth 3 / moirai_enabled_runners 2 / moirai_runner_heartbeat_age_seconds
+    420.047427 / moirai_active_workflows 0 / moirai_scheduled_jobs 0` (two enabled runners at 420 s
+    and 5 s plus one disabled at 10 h — the 420 s one is what is reported); after inserting a
+    workflow run and a job and making one issue ineligible, `moirai_queue_depth 2`,
+    `moirai_active_workflows 1`, `moirai_scheduled_jobs 1`,
+    `moirai_runner_heartbeat_age_seconds 427.567459` — every series moved, and the age aged.
+  - **Database down** (`docker stop moirai-pg-issue-296`): `GET /metrics` → `HTTP 200`, the five
+    state series absent, `moirai_orchestrator_metrics_scrape_errors_total 1`, process still alive;
+    after `docker start`, the next scrape served `moirai_queue_depth 2` again.
+  - **Bind failure**: with `127.0.0.1:19296` already held, the process exited 1 with
+    `serve metrics on "127.0.0.1:19296": listen tcp 127.0.0.1:19296: bind: address already in use`.
+  - **Disabled**: `LOOP_METRICS_BIND=""` logged
+    `INFO metrics endpoint disabled reason="LOOP_METRICS_BIND is empty"`, opened no listener, and
+    the process still ran and stopped cleanly on SIGTERM.
+  - `make compose` → pass. `make proto-check` → pass (no proto changed). `make test-release-tags` →
+    pass. `make compose-overlays` passes with `COMPOSE_PROJECT_NAME=moirai`; without it,
+    `render-tls-stack.sh --check` fails only because `docker compose config` derives the project
+    name from the checkout directory (`name: issue-296` vs `name: moirai`) — the same worktree
+    artifact recorded under #288, not a regression.
+  - `make test-web` was not run: nothing under `web/` changed.
+  - Throwaway containers `moirai-pg-issue-296` and `moirai-orch-issue296` and the local image were
+    removed after validation.
+- Known issues / notes for the next agent:
+  - The orchestrator publishes no port in `compose.yaml`, so `/metrics` is reachable from inside
+    the Compose networks only. That is deliberate — the console's published surface is port 3000 —
+    and a deployment that scrapes it should attach Prometheus to the `control` network rather than
+    publish 9090.
+  - Out of scope and untouched: #297 (blocked-status derivation), #298 (web console spec symbols),
+    #300 (console event envelope).

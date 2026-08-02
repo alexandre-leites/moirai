@@ -5,9 +5,13 @@
 // the fleet-wide runner heartbeat age — are deliberately absent: the runner
 // cannot populate them, and exporting a constant zero for them is worse than
 // exporting nothing, because an alert on a series that never changes can never
-// fire (issue #124). They belong to the orchestrator, which owns that database;
-// the Go orchestrator has no Prometheus surface of its own yet, so they are
-// currently exported by nothing rather than exported wrongly here.
+// fire (issue #124). They belong to the orchestrator, which owns that database,
+// and it exports them from its own listener on LOOP_METRICS_BIND
+// (orchestrator/internal/metrics), read from the database at scrape time.
+//
+// moirai_runner_heartbeat_age_seconds exists on both surfaces and means
+// different things: here it is this runner's own heartbeat; on the orchestrator
+// it is the oldest heartbeat across the enabled fleet.
 package metrics
 
 import (
