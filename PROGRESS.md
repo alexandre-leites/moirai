@@ -8,17 +8,29 @@
   **CI is green for the first time**: all 12 jobs passed on `238a9c4`, so `main` is
   independently verified rather than merely believed.
 - Current phase: Implementation. #197 landed with the CI work, so 4 issues remain open.
-- Active implementation: none. Per-project credentials are complete on both sides — the
-  orchestrator uses a project's own credential for issue sync and pull requests, and a runner
-  is handed one per job over TLS rather than being provisioned with a shared token.
-- Last updated: 2026-08-01
-- Agent/session identifier: per-project-credentials / 2026-08-01
+- Active implementation: none.
+- Last updated: 2026-08-02
+- Agent/session identifier: system-versions / 2026-08-02
 
 ## In Progress
 
 _Nothing is claimed. The next agent should take the first item under Pending Implementation._
 
 ## Done
+
+- [x] System-version reporting
+  - Completed: 2026-08-02
+  - Relevant files: service Dockerfiles, `compose.build.yaml`, release/CI workflows,
+    `api/internal/http/server.go`, runner control protocol, and `web/src/overview.tsx`.
+  - Behavior delivered: `make build-images`, CI, and release derive a 12-character Git SHA;
+    every service image refuses an empty build version. Health reports API/orchestrator versions;
+    runner heartbeats persist their version; Overview shows non-empty Web, API, Orchestrator,
+    and runner versions, truncated to 12 chars.
+  - Validation performed: API Go suite; focused runner version test; 663 orchestrator tests;
+    orchestrator lint/typecheck; web typecheck, lint (16 existing warnings), and overview tests;
+    all four Docker image builds.
+  - Commands executed: `make proto-generate`, `make build-images`, `make test-orchestrator`,
+    `make lint`, `make typecheck`, Dockerized `go test ./...` for API.
 
 - [x] Per-project GitHub credentials, encrypted at rest and used for that project's `gh`
       calls (migration 015, `persistence/secrets.py`, `workflows/code_host_factory.py`,

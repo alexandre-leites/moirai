@@ -329,6 +329,7 @@ def register_services(
             workflow_runtime=workflow_runtime,
             runner_control=runner_service,
             issue_sync=issue_sync,
+            version=os.environ.get("MOIRAI_BUILD_VERSION", ""),
         ),
         server,
     )

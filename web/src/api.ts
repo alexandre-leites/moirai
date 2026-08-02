@@ -8,6 +8,8 @@ export type HealthStatus = "healthy" | "unhealthy";
 export type Health = {
   status: string;
   orchestrator: string;
+  apiVersion?: string;
+  orchestratorVersion?: string;
 };
 
 // Mirrors the `Project` schema in api/openapi.yaml, served by
@@ -110,6 +112,7 @@ export type Runner = {
   enabled: boolean;
   draining: boolean;
   status: string;
+  version?: string;
   labels: string[];
   lastSeenAt: string;
 };
@@ -375,7 +378,12 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       try {
         const body: Partial<Health> = await res.json();
         if (typeof body?.status === "string" && typeof body?.orchestrator === "string") {
-          return { status: body.status, orchestrator: body.orchestrator };
+          return {
+            status: body.status,
+            orchestrator: body.orchestrator,
+            apiVersion: typeof body.apiVersion === "string" ? body.apiVersion : "",
+            orchestratorVersion: typeof body.orchestratorVersion === "string" ? body.orchestratorVersion : "",
+          };
         }
       } catch {
         // Not JSON: fall through to the status-code reading below.

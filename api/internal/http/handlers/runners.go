@@ -62,6 +62,7 @@ func (h *RunnerHandlers) list(w http.ResponseWriter, r *http.Request) {
 		Enabled    bool     `json:"enabled"`
 		Draining   bool     `json:"draining"`
 		Status     string   `json:"status"`
+		Version    string   `json:"version"`
 		Labels     []string `json:"labels"`
 		LastSeenAt string   `json:"lastSeenAt"`
 	}
@@ -77,6 +78,7 @@ func (h *RunnerHandlers) list(w http.ResponseWriter, r *http.Request) {
 			Enabled:    r.Enabled,
 			Draining:   r.Draining,
 			Status:     r.Status,
+			Version:    r.Version,
 			Labels:     labels,
 			LastSeenAt: r.LastSeenAt,
 		}
@@ -91,7 +93,7 @@ func runnerPayload(runner *controlv1.Runner) map[string]any {
 	}
 	return map[string]any{
 		"id": runner.Id, "name": runner.Name, "enabled": runner.Enabled,
-		"draining": runner.Draining, "status": runner.Status,
+		"draining": runner.Draining, "status": runner.Status, "version": runner.Version,
 		"labels": labels, "lastSeenAt": runner.LastSeenAt,
 	}
 }

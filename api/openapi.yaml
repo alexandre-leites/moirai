@@ -889,13 +889,14 @@ components:
         expiresAt: { type: string }
     Runner:
       type: object
-      required: [id, name, enabled, draining, status, labels, lastSeenAt]
+      required: [id, name, enabled, draining, status, version, labels, lastSeenAt]
       properties:
         id: { type: string }
         name: { type: string }
         enabled: { type: boolean }
         draining: { type: boolean }
         status: { type: string }
+        version: { type: string, maxLength: 12 }
         labels:
           type: array
           items: { type: string }
@@ -981,6 +982,8 @@ components:
       properties:
         status: { type: string, enum: [healthy, degraded] }
         orchestrator: { type: string, enum: [reachable, unreachable] }
+        apiVersion: { type: string, maxLength: 12 }
+        orchestratorVersion: { type: string, maxLength: 12 }
     SchedulerMetrics:
       type: object
       required: [queueDepth, activeWorkflows, scheduledJobs]

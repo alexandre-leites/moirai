@@ -48,7 +48,7 @@ message OrchestratorToRunner {
     DrainRunner drain = 4;
   }
 }
-message Heartbeat { repeated string labels = 1; bool busy = 2; }
+message Heartbeat { repeated string labels = 1; bool busy = 2; string version = 3; }
 message JobOffer { string job_id = 1; int64 lease_generation = 2; string task_packet_json = 3; }
 message JobOfferAccepted { string job_id = 1; }
 message JobOfferRejected { string job_id = 1; string reason = 2; }

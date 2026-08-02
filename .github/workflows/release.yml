@@ -271,6 +271,8 @@ jobs:
           provenance: ${{ needs.plan.outputs.push == 'true' && 'mode=max' || 'false' }}
           sbom: ${{ needs.plan.outputs.push == 'true' }}
           tags: ${{ steps.refs.outputs.tags }}
+          build-args: |
+            MOIRAI_BUILD_VERSION=${{ github.sha }}
           labels: |
             org.opencontainers.image.title=moirai-${{ matrix.service }}
             org.opencontainers.image.description=${{ matrix.description }}

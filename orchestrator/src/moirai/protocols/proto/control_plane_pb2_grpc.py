@@ -149,6 +149,11 @@ class ControlPlaneStub:
                 request_serializer=proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.SerializeToString,
                 response_deserializer=proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.FromString,
                 _registered_method=True)
+        self.GetSystemVersion = channel.unary_unary(
+                '/loop.control.v1.ControlPlane/GetSystemVersion',
+                request_serializer=proto_dot_control__plane__pb2.GetSystemVersionRequest.SerializeToString,
+                response_deserializer=proto_dot_control__plane__pb2.GetSystemVersionResponse.FromString,
+                _registered_method=True)
         self.StreamEvents = channel.unary_stream(
                 '/loop.control.v1.ControlPlane/StreamEvents',
                 request_serializer=proto_dot_control__plane__pb2.StreamEventsRequest.SerializeToString,
@@ -321,6 +326,12 @@ class ControlPlaneServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetSystemVersion(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def StreamEvents(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -464,6 +475,11 @@ def add_ControlPlaneServicer_to_server(servicer, server):
                     servicer.GetSchedulerMetrics,
                     request_deserializer=proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.FromString,
                     response_serializer=proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.SerializeToString,
+            ),
+            'GetSystemVersion': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetSystemVersion,
+                    request_deserializer=proto_dot_control__plane__pb2.GetSystemVersionRequest.FromString,
+                    response_serializer=proto_dot_control__plane__pb2.GetSystemVersionResponse.SerializeToString,
             ),
             'StreamEvents': grpc.unary_stream_rpc_method_handler(
                     servicer.StreamEvents,
@@ -1200,6 +1216,33 @@ class ControlPlane:
             '/loop.control.v1.ControlPlane/GetSchedulerMetrics',
             proto_dot_control__plane__pb2.GetSchedulerMetricsRequest.SerializeToString,
             proto_dot_control__plane__pb2.GetSchedulerMetricsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetSystemVersion(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/loop.control.v1.ControlPlane/GetSystemVersion',
+            proto_dot_control__plane__pb2.GetSystemVersionRequest.SerializeToString,
+            proto_dot_control__plane__pb2.GetSystemVersionResponse.FromString,
             options,
             channel_credentials,
             insecure,

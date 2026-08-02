@@ -429,6 +429,7 @@ type Heartbeat struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Labels        []string               `protobuf:"bytes,1,rep,name=labels,proto3" json:"labels,omitempty"`
 	Busy          bool                   `protobuf:"varint,2,opt,name=busy,proto3" json:"busy,omitempty"`
+	Version       string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -475,6 +476,13 @@ func (x *Heartbeat) GetBusy() bool {
 		return x.Busy
 	}
 	return false
+}
+
+func (x *Heartbeat) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
 }
 
 type JobOffer struct {
@@ -1279,10 +1287,11 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\x06cancel\x18\x02 \x01(\v2\x1f.loop.runner.v1.CancelExecutionH\x00R\x06cancel\x12R\n" +
 	"\x12lease_acknowledged\x18\x03 \x01(\v2!.loop.runner.v1.LeaseAcknowledgedH\x00R\x11leaseAcknowledged\x123\n" +
 	"\x05drain\x18\x04 \x01(\v2\x1b.loop.runner.v1.DrainRunnerH\x00R\x05drainB\t\n" +
-	"\amessage\"7\n" +
+	"\amessage\"Q\n" +
 	"\tHeartbeat\x12\x16\n" +
 	"\x06labels\x18\x01 \x03(\tR\x06labels\x12\x12\n" +
-	"\x04busy\x18\x02 \x01(\bR\x04busy\"v\n" +
+	"\x04busy\x18\x02 \x01(\bR\x04busy\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\"v\n" +
 	"\bJobOffer\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12)\n" +
 	"\x10lease_generation\x18\x02 \x01(\x03R\x0fleaseGeneration\x12(\n" +

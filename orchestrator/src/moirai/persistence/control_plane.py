@@ -989,18 +989,19 @@ class AsyncpgControlPlane:
             raise AuthenticationError("runner credential is invalid")
         return runner[0]
 
-    async def heartbeat(self, runner_id: str, credential: str, now: datetime) -> Runner:
+    async def heartbeat(self, runner_id: str, credential: str, now: datetime, version: str = "") -> Runner:
         # Raises if the credential is invalid; the record itself is re-read below.
         await self.authenticate_runner(runner_id, credential, now)
         updated = await self._pool.fetchrow(
             """
             UPDATE app.runners
-            SET status = 'online', last_seen_at = $2
+            SET status = 'online', last_seen_at = $2, version = COALESCE(NULLIF($3, ''), version)
             WHERE id = $1 AND enabled = true AND revoked_at IS NULL
             RETURNING id, labels, enabled, draining, capacity
             """,
             _uuid(runner_id),
             now,
+            version[:12],
         )
         if updated is None:
             raise AuthenticationError("runner is inactive")
@@ -1375,6 +1376,7 @@ class AsyncpgControlPlane:
                             "enabled": bool(runner["enabled"]),
                             "draining": bool(runner["draining"]),
                             "status": str(runner["status"]),
+                            "version": str(runner.get("version", "")),
                             "labels": _labels(runner["labels"]),
                             "last_seen_at": datetime.fromisoformat(runner["last_seen_at"])
                             if runner.get("last_seen_at")
@@ -1431,7 +1433,7 @@ class AsyncpgControlPlane:
 
     async def list_runners(self) -> list[RunnerRecord]:
         records = await self._pool.fetch(
-            "SELECT id, name, enabled, draining, status, labels, last_seen_at FROM app.runners ORDER BY name ASC, id ASC"
+            "SELECT id, name, enabled, draining, status, version, labels, last_seen_at FROM app.runners ORDER BY name ASC, id ASC"
         )
         return [
             {
@@ -1440,6 +1442,7 @@ class AsyncpgControlPlane:
                 "enabled": bool(record["enabled"]),
                 "draining": bool(record["draining"]),
                 "status": str(record["status"]),
+                "version": str(record["version"]),
                 "labels": record["labels"] if isinstance(record["labels"], list) else json.loads(record["labels"]),
                 "last_seen_at": record["last_seen_at"],
             }
@@ -3925,6 +3928,7 @@ def _runner_record(record: Any) -> RunnerRecord:
         "enabled": bool(record["enabled"]),
         "draining": bool(record["draining"]),
         "status": str(record["status"]),
+        "version": str(record.get("version", "")),
         "labels": _labels(record["labels"]),
         "last_seen_at": record["last_seen_at"],
     }

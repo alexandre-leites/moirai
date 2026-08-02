@@ -16,6 +16,8 @@ import (
 	"github.com/loop-engineering/api/internal/orchestrator"
 )
 
+var version string
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -39,6 +41,16 @@ func main() {
 	cfg.BindAddress = runtimeConfig.BindAddress
 	cfg.MaxRequestBodyBytes = runtimeConfig.MaxBodyBytes
 	cfg.OrchestratorHealthy = client.Healthy
+	cfg.Version = version
+	cfg.OrchestratorVersion = func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		value, err := client.SystemVersion(ctx)
+		if err != nil {
+			return ""
+		}
+		return value
+	}
 
 	srv, err := apiserver.New(cfg, logger)
 	if err != nil {

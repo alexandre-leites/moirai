@@ -1,6 +1,6 @@
 # Build the four images from this checkout instead of pulling them from GHCR.
 #
-#   docker compose -f compose.yaml -f compose.build.yaml up --build -d
+#   MOIRAI_BUILD_VERSION="$(git rev-parse --short=12 HEAD)" docker compose -f compose.yaml -f compose.build.yaml up --build -d
 #
 # The `image:` names from compose.yaml are kept, so a build tags the result
 # under the same reference the default stack would have pulled. Everything else
@@ -12,16 +12,25 @@ services:
     build:
       context: ./orchestrator
       dockerfile: Dockerfile
+      args:
+        MOIRAI_BUILD_VERSION: ${MOIRAI_BUILD_VERSION:-}
 
   api:
     build:
       context: .
       dockerfile: api/Dockerfile
+      args:
+        MOIRAI_BUILD_VERSION: ${MOIRAI_BUILD_VERSION:-}
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      args:
+        MOIRAI_BUILD_VERSION: ${MOIRAI_BUILD_VERSION:-}
 
   runner:
     build:
       context: .
       dockerfile: runner/Dockerfile
+      args:
+        MOIRAI_BUILD_VERSION: ${MOIRAI_BUILD_VERSION:-}

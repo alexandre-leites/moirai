@@ -74,6 +74,7 @@ class RunnerRecord(TypedDict):
     enabled: bool
     draining: bool
     status: str
+    version: str
     labels: list[str]
     last_seen_at: datetime | None
 

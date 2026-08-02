@@ -2342,6 +2342,7 @@ type Runner struct {
 	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
 	Labels        []string               `protobuf:"bytes,6,rep,name=labels,proto3" json:"labels,omitempty"`
 	LastSeenAt    string                 `protobuf:"bytes,7,opt,name=last_seen_at,json=lastSeenAt,proto3" json:"last_seen_at,omitempty"`
+	Version       string                 `protobuf:"bytes,8,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2421,6 +2422,13 @@ func (x *Runner) GetLabels() []string {
 func (x *Runner) GetLastSeenAt() string {
 	if x != nil {
 		return x.LastSeenAt
+	}
+	return ""
+}
+
+func (x *Runner) GetVersion() string {
+	if x != nil {
+		return x.Version
 	}
 	return ""
 }
@@ -3644,6 +3652,86 @@ func (x *GetSchedulerMetricsResponse) GetScheduledJobs() int32 {
 	return 0
 }
 
+type GetSystemVersionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSystemVersionRequest) Reset() {
+	*x = GetSystemVersionRequest{}
+	mi := &file_proto_control_plane_proto_msgTypes[65]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSystemVersionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSystemVersionRequest) ProtoMessage() {}
+
+func (x *GetSystemVersionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[65]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSystemVersionRequest.ProtoReflect.Descriptor instead.
+func (*GetSystemVersionRequest) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{65}
+}
+
+type GetSystemVersionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSystemVersionResponse) Reset() {
+	*x = GetSystemVersionResponse{}
+	mi := &file_proto_control_plane_proto_msgTypes[66]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSystemVersionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSystemVersionResponse) ProtoMessage() {}
+
+func (x *GetSystemVersionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_control_plane_proto_msgTypes[66]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSystemVersionResponse.ProtoReflect.Descriptor instead.
+func (*GetSystemVersionResponse) Descriptor() ([]byte, []int) {
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{66}
+}
+
+func (x *GetSystemVersionResponse) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
 type StreamEventsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	LastEventId   string                 `protobuf:"bytes,1,opt,name=last_event_id,json=lastEventId,proto3" json:"last_event_id,omitempty"`
@@ -3653,7 +3741,7 @@ type StreamEventsRequest struct {
 
 func (x *StreamEventsRequest) Reset() {
 	*x = StreamEventsRequest{}
-	mi := &file_proto_control_plane_proto_msgTypes[65]
+	mi := &file_proto_control_plane_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3665,7 +3753,7 @@ func (x *StreamEventsRequest) String() string {
 func (*StreamEventsRequest) ProtoMessage() {}
 
 func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[65]
+	mi := &file_proto_control_plane_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3678,7 +3766,7 @@ func (x *StreamEventsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamEventsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEventsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{65}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *StreamEventsRequest) GetLastEventId() string {
@@ -3700,7 +3788,7 @@ type ControlPlaneEvent struct {
 
 func (x *ControlPlaneEvent) Reset() {
 	*x = ControlPlaneEvent{}
-	mi := &file_proto_control_plane_proto_msgTypes[66]
+	mi := &file_proto_control_plane_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3712,7 +3800,7 @@ func (x *ControlPlaneEvent) String() string {
 func (*ControlPlaneEvent) ProtoMessage() {}
 
 func (x *ControlPlaneEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_control_plane_proto_msgTypes[66]
+	mi := &file_proto_control_plane_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3725,7 +3813,7 @@ func (x *ControlPlaneEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ControlPlaneEvent.ProtoReflect.Descriptor instead.
 func (*ControlPlaneEvent) Descriptor() ([]byte, []int) {
-	return file_proto_control_plane_proto_rawDescGZIP(), []int{66}
+	return file_proto_control_plane_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *ControlPlaneEvent) GetId() string {
@@ -3929,7 +4017,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x06events\x18\x01 \x03(\v2\x1e.loop.control.v1.WorkflowEventR\x06events\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +
 	"nextCursor\"\x14\n" +
-	"\x12ListRunnersRequest\"\xb4\x01\n" +
+	"\x12ListRunnersRequest\"\xce\x01\n" +
 	"\x06Runner\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -3938,7 +4026,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12\x16\n" +
 	"\x06labels\x18\x06 \x03(\tR\x06labels\x12 \n" +
 	"\flast_seen_at\x18\a \x01(\tR\n" +
-	"lastSeenAt\"H\n" +
+	"lastSeenAt\x12\x18\n" +
+	"\aversion\x18\b \x01(\tR\aversion\"H\n" +
 	"\x13ListRunnersResponse\x121\n" +
 	"\arunners\x18\x01 \x03(\v2\x17.loop.control.v1.RunnerR\arunners\"(\n" +
 	"\x10ListQueueRequest\x12\x14\n" +
@@ -4017,7 +4106,10 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\vqueue_depth\x18\x01 \x01(\x05R\n" +
 	"queueDepth\x12)\n" +
 	"\x10active_workflows\x18\x02 \x01(\x05R\x0factiveWorkflows\x12%\n" +
-	"\x0escheduled_jobs\x18\x03 \x01(\x05R\rscheduledJobs\"9\n" +
+	"\x0escheduled_jobs\x18\x03 \x01(\x05R\rscheduledJobs\"\x19\n" +
+	"\x17GetSystemVersionRequest\"4\n" +
+	"\x18GetSystemVersionResponse\x12\x18\n" +
+	"\aversion\x18\x01 \x01(\tR\aversion\"9\n" +
 	"\x13StreamEventsRequest\x12\"\n" +
 	"\rlast_event_id\x18\x01 \x01(\tR\vlastEventId\"\xaa\x01\n" +
 	"\x11ControlPlaneEvent\x12\x0e\n" +
@@ -4025,7 +4117,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\n" +
 	"event_type\x18\x02 \x01(\tR\teventType\x125\n" +
 	"\bworkflow\x18\x03 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow\x12/\n" +
-	"\x06runner\x18\x04 \x01(\v2\x17.loop.control.v1.RunnerR\x06runner2\xc1\x16\n" +
+	"\x06runner\x18\x04 \x01(\v2\x17.loop.control.v1.RunnerR\x06runner2\xaa\x17\n" +
 	"\fControlPlane\x12F\n" +
 	"\x05Login\x12\x1d.loop.control.v1.LoginRequest\x1a\x1e.loop.control.v1.LoginResponse\x12I\n" +
 	"\x06WhoAmI\x12\x1e.loop.control.v1.WhoAmIRequest\x1a\x1f.loop.control.v1.WhoAmIResponse\x12^\n" +
@@ -4053,7 +4145,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\rRetryWorkflow\x12%.loop.control.v1.RetryWorkflowRequest\x1a&.loop.control.v1.RetryWorkflowResponse\x12a\n" +
 	"\x0eCancelWorkflow\x12&.loop.control.v1.CancelWorkflowRequest\x1a'.loop.control.v1.CancelWorkflowResponse\x12^\n" +
 	"\rBlockWorkflow\x12%.loop.control.v1.BlockWorkflowRequest\x1a&.loop.control.v1.BlockWorkflowResponse\x12p\n" +
-	"\x13GetSchedulerMetrics\x12+.loop.control.v1.GetSchedulerMetricsRequest\x1a,.loop.control.v1.GetSchedulerMetricsResponse\x12Z\n" +
+	"\x13GetSchedulerMetrics\x12+.loop.control.v1.GetSchedulerMetricsRequest\x1a,.loop.control.v1.GetSchedulerMetricsResponse\x12g\n" +
+	"\x10GetSystemVersion\x12(.loop.control.v1.GetSystemVersionRequest\x1a).loop.control.v1.GetSystemVersionResponse\x12Z\n" +
 	"\fStreamEvents\x12$.loop.control.v1.StreamEventsRequest\x1a\".loop.control.v1.ControlPlaneEvent0\x01B@Z>github.com/loop-engineering/contracts/gen/control/v1;controlv1b\x06proto3"
 
 var (
@@ -4068,7 +4161,7 @@ func file_proto_control_plane_proto_rawDescGZIP() []byte {
 	return file_proto_control_plane_proto_rawDescData
 }
 
-var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 67)
+var file_proto_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 69)
 var file_proto_control_plane_proto_goTypes = []any{
 	(*LoginRequest)(nil),                          // 0: loop.control.v1.LoginRequest
 	(*LoginResponse)(nil),                         // 1: loop.control.v1.LoginResponse
@@ -4135,8 +4228,10 @@ var file_proto_control_plane_proto_goTypes = []any{
 	(*BlockWorkflowResponse)(nil),                 // 62: loop.control.v1.BlockWorkflowResponse
 	(*GetSchedulerMetricsRequest)(nil),            // 63: loop.control.v1.GetSchedulerMetricsRequest
 	(*GetSchedulerMetricsResponse)(nil),           // 64: loop.control.v1.GetSchedulerMetricsResponse
-	(*StreamEventsRequest)(nil),                   // 65: loop.control.v1.StreamEventsRequest
-	(*ControlPlaneEvent)(nil),                     // 66: loop.control.v1.ControlPlaneEvent
+	(*GetSystemVersionRequest)(nil),               // 65: loop.control.v1.GetSystemVersionRequest
+	(*GetSystemVersionResponse)(nil),              // 66: loop.control.v1.GetSystemVersionResponse
+	(*StreamEventsRequest)(nil),                   // 67: loop.control.v1.StreamEventsRequest
+	(*ControlPlaneEvent)(nil),                     // 68: loop.control.v1.ControlPlaneEvent
 }
 var file_proto_control_plane_proto_depIdxs = []int32{
 	7,  // 0: loop.control.v1.Project.pipeline_steps:type_name -> loop.control.v1.PipelineStep
@@ -4193,37 +4288,39 @@ var file_proto_control_plane_proto_depIdxs = []int32{
 	59, // 51: loop.control.v1.ControlPlane.CancelWorkflow:input_type -> loop.control.v1.CancelWorkflowRequest
 	61, // 52: loop.control.v1.ControlPlane.BlockWorkflow:input_type -> loop.control.v1.BlockWorkflowRequest
 	63, // 53: loop.control.v1.ControlPlane.GetSchedulerMetrics:input_type -> loop.control.v1.GetSchedulerMetricsRequest
-	65, // 54: loop.control.v1.ControlPlane.StreamEvents:input_type -> loop.control.v1.StreamEventsRequest
-	1,  // 55: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
-	3,  // 56: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
-	5,  // 57: loop.control.v1.ControlPlane.UpdateAccount:output_type -> loop.control.v1.UpdateAccountResponse
-	9,  // 58: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
-	12, // 59: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
-	14, // 60: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
-	16, // 61: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
-	21, // 62: loop.control.v1.ControlPlane.SetProjectCredential:output_type -> loop.control.v1.SetProjectCredentialResponse
-	22, // 63: loop.control.v1.ControlPlane.ClearProjectCredential:output_type -> loop.control.v1.ClearProjectCredentialResponse
-	23, // 64: loop.control.v1.ControlPlane.ListProjectCredentials:output_type -> loop.control.v1.ListProjectCredentialsResponse
-	25, // 65: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
-	28, // 66: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
-	30, // 67: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
-	33, // 68: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
-	35, // 69: loop.control.v1.ControlPlane.GetWorkflow:output_type -> loop.control.v1.GetWorkflowResponse
-	38, // 70: loop.control.v1.ControlPlane.ListWorkflowEvents:output_type -> loop.control.v1.ListWorkflowEventsResponse
-	41, // 71: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
-	44, // 72: loop.control.v1.ControlPlane.ListQueue:output_type -> loop.control.v1.ListQueueResponse
-	47, // 73: loop.control.v1.ControlPlane.SyncNow:output_type -> loop.control.v1.SyncNowResponse
-	50, // 74: loop.control.v1.ControlPlane.IssueSyncStatus:output_type -> loop.control.v1.IssueSyncStatusResponse
-	52, // 75: loop.control.v1.ControlPlane.SetRunnerState:output_type -> loop.control.v1.SetRunnerStateResponse
-	54, // 76: loop.control.v1.ControlPlane.Logout:output_type -> loop.control.v1.LogoutResponse
-	56, // 77: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
-	58, // 78: loop.control.v1.ControlPlane.RetryWorkflow:output_type -> loop.control.v1.RetryWorkflowResponse
-	60, // 79: loop.control.v1.ControlPlane.CancelWorkflow:output_type -> loop.control.v1.CancelWorkflowResponse
-	62, // 80: loop.control.v1.ControlPlane.BlockWorkflow:output_type -> loop.control.v1.BlockWorkflowResponse
-	64, // 81: loop.control.v1.ControlPlane.GetSchedulerMetrics:output_type -> loop.control.v1.GetSchedulerMetricsResponse
-	66, // 82: loop.control.v1.ControlPlane.StreamEvents:output_type -> loop.control.v1.ControlPlaneEvent
-	55, // [55:83] is the sub-list for method output_type
-	27, // [27:55] is the sub-list for method input_type
+	65, // 54: loop.control.v1.ControlPlane.GetSystemVersion:input_type -> loop.control.v1.GetSystemVersionRequest
+	67, // 55: loop.control.v1.ControlPlane.StreamEvents:input_type -> loop.control.v1.StreamEventsRequest
+	1,  // 56: loop.control.v1.ControlPlane.Login:output_type -> loop.control.v1.LoginResponse
+	3,  // 57: loop.control.v1.ControlPlane.WhoAmI:output_type -> loop.control.v1.WhoAmIResponse
+	5,  // 58: loop.control.v1.ControlPlane.UpdateAccount:output_type -> loop.control.v1.UpdateAccountResponse
+	9,  // 59: loop.control.v1.ControlPlane.ListProjects:output_type -> loop.control.v1.ListProjectsResponse
+	12, // 60: loop.control.v1.ControlPlane.CreateProject:output_type -> loop.control.v1.CreateProjectResponse
+	14, // 61: loop.control.v1.ControlPlane.UpdateProject:output_type -> loop.control.v1.UpdateProjectResponse
+	16, // 62: loop.control.v1.ControlPlane.SetProjectEnabled:output_type -> loop.control.v1.SetProjectEnabledResponse
+	21, // 63: loop.control.v1.ControlPlane.SetProjectCredential:output_type -> loop.control.v1.SetProjectCredentialResponse
+	22, // 64: loop.control.v1.ControlPlane.ClearProjectCredential:output_type -> loop.control.v1.ClearProjectCredentialResponse
+	23, // 65: loop.control.v1.ControlPlane.ListProjectCredentials:output_type -> loop.control.v1.ListProjectCredentialsResponse
+	25, // 66: loop.control.v1.ControlPlane.CreateRunnerRegistrationToken:output_type -> loop.control.v1.CreateRunnerRegistrationTokenResponse
+	28, // 67: loop.control.v1.ControlPlane.ListRunnerRegistrationTokens:output_type -> loop.control.v1.ListRunnerRegistrationTokensResponse
+	30, // 68: loop.control.v1.ControlPlane.RevokeRunnerRegistrationToken:output_type -> loop.control.v1.RevokeRunnerRegistrationTokenResponse
+	33, // 69: loop.control.v1.ControlPlane.ListWorkflows:output_type -> loop.control.v1.ListWorkflowsResponse
+	35, // 70: loop.control.v1.ControlPlane.GetWorkflow:output_type -> loop.control.v1.GetWorkflowResponse
+	38, // 71: loop.control.v1.ControlPlane.ListWorkflowEvents:output_type -> loop.control.v1.ListWorkflowEventsResponse
+	41, // 72: loop.control.v1.ControlPlane.ListRunners:output_type -> loop.control.v1.ListRunnersResponse
+	44, // 73: loop.control.v1.ControlPlane.ListQueue:output_type -> loop.control.v1.ListQueueResponse
+	47, // 74: loop.control.v1.ControlPlane.SyncNow:output_type -> loop.control.v1.SyncNowResponse
+	50, // 75: loop.control.v1.ControlPlane.IssueSyncStatus:output_type -> loop.control.v1.IssueSyncStatusResponse
+	52, // 76: loop.control.v1.ControlPlane.SetRunnerState:output_type -> loop.control.v1.SetRunnerStateResponse
+	54, // 77: loop.control.v1.ControlPlane.Logout:output_type -> loop.control.v1.LogoutResponse
+	56, // 78: loop.control.v1.ControlPlane.SubmitHumanDecision:output_type -> loop.control.v1.SubmitHumanDecisionResponse
+	58, // 79: loop.control.v1.ControlPlane.RetryWorkflow:output_type -> loop.control.v1.RetryWorkflowResponse
+	60, // 80: loop.control.v1.ControlPlane.CancelWorkflow:output_type -> loop.control.v1.CancelWorkflowResponse
+	62, // 81: loop.control.v1.ControlPlane.BlockWorkflow:output_type -> loop.control.v1.BlockWorkflowResponse
+	64, // 82: loop.control.v1.ControlPlane.GetSchedulerMetrics:output_type -> loop.control.v1.GetSchedulerMetricsResponse
+	66, // 83: loop.control.v1.ControlPlane.GetSystemVersion:output_type -> loop.control.v1.GetSystemVersionResponse
+	68, // 84: loop.control.v1.ControlPlane.StreamEvents:output_type -> loop.control.v1.ControlPlaneEvent
+	56, // [56:85] is the sub-list for method output_type
+	27, // [27:56] is the sub-list for method input_type
 	27, // [27:27] is the sub-list for extension type_name
 	27, // [27:27] is the sub-list for extension extendee
 	0,  // [0:27] is the sub-list for field type_name
@@ -4240,7 +4337,7 @@ func file_proto_control_plane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_control_plane_proto_rawDesc), len(file_proto_control_plane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   67,
+			NumMessages:   69,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

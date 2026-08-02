@@ -381,7 +381,7 @@ class ListRunnersRequest(_message.Message):
     def __init__(self) -> None: ...
 
 class Runner(_message.Message):
-    __slots__ = ("id", "name", "enabled", "draining", "status", "labels", "last_seen_at")
+    __slots__ = ("id", "name", "enabled", "draining", "status", "labels", "last_seen_at", "version")
     ID_FIELD_NUMBER: _ClassVar[int]
     NAME_FIELD_NUMBER: _ClassVar[int]
     ENABLED_FIELD_NUMBER: _ClassVar[int]
@@ -389,6 +389,7 @@ class Runner(_message.Message):
     STATUS_FIELD_NUMBER: _ClassVar[int]
     LABELS_FIELD_NUMBER: _ClassVar[int]
     LAST_SEEN_AT_FIELD_NUMBER: _ClassVar[int]
+    VERSION_FIELD_NUMBER: _ClassVar[int]
     id: str
     name: str
     enabled: bool
@@ -396,7 +397,8 @@ class Runner(_message.Message):
     status: str
     labels: _containers.RepeatedScalarFieldContainer[str]
     last_seen_at: str
-    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ..., draining: _Optional[bool] = ..., status: _Optional[str] = ..., labels: _Optional[_Iterable[str]] = ..., last_seen_at: _Optional[str] = ...) -> None: ...
+    version: str
+    def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., enabled: _Optional[bool] = ..., draining: _Optional[bool] = ..., status: _Optional[str] = ..., labels: _Optional[_Iterable[str]] = ..., last_seen_at: _Optional[str] = ..., version: _Optional[str] = ...) -> None: ...
 
 class ListRunnersResponse(_message.Message):
     __slots__ = ("runners",)
@@ -581,6 +583,16 @@ class GetSchedulerMetricsResponse(_message.Message):
     active_workflows: int
     scheduled_jobs: int
     def __init__(self, queue_depth: _Optional[int] = ..., active_workflows: _Optional[int] = ..., scheduled_jobs: _Optional[int] = ...) -> None: ...
+
+class GetSystemVersionRequest(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class GetSystemVersionResponse(_message.Message):
+    __slots__ = ("version",)
+    VERSION_FIELD_NUMBER: _ClassVar[int]
+    version: str
+    def __init__(self, version: _Optional[str] = ...) -> None: ...
 
 class StreamEventsRequest(_message.Message):
     __slots__ = ("last_event_id",)

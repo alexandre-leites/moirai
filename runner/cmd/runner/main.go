@@ -27,6 +27,8 @@ import (
 	"github.com/loop-engineering/runner/internal/toolchain"
 )
 
+var version string
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	if handled, err := toolchainCommand(os.Args[1:], toolchain.DefaultManifestPath, os.Stdout); handled {
@@ -337,6 +339,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create runner control client: %w", err)
 	}
+	client.SetVersion(version)
 	// Key material from a previous life is removed before any job can start: a
 	// crash mid-job leaves a private key on the tmpfs, and the next execution
 	// must not inherit one it was never granted.

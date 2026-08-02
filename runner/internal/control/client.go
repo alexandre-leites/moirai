@@ -46,6 +46,7 @@ func (s grpcService) Connect(ctx context.Context) (Stream, error) {
 type Client struct {
 	service      ControlService
 	identity     Identity
+	version      string
 	mu           sync.Mutex
 	stream       Stream
 	streamCancel context.CancelFunc
@@ -134,10 +135,16 @@ func (c *Client) Disconnect() {
 	}
 }
 
+func (c *Client) SetVersion(version string) {
+	c.mu.Lock()
+	c.version = version
+	c.mu.Unlock()
+}
+
 func (c *Client) Heartbeat(labels []string, busy bool) error {
 	return c.send(&runnerv1.RunnerToOrchestrator{
 		Message: &runnerv1.RunnerToOrchestrator_Heartbeat{
-			Heartbeat: &runnerv1.Heartbeat{Labels: labels, Busy: busy},
+			Heartbeat: &runnerv1.Heartbeat{Labels: labels, Busy: busy, Version: c.version},
 		},
 	})
 }

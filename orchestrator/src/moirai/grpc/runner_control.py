@@ -403,7 +403,7 @@ class RunnerControlService(runner_control_pb2_grpc.RunnerControlServicer):
             heartbeat = request.heartbeat
             if any(not label.strip() for label in heartbeat.labels):
                 raise _StreamFailure(grpc.StatusCode.INVALID_ARGUMENT, "runner heartbeat labels are invalid")
-            await _await_if_needed(self._control_plane.heartbeat(runner_id, request.credential, self._now()))
+            await _await_if_needed(self._control_plane.heartbeat(runner_id, request.credential, self._now(), request.heartbeat.version))
             return
         if message_type == "offer_accepted":
             job_id = request.offer_accepted.job_id
