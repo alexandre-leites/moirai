@@ -61,12 +61,14 @@ export function plural(count: number, singular: string, pluralForm = `${singular
 }
 
 /**
- * The queue's `blockedReason` enum in operator English. The reasons come from
- * the orchestrator's queue query (`ListQueue` in orchestrator/internal/server/
- * server.go), which emits `project_disabled`, `project_locked` or nothing at
- * all today; the rest of the vocabulary below is the specified set it is to
- * grow. An unrecognized value is passed through rather than swallowed, so a new
- * reason shows up as itself.
+ * The queue's `blockedReason` enum in operator English. `ListQueue`
+ * (orchestrator/internal/server/server.go) emits exactly three values today:
+ * `project_disabled`, `project_locked`, and empty. The circuit and
+ * runner-matching keys below are what the retired Python queue emitted and no
+ * producer sets now; the console specification names a third vocabulary again
+ * (§4.3 `holdReason`), so this map is deliberately the union rather than any
+ * one of them. An unrecognized value is passed through rather than swallowed,
+ * so a new reason shows up as itself.
  */
 const HOLD_REASONS: Record<string, string> = {
   "": "Next to schedule",

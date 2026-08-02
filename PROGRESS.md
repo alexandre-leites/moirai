@@ -640,3 +640,38 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
     fleet-heartbeat series #124 moved off the API and runner are exported by nobody.
   - #297 — a runner's agent-declared block ends its run as `failed`; the orchestrator never
     derives the terminal `blocked` status or `blocking_reason` from it.
+- Adversarial self-review of the diff (separate agent, told to hunt for corrections that are still
+  false, missed references, a deleted rather than replaced MVP criterion, and behavior smuggled
+  into a comment edit). It found five real defects in my own rewrite; all are fixed on this
+  branch:
+  1. The `describeEvent` comment claimed "every branch is driven by a field the writers actually
+     store". False: the branches were written against the Python envelope
+     (`{job_id, runner_id, …, payload: {…}}`), while `persistExecutionEvent` stores the runner's
+     payload flat and the API passes it through verbatim
+     (`api/internal/http/handlers/workflows.go`). So `executionError` reads a `payload.payload`
+     that never exists, `started` reads `runner_id`, `failed` reads `exit_code` against the
+     runner's `exitCode`, and three branches key on event types the Go orchestrator never writes
+     while `pull_request.created`/`pull_request.merged`/`delivery.failed` have no branch at all.
+     The comment now states that mismatch, `logText`'s envelope note with it, and the rendering
+     bug is filed as #300. (`log` events do still render: `EmitLog` writes a top-level `message`.)
+  2. `web/src/format.ts` claimed the unmatched hold reasons were "the specified set it is to
+     grow". They are neither: they are what the Python queue emitted
+     (`git grep provider_circuit_open 7132e24^`), and the specification names a third vocabulary
+     again. Corrected to say the map is deliberately the union.
+  3. `runner/README.md` "the planning phase is specified to allow two" — nothing specifies it in
+     V1, and the consequence was wrong: one non-delivering execution parks the issue (`parkIssue`)
+     rather than two. Reframed as the Python-era budget it was, with V1's harsher rule stated.
+  4. `VALID_EVENT_TYPES` (deleted with `workflows/runner_events.py`) survived six lines above the
+     reference I did fix, plus two live Go comments. All three now name `validEventType`.
+  5. Two internal contradictions of my own: "increments most of them" vs "never increments"
+     (never is right), and `tasks.md` A1's "plus" list naming fields `ListWorkflows` already
+     returns.
+  The review confirmed clean: no MVP criterion dropped (15 bullets before and after), and nothing
+  outside comments changed in `.go`/`.ts`/`.proto`/`.sql`/`gen` — the sole non-comment edit is one
+  `it(...)` description rename in `web/src/runner-status.test.ts`, assertions untouched.
+  It also flagged two overclaims I had already caught and fixed independently (AGENTS.md §17
+  "resumes" → recovers-and-releases, PROJECT.md's repository-change gate).
+- Second validation pass after the review fixes: `make lint`, `make typecheck`,
+  `make test-orchestrator`, `make test-runner`, `make test-api`, `make test-web` — all pass. CI on
+  PR #299 was green on the first push (12/12 including `validate`, `compose-smoke` and
+  `test-postgres-integration`) and re-ran on each subsequent push.

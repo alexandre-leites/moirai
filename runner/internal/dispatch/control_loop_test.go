@@ -803,7 +803,7 @@ func TestControlLoopReportsAnAgentReportedBlockDistinctlyFromAFailure(t *testing
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	terminal := client.events[1]
-	// The wire vocabulary is unchanged (orchestrator VALID_EVENT_TYPES): the
+	// The wire vocabulary is unchanged (the orchestrator's validEventType): the
 	// block is a refinement of the `failed` event, carried in the payload.
 	if terminal.GetType() != "failed" {
 		t.Fatalf("terminal event type = %q, want failed", terminal.GetType())

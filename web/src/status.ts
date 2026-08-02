@@ -75,7 +75,7 @@ export const isTerminal = (status: string): boolean => TERMINAL_STATUSES.has(sta
 // spent but not the cap, so the console carries one: these are the caps the
 // retired Python orchestrator enforced (RetryBudget), kept as the display
 // budget because the Go V1 orchestrator has no retry policy — it neither caps
-// these counters nor increments most of them (see `reachedPhase`).
+// these counters nor increments any of them (see `reachedPhase`).
 export const ATTEMPT_BUDGETS = {
   planning: 2,
   implementation: 3,
@@ -175,9 +175,18 @@ export const GATE_LABEL: Record<GateState, string> = {
  *
  * The events API returns the raw `event_type` and payload; specification task A3
  * moves this rendering to the orchestrator so every client agrees on the wording.
- * Until then it lives here, and every branch is driven by a field the writers in
- * orchestrator/internal/server (`persistExecutionEvent`, `delivery.go`) actually
- * store in `app.workflow_events`.
+ * Until then it lives here.
+ *
+ * The branches below were written against the retired Python writer, which
+ * wrapped every runner event in an envelope (`{job_id, runner_id, …, payload:
+ * {…}}`) and emitted recovery event types of its own. `persistExecutionEvent`
+ * (orchestrator/internal/server/server.go) stores the runner's payload flat and
+ * unwrapped, and the Go vocabulary is `started`/`log`/`progress`/`completed`/
+ * `failed`/`cancelled` plus `workflow_transition`, `pull_request.created`,
+ * `pull_request.merged` and `delivery.failed` — so the nested reads and the
+ * `offer_unanswered`/`lease_recovery_offered`/`execution_requeued` branches no
+ * longer match anything, and the pull-request events fall through to the
+ * default. Realigning them is issue #300, not a comment's job.
  */
 export function executionError(event: WorkflowEvent): string | null {
   if (event.type !== "failed") return null;
@@ -238,8 +247,10 @@ function shortPhase(status: string): string {
 }
 
 /**
- * The text a `log` event carried, dug out of the envelope the orchestrator wraps
- * runner events in (`{job_id, runner_id, …, payload: {…}}`).
+ * The text a `log` event carried. The nested shape it digs through is the
+ * envelope the retired Python writer wrapped runner events in
+ * (`{job_id, runner_id, …, payload: {…}}`); the Go writer stores the runner's
+ * payload flat, which the plain-string and top-level cases below cover (#300).
  */
 export function logText(payload: unknown): string | null {
   if (typeof payload === "string") return payload;

@@ -16,9 +16,10 @@ tests at each layer (spec §4).
 ## Phase A — Contracts and read APIs (backend, no UI changes)
 
 - [ ] **A1 (M) Widen the `Workflow` proto message and `GET /api/v1/workflows`.**
-  Spec §4.2. Carry everything the orchestrator's `ListWorkflows` RPC already returns (PR id/url,
-  blocking reason, five attempt counters) plus project name, issue number/title, runner id,
-  branch, timestamps, budgets; add `filter`, `projectId`, `q`, pagination params.
+  Spec §4.2. Keep everything the orchestrator's `ListWorkflows` RPC already returns (issue
+  number/title, branch, PR id/url/state, blocking reason, five attempt counters, timestamps) and
+  add what the console needs on top: project name, runner id, terminal reason, completed-at, and
+  the attempt budgets; plus `filter`, `projectId`, `q`, pagination params.
   *Accept:* response matches spec shape; `filter=needs_attention` returns exactly
   `waiting_human ∪ blocked`; old 4-field consumers keep working during migration.
 
