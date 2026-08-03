@@ -14,6 +14,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
@@ -668,5 +670,253 @@ func TestHeartbeatAgeCountsANeverConnectedRunnerFromRegistration(t *testing.T) {
 	}
 	if age := snapshot.OldestHeartbeatAge; age < 2990*time.Second || age > 3300*time.Second {
 		t.Errorf("OldestHeartbeatAge = %s, want ~3000s: a runner that never connected is not fresh, and not invisible", age)
+	}
+}
+
+// leaseGeneration reads the fencing generation the runner holds, which every
+// execution event has to carry to be accepted.
+func (h *harness) leaseGeneration(jobID string) int64 {
+	h.t.Helper()
+	var generation int64
+	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
+		h.t.Fatal(err)
+	}
+	return generation
+}
+
+// runState is the terminal shape of a run: everything the console reads to tell
+// a deliberate stop from a crash.
+type runState struct {
+	status, phase, blocking, terminal string
+	completed                         bool
+}
+
+func (h *harness) runState(workflowID string) runState {
+	h.t.Helper()
+	var state runState
+	var blocking, terminal *string
+	if err := h.pool.QueryRow(context.Background(), `SELECT status,current_phase,blocking_reason,terminal_reason,completed_at IS NOT NULL FROM app.workflow_runs WHERE id=$1`, workflowID).
+		Scan(&state.status, &state.phase, &blocking, &terminal, &state.completed); err != nil {
+		h.t.Fatal(err)
+	}
+	state.blocking, state.terminal = stringValue(blocking), stringValue(terminal)
+	return state
+}
+
+// The defect this pins: an agent that stopped deliberately and said why was
+// stored as an anonymous crash. The runner keeps the terminal event type
+// `failed` because that vocabulary is a shared contract, and marks the payload
+// `blocked: true` (runner/README.md, "An agent-reported block is not a crash"),
+// so the run itself has to end `blocked` with the agent's account in
+// blocking_reason. Ending it `failed` with an empty reason kept it out of the
+// console's needs-attention triage -- waiting_human union blocked -- which is
+// the one place an operator looks for work that is waiting on them.
+func TestAgentDeclaredBlockEndsTheRunBlockedWithItsReason(t *testing.T) {
+	h := newHarness(t)
+	_, issueID := h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	payload := `{"status":"blocked","blocked":true,"exitCode":0,"summary":"the deployment credential is missing","remainingWork":["obtain DEPLOY_KEY","re-run the migration"],"failureFingerprint":"execution:abc","error":"the agent reported itself blocked"}`
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: "failed", PayloadJson: payload,
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+
+	state := h.runState(workflowID)
+	if state.status != "blocked" {
+		t.Fatalf("status = %q, want blocked: a stated stop is being filed as an anonymous failure", state.status)
+	}
+	// A phase left at `failed` under a `blocked` status is the same defect one
+	// column over: the console reads both.
+	if state.phase != "blocked" {
+		t.Fatalf("current_phase = %q, want blocked to match the status", state.phase)
+	}
+	if !strings.Contains(state.blocking, "the deployment credential is missing") {
+		t.Fatalf("blocking_reason = %q, want the agent's summary", state.blocking)
+	}
+	if !strings.Contains(state.blocking, "obtain DEPLOY_KEY") || !strings.Contains(state.blocking, "re-run the migration") {
+		t.Fatalf("blocking_reason = %q, want the remaining work the agent named", state.blocking)
+	}
+	if len(state.blocking) > maxBlockingReasonBytes || state.terminal != state.blocking {
+		t.Fatalf("terminal_reason = %q, blocking_reason = %q: the two are written together everywhere else", state.terminal, state.blocking)
+	}
+	if !state.completed {
+		t.Fatal("a blocked run has no completed_at, so it reads as still running")
+	}
+
+	// The event type is a shared vocabulary and is stored exactly as it
+	// arrived. Only the run's derived status changes.
+	if events := h.scalar(`SELECT COUNT(*) FROM app.workflow_events WHERE workflow_run_id=$1 AND event_type='failed' AND severity='error'`, workflowID); events != 1 {
+		t.Fatal("the terminal event was not stored under the type and severity the console reads")
+	}
+	if jobs := h.scalar(`SELECT COUNT(*) FROM app.jobs WHERE id=$1 AND status='failed' AND finished_at IS NOT NULL`, jobID); jobs != 1 {
+		t.Fatal("the job's status left the vocabulary it shares with the event type")
+	}
+
+	// Lock release and issue parking are the parts that must NOT have changed:
+	// a block is a non-delivering outcome like any other.
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("a blocked run kept its project lock, so the project can never schedule again")
+	}
+	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
+		t.Fatal("a blocked run left its issue eligible, so the scheduler re-dispatches the same block forever")
+	}
+	scheduled, err := h.ScheduleOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduled {
+		t.Fatal("the scheduler re-created the blocked work with no operator action")
+	}
+
+	// The gauge's help text is "runs that have not reached a terminal status".
+	// A blocked run has reached one, so it must not be counted.
+	snapshot, err := h.MetricsSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("MetricsSnapshot: %v", err)
+	}
+	if snapshot.ActiveWorkflows != 0 {
+		t.Fatalf("moirai_active_workflows = %d after the only run blocked, want 0", snapshot.ActiveWorkflows)
+	}
+
+	// Retry is still the way back, and it is gated on the terminal status.
+	if _, err := h.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
+		t.Fatalf("RetryWorkflow on an agent-blocked run: %v", err)
+	}
+	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
+		t.Fatal("retry did not reopen the issue of an agent-blocked run")
+	}
+}
+
+// The inverse defect, which would be worse than the original: a genuine crash
+// filed as a deliberate block hides a real failure behind "someone decided to
+// stop". The payload is agent-supplied, so a malformed one must degrade to
+// `failed` rather than reject the terminal event -- losing a terminal event
+// strands the run and its project lock.
+func TestOnlyAGenuineBlockDeclarationDivertsTheTerminalStatus(t *testing.T) {
+	for name, payload := range map[string]string{
+		"a crash":                      `{"status":"failed","exitCode":1,"error":"agent exited 1","failureFingerprint":"execution:abc"}`,
+		"an empty payload":             `{}`,
+		"a payload that is not object": `"blocked"`,
+		"a false flag":                 `{"status":"blocked","blocked":false,"summary":"x"}`,
+		"a null flag":                  `{"blocked":null,"summary":"x"}`,
+		"a stringly-typed flag":        `{"blocked":"true","summary":"x"}`,
+		"a status with no flag":        `{"status":"blocked","summary":"x"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.project()
+			runnerID := h.runner()
+			jobID, workflowID := h.runJob(runnerID)
+
+			if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+				JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: "failed", PayloadJson: payload,
+			}); err != nil {
+				t.Fatalf("persistExecutionEvent(%s): %v", payload, err)
+			}
+
+			state := h.runState(workflowID)
+			if state.status != "failed" || state.phase != "failed" {
+				t.Fatalf("status/phase = %q/%q for payload %s, want failed: a crash filed as a block is a hidden failure", state.status, state.phase, payload)
+			}
+			if state.blocking != "" {
+				t.Fatalf("blocking_reason = %q for payload %s, want it left empty", state.blocking, payload)
+			}
+			if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+				t.Fatal("the failed run kept its project lock")
+			}
+		})
+	}
+}
+
+// Agent prose reaching a text column: PostgreSQL rejects a NUL byte outright,
+// and the whole terminal event fails with it -- the run would keep its project
+// lock and never end. The bound is the orchestrator's own; the runner applies
+// one too, but the orchestrator does not get to assume a runner it does not
+// control did so.
+func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	entries := make([]string, 40)
+	for index := range entries {
+		entries[index] = strings.Repeat("漢", 400)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"status":  "blocked",
+		"blocked": true,
+		// An ANSI introducer, which PostgreSQL stores in jsonb happily and
+		// which must not survive into an operator-facing column. A NUL byte
+		// cannot be tested here: jsonb rejects one anywhere in the payload,
+		// so the whole event insert fails before the reason is composed --
+		// a separate defect, pinned against the composer in server_test.go.
+		"summary":       "credential missing\x1b[31m and more prose",
+		"remainingWork": entries,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: "failed", PayloadJson: string(payload),
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+
+	state := h.runState(workflowID)
+	if state.status != "blocked" {
+		t.Fatalf("status = %q, want blocked", state.status)
+	}
+	if len(state.blocking) > maxBlockingReasonBytes {
+		t.Fatalf("blocking_reason is %d bytes, over the %d byte bound", len(state.blocking), maxBlockingReasonBytes)
+	}
+	if strings.ContainsAny(state.blocking, "\x00\x1b") || !utf8.ValidString(state.blocking) {
+		t.Fatalf("blocking_reason = %q kept a control byte or invalid UTF-8", state.blocking)
+	}
+	if !strings.Contains(state.blocking, "credential missing") {
+		t.Fatalf("blocking_reason = %q lost the agent's words", state.blocking)
+	}
+	// The remaining-work list is the half an operator acts on, so it has to
+	// survive the bound rather than be crowded out by prose, and the list it
+	// opens has to close.
+	if !strings.Contains(state.blocking, "\u6f22") || !strings.HasSuffix(state.blocking, ")") {
+		t.Fatalf("blocking_reason = %q dropped the remaining work or left its list unclosed", state.blocking)
+	}
+}
+
+// Only a `failed` event is read for a block declaration. The guard matters
+// because `completed` is the delivery path: deliverWorkflow opens the pull
+// request under `WHERE id=$1 AND status='completed'`, so a `completed` event
+// diverted to `blocked` would lose a delivered branch, and a `cancelled` one
+// reached no outcome of its own to declare. Neither carries the flag today —
+// the runner only sets it beside a `failed` event — so this pins the guard
+// rather than any current runner behaviour.
+func TestOnlyAFailedEventIsReadForABlockDeclaration(t *testing.T) {
+	for eventType, want := range map[string]string{"completed": "waiting_github_checks", "cancelled": "cancelled"} {
+		t.Run(eventType, func(t *testing.T) {
+			h := newHarness(t)
+			h.project()
+			runnerID := h.runner()
+			jobID, workflowID := h.runJob(runnerID)
+
+			if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+				JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: eventType,
+				PayloadJson: `{"status":"blocked","blocked":true,"summary":"the deployment credential is missing"}`,
+			}); err != nil {
+				t.Fatalf("persistExecutionEvent(%s): %v", eventType, err)
+			}
+
+			state := h.runState(workflowID)
+			if state.status != want {
+				t.Fatalf("a %s event carrying blocked:true left the run %q, want %q", eventType, state.status, want)
+			}
+			if state.blocking != "" {
+				t.Fatalf("blocking_reason = %q for a %s event, want it left empty", state.blocking, eventType)
+			}
+		})
 	}
 }
