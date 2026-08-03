@@ -343,6 +343,89 @@ func TestRecoverySweepReclaimsAnUnansweredOffer(t *testing.T) {
 	}
 }
 
+// A `completed` runner event does not land the run on `completed` directly
+// any more (#267): it moves to `delivering` first, and deliverWorkflow's own
+// guard (`WHERE status='delivering'`) is what carries it on to
+// `waiting_github_checks` once the pull request is open. This pins that a
+// second delivery attempt against the same workflow, once it has already
+// moved on, is a no-op rather than a second pull request -- the guard a
+// stranded-delivery re-drive (and any other retry of deliverWorkflow) leans
+// on.
+func TestCompletedEventDeliversThroughDeliveringStatus(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: "completed", PayloadJson: "{}",
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+
+	state := h.runState(workflowID)
+	if state.status != "waiting_github_checks" {
+		t.Fatalf("status = %q, want waiting_github_checks", state.status)
+	}
+	if err := h.deliverWorkflow(context.Background(), workflowID); err == nil {
+		t.Fatal("deliverWorkflow re-ran against a run no longer at 'delivering', which would open a second pull request")
+	}
+	if prs := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1`, workflowID); prs != 1 {
+		t.Fatalf("pull_requests rows = %d, want 1", prs)
+	}
+}
+
+// Before StatusDelivering existed, the window between the runner's completion
+// committing and the pull request being opened was spent at 'completed' while
+// still holding a project_locks row -- the only way to tell that run apart
+// from one that had already merged. This pins that the stranded-delivery
+// sweep now finds and re-drives that run by status and age alone: no
+// project_locks row is seeded here at all, and the age bound (not a lock
+// join) is what would otherwise stop this from racing a delivery still in
+// progress.
+func TestRecoverySweepResumesAStrandedDeliveryByStatusAlone(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := newID()
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name,updated_at) VALUES($1,$2,$3,$4,'delivering','delivering',$5,now()-interval '10 minutes')`,
+		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
+
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks`); locks != 0 {
+		t.Fatal("test setup left a project lock behind; the point is proving none is needed")
+	}
+
+	if err := h.RecoverOnce(context.Background()); err != nil {
+		t.Fatalf("RecoverOnce: %v", err)
+	}
+
+	if waiting := h.scalar(`SELECT COUNT(*) FROM app.workflow_runs WHERE id=$1 AND status='waiting_github_checks'`, workflowID); waiting != 1 {
+		t.Fatal("a stranded delivery with no project lock was not re-driven by status and age alone")
+	}
+	if prs := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1`, workflowID); prs != 1 {
+		t.Fatal("the re-driven delivery did not open a pull request")
+	}
+}
+
+// A run mid-delivery has done real, unfinished work: before StatusDelivering
+// existed it would have been sitting at 'completed', the same value a merged
+// run ends at, and GetSchedulerMetrics's `status NOT IN (terminalStatusList)`
+// predicate would have wrongly read it as finished.
+func TestSchedulerMetricsCountsADeliveringRunAsActive(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := newID()
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'delivering','delivering')`,
+		workflowID, projectID, issueID, "thread-"+workflowID)
+
+	snapshot, err := h.readSchedulerSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("readSchedulerSnapshot: %v", err)
+	}
+	if snapshot.activeWorkflows != 1 {
+		t.Fatalf("activeWorkflows = %d, want 1: a run mid-delivery must count as active", snapshot.activeWorkflows)
+	}
+}
+
 // Refusing to read "no checks" as success means a repository whose checks never
 // report would hold its project lock forever unless the wait is bounded.
 func TestRecoverySweepBlocksAnAbandonedCheckWait(t *testing.T) {
@@ -918,12 +1001,13 @@ func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
 }
 
 // Only a `failed` event is read for a block declaration. The guard matters
-// because `completed` is the delivery path: deliverWorkflow opens the pull
-// request under `WHERE id=$1 AND status='completed'`, so a `completed` event
-// diverted to `blocked` would lose a delivered branch, and a `cancelled` one
-// reached no outcome of its own to declare. Neither carries the flag today —
-// the runner only sets it beside a `failed` event — so this pins the guard
-// rather than any current runner behaviour.
+// because `completed` is the delivery path: persistExecutionEvent moves the
+// run to `delivering` and deliverWorkflow then opens the pull request under
+// `WHERE id=$1 AND status='delivering'`, so a `completed` event diverted to
+// `blocked` would lose a delivered branch, and a `cancelled` one reached no
+// outcome of its own to declare. Neither carries the flag today — the runner
+// only sets it beside a `failed` event — so this pins the guard rather than
+// any current runner behaviour.
 func TestOnlyAFailedEventIsReadForABlockDeclaration(t *testing.T) {
 	for eventType, want := range map[string]string{"completed": "waiting_github_checks", "cancelled": "cancelled"} {
 		t.Run(eventType, func(t *testing.T) {

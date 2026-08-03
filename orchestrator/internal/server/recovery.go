@@ -28,9 +28,9 @@ const unansweredOffer = 5 * time.Minute
 // unansweredOfferReason describes that outcome wherever it is recorded.
 const unansweredOfferReason = "runner never answered the job offer"
 
-// strandedDelivery is how long a run may sit at 'completed' holding its project
-// lock before the sweep assumes the delivery that was meant to follow is never
-// going to finish.
+// strandedDelivery is how long a run may sit at 'delivering' before the sweep
+// assumes the delivery that was meant to follow the runner's success is never
+// going to finish on its own.
 const strandedDelivery = 5 * time.Minute
 
 // abandonedChecks bounds the wait for GitHub checks. Nothing else ends that
@@ -46,7 +46,8 @@ const abandonedChecks = 6 * time.Hour
 // one workflow run at a time, so any run that stops making progress while
 // holding one takes its whole project down with it until something clears it —
 // and a runner killed mid-job, or an orchestrator restarted between committing
-// a completion and delivering it, both do exactly that.
+// the runner's success (status='delivering') and finishing its delivery, both
+// do exactly that.
 //
 // The three sweeps are independent, so all three run even if one fails: the two
 // that release project locks must not be skipped because a console flag could
@@ -145,13 +146,22 @@ func (s *Server) reclaimExpiredLeases(ctx context.Context) error {
 	})
 }
 
-// resumeStrandedDeliveries re-drives workflows left at 'completed' while still
-// holding their project lock. A run reaches that state for the short window
-// between the runner's completion being committed and the pull request being
-// opened, and the lock is deliberately retained across it. If the process dies
-// in that window nothing else looks at the run again: the check observer only
-// selects 'waiting_github_checks', and both retry and cancel refuse a run whose
-// status is already terminal.
+// resumeStrandedDeliveries re-drives workflows left at 'delivering'. A run
+// reaches that status for the short window between the runner's completion
+// being committed (persistExecutionEvent) and the pull request being opened
+// (deliverWorkflow), and deliberately keeps its project lock across it. If the
+// process dies in that window nothing else looks at the run again: the check
+// observer only selects 'waiting_github_checks', and both retry and cancel
+// refuse a run whose status is already terminal (delivering is not, but
+// neither action is what re-drives a delivery).
+//
+// Before StatusDelivering existed this same window was spent at 'completed',
+// indistinguishable by status alone from the run's other, later use of that
+// value once GitHub confirmed the merge -- the only thing telling them apart
+// was whether a project_locks row still happened to exist, which is why this
+// query used to join app.project_locks. Splitting the two meanings gives the
+// stranded case its own status, so a plain predicate on status and age finds
+// exactly the same rows the lock join did.
 //
 // deliverWorkflow finds an existing pull request before creating one, so
 // re-driving a delivery that already reached GitHub reuses it.

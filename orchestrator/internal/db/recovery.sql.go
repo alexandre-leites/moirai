@@ -130,8 +130,7 @@ func (q *Queries) SelectAbandonedChecksWorkflows(ctx context.Context, abandonedC
 const selectStrandedDeliveryWorkflows = `-- name: SelectStrandedDeliveryWorkflows :many
 SELECT wr.id::text AS id
 FROM app.workflow_runs wr
-JOIN app.project_locks l ON l.workflow_run_id = wr.id
-WHERE wr.status = 'completed' AND wr.updated_at < now() - $1::interval
+WHERE wr.status = 'delivering' AND wr.updated_at < now() - $1::interval
 ORDER BY wr.updated_at, wr.id
 LIMIT 20
 `

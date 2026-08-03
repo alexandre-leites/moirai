@@ -1219,10 +1219,21 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		// event that passed the fence — so the COALESCE is a backstop against
 		// that reasoning changing, not a case anything is known to hit.
 		// event.GetType() is one of "completed", "failed" or "cancelled" here
-		// (terminalEvent already fenced anything else), which is exactly the
-		// runner-event vocabulary Status shares for these three values.
+		// (terminalEvent already fenced anything else), which is the
+		// runner-event vocabulary Status shares for "failed" and "cancelled" --
+		// but not for "completed", which the run's own status column no longer
+		// reuses. A "completed" event means the agent succeeded, not that
+		// delivery (opening/merging the pull request) has, so the run moves to
+		// StatusDelivering instead: see its doc comment in status.go for why
+		// conflating the two under one 'completed' value was the bug #267
+		// fixed. The event row above still records the runner's own
+		// "completed", since that is the separate, shared vocabulary the
+		// console's event timeline switches on.
 		runStatus, blockingReason := Status(event.GetType()), ""
-		if event.GetType() == "failed" {
+		switch event.GetType() {
+		case "completed":
+			runStatus = StatusDelivering
+		case "failed":
 			if reason, blocked := agentBlockReason(event.GetPayloadJson()); blocked {
 				runStatus, blockingReason = StatusBlocked, reason
 			}
