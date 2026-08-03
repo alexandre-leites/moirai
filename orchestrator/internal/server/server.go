@@ -591,15 +591,21 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 	// lifecycle also wrote, which meant a sync pass had to stop recomputing
 	// it from labels entirely once any run existed, silently breaking
 	// operator label edits from that point on.
+	//
+	// issue.State likewise comes straight from GitHub on every sync (ListIssues
+	// now fetches --state all instead of --state open), so an issue closed on
+	// the tracker is reconciled to state='closed' here instead of staying
+	// 'open' -- and therefore schedulable -- forever just because a sync that
+	// only ever asked for open issues could never observe the close.
 	for _, issue := range issues {
 		labels, _ := json.Marshal(issue.Labels)
 		raw, _ := json.Marshal(issue)
 		if err := queries.UpsertIssue(ctx, db.UpsertIssueParams{
 			ID: newID(), ProjectID: projectID, ExternalID: issue.ExternalID, Title: issue.Title, Body: issue.Body, Url: issue.URL,
-			Column7: labels, Priority: int32(issue.Priority), Eligible: issue.Eligible,
+			State: issue.State, Column8: labels, Priority: int32(issue.Priority), Eligible: issue.Eligible,
 			ExternalCreatedAt: pgtype.Timestamptz{Time: issue.CreatedAt, Valid: true},
 			ExternalUpdatedAt: pgtype.Timestamptz{Time: issue.UpdatedAt, Valid: true},
-			Column12:          raw,
+			Column13:          raw,
 		}); err != nil {
 			return databaseError(err)
 		}

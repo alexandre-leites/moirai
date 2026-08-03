@@ -1426,7 +1426,7 @@ func (s *labelStub) ListIssues(context.Context, string, string) ([]githubIssue, 
 	return []githubIssue{{
 		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
 		Labels: s.labels, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-		Priority: priority, Eligible: eligible,
+		Priority: priority, Eligible: eligible, State: "open",
 	}}, nil
 }
 
@@ -1501,6 +1501,68 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	}
 	if !h.schedulable(issueID) {
 		t.Fatal("retry did not make the issue schedulable again")
+	}
+}
+
+// stateStub is a GitHub whose ListIssues result reports a single issue whose
+// tracker state is driven by a mutable field, so a test can simulate an
+// issue being closed on GitHub between two sync passes.
+type stateStub struct {
+	stubGitHub
+	state string
+}
+
+func (s *stateStub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+	return []githubIssue{{
+		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
+		Labels: []string{"agent:ready"}, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Priority: 0, Eligible: s.state == "open", State: s.state,
+	}}, nil
+}
+
+// TestSyncReconcilesAnIssueClosedOnGitHub pins the fix for the bug where
+// ListIssues only ever fetched --state open: a closed issue never came back
+// from GitHub at all, so app.issues.state stayed 'open' (and the issue
+// stayed schedulable) forever. Now that ListIssues fetches --state all, a
+// sync pass must flip the row to state='closed', clear eligible, and the
+// scheduler's own predicate (h.schedulable, mirroring ListQueueEntries and
+// ClaimSchedulableIssue) must actually exclude it -- not just have some
+// column flipped that nothing reads.
+func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	stub := &stateStub{state: "open"}
+	h.github = stub
+
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject: %v", err)
+	}
+	if !h.schedulable(issueID) {
+		t.Fatal("test setup: the open issue should be schedulable before it closes")
+	}
+
+	stub.state = "closed"
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject: %v", err)
+	}
+	if state := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND state='closed'`, issueID); state != 1 {
+		t.Fatal("closing the issue on GitHub did not reconcile app.issues.state to 'closed'")
+	}
+	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
+		t.Fatal("closing the issue on GitHub did not clear the eligible bit")
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("an issue closed on GitHub is still schedulable after sync reconciled it")
+	}
+
+	// Reopening it on GitHub must bring it back, proving this is a live
+	// reconciliation and not a one-way trip.
+	stub.state = "open"
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject: %v", err)
+	}
+	if !h.schedulable(issueID) {
+		t.Fatal("reopening the issue on GitHub did not make it schedulable again")
 	}
 }
 

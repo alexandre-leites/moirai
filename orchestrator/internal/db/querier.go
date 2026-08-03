@@ -149,6 +149,15 @@ type Querier interface {
 	// ClaimSchedulableIssue's app.workflow_runs.superseded_at join for that), so
 	// there is no lifecycle state left here for a sync to clobber. See #268 and
 	// migration 023 for why a CASE guarding this used to live here.
+	//
+	// state is now written from what GitHub itself reports (ListIssues fetches
+	// --state all, not just open) rather than being hardcoded to 'open': every
+	// scheduling query (ListQueueEntries, GetSchedulerSnapshot,
+	// ClaimSchedulableIssue) already filters on i.state = 'open', so an issue
+	// closed on the tracker stops being schedulable the moment this reconciles
+	// it, with no separate lifecycle write required. The caller also ANDs
+	// eligible with "still open on the tracker", so a closed issue is reported
+	// ineligible too, not just excluded via state.
 	UpsertIssue(ctx context.Context, arg UpsertIssueParams) error
 	UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error
 	UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error
