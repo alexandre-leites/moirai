@@ -2,8 +2,11 @@ package migrate
 
 import (
 	"io/fs"
+	"strings"
 	"testing"
 	"testing/fstest"
+
+	orchestrator "github.com/loop-engineering/orchestrator"
 )
 
 func TestSourceFSExposesLegacyFilesAsUpMigrations(t *testing.T) {
@@ -65,5 +68,49 @@ func TestSourceFSSkipsNonMigrationFiles(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name() != "001_first.up.sql" {
 		t.Fatalf("entries = %#v", entries)
+	}
+}
+
+// TestSourceFSRejectsMisnamedSQLFiles guards against #270-style outages: a
+// migration file that almost matches the naming convention used to be
+// skipped with no warning and no count, so the orchestrator started
+// "successfully" against a schema missing whatever that file would have
+// created. Any of these near-misses must now fail startup loudly, naming the
+// offending file, instead of silently vanishing from the migration set.
+func TestSourceFSRejectsMisnamedSQLFiles(t *testing.T) {
+	cases := map[string]string{
+		"hyphen instead of underscore": "019-add-foo.sql",
+		"upper-cased extension":        "019_add_foo.SQL",
+		"missing leading version":      "add_foo.sql",
+	}
+	for name, filename := range cases {
+		t.Run(name, func(t *testing.T) {
+			source := sourceFS{fstest.MapFS{
+				"migrations/001_first.sql": {Data: []byte("SELECT 1;")},
+				"migrations/" + filename:   {Data: []byte("SELECT 2;")},
+			}}
+			_, err := fs.ReadDir(source, "migrations")
+			if err == nil {
+				t.Fatalf("ReadDir accepted mis-named migration file %q", filename)
+			}
+			if !strings.Contains(err.Error(), filename) {
+				t.Fatalf("error %q does not name the offending file %q", err.Error(), filename)
+			}
+		})
+	}
+}
+
+// TestRealMigrationsDirectoryNamesAreValid is a regression test against the
+// actual embedded migrations shipped with the binary: every file the build
+// bakes in via go:embed must satisfy the naming pattern, or the orchestrator
+// would fail to start in production.
+func TestRealMigrationsDirectoryNamesAreValid(t *testing.T) {
+	source := sourceFS{orchestrator.Migrations}
+	entries, err := fs.ReadDir(source, "migrations")
+	if err != nil {
+		t.Fatalf("real embedded migrations directory failed validation: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected at least one embedded migration file")
 	}
 }

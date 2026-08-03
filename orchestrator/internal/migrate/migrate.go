@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path"
 	"regexp"
 	"strings"
 
@@ -16,6 +17,15 @@ import (
 )
 
 var migrationName = regexp.MustCompile(`^(\d+)_.+\.sql$`)
+
+// sqlFile matches any file that is plausibly meant to be a migration - it is
+// deliberately looser than migrationName (case-insensitive, no version or
+// separator requirement) so that a file which merely looks like a
+// mis-typed migration - a hyphen instead of an underscore, an upper-cased
+// .SQL extension, a missing leading version - is caught as a startup error
+// instead of being silently skipped like a genuinely unrelated file
+// (README.md, .gitkeep) would be.
+var sqlFile = regexp.MustCompile(`(?i)\.sql$`)
 
 type sourceFS struct{ fs.FS }
 
@@ -37,10 +47,16 @@ func (source sourceFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	result := make([]fs.DirEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !migrationName.MatchString(entry.Name()) {
+		if entry.IsDir() {
 			continue
 		}
-		result = append(result, sourceEntry{DirEntry: entry, name: strings.TrimSuffix(entry.Name(), ".sql") + ".up.sql"})
+		if migrationName.MatchString(entry.Name()) {
+			result = append(result, sourceEntry{DirEntry: entry, name: strings.TrimSuffix(entry.Name(), ".sql") + ".up.sql"})
+			continue
+		}
+		if sqlFile.MatchString(entry.Name()) {
+			return nil, fmt.Errorf("migration file %q does not match the required name pattern %s (expected e.g. 001_description.sql)", path.Join(name, entry.Name()), migrationName.String())
+		}
 	}
 	return result, nil
 }
