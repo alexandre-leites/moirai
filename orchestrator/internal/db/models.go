@@ -72,6 +72,7 @@ type AppIssue struct {
 	ExternalUpdatedAt     pgtype.Timestamptz
 	LastSyncedAt          pgtype.Timestamptz
 	RawSnapshot           []byte
+	TaskSourceID          string
 }
 
 type AppIssueSyncState struct {
@@ -81,6 +82,7 @@ type AppIssueSyncState struct {
 	LastError           pgtype.Text
 	UpdatedAt           pgtype.Timestamptz
 	LastSyncedAt        pgtype.Timestamptz
+	TaskSourceID        string
 }
 
 type AppJob struct {
@@ -127,7 +129,6 @@ type AppProject struct {
 	RepositoryUrl       pgtype.Text
 	LocalRepositoryPath pgtype.Text
 	DefaultBranch       string
-	IssueTrackerType    string
 	CodeHostType        string
 	Configuration       []byte
 	CreatedAt           pgtype.Timestamptz
@@ -145,13 +146,14 @@ type AppProjectCircuitState struct {
 }
 
 type AppProjectCredential struct {
-	ProjectID  string
-	Kind       string
-	Ciphertext []byte
-	Nonce      []byte
-	CreatedAt  pgtype.Timestamptz
-	UpdatedAt  pgtype.Timestamptz
-	FilePath   string
+	ProjectID    string
+	Kind         string
+	Ciphertext   []byte
+	Nonce        []byte
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
+	FilePath     string
+	TaskSourceID pgtype.UUID
 }
 
 type AppProjectLabel struct {
@@ -184,6 +186,17 @@ type AppProjectPipelineStep struct {
 	TimeoutSeconds int32
 	Required       bool
 	Environment    []byte
+}
+
+type AppProjectTaskSource struct {
+	ID            string
+	ProjectID     string
+	Provider      string
+	Name          string
+	Enabled       bool
+	Configuration []byte
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
 }
 
 type AppProviderCircuitState struct {

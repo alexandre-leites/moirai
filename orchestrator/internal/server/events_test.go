@@ -85,7 +85,7 @@ func (h *harness) startStream(t *testing.T, lastEventID string) (*fakeEventStrea
 func (h *harness) workflowRun(projectID string) (workflowID string) {
 	h.t.Helper()
 	issueID := idgen.NewID()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github',$3,$3,'Test issue','https://example.test/issues/'||$3,'open',true,now(),now())`, issueID, projectID, issueID[:8])
+	h.exec(`INSERT INTO app.issues(id,project_id,task_source_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,$3,'github',$4,$4,'Test issue','https://example.test/issues/'||$4,'open',true,now(),now())`, issueID, projectID, h.defaultTaskSource(projectID), issueID[:8])
 	workflowID = idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, workflowID, projectID, issueID, "thread-"+workflowID)
 	return workflowID

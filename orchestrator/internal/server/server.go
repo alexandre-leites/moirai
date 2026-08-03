@@ -151,8 +151,8 @@ func New(pool *pgxpool.Pool, version string) (*Core, error) {
 		return nil, errors.New("database pool is required")
 	}
 	queries := db.New(pool)
-	github := NewGitHubCLI(nil, func(ctx context.Context, projectID string) (string, error) {
-		return resolveGitHubToken(ctx, queries, projectID)
+	github := NewGitHubCLI(nil, func(ctx context.Context, projectID, taskSourceID string) (string, error) {
+		return resolveGitHubToken(ctx, queries, projectID, taskSourceID)
 	})
 	return NewWithAdapters(pool, version, github, github, LocalFileTaskSource{})
 }
@@ -175,10 +175,11 @@ func NewWithGitHub(pool *pgxpool.Pool, version string, github gitHubLikeAdapter)
 }
 
 // NewWithAdapters is the general constructor: defaultTaskSource and
-// defaultCodeHost back every project whose issue_tracker_type/code_host_type
-// is unset or "github" (every project that predates this seam), and
-// localFileTaskSource additionally backs a project explicitly configured with
-// issue_tracker_type = "local_file" (see resolveTaskSource). localFileTaskSource
+// defaultCodeHost back every task source whose provider is unset or "github"
+// (every source migration 026 auto-created for a project that predates this
+// seam) and every project's code_host_type respectively, and
+// localFileTaskSource additionally backs a task source explicitly configured
+// with provider = "local_file" (see resolveTaskSource). localFileTaskSource
 // may be nil when no caller needs that path (e.g. most tests, and any process
 // that never registers a local-file project).
 func NewWithAdapters(pool *pgxpool.Pool, version string, defaultTaskSource TaskSource, defaultCodeHost CodeHost, localFileTaskSource TaskSource) (*Core, error) {
@@ -591,29 +592,33 @@ func (s *ControlServer) SyncNow(ctx context.Context, request *controlv1.SyncNowR
 	if projectID != "" && !idgen.ValidID(projectID) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
-	var candidates []db.ListSyncableProjectsRow
+	var projectIDs []string
 	if projectID != "" {
-		byID, err := s.queries.ListSyncableProjectByID(ctx, projectID)
+		enabled, err := s.queries.ProjectIsEnabled(ctx, projectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, status.Error(codes.NotFound, "enabled project is unknown")
+		}
 		if err != nil {
 			return nil, databaseError(err)
 		}
-		for _, row := range byID {
-			candidates = append(candidates, db.ListSyncableProjectsRow(row))
+		if !enabled {
+			return nil, status.Error(codes.NotFound, "enabled project is unknown")
 		}
+		projectIDs = []string{projectID}
 	} else {
-		all, err := s.queries.ListSyncableProjects(ctx)
+		ids, err := s.queries.ListEnabledProjectIDs(ctx)
 		if err != nil {
 			return nil, databaseError(err)
 		}
-		candidates = all
+		projectIDs = ids
 	}
 	response := &controlv1.SyncNowResponse{}
-	for _, candidate := range candidates {
-		result := &controlv1.ProjectSyncResult{ProjectId: candidate.ID}
-		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl), candidate.IssueTrackerType); err != nil {
+	for _, id := range projectIDs {
+		result := &controlv1.ProjectSyncResult{ProjectId: id}
+		if err := s.syncProject(ctx, id); err != nil {
 			result.Error = syncErrorMessage(err)
 		} else {
-			count, err := s.queries.CountProjectIssues(ctx, candidate.ID)
+			count, err := s.queries.CountProjectIssues(ctx, id)
 			if err != nil {
 				return nil, databaseError(err)
 			}
@@ -621,33 +626,33 @@ func (s *ControlServer) SyncNow(ctx context.Context, request *controlv1.SyncNowR
 		}
 		response.Results = append(response.Results, result)
 	}
-	if projectID != "" && len(response.Results) == 0 {
-		return nil, status.Error(codes.NotFound, "enabled project is unknown")
-	}
 	return response, nil
 }
 
-// SyncProjects refreshes the issue snapshot for every enabled project. It is
-// the unattended half of SyncNow: the console's "Sync now" button covers an
-// operator who is watching, and this covers the deployments that nobody is.
+// SyncProjects refreshes the issue snapshot for every enabled project's
+// enabled task sources. It is the unattended half of SyncNow: the console's
+// "Sync now" button covers an operator who is watching, and this covers the
+// deployments that nobody is.
 //
-// One project's failure does not abandon the rest — a repository with a revoked
-// token would otherwise stop every other project discovering work — so failures
-// are recorded per project (which is what drives the console's sync health) and
-// reported together.
+// One source's failure does not abandon its siblings, on the same project or
+// any other -- a Jira source with a revoked token would otherwise stop a
+// healthy GitHub source on the same project, or every other project's
+// sources, from discovering work. Failures are recorded per source (which is
+// what drives app.issue_sync_state's per-source backoff) and reported
+// together.
 func (s *Core) SyncProjects(ctx context.Context) error {
-	// ListProjectsDueForSync (unlike ListSyncableProjects, which SyncNow uses)
-	// excludes a project still inside the backoff window recordSyncFailure set
+	// ListSourcesDueForSync (unlike ListSyncableSources, which SyncNow uses)
+	// excludes a source still inside the backoff window recordSyncFailure set
 	// on it, so a repository with a revoked token or a deleted remote is not
 	// retried at full rate forever.
-	projects, err := s.queries.ListProjectsDueForSync(ctx)
+	sources, err := s.queries.ListSourcesDueForSync(ctx)
 	if err != nil {
 		return databaseError(err)
 	}
 	var failures []error
-	for _, candidate := range projects {
-		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl), candidate.IssueTrackerType); err != nil {
-			failures = append(failures, fmt.Errorf("project %s: %w", candidate.ID, err))
+	for _, source := range sources {
+		if err := s.syncSource(ctx, source.ID, source.ProjectID, source.Provider, sourceRef(source.Configuration)); err != nil {
+			failures = append(failures, fmt.Errorf("task source %s (project %s): %w", source.ID, source.ProjectID, err))
 		}
 	}
 	return errors.Join(failures...)
@@ -669,26 +674,27 @@ func (s *ControlServer) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueS
 			Enabled:       row.Enabled,
 			IssueCount:    int32(row.IssueCount),
 			EligibleCount: int32(row.EligibleCount),
+			// ConsecutiveFailures/LastError are aggregated (COALESCEd to
+			// 0/"") across a project's task sources, so they are never NULL:
+			// a project with zero sources reports the same "nothing to
+			// show" values a project whose one source has never failed
+			// already did.
+			ConsecutiveFailures: row.ConsecutiveFailures,
+			LastError:           row.LastError,
 		}
 		if row.LastSyncedAt.Valid {
 			entry.LastSyncedAt = textutil.Timestamp(row.LastSyncedAt.Time)
 		}
-		if row.ConsecutiveFailures.Valid {
-			entry.ConsecutiveFailures = row.ConsecutiveFailures.Int32
-		}
 		if row.NextRetryAt.Valid {
 			entry.NextRetryAt = textutil.Timestamp(row.NextRetryAt.Time)
-		}
-		if row.LastError.Valid {
-			entry.LastError = row.LastError.String
 		}
 		response.Entries = append(response.Entries, entry)
 	}
 	return response, nil
 }
 
-// providerName normalizes a project's issue_tracker_type/code_host_type
-// column into the value persisted as app.issues.provider /
+// providerName normalizes a task source's provider (or a project's
+// code_host_type) column into the value persisted as app.issues.provider /
 // app.pull_requests.provider: the schema default and every pre-existing
 // project have it empty or "github" respectively, and both mean the same
 // thing to the rest of the system, so both are recorded identically.
@@ -697,6 +703,23 @@ func providerName(configuredType string) string {
 		return "github"
 	}
 	return configuredType
+}
+
+// sourceRef reads the "ref" key out of a task source's own
+// configuration JSONB (app.project_task_sources.configuration), which is
+// where syncSource's ref argument comes from. Every source migration 026
+// auto-created has one, copied from the project's old repository_url; a
+// malformed or absent value degrades to "" rather than failing the sync
+// outright, matching how a NULL repository_url read as "" before this
+// column existed (see textutil.TextValue's prior use here).
+func sourceRef(configuration string) string {
+	var decoded struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.Unmarshal([]byte(configuration), &decoded); err != nil {
+		return ""
+	}
+	return decoded.Ref
 }
 
 // legacyTaskLabels extracts the GitHub-era "Labels" array back out of a
@@ -720,14 +743,43 @@ func legacyTaskLabels(raw json.RawMessage) []byte {
 	return encoded
 }
 
-func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL, issueTrackerType string) error {
-	source, err := s.adapters.resolveTaskSource(issueTrackerType)
+// syncProject refreshes every enabled task source configured for one
+// project. A project with zero configured sources (valid -- see #293) simply
+// iterates nothing and returns nil: there is no error path for "nothing to
+// sync". One source's failure does not stop its siblings on the same
+// project, matching SyncProjects' cross-project isolation one level down;
+// every failure is still collected and returned together so a caller (SyncNow)
+// can report all of them rather than only the first.
+func (s *Core) syncProject(ctx context.Context, projectID string) error {
+	sources, err := s.queries.ListSyncableSourcesByProject(ctx, projectID)
+	if err != nil {
+		return databaseError(err)
+	}
+	var failures []error
+	for _, source := range sources {
+		if err := s.syncSource(ctx, source.ID, source.ProjectID, source.Provider, sourceRef(source.Configuration)); err != nil {
+			failures = append(failures, fmt.Errorf("task source %s: %w", source.ID, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// syncSource refreshes one task source's issue snapshot: the unit of work
+// both SyncProjects and syncProject (SyncNow's per-project helper) iterate
+// over. provider is the source's own app.project_task_sources.provider
+// (selecting the adapter via resolveTaskSource), and ref is that source's own
+// configuration->>'ref' (see sourceRef) -- both scoped to this one source,
+// never to the project as a whole, which is what lets two sources on the
+// same project use different adapters and point at different repositories/
+// directories/queries.
+func (s *Core) syncSource(ctx context.Context, sourceID, projectID, provider, ref string) error {
+	adapter, err := s.adapters.resolveTaskSource(provider)
 	if err != nil {
 		return err
 	}
-	tasks, err := source.ListTasks(ctx, projectID, repositoryURL)
+	tasks, err := adapter.ListTasks(ctx, projectID, sourceID, ref)
 	if err != nil {
-		_ = s.recordSyncFailure(ctx, projectID, err)
+		_ = s.recordSyncFailure(ctx, sourceID, projectID, err)
 		return err
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -736,7 +788,7 @@ func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL, issueT
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	provider := providerName(issueTrackerType)
+	recordedProvider := providerName(provider)
 	// Eligible is written unconditionally from the source's own derivation on
 	// every sync (for GitHub: issuePriority reading agent:ready/agent:blocked/
 	// agent:delivered labels) — it is not, by itself, the scheduler's
@@ -766,23 +818,25 @@ func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL, issueT
 			raw = json.RawMessage("{}")
 		}
 		if err := queries.UpsertIssue(ctx, db.UpsertIssueParams{
-			ID: idgen.NewID(), ProjectID: projectID, Provider: provider, ExternalID: task.ExternalID, Title: task.Title, Body: task.Body, Url: task.URL,
-			State: task.State, Column9: legacyTaskLabels(raw), Priority: int32(task.Priority), Eligible: task.Eligible,
+			ID: idgen.NewID(), ProjectID: projectID, TaskSourceID: sourceID, Provider: recordedProvider, ExternalID: task.ExternalID, Title: task.Title, Body: task.Body, Url: task.URL,
+			State: task.State, Column10: legacyTaskLabels(raw), Priority: int32(task.Priority), Eligible: task.Eligible,
 			ExternalCreatedAt: pgtype.Timestamptz{Time: task.CreatedAt, Valid: true},
 			ExternalUpdatedAt: pgtype.Timestamptz{Time: task.UpdatedAt, Valid: true},
-			Column14:          raw,
+			Column15:          raw,
 		}); err != nil {
 			return databaseError(err)
 		}
 	}
-	if err := queries.UpsertIssueSyncStateSuccess(ctx, projectID); err != nil {
+	if err := queries.UpsertIssueSyncStateSuccess(ctx, db.UpsertIssueSyncStateSuccessParams{TaskSourceID: sourceID, ProjectID: projectID}); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
 }
 
-func (s *Core) recordSyncFailure(ctx context.Context, projectID string, cause error) error {
-	err := s.queries.UpsertIssueSyncStateFailure(ctx, db.UpsertIssueSyncStateFailureParams{ProjectID: projectID, LastError: pgtype.Text{String: textutil.Truncate(cause.Error(), 1024), Valid: true}})
+func (s *Core) recordSyncFailure(ctx context.Context, sourceID, projectID string, cause error) error {
+	err := s.queries.UpsertIssueSyncStateFailure(ctx, db.UpsertIssueSyncStateFailureParams{
+		TaskSourceID: sourceID, ProjectID: projectID, LastError: pgtype.Text{String: textutil.Truncate(cause.Error(), 1024), Valid: true},
+	})
 	return databaseError(err)
 }
 
@@ -1722,6 +1776,7 @@ func (s *Core) authenticateRunner(ctx context.Context, runnerID, credential stri
 type projectQuerier interface {
 	GetProject(context.Context, string) (db.GetProjectRow, error)
 	ListProjectPipelineSteps(context.Context, string) ([]db.ListProjectPipelineStepsRow, error)
+	ListProjectTaskSources(context.Context, string) ([]db.ListProjectTaskSourcesRow, error)
 }
 
 func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (*controlv1.Project, error) {
@@ -1755,6 +1810,22 @@ func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (
 	for _, step := range steps {
 		project.PipelineSteps = append(project.PipelineSteps, &controlv1.PipelineStep{
 			Command: step.Command, TimeoutSeconds: step.TimeoutSeconds, Position: step.Position, Required: step.Required,
+		})
+	}
+	// TaskSources: the minimal read surface #293 adds for what used to be the
+	// single, invisible app.projects.issue_tracker_type column. Creating,
+	// editing and deleting a source needs #294's field-level descriptor for a
+	// real write API rather than one this issue would have to hand-roll and
+	// #294 would then redesign around; see the PR description. Every project
+	// still has at least the source migration 026 auto-created for it, so
+	// this is never misleadingly empty for an existing project.
+	sources, err := queries.ListProjectTaskSources(ctx, id)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	for _, source := range sources {
+		project.TaskSources = append(project.TaskSources, &controlv1.TaskSource{
+			Id: source.ID, Provider: source.Provider, Name: source.Name, Enabled: source.Enabled, Configuration: source.Configuration,
 		})
 	}
 	return project, nil

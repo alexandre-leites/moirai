@@ -86,7 +86,7 @@ func (q *Queries) DeleteProjectPipelineSteps(ctx context.Context, projectID stri
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration, issue_tracker_type, code_host_type
+SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration, code_host_type
 FROM app.projects
 WHERE id = $1
 `
@@ -100,7 +100,6 @@ type GetProjectRow struct {
 	LocalRepositoryPath pgtype.Text
 	DefaultBranch       string
 	Configuration       string
-	IssueTrackerType    string
 	CodeHostType        string
 }
 
@@ -116,7 +115,6 @@ func (q *Queries) GetProject(ctx context.Context, id string) (GetProjectRow, err
 		&i.LocalRepositoryPath,
 		&i.DefaultBranch,
 		&i.Configuration,
-		&i.IssueTrackerType,
 		&i.CodeHostType,
 	)
 	return i, err
@@ -128,11 +126,19 @@ SELECT p.id::text AS id, p.name, p.enabled, COUNT(i.id) AS issue_count,
          SELECT 1 FROM app.workflow_runs w
          WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed', 'blocked', 'completed')
        )) AS eligible_count,
-       s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error
+       MAX(s.last_synced_at)::timestamptz AS last_synced_at,
+       -- COALESCEd to 0/'' rather than left NULL: a project with zero
+       -- configured task sources has no per-source failure/error to report
+       -- (there is nothing failing), which is the same "nothing to show"
+       -- state a project whose one source has never failed already reports.
+       COALESCE(MAX(s.consecutive_failures), 0)::int AS consecutive_failures,
+       MIN(s.next_retry_at)::timestamptz AS next_retry_at,
+       COALESCE((array_agg(s.last_error ORDER BY s.updated_at DESC NULLS LAST) FILTER (WHERE s.last_error IS NOT NULL))[1], '')::text AS last_error
 FROM app.projects p
-LEFT JOIN app.issues i ON i.project_id = p.id
-LEFT JOIN app.issue_sync_state s ON s.project_id = p.id
-GROUP BY p.id, p.name, p.enabled, s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error
+LEFT JOIN app.project_task_sources ts ON ts.project_id = p.id
+LEFT JOIN app.issues i ON i.task_source_id = ts.id
+LEFT JOIN app.issue_sync_state s ON s.task_source_id = ts.id
+GROUP BY p.id, p.name, p.enabled
 ORDER BY p.name, p.id
 `
 
@@ -143,9 +149,9 @@ type IssueSyncStatusEntriesRow struct {
 	IssueCount          int64
 	EligibleCount       int64
 	LastSyncedAt        pgtype.Timestamptz
-	ConsecutiveFailures pgtype.Int4
+	ConsecutiveFailures int32
 	NextRetryAt         pgtype.Timestamptz
-	LastError           pgtype.Text
+	LastError           string
 }
 
 // eligible_count matches the scheduler's own candidate set (ListQueueEntries,
@@ -153,6 +159,16 @@ type IssueSyncStatusEntriesRow struct {
 // but sitting on a failed, blocked or delivered run that has not been
 // superseded by a retry is not actually schedulable, and the sidebar badge
 // would otherwise overcount it.
+//
+// This reports one row per *project*, aggregated across however many task
+// sources it has, rather than one row per source: the console's sync panel
+// (out of scope for #293 -- see the PR description) reads this shape today,
+// and a project with its one auto-migrated source produces exactly the same
+// row it always did. last_synced_at/consecutive_failures take the MAX across
+// a project's sources (the worst case is the one worth surfacing),
+// next_retry_at the soonest non-null retry, and last_error the most
+// recently updated source's error. A true per-source breakdown is future
+// work once the console has somewhere to show it.
 func (q *Queries) IssueSyncStatusEntries(ctx context.Context) ([]IssueSyncStatusEntriesRow, error) {
 	rows, err := q.db.Query(ctx, issueSyncStatusEntries)
 	if err != nil {
@@ -176,6 +192,32 @@ func (q *Queries) IssueSyncStatusEntries(ctx context.Context) ([]IssueSyncStatus
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEnabledProjectIDs = `-- name: ListEnabledProjectIDs :many
+SELECT id::text AS id FROM app.projects WHERE enabled ORDER BY name, id
+`
+
+// SyncNow's "sync every project" path (no project_id given): the set of
+// projects whose task sources are even candidates for ListSyncableSources.
+func (q *Queries) ListEnabledProjectIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.Query(ctx, listEnabledProjectIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -246,37 +288,47 @@ func (q *Queries) ListProjectPipelineSteps(ctx context.Context, projectID string
 	return items, nil
 }
 
-const listProjectsDueForSync = `-- name: ListProjectsDueForSync :many
-SELECT p.id::text AS id, p.repository_url, p.issue_tracker_type
-FROM app.projects p
-LEFT JOIN app.issue_sync_state s ON s.project_id = p.id
-WHERE p.enabled AND (s.next_retry_at IS NULL OR s.next_retry_at <= now())
+const listSourcesDueForSync = `-- name: ListSourcesDueForSync :many
+SELECT ts.id::text AS id, ts.project_id::text AS project_id, ts.provider, ts.configuration::text AS configuration
+FROM app.project_task_sources ts
+JOIN app.projects p ON p.id = ts.project_id
+LEFT JOIN app.issue_sync_state s ON s.task_source_id = ts.id
+WHERE p.enabled AND ts.enabled AND (s.next_retry_at IS NULL OR s.next_retry_at <= now())
 `
 
-type ListProjectsDueForSyncRow struct {
-	ID               string
-	RepositoryUrl    pgtype.Text
-	IssueTrackerType string
+type ListSourcesDueForSyncRow struct {
+	ID            string
+	ProjectID     string
+	Provider      string
+	Configuration string
 }
 
-// Used by the unattended sync loop only (SyncProjects): a project whose last
+// Used by the unattended sync loop only (SyncProjects): a source whose last
 // failure set app.issue_sync_state.next_retry_at in the future (see
 // UpsertIssueSyncStateFailure's exponential backoff) is skipped so a
 // repository with a revoked token or a deleted remote is not hammered on
 // every tick forever. The operator-triggered "Sync now" path (SyncNow) goes
-// through ListSyncableProjects/ListSyncableProjectByID instead and always
+// through ListSyncableSources/ListSyncableSourcesByProject instead and always
 // bypasses backoff, since a human explicitly asking for a sync right now is
-// exactly the case backoff should not stand in front of.
-func (q *Queries) ListProjectsDueForSync(ctx context.Context) ([]ListProjectsDueForSyncRow, error) {
-	rows, err := q.db.Query(ctx, listProjectsDueForSync)
+// exactly the case backoff should not stand in front of. Backoff is tracked
+// per source (app.issue_sync_state is keyed by task_source_id), so one
+// source's failure no longer throttles a healthy sibling source on the same
+// project.
+func (q *Queries) ListSourcesDueForSync(ctx context.Context) ([]ListSourcesDueForSyncRow, error) {
+	rows, err := q.db.Query(ctx, listSourcesDueForSync)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListProjectsDueForSyncRow
+	var items []ListSourcesDueForSyncRow
 	for rows.Next() {
-		var i ListProjectsDueForSyncRow
-		if err := rows.Scan(&i.ID, &i.RepositoryUrl, &i.IssueTrackerType); err != nil {
+		var i ListSourcesDueForSyncRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Provider,
+			&i.Configuration,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -287,28 +339,39 @@ func (q *Queries) ListProjectsDueForSync(ctx context.Context) ([]ListProjectsDue
 	return items, nil
 }
 
-const listSyncableProjectByID = `-- name: ListSyncableProjectByID :many
-SELECT id::text AS id, repository_url, issue_tracker_type
-FROM app.projects
-WHERE enabled AND id = $1
+const listSyncableSources = `-- name: ListSyncableSources :many
+SELECT ts.id::text AS id, ts.project_id::text AS project_id, ts.provider, ts.configuration::text AS configuration
+FROM app.project_task_sources ts
+JOIN app.projects p ON p.id = ts.project_id
+WHERE p.enabled AND ts.enabled
 `
 
-type ListSyncableProjectByIDRow struct {
-	ID               string
-	RepositoryUrl    pgtype.Text
-	IssueTrackerType string
+type ListSyncableSourcesRow struct {
+	ID            string
+	ProjectID     string
+	Provider      string
+	Configuration string
 }
 
-func (q *Queries) ListSyncableProjectByID(ctx context.Context, id string) ([]ListSyncableProjectByIDRow, error) {
-	rows, err := q.db.Query(ctx, listSyncableProjectByID, id)
+// One row per enabled task source of every enabled project -- the unit the
+// sync loop now iterates is a source, not a project (see #293): a project
+// with zero configured sources simply contributes no rows here, and a
+// disabled source is skipped the same way a disabled project always was.
+func (q *Queries) ListSyncableSources(ctx context.Context) ([]ListSyncableSourcesRow, error) {
+	rows, err := q.db.Query(ctx, listSyncableSources)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListSyncableProjectByIDRow
+	var items []ListSyncableSourcesRow
 	for rows.Next() {
-		var i ListSyncableProjectByIDRow
-		if err := rows.Scan(&i.ID, &i.RepositoryUrl, &i.IssueTrackerType); err != nil {
+		var i ListSyncableSourcesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Provider,
+			&i.Configuration,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -319,28 +382,35 @@ func (q *Queries) ListSyncableProjectByID(ctx context.Context, id string) ([]Lis
 	return items, nil
 }
 
-const listSyncableProjects = `-- name: ListSyncableProjects :many
-SELECT id::text AS id, repository_url, issue_tracker_type
-FROM app.projects
-WHERE enabled
+const listSyncableSourcesByProject = `-- name: ListSyncableSourcesByProject :many
+SELECT ts.id::text AS id, ts.project_id::text AS project_id, ts.provider, ts.configuration::text AS configuration
+FROM app.project_task_sources ts
+JOIN app.projects p ON p.id = ts.project_id
+WHERE p.enabled AND ts.enabled AND ts.project_id = $1
 `
 
-type ListSyncableProjectsRow struct {
-	ID               string
-	RepositoryUrl    pgtype.Text
-	IssueTrackerType string
+type ListSyncableSourcesByProjectRow struct {
+	ID            string
+	ProjectID     string
+	Provider      string
+	Configuration string
 }
 
-func (q *Queries) ListSyncableProjects(ctx context.Context) ([]ListSyncableProjectsRow, error) {
-	rows, err := q.db.Query(ctx, listSyncableProjects)
+func (q *Queries) ListSyncableSourcesByProject(ctx context.Context, projectID string) ([]ListSyncableSourcesByProjectRow, error) {
+	rows, err := q.db.Query(ctx, listSyncableSourcesByProject, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListSyncableProjectsRow
+	var items []ListSyncableSourcesByProjectRow
 	for rows.Next() {
-		var i ListSyncableProjectsRow
-		if err := rows.Scan(&i.ID, &i.RepositoryUrl, &i.IssueTrackerType); err != nil {
+		var i ListSyncableSourcesByProjectRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Provider,
+			&i.Configuration,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -349,6 +419,21 @@ func (q *Queries) ListSyncableProjects(ctx context.Context) ([]ListSyncableProje
 		return nil, err
 	}
 	return items, nil
+}
+
+const projectIsEnabled = `-- name: ProjectIsEnabled :one
+SELECT enabled FROM app.projects WHERE id = $1
+`
+
+// Distinguishes "unknown project" (no row, pgx.ErrNoRows) from "disabled
+// project" (a row, enabled = false) for SyncNow's single-project path, which
+// reports both as the same 404 -- syncing a specific project only ever makes
+// sense for one that is both known and enabled.
+func (q *Queries) ProjectIsEnabled(ctx context.Context, id string) (bool, error) {
+	row := q.db.QueryRow(ctx, projectIsEnabled, id)
+	var enabled bool
+	err := row.Scan(&enabled)
+	return enabled, err
 }
 
 const setProjectEnabled = `-- name: SetProjectEnabled :execrows
@@ -402,9 +487,9 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (i
 }
 
 const upsertIssue = `-- name: UpsertIssue :exec
-INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
-VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, now(), $14::jsonb)
-ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
+INSERT INTO app.issues(id, project_id, task_source_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
+VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, now(), $15::jsonb)
+ON CONFLICT(task_source_id, external_id) DO UPDATE SET
   display_number = EXCLUDED.display_number,
   title = EXCLUDED.title,
   body = EXCLUDED.body,
@@ -434,18 +519,19 @@ WHERE
 type UpsertIssueParams struct {
 	ID                string
 	ProjectID         string
+	TaskSourceID      string
 	Provider          string
 	ExternalID        string
 	Title             string
 	Body              string
 	Url               string
 	State             string
-	Column9           []byte
+	Column10          []byte
 	Priority          int32
 	Eligible          bool
 	ExternalCreatedAt pgtype.Timestamptz
 	ExternalUpdatedAt pgtype.Timestamptz
-	Column14          []byte
+	Column15          []byte
 }
 
 // eligible is written unconditionally from the tracker's labels (see
@@ -477,26 +563,27 @@ func (q *Queries) UpsertIssue(ctx context.Context, arg UpsertIssueParams) error 
 	_, err := q.db.Exec(ctx, upsertIssue,
 		arg.ID,
 		arg.ProjectID,
+		arg.TaskSourceID,
 		arg.Provider,
 		arg.ExternalID,
 		arg.Title,
 		arg.Body,
 		arg.Url,
 		arg.State,
-		arg.Column9,
+		arg.Column10,
 		arg.Priority,
 		arg.Eligible,
 		arg.ExternalCreatedAt,
 		arg.ExternalUpdatedAt,
-		arg.Column14,
+		arg.Column15,
 	)
 	return err
 }
 
 const upsertIssueSyncStateFailure = `-- name: UpsertIssueSyncStateFailure :exec
-INSERT INTO app.issue_sync_state(project_id, consecutive_failures, next_retry_at, last_error, updated_at)
-VALUES ($1, 1, now() + LEAST(INTERVAL '1 minute' * POWER(2, LEAST(1, 10)), INTERVAL '1 hour'), $2, now())
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO app.issue_sync_state(task_source_id, project_id, consecutive_failures, next_retry_at, last_error, updated_at)
+VALUES ($1, $3, 1, now() + LEAST(INTERVAL '1 minute' * POWER(2, LEAST(1, 10)), INTERVAL '1 hour'), $2, now())
+ON CONFLICT(task_source_id) DO UPDATE SET
   consecutive_failures = app.issue_sync_state.consecutive_failures + 1,
   next_retry_at = now() + LEAST(INTERVAL '1 minute' * POWER(2, LEAST(app.issue_sync_state.consecutive_failures + 1, 10)), INTERVAL '1 hour'),
   last_error = EXCLUDED.last_error,
@@ -504,26 +591,27 @@ ON CONFLICT(project_id) DO UPDATE SET
 `
 
 type UpsertIssueSyncStateFailureParams struct {
-	ProjectID string
-	LastError pgtype.Text
+	TaskSourceID string
+	LastError    pgtype.Text
+	ProjectID    string
 }
 
 // next_retry_at backs off exponentially with consecutive_failures (1 minute,
 // 2, 4, 8, ...), capped at 1 hour. The exponent itself is capped (via the
 // inner LEAST) before POWER ever sees it, rather than relying on the outer
 // LEAST against '1 hour' alone: POWER(2, n) is evaluated first, and an
-// uncapped n for a project that has been failing for days would overflow
+// uncapped n for a source that has been failing for days would overflow
 // double precision (and then interval multiplication) before that outer
 // LEAST ever got a chance to clamp the result.
 func (q *Queries) UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error {
-	_, err := q.db.Exec(ctx, upsertIssueSyncStateFailure, arg.ProjectID, arg.LastError)
+	_, err := q.db.Exec(ctx, upsertIssueSyncStateFailure, arg.TaskSourceID, arg.LastError, arg.ProjectID)
 	return err
 }
 
 const upsertIssueSyncStateSuccess = `-- name: UpsertIssueSyncStateSuccess :exec
-INSERT INTO app.issue_sync_state(project_id, consecutive_failures, next_retry_at, last_error, last_synced_at, updated_at)
-VALUES ($1, 0, NULL, NULL, now(), now())
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO app.issue_sync_state(task_source_id, project_id, consecutive_failures, next_retry_at, last_error, last_synced_at, updated_at)
+VALUES ($1, $2, 0, NULL, NULL, now(), now())
+ON CONFLICT(task_source_id) DO UPDATE SET
   consecutive_failures = 0,
   next_retry_at = NULL,
   last_error = NULL,
@@ -531,10 +619,17 @@ ON CONFLICT(project_id) DO UPDATE SET
   updated_at = now()
 `
 
+type UpsertIssueSyncStateSuccessParams struct {
+	TaskSourceID string
+	ProjectID    string
+}
+
 // next_retry_at is reset to NULL on success: leaving a stale future timestamp
-// around after a project recovers would keep ListProjectsDueForSync skipping
-// it long after there is anything to back off from.
-func (q *Queries) UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error {
-	_, err := q.db.Exec(ctx, upsertIssueSyncStateSuccess, projectID)
+// around after a source recovers would keep ListSourcesDueForSync skipping
+// it long after there is anything to back off from. Keyed by task_source_id
+// (see migration 026): a project's sources back off independently, so one
+// source's failure streak cannot mask or reset alongside a sibling's success.
+func (q *Queries) UpsertIssueSyncStateSuccess(ctx context.Context, arg UpsertIssueSyncStateSuccessParams) error {
+	_, err := q.db.Exec(ctx, upsertIssueSyncStateSuccess, arg.TaskSourceID, arg.ProjectID)
 	return err
 }
