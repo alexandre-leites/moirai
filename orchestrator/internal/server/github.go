@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -113,6 +114,11 @@ type githubIssue struct {
 	UpdatedAt  time.Time
 	Priority   int
 	Eligible   bool
+	// State is GitHub's issue state, lowercased ("open" or "closed"). It
+	// drives app.issues.state, which every scheduling query filters on
+	// directly (see UpsertIssue) — an issue closed on the tracker must be
+	// reconciled here or it stays schedulable forever.
+	State string
 }
 
 type githubPR struct {
@@ -195,12 +201,27 @@ func resolveGitHubToken(ctx context.Context, queries *db.Queries, projectID stri
 	return string(plaintext), nil
 }
 
+// githubIssueListLimit bounds a single ListIssues call. gh issue list has no
+// cursor/page flag of its own -- --limit is the only lever, and it paginates
+// internally (in pages of up to 100) until either the limit or the tracker's
+// own issue count is reached, whichever comes first. This is set far above
+// the previous --limit 100 (which silently truncated any project with more
+// open issues than that) so that, in practice, every project's full issue
+// list is fetched in one call; a project that still has more issues than
+// this is logged rather than silently truncated (see below), because gh
+// itself gives no way to tell "reached the limit" apart from "that was
+// exactly the whole list".
+const githubIssueListLimit = 5000
+
 func (client githubCLI) ListIssues(ctx context.Context, projectID, repository string) ([]githubIssue, error) {
 	token, err := client.token(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	output, err := client.command.Run(ctx, token, "issue", "list", "--repo", repository, "--state", "open", "--limit", "100", "--json", "number,title,body,url,labels,createdAt,updatedAt")
+	// --state all: --state open (the previous default) can by definition
+	// never return a closed issue, so an issue closed on the tracker never
+	// got reconciled here and stayed schedulable in the database forever.
+	output, err := client.command.Run(ctx, token, "issue", "list", "--repo", repository, "--state", "all", "--limit", strconv.Itoa(githubIssueListLimit), "--json", "number,title,body,url,labels,createdAt,updatedAt,state")
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +230,7 @@ func (client githubCLI) ListIssues(ctx context.Context, projectID, repository st
 		Title  string `json:"title"`
 		Body   string `json:"body"`
 		URL    string `json:"url"`
+		State  string `json:"state"`
 		Labels []struct {
 			Name string `json:"name"`
 		} `json:"labels"`
@@ -217,6 +239,9 @@ func (client githubCLI) ListIssues(ctx context.Context, projectID, repository st
 	}
 	if err := json.Unmarshal(output, &values); err != nil {
 		return nil, fmt.Errorf("decode GitHub issues: %w", err)
+	}
+	if len(values) >= githubIssueListLimit {
+		slog.Warn("GitHub issue list may be truncated", "project_id", projectID, "repository", repository, "limit", githubIssueListLimit)
 	}
 	issues := make([]githubIssue, 0, len(values))
 	for _, value := range values {
@@ -228,7 +253,14 @@ func (client githubCLI) ListIssues(ctx context.Context, projectID, repository st
 			labels = append(labels, label.Name)
 		}
 		priority, eligible := issuePriority(labels)
-		issues = append(issues, githubIssue{ExternalID: strconv.Itoa(value.Number), Title: value.Title, Body: value.Body, URL: value.URL, Labels: labels, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, Priority: priority, Eligible: eligible})
+		state := strings.ToLower(strings.TrimSpace(value.State))
+		// A closed issue is never eligible regardless of its labels: it is
+		// not "ready for work" if there is no longer any open issue to work.
+		// The scheduler also filters on state = 'open' directly (belt and
+		// suspenders), but IssueSyncStatusEntries' eligible_count and any
+		// other eligible-only reader must not overcount a closed issue too.
+		eligible = eligible && state == "open"
+		issues = append(issues, githubIssue{ExternalID: strconv.Itoa(value.Number), Title: value.Title, Body: value.Body, URL: value.URL, Labels: labels, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, Priority: priority, Eligible: eligible, State: state})
 	}
 	return issues, nil
 }
