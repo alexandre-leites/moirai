@@ -73,6 +73,81 @@ func (s fakeEventStream) Recv() (*controlv1.ControlPlaneEvent, error) {
 	}
 }
 
+// deadlineTrackingRecorder augments synchronizedRecorder with the
+// SetWriteDeadline method net/http.ResponseController looks for (see
+// https://pkg.go.dev/net/http#ResponseController.SetWriteDeadline). httptest's
+// ResponseRecorder does not implement it, and a real *http.Server response
+// writer does not surface it under go test either, so this fake is what lets
+// the test observe whether the handler actually asks for the write deadline
+// to be cleared — the exact regression the SSE stream needs to be safe from
+// an http.Server.WriteTimeout (see server.go's WriteTimeout) killing a
+// connection open longer than that timeout.
+type deadlineTrackingRecorder struct {
+	*synchronizedRecorder
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func newDeadlineTrackingRecorder() *deadlineTrackingRecorder {
+	return &deadlineTrackingRecorder{synchronizedRecorder: newSynchronizedRecorder()}
+}
+
+func (r *deadlineTrackingRecorder) SetWriteDeadline(deadline time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deadlines = append(r.deadlines, deadline)
+	return nil
+}
+
+func (r *deadlineTrackingRecorder) calls() []time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Time(nil), r.deadlines...)
+}
+
+// TestEventStreamClearsWriteDeadline guards against the SSE stream being
+// silently killed by http.Server.WriteTimeout: under HTTP/1.1 that deadline
+// covers the whole response body, not just the time to write one chunk of
+// it, so a long-lived stream that never clears it gets disconnected at the
+// timeout even though nothing is wrong. httptest.NewServer sets no
+// WriteTimeout, so a test built on it can't reproduce the failure directly;
+// asserting the handler calls SetWriteDeadline(time.Time{}) verifies the fix
+// without needing to actually run a connection past the timeout.
+func TestEventStreamClearsWriteDeadline(t *testing.T) {
+	client := &fakeEventClient{events: make(chan *controlv1.ControlPlaneEvent)}
+	handler := NewEventHandlers(client)
+	handler.keepAliveInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events", nil).WithContext(ctx)
+	req = req.WithContext(auth.WithSessionToken(req.Context(), "session"))
+	rec := newDeadlineTrackingRecorder()
+	finished := make(chan struct{})
+	go func() { handler.stream(rec, req); close(finished) }()
+	<-rec.wrote
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop")
+	}
+
+	calls := rec.calls()
+	if len(calls) == 0 {
+		t.Fatal("SetWriteDeadline was never called; the http.Server.WriteTimeout will kill this stream at 60s")
+	}
+	found := false
+	for _, deadline := range calls {
+		if deadline.IsZero() {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("SetWriteDeadline was not called with a zero time to clear the deadline, got %v", calls)
+	}
+}
+
 func TestEventRouteRequiresSession(t *testing.T) {
 	mux := http.NewServeMux()
 	NewEventHandlers(&fakeEventClient{events: make(chan *controlv1.ControlPlaneEvent)}).RegisterRoutes(mux)

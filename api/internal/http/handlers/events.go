@@ -47,10 +47,26 @@ func (h *EventHandlers) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+
+	rc := http.NewResponseController(w)
+	// The server sets an http.Server.WriteTimeout so that ordinary handlers
+	// cannot hang a connection forever, but under HTTP/1.1 that deadline
+	// applies to the whole response body, not just the time to write it —
+	// so it would silently kill this long-lived stream at the timeout
+	// (currently 60s) even though the client and orchestrator are both
+	// healthy. Clearing it here is safe: the request context (cancelled on
+	// client disconnect, see the r.Context().Done() case below) remains the
+	// mechanism that ends an idle or abandoned connection. Some
+	// ResponseWriters (e.g. httptest's) don't support deadlines at all and
+	// return http.ErrNotSupported, which is fine to ignore here.
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return
+	}
+
 	if err := writeSSEComment(w, "connected"); err != nil {
 		return
 	}
-	if err := http.NewResponseController(w).Flush(); err != nil {
+	if err := rc.Flush(); err != nil {
 		return
 	}
 
@@ -81,7 +97,7 @@ func (h *EventHandlers) stream(w http.ResponseWriter, r *http.Request) {
 			if err := writeSSEComment(w, "keepalive"); err != nil {
 				return
 			}
-			if err := http.NewResponseController(w).Flush(); err != nil {
+			if err := rc.Flush(); err != nil {
 				return
 			}
 		case result := <-received:
@@ -94,7 +110,7 @@ func (h *EventHandlers) stream(w http.ResponseWriter, r *http.Request) {
 			if err := writeSSEEvent(w, result.event); err != nil {
 				return
 			}
-			if err := http.NewResponseController(w).Flush(); err != nil {
+			if err := rc.Flush(); err != nil {
 				return
 			}
 		}
