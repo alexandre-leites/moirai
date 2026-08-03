@@ -516,7 +516,11 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 // are recorded per project (which is what drives the console's sync health) and
 // reported together.
 func (s *Server) SyncProjects(ctx context.Context) error {
-	projects, err := s.queries.ListSyncableProjects(ctx)
+	// ListProjectsDueForSync (unlike ListSyncableProjects, which SyncNow uses)
+	// excludes a project still inside the backoff window recordSyncFailure set
+	// on it, so a repository with a revoked token or a deleted remote is not
+	// retried at full rate forever.
+	projects, err := s.queries.ListProjectsDueForSync(ctx)
 	if err != nil {
 		return databaseError(err)
 	}

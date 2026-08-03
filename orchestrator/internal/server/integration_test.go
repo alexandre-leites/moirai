@@ -188,8 +188,15 @@ func (h *harness) project() (projectID, issueID string) {
 // offered work.
 func (h *harness) runner() string {
 	h.t.Helper()
+	return h.runnerWithCapacity(1)
+}
+
+// runnerWithCapacity is runner() with an explicit app.runners.capacity, for
+// tests exercising capacity-aware scheduling.
+func (h *harness) runnerWithCapacity(capacity int) string {
+	h.t.Helper()
 	runnerID := newID()
-	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now())`, runnerID, "runner-"+runnerID[:8])
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,capacity,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,$3,now())`, runnerID, "runner-"+runnerID[:8], capacity)
 	if !h.addSession(runnerID, make(chan *runnerv1.OrchestratorToRunner, 16)) {
 		h.t.Fatal("runner session was already registered")
 	}
@@ -1632,4 +1639,177 @@ func TestListWorkflowsIsBoundedAndBatched(t *testing.T) {
 	if issued > 5 {
 		t.Fatalf("ListWorkflows issued %d queries for %d workflow runs, want a small constant regardless of row count", issued, total)
 	}
+}
+
+// TestRunnerCapacityAllowsMultipleConcurrentJobs pins #272: RegisterRunner
+// validated and stored app.runners.capacity, but ClaimSchedulableIssue
+// excluded a runner the instant it held any in-flight job at all, so a
+// runner registering capacity 3 could never be offered more than one job. A
+// single project's own project_locks entry already limits it to one active
+// workflow run at a time (TestOnlyOneWorkflowRunsPerProject), so this seeds
+// three separate projects to isolate the runner's capacity as the only
+// remaining limit.
+func TestRunnerCapacityAllowsMultipleConcurrentJobs(t *testing.T) {
+	h := newHarness(t)
+	runnerID := h.runnerWithCapacity(3)
+	for range 4 {
+		h.project()
+	}
+
+	scheduled := 0
+	for range 4 {
+		ok, err := h.ScheduleOnce(context.Background())
+		if err != nil {
+			t.Fatalf("ScheduleOnce: %v", err)
+		}
+		if !ok {
+			break
+		}
+		scheduled++
+	}
+	if scheduled != 3 {
+		t.Fatalf("ScheduleOnce claimed %d jobs for a runner with capacity 3, want exactly 3", scheduled)
+	}
+	if jobs := h.scalar(`SELECT COUNT(*) FROM app.jobs WHERE runner_id=$1 AND status IN ('offered','preparing','running')`, runnerID); jobs != 3 {
+		t.Fatalf("in-flight jobs for the runner = %d, want 3", jobs)
+	}
+
+	// A fourth eligible issue exists (on its own, unlocked project), but the
+	// runner is now at capacity: nothing more should be offered to it.
+	if ok, err := h.ScheduleOnce(context.Background()); err != nil {
+		t.Fatalf("ScheduleOnce: %v", err)
+	} else if ok {
+		t.Fatal("ScheduleOnce claimed a fourth job for a runner already holding its registered capacity of 3")
+	}
+}
+
+// failingGitHub makes ListIssues fail every call, for tests driving
+// recordSyncFailure/backoff without touching a real `gh` process.
+type failingGitHub struct {
+	stubGitHub
+	err error
+}
+
+func (g *failingGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+	return nil, g.err
+}
+
+// TestRecordSyncFailureSetsExponentialBackoff pins #272: recordSyncFailure
+// used to only increment consecutive_failures, leaving next_retry_at NULL
+// forever even though IssueSyncStatus reports it and the console renders it.
+// The formula is 1 minute * 2^consecutive_failures, capped at 1 hour; this
+// checks the first two failures land inside the expected window and that a
+// long failure streak is still capped rather than overflowing.
+func TestRecordSyncFailureSetsExponentialBackoff(t *testing.T) {
+	h := newHarness(t)
+	projectID, _ := h.project()
+	ctx := context.Background()
+
+	if err := h.recordSyncFailure(ctx, projectID, errors.New("boom")); err != nil {
+		t.Fatalf("recordSyncFailure: %v", err)
+	}
+	var failures int
+	var nextRetry time.Time
+	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&failures, &nextRetry); err != nil {
+		t.Fatal(err)
+	}
+	if failures != 1 {
+		t.Fatalf("consecutive_failures = %d, want 1", failures)
+	}
+	wait := time.Until(nextRetry)
+	if wait < 90*time.Second || wait > 150*time.Second {
+		t.Fatalf("first failure's next_retry_at is %s away, want ~2 minutes (2^1 minutes)", wait)
+	}
+
+	// Drive it through many more failures than the exponent could ever
+	// tolerate uncapped (2^30 minutes would overflow long before this) and
+	// confirm it still lands within the 1 hour ceiling instead of erroring
+	// out or producing a nonsensical timestamp.
+	for range 30 {
+		if err := h.recordSyncFailure(ctx, projectID, errors.New("still failing")); err != nil {
+			t.Fatalf("recordSyncFailure: %v", err)
+		}
+	}
+	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&failures, &nextRetry); err != nil {
+		t.Fatal(err)
+	}
+	if failures != 31 {
+		t.Fatalf("consecutive_failures = %d, want 31", failures)
+	}
+	wait = time.Until(nextRetry)
+	if wait <= 0 || wait > time.Hour+time.Minute {
+		t.Fatalf("next_retry_at after 31 failures is %s away, want capped at ~1 hour", wait)
+	}
+
+	// A subsequent success must clear both fields, so a recovered project is
+	// not skipped by a stale future timestamp forever.
+	if err := h.queries.UpsertIssueSyncStateSuccess(ctx, projectID); err != nil {
+		t.Fatalf("UpsertIssueSyncStateSuccess: %v", err)
+	}
+	var nextRetryValid bool
+	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at IS NOT NULL FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&failures, &nextRetryValid); err != nil {
+		t.Fatal(err)
+	}
+	if failures != 0 || nextRetryValid {
+		t.Fatalf("after success: consecutive_failures=%d, next_retry_at set=%v, want 0 and NULL", failures, nextRetryValid)
+	}
+}
+
+// TestSyncProjectsSkipsAProjectStillInsideItsBackoffWindow pins #272: nothing
+// acted on next_retry_at, so SyncProjects (the unattended sync loop) retried
+// a project with, say, a revoked token or a deleted repository at full rate
+// forever. This drives a real failure through syncProject to set the
+// backoff, then confirms a subsequent SyncProjects pass does not call
+// ListIssues again while still inside that window, and does once the window
+// is forced into the past (standing in for it elapsing).
+func TestSyncProjectsSkipsAProjectStillInsideItsBackoffWindow(t *testing.T) {
+	h := newHarness(t)
+	projectID, _ := h.project()
+	failing := &failingGitHub{err: errors.New("revoked token")}
+	h.github = failing
+
+	if err := h.SyncProjects(context.Background()); err == nil {
+		t.Fatal("SyncProjects: want an error surfaced from the failing project")
+	}
+	var nextRetryValid bool
+	if err := h.pool.QueryRow(context.Background(), `SELECT next_retry_at IS NOT NULL FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&nextRetryValid); err != nil {
+		t.Fatal(err)
+	}
+	if !nextRetryValid {
+		t.Fatal("test setup: the first failure should have set next_retry_at")
+	}
+
+	// Swap in a GitHub that would succeed, to prove a skip (not another
+	// failure) is why ListIssues is not called again.
+	succeeding := &countingGitHub{}
+	h.github = succeeding
+	if err := h.SyncProjects(context.Background()); err != nil {
+		t.Fatalf("SyncProjects: %v", err)
+	}
+	if succeeding.calls != 0 {
+		t.Fatalf("SyncProjects called ListIssues %d times for a project still inside its backoff window, want 0", succeeding.calls)
+	}
+
+	// Force the window into the past and confirm the project is picked back
+	// up on the very next pass.
+	h.exec(`UPDATE app.issue_sync_state SET next_retry_at = now() - interval '1 minute' WHERE project_id=$1`, projectID)
+	if err := h.SyncProjects(context.Background()); err != nil {
+		t.Fatalf("SyncProjects: %v", err)
+	}
+	if succeeding.calls != 1 {
+		t.Fatalf("SyncProjects called ListIssues %d times once the backoff window elapsed, want 1", succeeding.calls)
+	}
+}
+
+// countingGitHub counts ListIssues calls while always succeeding (with no
+// issues), so a test can prove a sync pass was skipped rather than merely
+// having nothing to do.
+type countingGitHub struct {
+	stubGitHub
+	calls int
+}
+
+func (g *countingGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+	g.calls++
+	return nil, nil
 }
