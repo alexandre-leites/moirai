@@ -35,6 +35,7 @@ export function workflow(overrides: Partial<Workflow> = {}): Workflow {
     ciRepairAttempts: 0,
     reviewCycles: 0,
     totalAgentExecutions: 3,
+    planSummary: "",
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -54,6 +55,7 @@ export function project(overrides: Partial<Project> = {}): Project {
     pipelineSteps: [],
     executionImage: "",
     requireHumanApproval: false,
+    requirePlanning: false,
     taskSources: [],
     ...overrides,
   };

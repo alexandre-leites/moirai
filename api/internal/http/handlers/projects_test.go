@@ -279,6 +279,7 @@ func (f *fakeControlPlane) CreateProject(ctx context.Context, req *controlv1.Cre
 		RequiredRunnerLabels: req.Project.RequiredRunnerLabels,
 		PipelineSteps:        req.Project.PipelineSteps,
 		RequireHumanApproval: req.Project.RequireHumanApproval,
+		RequirePlanning:      req.Project.RequirePlanning,
 	}
 	f.projects[project.Id] = project
 	return &controlv1.CreateProjectResponse{Project: project}, nil
@@ -305,6 +306,7 @@ func (f *fakeControlPlane) UpdateProject(ctx context.Context, req *controlv1.Upd
 	project.RequiredRunnerLabels = req.Project.RequiredRunnerLabels
 	project.PipelineSteps = req.Project.PipelineSteps
 	project.RequireHumanApproval = req.Project.RequireHumanApproval
+	project.RequirePlanning = req.Project.RequirePlanning
 	return &controlv1.UpdateProjectResponse{Project: project}, nil
 }
 
@@ -509,6 +511,32 @@ func TestCreateProjectPersistsRequireHumanApproval(t *testing.T) {
 	fake.mu.Unlock()
 	if !ok || !stored.RequireHumanApproval {
 		t.Errorf("stored project = %#v, want RequireHumanApproval true", stored)
+	}
+}
+
+// requirePlanning (#351) defaults to false and must round-trip through the
+// API layer the same way requireHumanApproval does, the same lever an
+// operator needs to turn the planning gate on for a project.
+func TestCreateProjectPersistsRequirePlanning(t *testing.T) {
+	mux, fake := startProjectServer(t)
+	req := mutateRequest(t, http.MethodPost, "/api/v1/projects",
+		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","requirePlanning":true}`,
+		"admin-session")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d, want %d: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	project := decodeProject(t, rec)
+	if project["requirePlanning"] != true {
+		t.Errorf("requirePlanning = %v, want true in the response", project["requirePlanning"])
+	}
+	fake.mu.Lock()
+	stored, ok := fake.projects["p-new"]
+	fake.mu.Unlock()
+	if !ok || !stored.RequirePlanning {
+		t.Errorf("stored project = %#v, want RequirePlanning true", stored)
 	}
 }
 

@@ -15,14 +15,17 @@ const cancelExpiredLeaseJobs = `-- name: CancelExpiredLeaseJobs :many
 UPDATE app.jobs
 SET status = 'cancelled', finished_at = now(), lease_generation = lease_generation + 1,
     recovery_reason = $1
-WHERE status IN ('preparing', 'running') AND role = 'developer' AND lease_expires_at < now()
+WHERE status IN ('preparing', 'running') AND role IN ('developer', 'planner') AND lease_expires_at < now()
 RETURNING workflow_run_id::text AS workflow_run_id
 `
 
-// Scoped to role = 'developer' for the same reason CancelUnansweredOfferJobs
-// is: failing the whole workflow run over a reviewer's lapsed lease would
-// discard a developer execution that already succeeded. See
-// ReclaimExpiredReviewLeases for the reviewer-scoped counterpart.
+// Scoped to role IN ('developer', 'planner') for the same reason
+// CancelUnansweredOfferJobs is: failing the whole workflow run over a
+// reviewer's lapsed lease would discard a developer execution that already
+// succeeded, but a planner's lapsed lease has nothing of the sort behind it
+// yet -- it belongs with the developer case, failing the run outright, not
+// with the reviewer's. See ReclaimExpiredReviewLeases for the reviewer-scoped
+// counterpart.
 func (q *Queries) CancelExpiredLeaseJobs(ctx context.Context, reason pgtype.Text) ([]string, error) {
 	rows, err := q.db.Query(ctx, cancelExpiredLeaseJobs, reason)
 	if err != nil {
@@ -47,7 +50,7 @@ const cancelUnansweredOfferJobs = `-- name: CancelUnansweredOfferJobs :many
 UPDATE app.jobs
 SET status = 'cancelled', finished_at = now(), lease_generation = lease_generation + 1,
     recovery_reason = $1
-WHERE status = 'offered' AND role = 'developer' AND offered_at < now() - $2::interval
+WHERE status = 'offered' AND role IN ('developer', 'planner') AND offered_at < now() - $2::interval
 RETURNING workflow_run_id::text AS workflow_run_id
 `
 
@@ -56,12 +59,15 @@ type CancelUnansweredOfferJobsParams struct {
 	UnansweredOffer pgtype.Interval
 }
 
-// Scoped to role = 'developer': an unanswered reviewer offer must not cancel
-// the whole workflow run the way an unanswered original offer does (nothing
-// ran yet there, so the issue is simply offered again) -- the developer's
-// work already happened and would otherwise be discarded. See
+// Scoped to role IN ('developer', 'planner'): an unanswered reviewer offer
+// must not cancel the whole workflow run the way an unanswered developer or
+// planner offer does (nothing ran yet for either of those, so the issue is
+// simply offered again) -- the developer's work already happened by the time
+// a reviewer offer exists, and would otherwise be discarded. See
 // resumeStrandedReviewDispatches (recovery.go), which redrives that case
-// instead by age alone.
+// instead by age alone. A planner offer belongs with the developer one here,
+// not with the reviewer: it is the first execution a run makes, exactly like
+// an ordinary developer offer, just under a different role.
 func (q *Queries) CancelUnansweredOfferJobs(ctx context.Context, arg CancelUnansweredOfferJobsParams) ([]string, error) {
 	rows, err := q.db.Query(ctx, cancelUnansweredOfferJobs, arg.Reason, arg.UnansweredOffer)
 	if err != nil {

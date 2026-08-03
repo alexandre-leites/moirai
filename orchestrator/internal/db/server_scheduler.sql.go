@@ -205,8 +205,8 @@ func (q *Queries) ClaimSchedulableIssue(ctx context.Context, runnerIds []string)
 }
 
 const createJob = `-- name: CreateJob :exec
-INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, lease_generation, offered_at)
-VALUES ($1, $2, $3, $4::uuid, 'offered', 1, now())
+INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, role, lease_generation, offered_at)
+VALUES ($1, $2, $3, $4::uuid, 'offered', $5, 1, now())
 `
 
 type CreateJobParams struct {
@@ -214,14 +214,20 @@ type CreateJobParams struct {
 	WorkflowRunID string
 	ProjectID     string
 	RunnerID      string
+	Role          string
 }
 
+// role (028_workflow_run_ai_review.sql, #353) is 'developer' for every
+// ordinary dispatch, matching the column's own default -- ScheduleOnce passes
+// 'planner' instead for a project that opted into RequirePlanning (#351), so
+// the run's first execution is a planning one rather than the developer one.
 func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) error {
 	_, err := q.db.Exec(ctx, createJob,
 		arg.ID,
 		arg.WorkflowRunID,
 		arg.ProjectID,
 		arg.RunnerID,
+		arg.Role,
 	)
 	return err
 }
@@ -316,6 +322,52 @@ func (q *Queries) DeleteProjectLockByWorkflow(ctx context.Context, workflowRunID
 	return err
 }
 
+const getImplementationDispatchFacts = `-- name: GetImplementationDispatchFacts :one
+SELECT wr.project_id::text AS project_id, wr.branch_name,
+       i.external_id, i.title, i.body,
+       p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
+       p.configuration::text AS configuration
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+JOIN app.projects p ON p.id = wr.project_id
+WHERE wr.id = $1
+`
+
+type GetImplementationDispatchFactsRow struct {
+	ProjectID           string
+	BranchName          pgtype.Text
+	ExternalID          string
+	Title               string
+	Body                string
+	RepositoryMode      string
+	RepositoryUrl       pgtype.Text
+	LocalRepositoryPath pgtype.Text
+	DefaultBranch       string
+	Configuration       string
+}
+
+// Everything dispatchImplementationJob needs to build a developer packet for
+// a workflow whose planning execution just completed, mirroring what
+// ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+// dispatch.
+func (q *Queries) GetImplementationDispatchFacts(ctx context.Context, id string) (GetImplementationDispatchFactsRow, error) {
+	row := q.db.QueryRow(ctx, getImplementationDispatchFacts, id)
+	var i GetImplementationDispatchFactsRow
+	err := row.Scan(
+		&i.ProjectID,
+		&i.BranchName,
+		&i.ExternalID,
+		&i.Title,
+		&i.Body,
+		&i.RepositoryMode,
+		&i.RepositoryUrl,
+		&i.LocalRepositoryPath,
+		&i.DefaultBranch,
+		&i.Configuration,
+	)
+	return i, err
+}
+
 const getJobForOfferReject = `-- name: GetJobForOfferReject :one
 SELECT j.workflow_run_id::text AS workflow_run_id, j.project_id::text AS project_id
 FROM app.jobs j
@@ -390,6 +442,15 @@ func (q *Queries) GetSchedulerSnapshot(ctx context.Context) (GetSchedulerSnapsho
 		&i.DbNow,
 	)
 	return i, err
+}
+
+const incrementPlanningAttempts = `-- name: IncrementPlanningAttempts :exec
+UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) IncrementPlanningAttempts(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, incrementPlanningAttempts, id)
+	return err
 }
 
 const listQueueEntries = `-- name: ListQueueEntries :many
@@ -479,6 +540,20 @@ func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExec
 	return i, err
 }
 
+const recordPlanSummary = `-- name: RecordPlanSummary :exec
+UPDATE app.workflow_runs SET plan_summary = NULLIF($1::text, ''), updated_at = now() WHERE id = $2
+`
+
+type RecordPlanSummaryParams struct {
+	PlanSummary string
+	ID          string
+}
+
+func (q *Queries) RecordPlanSummary(ctx context.Context, arg RecordPlanSummaryParams) error {
+	_, err := q.db.Exec(ctx, recordPlanSummary, arg.PlanSummary, arg.ID)
+	return err
+}
+
 const renewJobLease = `-- name: RenewJobLease :one
 UPDATE app.jobs SET lease_expires_at = $1
 WHERE id = $2 AND runner_id = $3::uuid AND lease_generation = $4 AND status IN ('preparing','running') AND lease_expires_at > now()
@@ -502,6 +577,54 @@ func (q *Queries) RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (p
 	var lease_expires_at pgtype.Timestamptz
 	err := row.Scan(&lease_expires_at)
 	return lease_expires_at, err
+}
+
+const reopenJobForImplementation = `-- name: ReopenJobForImplementation :one
+UPDATE app.jobs SET
+  role = 'developer', status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
+  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL, recovery_reason = NULL
+WHERE id = $1 AND role = 'planner' AND status = 'completed'
+RETURNING lease_generation, runner_id::text AS runner_id
+`
+
+type ReopenJobForImplementationRow struct {
+	LeaseGeneration int64
+	RunnerID        string
+}
+
+// Reuses the workflow run's single job row for its developer execution once
+// planning has completed (app.jobs.workflow_run_id stays UNIQUE), exactly the
+// shape ReopenJobForReview (review.sql, #353) reuses it for an independent
+// review after a developer execution -- here reopened backwards, from
+// 'planner' to 'developer', as the very first execution's follow-up rather
+// than a second one after it. Guarded on the job still being the completed
+// planner job, the same guard a racing caller (there is only ever one, this
+// is not retried by any sweep) would lose.
+//
+// The runner's own offer/lease state (runner/internal/control's OfferState)
+// keys everything by job ID and forgets it entirely once Abandon runs at the
+// end of the planner execution, so a fresh JobOffer for the same ID with an
+// incremented lease_generation is indistinguishable, to the runner, from any
+// other new job -- no runner-side change was needed for this reopening.
+func (q *Queries) ReopenJobForImplementation(ctx context.Context, id string) (ReopenJobForImplementationRow, error) {
+	row := q.db.QueryRow(ctx, reopenJobForImplementation, id)
+	var i ReopenJobForImplementationRow
+	err := row.Scan(&i.LeaseGeneration, &i.RunnerID)
+	return i, err
+}
+
+const setWorkflowPlanningActive = `-- name: SetWorkflowPlanningActive :exec
+UPDATE app.workflow_runs SET status = 'planning', current_phase = 'planning', updated_at = now()
+WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
+  AND status NOT IN ('completed','failed','blocked','cancelled')
+`
+
+// acceptOffer's planner-role branch: the same shape SetWorkflowPreparing is,
+// called instead of it when the accepted job's role (AcceptJob's own RETURNING)
+// is 'planner' rather than 'developer'.
+func (q *Queries) SetWorkflowPlanningActive(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, setWorkflowPlanningActive, id)
+	return err
 }
 
 const setWorkflowPreparing = `-- name: SetWorkflowPreparing :exec

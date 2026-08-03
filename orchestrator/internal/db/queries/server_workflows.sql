@@ -10,7 +10,7 @@ SELECT wr.id::text AS id, wr.project_id::text AS project_id, wr.status, wr.curre
        pr.url AS pr_url, wr.pull_request_url AS run_pull_request_url,
        pr.state AS pull_request_state, wr.blocking_reason,
        wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts, wr.ci_repair_attempts,
-       wr.review_cycles, wr.total_agent_executions, wr.created_at, wr.updated_at
+       wr.review_cycles, wr.total_agent_executions, wr.plan_summary, wr.created_at, wr.updated_at
 FROM app.workflow_runs wr
 JOIN app.issues i ON i.id = wr.issue_id
 LEFT JOIN app.pull_requests pr ON pr.workflow_run_id = wr.id
@@ -36,7 +36,7 @@ SELECT wr.id::text AS id, wr.project_id::text AS project_id, wr.status, wr.curre
        pr.url AS pr_url, wr.pull_request_url AS run_pull_request_url,
        pr.state AS pull_request_state, wr.blocking_reason,
        wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts, wr.ci_repair_attempts,
-       wr.review_cycles, wr.total_agent_executions, wr.created_at, wr.updated_at
+       wr.review_cycles, wr.total_agent_executions, wr.plan_summary, wr.created_at, wr.updated_at
 FROM app.workflow_runs wr
 JOIN app.issues i ON i.id = wr.issue_id
 LEFT JOIN app.pull_requests pr ON pr.workflow_run_id = wr.id

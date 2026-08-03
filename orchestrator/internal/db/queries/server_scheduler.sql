@@ -78,8 +78,12 @@ VALUES ($1, $2)
 ON CONFLICT(project_id) DO NOTHING;
 
 -- name: CreateJob :exec
-INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, lease_generation, offered_at)
-VALUES (sqlc.arg(id), sqlc.arg(workflow_run_id), sqlc.arg(project_id), sqlc.arg(runner_id)::uuid, 'offered', 1, now());
+-- role (028_workflow_run_ai_review.sql, #353) is 'developer' for every
+-- ordinary dispatch, matching the column's own default -- ScheduleOnce passes
+-- 'planner' instead for a project that opted into RequirePlanning (#351), so
+-- the run's first execution is a planning one rather than the developer one.
+INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, role, lease_generation, offered_at)
+VALUES (sqlc.arg(id), sqlc.arg(workflow_run_id), sqlc.arg(project_id), sqlc.arg(runner_id)::uuid, 'offered', sqlc.arg(role), 1, now());
 
 -- name: CreateJobOffer :exec
 INSERT INTO app.job_offers(id, job_id, runner_id, status, expires_at)
@@ -118,6 +122,55 @@ RETURNING lease_generation, lease_expires_at, role;
 UPDATE app.workflow_runs SET status = 'preparing', updated_at = now()
 WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
   AND status NOT IN ('completed','failed','blocked','cancelled');
+
+-- name: SetWorkflowPlanningActive :exec
+-- acceptOffer's planner-role branch: the same shape SetWorkflowPreparing is,
+-- called instead of it when the accepted job's role (AcceptJob's own RETURNING)
+-- is 'planner' rather than 'developer'.
+UPDATE app.workflow_runs SET status = 'planning', current_phase = 'planning', updated_at = now()
+WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
+  AND status NOT IN ('completed','failed','blocked','cancelled');
+
+-- name: IncrementPlanningAttempts :exec
+UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_at = now() WHERE id = $1;
+
+-- name: RecordPlanSummary :exec
+UPDATE app.workflow_runs SET plan_summary = NULLIF(sqlc.arg(plan_summary)::text, ''), updated_at = now() WHERE id = sqlc.arg(id);
+
+-- name: ReopenJobForImplementation :one
+-- Reuses the workflow run's single job row for its developer execution once
+-- planning has completed (app.jobs.workflow_run_id stays UNIQUE), exactly the
+-- shape ReopenJobForReview (review.sql, #353) reuses it for an independent
+-- review after a developer execution -- here reopened backwards, from
+-- 'planner' to 'developer', as the very first execution's follow-up rather
+-- than a second one after it. Guarded on the job still being the completed
+-- planner job, the same guard a racing caller (there is only ever one, this
+-- is not retried by any sweep) would lose.
+--
+-- The runner's own offer/lease state (runner/internal/control's OfferState)
+-- keys everything by job ID and forgets it entirely once Abandon runs at the
+-- end of the planner execution, so a fresh JobOffer for the same ID with an
+-- incremented lease_generation is indistinguishable, to the runner, from any
+-- other new job -- no runner-side change was needed for this reopening.
+UPDATE app.jobs SET
+  role = 'developer', status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
+  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL, recovery_reason = NULL
+WHERE id = $1 AND role = 'planner' AND status = 'completed'
+RETURNING lease_generation, runner_id::text AS runner_id;
+
+-- name: GetImplementationDispatchFacts :one
+-- Everything dispatchImplementationJob needs to build a developer packet for
+-- a workflow whose planning execution just completed, mirroring what
+-- ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+-- dispatch.
+SELECT wr.project_id::text AS project_id, wr.branch_name,
+       i.external_id, i.title, i.body,
+       p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
+       p.configuration::text AS configuration
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+JOIN app.projects p ON p.id = wr.project_id
+WHERE wr.id = $1;
 
 -- name: GetJobForOfferReject :one
 SELECT j.workflow_run_id::text AS workflow_run_id, j.project_id::text AS project_id

@@ -81,6 +81,11 @@ message Project {
   // Defaults to false, so an existing project's behavior is unchanged unless
   // it explicitly turns this on.
   bool require_human_approval = 12;
+  // Opt-in planning gate (see #351): when true, ScheduleOnce dispatches a
+  // planner-role packet before the developer packet, and its output feeds the
+  // developer packet's Plan context. Defaults to false, so an existing
+  // project's behavior is unchanged unless it explicitly turns this on.
+  bool require_planning = 14;
   // The project's configured task sources (app.project_task_sources): 0, 1 or
   // N of them, each independently enabled and provider-configured. Read-only
   // for now -- creating/editing/deleting a source needs #294's field-level
@@ -199,6 +204,7 @@ message ProjectConfiguration {
   string execution_image = 8;
   int32 execution_timeout_seconds = 9;
   bool require_human_approval = 10;
+  bool require_planning = 11;
 }
 message CreateProjectRequest { ProjectConfiguration project = 1; }
 message CreateProjectResponse { Project project = 1; }
@@ -279,6 +285,11 @@ message Workflow {
   // column but enforces no cap on it, so the meter's budget is a display-side
   // constant (ATTEMPT_BUDGETS in web/src/status.ts) until retry policy exists.
   int32 total_agent_executions = 19;
+  // The planning phase's own account of the work (#351): the planner
+  // execution's summary, or empty when the project never opted into
+  // RequirePlanning or the run has not reached that phase yet. Persists past
+  // the developer packet it fed, so it stays visible for the life of the run.
+  string plan_summary = 20;
 }
 message ListWorkflowsResponse { repeated Workflow workflows = 1; }
 message GetWorkflowRequest { string workflow_run_id = 1; }

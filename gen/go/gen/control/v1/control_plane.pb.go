@@ -515,6 +515,11 @@ type Project struct {
 	// Defaults to false, so an existing project's behavior is unchanged unless
 	// it explicitly turns this on.
 	RequireHumanApproval bool `protobuf:"varint,12,opt,name=require_human_approval,json=requireHumanApproval,proto3" json:"require_human_approval,omitempty"`
+	// Opt-in planning gate (see #351): when true, ScheduleOnce dispatches a
+	// planner-role packet before the developer packet, and its output feeds the
+	// developer packet's Plan context. Defaults to false, so an existing
+	// project's behavior is unchanged unless it explicitly turns this on.
+	RequirePlanning bool `protobuf:"varint,14,opt,name=require_planning,json=requirePlanning,proto3" json:"require_planning,omitempty"`
 	// The project's configured task sources (app.project_task_sources): 0, 1 or
 	// N of them, each independently enabled and provider-configured. Read-only
 	// for now -- creating/editing/deleting a source needs #294's field-level
@@ -637,6 +642,13 @@ func (x *Project) GetExecutionTimeoutSeconds() int32 {
 func (x *Project) GetRequireHumanApproval() bool {
 	if x != nil {
 		return x.RequireHumanApproval
+	}
+	return false
+}
+
+func (x *Project) GetRequirePlanning() bool {
+	if x != nil {
+		return x.RequirePlanning
 	}
 	return false
 }
@@ -1457,6 +1469,7 @@ type ProjectConfiguration struct {
 	ExecutionImage          string                 `protobuf:"bytes,8,opt,name=execution_image,json=executionImage,proto3" json:"execution_image,omitempty"`
 	ExecutionTimeoutSeconds int32                  `protobuf:"varint,9,opt,name=execution_timeout_seconds,json=executionTimeoutSeconds,proto3" json:"execution_timeout_seconds,omitempty"`
 	RequireHumanApproval    bool                   `protobuf:"varint,10,opt,name=require_human_approval,json=requireHumanApproval,proto3" json:"require_human_approval,omitempty"`
+	RequirePlanning         bool                   `protobuf:"varint,11,opt,name=require_planning,json=requirePlanning,proto3" json:"require_planning,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -1557,6 +1570,13 @@ func (x *ProjectConfiguration) GetExecutionTimeoutSeconds() int32 {
 func (x *ProjectConfiguration) GetRequireHumanApproval() bool {
 	if x != nil {
 		return x.RequireHumanApproval
+	}
+	return false
+}
+
+func (x *ProjectConfiguration) GetRequirePlanning() bool {
+	if x != nil {
+		return x.RequirePlanning
 	}
 	return false
 }
@@ -2627,8 +2647,13 @@ type Workflow struct {
 	// column but enforces no cap on it, so the meter's budget is a display-side
 	// constant (ATTEMPT_BUDGETS in web/src/status.ts) until retry policy exists.
 	TotalAgentExecutions int32 `protobuf:"varint,19,opt,name=total_agent_executions,json=totalAgentExecutions,proto3" json:"total_agent_executions,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// The planning phase's own account of the work (#351): the planner
+	// execution's summary, or empty when the project never opted into
+	// RequirePlanning or the run has not reached that phase yet. Persists past
+	// the developer packet it fed, so it stays visible for the life of the run.
+	PlanSummary   string `protobuf:"bytes,20,opt,name=plan_summary,json=planSummary,proto3" json:"plan_summary,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Workflow) Reset() {
@@ -2792,6 +2817,13 @@ func (x *Workflow) GetTotalAgentExecutions() int32 {
 		return x.TotalAgentExecutions
 	}
 	return 0
+}
+
+func (x *Workflow) GetPlanSummary() string {
+	if x != nil {
+		return x.PlanSummary
+	}
+	return ""
 }
 
 type ListWorkflowsResponse struct {
@@ -4780,7 +4812,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12'\n" +
 	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\x12\x1a\n" +
 	"\bposition\x18\x03 \x01(\x05R\bposition\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired\"\xc9\x04\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired\"\xf4\x04\n" +
 	"\aProject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -4794,7 +4826,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x0fexecution_image\x18\n" +
 	" \x01(\tR\x0eexecutionImage\x12:\n" +
 	"\x19execution_timeout_seconds\x18\v \x01(\x05R\x17executionTimeoutSeconds\x124\n" +
-	"\x16require_human_approval\x18\f \x01(\bR\x14requireHumanApproval\x12>\n" +
+	"\x16require_human_approval\x18\f \x01(\bR\x14requireHumanApproval\x12)\n" +
+	"\x10require_planning\x18\x0e \x01(\bR\x0frequirePlanning\x12>\n" +
 	"\ftask_sources\x18\r \x03(\v2\x1b.loop.control.v1.TaskSourceR\vtaskSources\"\xce\x01\n" +
 	"\n" +
 	"TaskSource\x12\x0e\n" +
@@ -4856,7 +4889,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x0etask_source_id\x18\x01 \x01(\tR\ftaskSourceId\"\x1a\n" +
 	"\x18DeleteTaskSourceResponse\"L\n" +
 	"\x14ListProjectsResponse\x124\n" +
-	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\xec\x03\n" +
+	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\x97\x04\n" +
 	"\x14ProjectConfiguration\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12'\n" +
 	"\x0frepository_mode\x18\x02 \x01(\tR\x0erepositoryMode\x12%\n" +
@@ -4868,7 +4901,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x0fexecution_image\x18\b \x01(\tR\x0eexecutionImage\x12:\n" +
 	"\x19execution_timeout_seconds\x18\t \x01(\x05R\x17executionTimeoutSeconds\x124\n" +
 	"\x16require_human_approval\x18\n" +
-	" \x01(\bR\x14requireHumanApproval\"W\n" +
+	" \x01(\bR\x14requireHumanApproval\x12)\n" +
+	"\x10require_planning\x18\v \x01(\bR\x0frequirePlanning\"W\n" +
 	"\x14CreateProjectRequest\x12?\n" +
 	"\aproject\x18\x01 \x01(\v2%.loop.control.v1.ProjectConfigurationR\aproject\"K\n" +
 	"\x15CreateProjectResponse\x122\n" +
@@ -4934,7 +4968,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\btoken_id\x18\x01 \x01(\tR\atokenId\"g\n" +
 	"%RevokeRunnerRegistrationTokenResponse\x12>\n" +
 	"\x05token\x18\x01 \x01(\v2(.loop.control.v1.RunnerRegistrationTokenR\x05token\"\x16\n" +
-	"\x14ListWorkflowsRequest\"\xf6\x05\n" +
+	"\x14ListWorkflowsRequest\"\x99\x06\n" +
 	"\bWorkflow\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -4960,7 +4994,8 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"created_at\x18\x11 \x01(\tR\tcreatedAt\x12\x1d\n" +
 	"\n" +
 	"updated_at\x18\x12 \x01(\tR\tupdatedAt\x124\n" +
-	"\x16total_agent_executions\x18\x13 \x01(\x05R\x14totalAgentExecutions\"P\n" +
+	"\x16total_agent_executions\x18\x13 \x01(\x05R\x14totalAgentExecutions\x12!\n" +
+	"\fplan_summary\x18\x14 \x01(\tR\vplanSummary\"P\n" +
 	"\x15ListWorkflowsResponse\x127\n" +
 	"\tworkflows\x18\x01 \x03(\v2\x19.loop.control.v1.WorkflowR\tworkflows\"<\n" +
 	"\x12GetWorkflowRequest\x12&\n" +

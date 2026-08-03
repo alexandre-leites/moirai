@@ -78,6 +78,53 @@ func TestOfferStateAdmitsOneSafeOfferAndAppliesAuthoritativeAcknowledgement(t *t
 	}
 }
 
+// #351: the orchestrator's planning phase re-offers the one job a workflow
+// run is ever given (app.jobs.workflow_run_id is UNIQUE) for its developer
+// execution once planning completes, reusing the same job ID with an
+// incremented lease_generation rather than minting a new job. This pins that
+// OfferState itself needs no change to support that: once Abandon runs at the
+// end of an execution, the job ID is forgotten entirely, so a later offer for
+// the same ID is indistinguishable from any other new job.
+func TestOfferStateAdmitsTheSameJobIDAgainAfterItIsAbandoned(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	client := &offerClient{}
+	state := newOfferState(t, client, &now)
+
+	first := validOffer(t, "job-1", 1)
+	if admitted, err := state.Admit(first); err != nil || !admitted {
+		t.Fatalf("first Admit() = (%v, %v), want (true, nil)", admitted, err)
+	}
+	expiresAt := now.Add(time.Minute)
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 1, ExpiresAtUnixMs: expiresAt.UnixMilli()}) {
+		t.Fatal("ApplyAcknowledgement() rejected the first offer's acknowledgement")
+	}
+	if !state.Abandon("job-1", 1) {
+		t.Fatal("Abandon() did not release the first execution's lease")
+	}
+	if _, active := state.ActiveLease("job-1"); active {
+		t.Fatal("job-1 is still active after Abandon")
+	}
+
+	// The re-offer: same job ID, next lease_generation, exactly what
+	// dispatchImplementationJob (orchestrator/internal/server/server.go)
+	// sends once the planner execution's terminal event is processed.
+	second := validOffer(t, "job-1", 2)
+	admitted, err := state.Admit(second)
+	if err != nil || !admitted {
+		t.Fatalf("second Admit() = (%v, %v), want (true, nil): a job ID must be admissible again once its prior execution abandoned it", admitted, err)
+	}
+	if len(client.accepted) != 2 || client.accepted[1] != "job-1" {
+		t.Fatalf("accepted = %#v, want job-1 accepted twice", client.accepted)
+	}
+	if !state.ApplyAcknowledgement(&runnerv1.LeaseAcknowledged{JobId: "job-1", LeaseGeneration: 2, ExpiresAtUnixMs: now.Add(2 * time.Minute).UnixMilli()}) {
+		t.Fatal("ApplyAcknowledgement() rejected the second offer's acknowledgement")
+	}
+	lease, active := state.ActiveLease("job-1")
+	if !active || lease.Generation != 2 {
+		t.Fatalf("active lease = %#v, %v, want generation 2 active", lease, active)
+	}
+}
+
 func TestOfferStateRejectsInvalidAndConcurrentOffers(t *testing.T) {
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	client := &offerClient{}

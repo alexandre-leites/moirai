@@ -44,6 +44,13 @@ export type Project = {
    * this behaves exactly as it always did.
    */
   requireHumanApproval: boolean;
+  /**
+   * Opt-in planning gate (#351): when true, the orchestrator dispatches a
+   * planner execution before the developer one, and its output feeds the
+   * developer packet's context. Defaults to false, so a project that never
+   * set this behaves exactly as it always did.
+   */
+  requirePlanning: boolean;
   /** This project's configured task sources (see ListTaskSourceTypes, #294/#345). */
   taskSources: TaskSource[];
 };
@@ -151,6 +158,12 @@ export type Workflow = {
   ciRepairAttempts: number;
   reviewCycles: number;
   totalAgentExecutions: number;
+  /**
+   * The planning phase's own account of the work (#351): the planner
+   * execution's summary, or empty when the project never opted into
+   * requirePlanning or the run has not reached that phase yet.
+   */
+  planSummary: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -326,6 +339,7 @@ export type ProjectConfiguration = {
   pipelineSteps?: PipelineStep[];
   executionImage?: string;
   requireHumanApproval?: boolean;
+  requirePlanning?: boolean;
 };
 
 export class ApiError extends Error {
@@ -730,6 +744,7 @@ function normalizeProject(project: ProjectPayload): Project {
     pipelineSteps: project.pipelineSteps ?? [],
     executionImage: project.executionImage ?? "",
     requireHumanApproval: project.requireHumanApproval ?? false,
+    requirePlanning: project.requirePlanning ?? false,
     taskSources: project.taskSources ?? [],
   };
 }

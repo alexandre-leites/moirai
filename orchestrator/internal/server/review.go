@@ -18,14 +18,17 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 )
 
-// jobRoleDeveloper and jobRoleReviewer are the two values app.jobs.role
-// carries (028_workflow_run_ai_review.sql's CHECK constraint enforces the
-// same set). Every job that ever existed before this column was added is a
-// developer job by definition -- that is the column's DB default -- and
-// dispatchReviewerJob is the only writer of jobRoleReviewer.
+// jobRoleDeveloper, jobRoleReviewer and jobRolePlanner are the three values
+// app.jobs.role carries (028_workflow_run_ai_review.sql's CHECK constraint,
+// widened by 029_workflow_run_planning_status.sql to add 'planner' for #351).
+// Every job that ever existed before the role column was added is a developer
+// job by definition -- that is the column's DB default -- ScheduleOnce is the
+// only writer of jobRolePlanner (for a project that opted into RequirePlanning),
+// and dispatchReviewerJob is the only writer of jobRoleReviewer.
 const (
 	jobRoleDeveloper = "developer"
 	jobRoleReviewer  = "reviewer"
+	jobRolePlanner   = "planner"
 )
 
 // reviewExecutionID derives the execution ID a reopened job's reviewer

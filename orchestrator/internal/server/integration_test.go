@@ -426,6 +426,49 @@ func TestRecoverySweepReclaimsAnExpiredLease(t *testing.T) {
 	}
 }
 
+// #351: a run stuck at 'planning' whose runner stopped renewing its lease
+// needs no new recovery code -- reclaimExpiredLeases works off app.jobs.
+// lease_expires_at, the same column a developer execution's job uses, so the
+// existing sweep already reclaims it exactly like TestRecoverySweepReclaimsAnExpiredLease.
+func TestRecoverySweepReclaimsAnExpiredLeaseDuringPlanning(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	h.requirePlanning(projectID)
+	runnerID := h.runner()
+	outbound := h.outboundChannel(runnerID)
+
+	if scheduled, err := h.ScheduleOnce(context.Background()); err != nil || !scheduled {
+		t.Fatalf("ScheduleOnce() = (%v, %v), want a scheduled job", scheduled, err)
+	}
+	offer := h.receiveOffer(outbound)
+	jobID := offer.GetJobId()
+	if _, _, err := h.acceptOffer(context.Background(), runnerID, jobID); err != nil {
+		t.Fatalf("acceptOffer: %v", err)
+	}
+	var workflowID string
+	if err := h.pool.QueryRow(context.Background(), `SELECT workflow_run_id::text FROM app.jobs WHERE id=$1`, jobID).Scan(&workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if state := h.runState(workflowID); state.status != "planning" {
+		t.Fatalf("status = %q, want planning before the lease expires", state.status)
+	}
+	h.exec(`UPDATE app.jobs SET lease_expires_at=now()-interval '1 minute' WHERE id=$1`, jobID)
+
+	if err := h.RecoverOnce(context.Background()); err != nil {
+		t.Fatalf("RecoverOnce: %v", err)
+	}
+
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("the abandoned planning run kept its project lock")
+	}
+	if state := h.runState(workflowID); state.status != "failed" {
+		t.Fatalf("status = %q, want failed", state.status)
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("the abandoned planning run left its issue schedulable")
+	}
+}
+
 // Nothing else writes 'offline' outside an operator revoke, so a runner that
 // stopped heartbeating is reported online forever — including every runner
 // after a restart.
@@ -508,6 +551,194 @@ func TestCompletedEventDeliversThroughDeliveringStatus(t *testing.T) {
 	}
 	if prs := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1`, workflowID); prs != 1 {
 		t.Fatalf("pull_requests rows = %d, want 1", prs)
+	}
+}
+
+// #351: a project that opts into RequirePlanning gets a planner-role packet
+// dispatched first, not the developer packet ScheduleOnce sends every other
+// project directly. The run sits at StatusPlanning while that execution is in
+// flight -- distinct from 'preparing', which the ordinary developer execution
+// still uses -- and planning_attempts is incremented at dispatch, not left at
+// its permanent 0.
+func TestRequirePlanningDispatchesAPlannerPacketBeforeTheDeveloperOne(t *testing.T) {
+	h := newHarness(t)
+	projectID, _ := h.project()
+	h.requirePlanning(projectID)
+	runnerID := h.runner()
+	outbound := h.outboundChannel(runnerID)
+
+	scheduled, err := h.ScheduleOnce(context.Background())
+	if err != nil || !scheduled {
+		t.Fatalf("ScheduleOnce() = (%v, %v), want a scheduled job", scheduled, err)
+	}
+	offer := h.receiveOffer(outbound)
+
+	var packet struct {
+		Role        string `json:"role"`
+		Constraints struct {
+			MayModifyFiles bool `json:"mayModifyFiles"`
+			MayPush        bool `json:"mayPush"`
+		} `json:"constraints"`
+	}
+	if err := json.Unmarshal([]byte(offer.GetTaskPacketJson()), &packet); err != nil {
+		t.Fatalf("decode task packet: %v", err)
+	}
+	if packet.Role != "planner" {
+		t.Fatalf("role = %q, want planner", packet.Role)
+	}
+	if packet.Constraints.MayModifyFiles || packet.Constraints.MayPush {
+		t.Fatal("a planner packet must not be allowed to modify files or push")
+	}
+
+	jobID := offer.GetJobId()
+	if _, _, err := h.acceptOffer(context.Background(), runnerID, jobID); err != nil {
+		t.Fatalf("acceptOffer: %v", err)
+	}
+
+	var workflowID string
+	if err := h.pool.QueryRow(context.Background(), `SELECT workflow_run_id::text FROM app.jobs WHERE id=$1`, jobID).Scan(&workflowID); err != nil {
+		t.Fatal(err)
+	}
+	state := h.runState(workflowID)
+	if state.status != "planning" {
+		t.Fatalf("status = %q, want planning", state.status)
+	}
+	if attempts := h.scalar(`SELECT planning_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != 1 {
+		t.Fatalf("planning_attempts = %d, want 1", attempts)
+	}
+}
+
+// The plan a planner execution reports has to reach the developer packet
+// dispatched afterward, and both executions are the one job app.jobs.
+// workflow_run_id's UNIQUE constraint allows this workflow run: the job ID
+// does not change between the planner offer and the developer offer that
+// follows it, only its lease_generation advances.
+func TestPlanningCompletionReoffersTheSameJobWithThePlan(t *testing.T) {
+	h := newHarness(t)
+	projectID, _ := h.project()
+	h.requirePlanning(projectID)
+	runnerID := h.runner()
+	outbound := h.outboundChannel(runnerID)
+
+	if scheduled, err := h.ScheduleOnce(context.Background()); err != nil || !scheduled {
+		t.Fatalf("ScheduleOnce() = (%v, %v), want a scheduled job", scheduled, err)
+	}
+	plannerOffer := h.receiveOffer(outbound)
+	plannerJobID := plannerOffer.GetJobId()
+	if _, _, err := h.acceptOffer(context.Background(), runnerID, plannerJobID); err != nil {
+		t.Fatalf("acceptOffer: %v", err)
+	}
+	var workflowID string
+	if err := h.pool.QueryRow(context.Background(), `SELECT workflow_run_id::text FROM app.jobs WHERE id=$1`, plannerJobID).Scan(&workflowID); err != nil {
+		t.Fatal(err)
+	}
+
+	err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: plannerJobID, LeaseGeneration: h.leaseGeneration(plannerJobID), EventSequence: 1, Type: "completed",
+		PayloadJson: `{"status":"completed","summary":"Add a cache layer in front of the repository lookup","remainingWork":["Add the cache struct","Wire it into the lookup path"]}`,
+	})
+	if err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+
+	// The same job is re-offered, not a new one: app.jobs.workflow_run_id stays
+	// UNIQUE, so a second job for this workflow run would violate it outright.
+	if jobs := h.scalar(`SELECT COUNT(*) FROM app.jobs WHERE workflow_run_id=$1`, workflowID); jobs != 1 {
+		t.Fatalf("jobs for workflow = %d, want 1 (the same job re-offered)", jobs)
+	}
+
+	developerOffer := h.receiveOffer(outbound)
+	if developerOffer.GetJobId() != plannerJobID {
+		t.Fatalf("developer offer job_id = %q, want the planning job %q re-offered", developerOffer.GetJobId(), plannerJobID)
+	}
+	if developerOffer.GetLeaseGeneration() <= plannerOffer.GetLeaseGeneration() {
+		t.Fatalf("developer offer lease_generation = %d, want it to advance past the planner's %d", developerOffer.GetLeaseGeneration(), plannerOffer.GetLeaseGeneration())
+	}
+
+	var packet struct {
+		Role string   `json:"role"`
+		Plan []string `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(developerOffer.GetTaskPacketJson()), &packet); err != nil {
+		t.Fatalf("decode developer task packet: %v", err)
+	}
+	if packet.Role != "developer" {
+		t.Fatalf("role = %q, want developer", packet.Role)
+	}
+	if len(packet.Plan) < 2 || packet.Plan[0] != "Add a cache layer in front of the repository lookup" {
+		t.Fatalf("plan = %#v, did not carry the planner's summary and remaining work forward", packet.Plan)
+	}
+
+	// The run stays at 'planning' (dispatchImplementationJob's plannerCompleted
+	// case, server.go, touches nothing else) until the developer offer's own
+	// acceptOffer call moves it to 'preparing' directly -- the same one-status-
+	// covers-the-whole-offer shape 'waiting_ai_review' uses for a reviewer job
+	// in flight (review.go).
+	state := h.runState(workflowID)
+	if state.status != "planning" {
+		t.Fatalf("status = %q, want planning (still covering the re-offered job until accepted)", state.status)
+	}
+	if attempts := h.scalar(`SELECT planning_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != 1 {
+		t.Fatalf("planning_attempts = %d, want exactly 1 (not incremented again on completion)", attempts)
+	}
+	var planSummary string
+	if err := h.pool.QueryRow(context.Background(), `SELECT COALESCE(plan_summary,'') FROM app.workflow_runs WHERE id=$1`, workflowID).Scan(&planSummary); err != nil {
+		t.Fatal(err)
+	}
+	if planSummary != "Add a cache layer in front of the repository lookup" {
+		t.Fatalf("plan_summary = %q, want the planner's summary persisted for the console to show", planSummary)
+	}
+	if events := h.scalar(`SELECT COUNT(*) FROM app.workflow_events WHERE workflow_run_id=$1 AND event_type='plan.recorded'`, workflowID); events != 1 {
+		t.Fatal("no plan.recorded event was written for the console's timeline")
+	}
+
+	// Accepting and finishing the developer execution now drives the run
+	// through the ordinary delivery path, exactly like a no-planning project.
+	if _, _, err := h.acceptOffer(context.Background(), runnerID, plannerJobID); err != nil {
+		t.Fatalf("acceptOffer (developer): %v", err)
+	}
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: plannerJobID, LeaseGeneration: h.leaseGeneration(plannerJobID), EventSequence: 1, Type: "completed", PayloadJson: "{}",
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent (developer completion): %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "waiting_github_checks" {
+		t.Fatalf("status = %q, want waiting_github_checks after the developer execution completes", state.status)
+	}
+}
+
+// A project that never opts into RequirePlanning must behave exactly as it
+// did before #351: this pins that ScheduleOnce dispatches the developer
+// packet directly, with no intervening 'planning' status and no planner
+// packet ever sent, so an existing deployment sees no behavior change.
+func TestPlanningIsOptInAndOffByDefault(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	runnerID := h.runner()
+	outbound := h.outboundChannel(runnerID)
+
+	if scheduled, err := h.ScheduleOnce(context.Background()); err != nil || !scheduled {
+		t.Fatalf("ScheduleOnce() = (%v, %v), want a scheduled job", scheduled, err)
+	}
+	offer := h.receiveOffer(outbound)
+	var packet struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal([]byte(offer.GetTaskPacketJson()), &packet); err != nil {
+		t.Fatalf("decode task packet: %v", err)
+	}
+	if packet.Role != "developer" {
+		t.Fatalf("role = %q, want developer: an opted-out project must never receive a planner packet", packet.Role)
+	}
+	if _, _, err := h.acceptOffer(context.Background(), runnerID, offer.GetJobId()); err != nil {
+		t.Fatalf("acceptOffer: %v", err)
+	}
+	var workflowID string
+	if err := h.pool.QueryRow(context.Background(), `SELECT workflow_run_id::text FROM app.jobs WHERE id=$1`, offer.GetJobId()).Scan(&workflowID); err != nil {
+		t.Fatal(err)
+	}
+	if state := h.runState(workflowID); state.status != "preparing" {
+		t.Fatalf("status = %q, want preparing (never planning)", state.status)
 	}
 }
 
@@ -641,6 +872,31 @@ func (h *harness) seedWaitingChecks(projectID, issueID string) (workflowID strin
 func (h *harness) requireApproval(projectID string) {
 	h.t.Helper()
 	h.exec(`UPDATE app.projects SET configuration = configuration || '{"require_human_approval":true}'::jsonb WHERE id=$1`, projectID)
+}
+
+// requirePlanning opts a project into the planning gate (#351,
+// projectConfig.RequirePlanning), decoded fresh by ScheduleOnce on every call.
+func (h *harness) requirePlanning(projectID string) {
+	h.t.Helper()
+	h.exec(`UPDATE app.projects SET configuration = configuration || '{"require_planning":true}'::jsonb WHERE id=$1`, projectID)
+}
+
+// receiveOffer reads the next JobOffer off a runner's outbound channel and
+// decodes its task packet, for a test that needs to inspect what role or
+// context the orchestrator actually sent rather than just draining it.
+func (h *harness) receiveOffer(outbound chan *runnerv1.OrchestratorToRunner) *runnerv1.JobOffer {
+	h.t.Helper()
+	select {
+	case message := <-outbound:
+		offer := message.GetOffer()
+		if offer == nil {
+			h.t.Fatalf("expected a JobOffer, got %T", message.GetMessage())
+		}
+		return offer
+	case <-time.After(time.Second):
+		h.t.Fatal("timed out waiting for a job offer")
+		return nil
+	}
 }
 
 // enableAiReview flips a seeded project's configuration to opt into the
