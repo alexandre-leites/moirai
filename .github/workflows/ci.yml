@@ -39,9 +39,7 @@ env:
 
 jobs:
   resolve-runner:
-    # Always GitHub-hosted: this is the job that decides where everything else
-    # runs, so it cannot depend on the pool it is selecting.
-    runs-on: ubuntu-latest
+    runs-on: ["self-hosted", "linux"]
     outputs:
       runner: ${{ steps.resolve.outputs.runner }}
     steps:
