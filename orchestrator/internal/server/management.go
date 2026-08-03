@@ -69,7 +69,7 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 	if err := queries.UpdateUserProfile(ctx, db.UpdateUserProfileParams{ID: actor.id, Email: response.Email, DisplayName: response.DisplayName}); err != nil {
 		return nil, databaseError(err)
 	}
-	if err := audit(ctx, tx, actor.id, "user.account.update", "user", actor.id); err != nil {
+	if err := audit(ctx, queries, actor.id, "user.account.update", "user", actor.id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -97,7 +97,7 @@ func (s *Server) CreateRunnerRegistrationToken(ctx context.Context, request *con
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if err := audit(ctx, s.pool, actor.id, "runner.token.create", "runner_registration_token", hashSecret(token)); err != nil {
+	if err := audit(ctx, s.queries, actor.id, "runner.token.create", "runner_registration_token", hashSecret(token)); err != nil {
 		return nil, err
 	}
 	return &controlv1.CreateRunnerRegistrationTokenResponse{Token: token, ExpiresAt: timestamp(expiresAt.Time)}, nil
@@ -141,7 +141,7 @@ func (s *Server) RevokeRunnerRegistrationToken(ctx context.Context, request *con
 	if err != nil {
 		return nil, err
 	}
-	if err := audit(ctx, s.pool, actor.id, "runner.token.revoke", "runner_registration_token", request.GetTokenId()); err != nil {
+	if err := audit(ctx, s.queries, actor.id, "runner.token.revoke", "runner_registration_token", request.GetTokenId()); err != nil {
 		return nil, err
 	}
 	return &controlv1.RevokeRunnerRegistrationTokenResponse{Token: token}, nil

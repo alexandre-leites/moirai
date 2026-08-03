@@ -1,0 +1,90 @@
+-- name: ListProjectIDs :many
+SELECT id::text AS id FROM app.projects ORDER BY name, id;
+
+-- name: CreateProject :exec
+INSERT INTO app.projects (id, name, repository_mode, repository_url, local_repository_path, default_branch, configuration)
+VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7::jsonb);
+
+-- name: UpdateProject :execrows
+UPDATE app.projects
+SET name = $2, repository_mode = $3, repository_url = NULLIF($4, ''), local_repository_path = NULLIF($5, ''),
+    default_branch = $6, configuration = $7::jsonb, updated_at = now()
+WHERE id = $1;
+
+-- name: SetProjectEnabled :execrows
+UPDATE app.projects SET enabled = $2, updated_at = now() WHERE id = $1;
+
+-- name: GetProject :one
+SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration
+FROM app.projects
+WHERE id = $1;
+
+-- name: ListProjectPipelineSteps :many
+SELECT command, timeout_seconds, position, required
+FROM app.project_pipeline_steps
+WHERE project_id = $1
+ORDER BY position, id;
+
+-- name: DeleteProjectPipelineSteps :exec
+DELETE FROM app.project_pipeline_steps WHERE project_id = $1;
+
+-- name: CreateProjectPipelineStep :exec
+INSERT INTO app.project_pipeline_steps(id, project_id, position, name, command, timeout_seconds, required)
+VALUES ($1, $2, $3, $4, $4, $5, $6);
+
+-- name: ListSyncableProjects :many
+SELECT id::text AS id, repository_url
+FROM app.projects
+WHERE enabled;
+
+-- name: ListSyncableProjectByID :many
+SELECT id::text AS id, repository_url
+FROM app.projects
+WHERE enabled AND id = $1;
+
+-- name: CountProjectIssues :one
+SELECT COUNT(*) FROM app.issues WHERE project_id = $1;
+
+-- name: IssueSyncStatusEntries :many
+SELECT p.id::text AS id, p.name, p.enabled, COUNT(i.id) AS issue_count,
+       COUNT(i.id) FILTER(WHERE i.eligible) AS eligible_count,
+       s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error
+FROM app.projects p
+LEFT JOIN app.issues i ON i.project_id = p.id
+LEFT JOIN app.issue_sync_state s ON s.project_id = p.id
+GROUP BY p.id, p.name, p.enabled, s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error
+ORDER BY p.name, p.id;
+
+-- name: UpsertIssue :exec
+INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
+VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, 'open', $7::jsonb, $8, $9, $10, $11, now(), $12::jsonb)
+ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
+  display_number = EXCLUDED.display_number,
+  title = EXCLUDED.title,
+  body = EXCLUDED.body,
+  url = EXCLUDED.url,
+  state = 'open',
+  labels = EXCLUDED.labels,
+  priority = EXCLUDED.priority,
+  eligible = CASE WHEN EXISTS(SELECT 1 FROM app.workflow_runs w WHERE w.issue_id = app.issues.id) THEN app.issues.eligible ELSE EXCLUDED.eligible END,
+  external_created_at = EXCLUDED.external_created_at,
+  external_updated_at = EXCLUDED.external_updated_at,
+  last_synced_at = now(),
+  raw_snapshot = EXCLUDED.raw_snapshot;
+
+-- name: UpsertIssueSyncStateSuccess :exec
+INSERT INTO app.issue_sync_state(project_id, consecutive_failures, last_error, last_synced_at, updated_at)
+VALUES ($1, 0, NULL, now(), now())
+ON CONFLICT(project_id) DO UPDATE SET
+  consecutive_failures = 0,
+  last_error = NULL,
+  last_synced_at = now(),
+  updated_at = now();
+
+-- name: UpsertIssueSyncStateFailure :exec
+INSERT INTO app.issue_sync_state(project_id, consecutive_failures, last_error, updated_at)
+VALUES ($1, 1, $2, now())
+ON CONFLICT(project_id) DO UPDATE SET
+  consecutive_failures = app.issue_sync_state.consecutive_failures + 1,
+  last_error = EXCLUDED.last_error,
+  updated_at = now();
