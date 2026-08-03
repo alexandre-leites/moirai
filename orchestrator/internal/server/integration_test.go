@@ -15,6 +15,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -83,6 +84,60 @@ func (stubGitHub) Checks(context.Context, string, string, string) (checkState, e
 func (stubGitHub) MergeSquash(context.Context, string, string, string) error { return nil }
 func (stubGitHub) Merged(context.Context, string, string, string) (bool, error) {
 	return false, nil
+}
+
+// sequencedGitHub lets a test control exactly which error (if any)
+// FindOrCreatePR returns on each successive call: `errs[0]` on the first
+// call, `errs[1]` on the second, and so on, falling back to `alwaysErr` (or
+// success, if nil) once `errs` is exhausted. That is what lets a test drive
+// deliverWorkflow through a transient failure, a successful retry, or an
+// unbroken run of failures that exhausts the attempt budget, all without
+// touching a real `gh` process.
+type sequencedGitHub struct {
+	mu        sync.Mutex
+	errs      []error
+	alwaysErr error
+	pr        githubPR
+}
+
+func (g *sequencedGitHub) nextErr() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.errs) > 0 {
+		err := g.errs[0]
+		g.errs = g.errs[1:]
+		return err
+	}
+	return g.alwaysErr
+}
+
+func (g *sequencedGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+	return nil, nil
+}
+func (g *sequencedGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (githubPR, error) {
+	if err := g.nextErr(); err != nil {
+		return githubPR{}, err
+	}
+	pr := g.pr
+	if pr.Number == "" {
+		pr = githubPR{Number: "9", URL: "https://example.test/pull/9", State: "OPEN", HeadSHA: "deadbeef"}
+	}
+	return pr, nil
+}
+func (g *sequencedGitHub) Checks(context.Context, string, string, string) (checkState, error) {
+	if err := g.nextErr(); err != nil {
+		return checksPending, err
+	}
+	return checksGreen, nil
+}
+func (g *sequencedGitHub) MergeSquash(context.Context, string, string, string) error {
+	return g.nextErr()
+}
+func (g *sequencedGitHub) Merged(context.Context, string, string, string) (bool, error) {
+	if err := g.nextErr(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (h *harness) exec(query string, args ...any) {
@@ -423,6 +478,126 @@ func TestRecoverySweepResumesAStrandedDeliveryByStatusAlone(t *testing.T) {
 	}
 	if prs := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1`, workflowID); prs != 1 {
 		t.Fatal("the re-driven delivery did not open a pull request")
+	}
+}
+
+// seedDelivering inserts a workflow run already at 'delivering' with its
+// project lock held, the state deliverWorkflow expects to find itself
+// re-driven from -- see TestRecoverySweepResumesAStrandedDeliveryByStatusAlone
+// for why a raw insert (rather than driving a runner through execution) is
+// how these tests reach that state directly.
+func (h *harness) seedDelivering(projectID, issueID string) (workflowID string) {
+	h.t.Helper()
+	workflowID = newID()
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'delivering','delivering',$5)`,
+		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
+	h.exec(`INSERT INTO app.project_locks(project_id, workflow_run_id) VALUES($1,$2)`, projectID, workflowID)
+	return workflowID
+}
+
+// Before this, every GitHub error deliverWorkflow/observeWorkflow saw -- a
+// rate limit, a DNS blip, a 502 -- funnelled straight to blockExternal, which
+// is terminal: it releases the project lock and parks the issue. A single
+// transient GitHub failure must instead leave the run exactly where it was so
+// the next retry (a recovery sweep re-driving 'delivering', or the next
+// observer tick for 'waiting_github_checks') can simply try again.
+func TestDeliveryRetriesATransientGitHubFailureInsteadOfBlocking(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := h.seedDelivering(projectID, issueID)
+
+	fake := &sequencedGitHub{errs: []error{errors.New("gh pr list: HTTP 502: Bad Gateway (HTTP 502)")}}
+	h.github = fake
+
+	if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("deliverWorkflow: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "delivering" {
+		t.Fatalf("status = %q, want delivering: a transient failure must not block the run", state.status)
+	}
+	if attempts := h.scalar(`SELECT delivery_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != 1 {
+		t.Fatalf("delivery_attempts = %d, want 1", attempts)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 1 {
+		t.Fatal("a transient failure released the project lock")
+	}
+
+	// The next retry succeeds, and the run should both progress and have its
+	// attempt count reset -- it is no longer failing.
+	if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("deliverWorkflow retry: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "waiting_github_checks" {
+		t.Fatalf("status = %q, want waiting_github_checks once the retry succeeds", state.status)
+	}
+	if attempts := h.scalar(`SELECT delivery_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != 0 {
+		t.Fatalf("delivery_attempts = %d, want reset to 0 once delivery succeeded", attempts)
+	}
+}
+
+// A terminal GitHub failure -- a 404, bad credentials, anything not
+// recognised as transient -- must still block immediately, with no change
+// from blockExternal's pre-existing behaviour: no retry budget spent, the
+// project lock released, and the issue parked for a human.
+func TestDeliveryBlocksImmediatelyOnATerminalGitHubFailure(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := h.seedDelivering(projectID, issueID)
+
+	h.github = &sequencedGitHub{errs: []error{errors.New(`gh pr list: exit status 1: {"message":"Not Found"} gh: Not Found (HTTP 404)`)}}
+
+	// blockExternal itself succeeds (it commits the run to 'blocked'), so
+	// deliverWorkflow returns nil here just like it does for a successfully
+	// delivered run -- the assertion is on the run's resulting state, not on
+	// deliverWorkflow's return value.
+	if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("deliverWorkflow: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "blocked" || state.blocking == "" {
+		t.Fatalf("state = %+v, want blocked with a reason", state)
+	}
+	if attempts := h.scalar(`SELECT delivery_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != 0 {
+		t.Fatalf("delivery_attempts = %d, want 0: a terminal failure must not consume the retry budget", attempts)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("a terminal failure kept the project lock")
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("a terminal failure left the issue schedulable instead of parking it")
+	}
+}
+
+// The retry budget is not unbounded: a run stuck behind an unbroken run of
+// transient failures (a mis-scoped token returning 503s forever, say) must
+// eventually fall through to blockExternal too, the same way abandonedChecks
+// bounds a check wait GitHub never resolves.
+func TestDeliveryBlocksAfterExhaustingItsRetryBudget(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := h.seedDelivering(projectID, issueID)
+
+	h.github = &sequencedGitHub{alwaysErr: errors.New("gh pr list: HTTP 503: Service Unavailable (HTTP 503)")}
+
+	for attempt := 1; attempt <= maxDeliveryAttempts; attempt++ {
+		if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
+			t.Fatalf("attempt %d: deliverWorkflow: %v", attempt, err)
+		}
+		if state := h.runState(workflowID); state.status != "delivering" {
+			t.Fatalf("attempt %d: status = %q, want delivering (still under budget)", attempt, state.status)
+		}
+	}
+	if attempts := h.scalar(`SELECT delivery_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != maxDeliveryAttempts {
+		t.Fatalf("delivery_attempts = %d, want %d", attempts, maxDeliveryAttempts)
+	}
+
+	// One more attempt exceeds the bound and must finally block. As with the
+	// terminal case, blockExternal succeeding means deliverWorkflow itself
+	// returns nil -- the assertion is on the resulting status.
+	if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("deliverWorkflow: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "blocked" {
+		t.Fatalf("status = %q, want blocked once the retry budget is exhausted", state.status)
 	}
 }
 

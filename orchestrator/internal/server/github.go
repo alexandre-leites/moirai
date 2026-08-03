@@ -55,6 +55,20 @@ func (execCommand) Run(parent context.Context, token string, args ...string) ([]
 	// which matters because the detail is truncated to 1 KiB before storage.
 	output, err := command.Output()
 	if err != nil {
+		// A command exec.CommandContext kills for exceeding githubTimeout exits
+		// non-zero (typically "signal: killed"), which os/exec reports as a
+		// plain *exec.ExitError -- it does not itself wrap ctx.Err(), even
+		// though the context is what caused the kill (verified against
+		// go1.25's os/exec: Wait only surfaces the context error when the
+		// process happens to exit success after being canceled, never for the
+		// killed-with-nonzero-status case this timeout always produces).
+		// Substituting ctx.Err() here is what lets isTransientGitHubError
+		// (delivery.go) tell a timed-out gh invocation apart from an ordinary
+		// command failure via errors.Is, instead of guessing from "signal:
+		// killed" string text that says nothing about the cause.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("gh %s: %w", strings.Join(args, " "), ctxErr)
+		}
 		var exit *exec.ExitError
 		var detail string
 		if errors.As(err, &exit) {

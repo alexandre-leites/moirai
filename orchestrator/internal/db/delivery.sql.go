@@ -117,7 +117,7 @@ func (q *Queries) MarkPullRequestMerged(ctx context.Context, workflowRunID strin
 
 const markWorkflowCompleted = `-- name: MarkWorkflowCompleted :execrows
 UPDATE app.workflow_runs
-SET status = 'completed', current_phase = 'completed', completed_at = now(), updated_at = now()
+SET status = 'completed', current_phase = 'completed', completed_at = now(), updated_at = now(), delivery_attempts = 0
 WHERE id = $1 AND status = 'waiting_github_checks'
 `
 
@@ -131,7 +131,7 @@ func (q *Queries) MarkWorkflowCompleted(ctx context.Context, id string) (int64, 
 
 const markWorkflowDelivered = `-- name: MarkWorkflowDelivered :execrows
 UPDATE app.workflow_runs
-SET status = 'waiting_github_checks', current_phase = 'waiting_github_checks', updated_at = now(), completed_at = NULL
+SET status = 'waiting_github_checks', current_phase = 'waiting_github_checks', updated_at = now(), completed_at = NULL, delivery_attempts = 0
 WHERE id = $1 AND status = 'delivering'
 `
 
@@ -141,6 +141,27 @@ func (q *Queries) MarkWorkflowDelivered(ctx context.Context, id string) (int64, 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const recordTransientDeliveryFailure = `-- name: RecordTransientDeliveryFailure :one
+UPDATE app.workflow_runs
+SET delivery_attempts = delivery_attempts + 1, updated_at = now()
+WHERE id = $1
+RETURNING delivery_attempts
+`
+
+// Bumps the count of consecutive transient GitHub failures blockOrRetryExternal
+// (delivery.go) has absorbed for this run without moving its status, and
+// returns the new count so the caller can decide whether to keep retrying or
+// fall through to blockExternal. updated_at advances with it so a transient
+// failure during 'delivering' also pushes back resumeStrandedDeliveries'
+// re-drive window (recovery.go's strandedDelivery), which is what turns
+// these retries into spaced-out attempts instead of a tight loop.
+func (q *Queries) RecordTransientDeliveryFailure(ctx context.Context, id string) (int32, error) {
+	row := q.db.QueryRow(ctx, recordTransientDeliveryFailure, id)
+	var delivery_attempts int32
+	err := row.Scan(&delivery_attempts)
+	return delivery_attempts, err
 }
 
 const selectWaitingGithubChecksWorkflows = `-- name: SelectWaitingGithubChecksWorkflows :many
