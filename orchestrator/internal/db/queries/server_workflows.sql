@@ -1,5 +1,21 @@
--- name: ListWorkflowIDs :many
-SELECT wr.id::text AS id FROM app.workflow_runs wr ORDER BY wr.created_at DESC, wr.id;
+-- name: ListWorkflowsPage :many
+-- Replaces the old ListWorkflowIDs + one GetWorkflowDetail per row: that shape
+-- was O(all workflow runs) in both rows and queries, and app.workflow_runs
+-- only grows. This does the same join GetWorkflowDetail does, once, for the
+-- most recent $1 rows -- see the pr.external_id/wr.pull_request_external_id
+-- comment on GetWorkflowDetail below for why those aren't COALESCEd in SQL.
+SELECT wr.id::text AS id, wr.project_id::text AS project_id, wr.status, wr.current_phase,
+       i.external_id, i.title, wr.branch_name,
+       pr.external_id AS pr_external_id, wr.pull_request_external_id AS run_pull_request_external_id,
+       pr.url AS pr_url, wr.pull_request_url AS run_pull_request_url,
+       pr.state AS pull_request_state, wr.blocking_reason,
+       wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts, wr.ci_repair_attempts,
+       wr.review_cycles, wr.total_agent_executions, wr.created_at, wr.updated_at
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+LEFT JOIN app.pull_requests pr ON pr.workflow_run_id = wr.id
+ORDER BY wr.created_at DESC, wr.id
+LIMIT $1;
 
 -- name: ListWorkflowEvents :many
 SELECT id::text AS id, event_type, created_at, payload::text AS payload

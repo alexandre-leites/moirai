@@ -22,10 +22,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
@@ -1205,5 +1207,73 @@ func TestWorkflowRunStatusCheckConstraintMatchesKnownStatuses(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "workflow_runs_status_is_known") {
 		t.Fatalf("insert of an unknown status failed with %v, want the workflow_runs_status_is_known constraint", err)
+	}
+}
+
+// countingTracer counts every query issued through the pool it is attached
+// to, so TestListWorkflowsIsBoundedAndBatched can prove the N+1 is gone by
+// counting round trips rather than by reading the code and assuming.
+type countingTracer struct{ queries int64 }
+
+func (c *countingTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	atomic.AddInt64(&c.queries, 1)
+	return ctx
+}
+
+func (c *countingTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// ListWorkflows used to run one query listing every workflow_runs row ever
+// created, then one more per row to fetch its detail -- O(all workflow runs)
+// in both rows and queries, degrading with everything that had ever run.
+// This seeds well past the fixed cap and proves both halves of the fix: the
+// response is capped, and the number of queries issued does not grow with
+// the number of rows in the table.
+func TestListWorkflowsIsBoundedAndBatched(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+
+	total := listWorkflowsLimit + 20
+	ids := make([]string, total)
+	threads := make([]string, total)
+	for i := range ids {
+		ids[i] = newID()
+		threads[i] = "thread-" + ids[i]
+	}
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase)
+		SELECT unnest($1::uuid[]), $2::uuid, $3::uuid, unnest($4::text[]), 'offered', 'offered'`,
+		ids, projectID, issueID, threads)
+
+	url := os.Getenv("LOOP_TEST_DATABASE_URL")
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer := &countingTracer{}
+	cfg.ConnConfig.Tracer = tracer
+	tracedPool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tracedPool.Close()
+	traced, err := NewWithGitHub(tracedPool, "test", stubGitHub{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := atomic.LoadInt64(&tracer.queries)
+	resp, err := traced.ListWorkflows(h.adminContext(), &controlv1.ListWorkflowsRequest{})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	issued := atomic.LoadInt64(&tracer.queries) - before
+
+	if len(resp.Workflows) != listWorkflowsLimit {
+		t.Fatalf("ListWorkflows returned %d workflows with %d runs seeded, want the %d cap", len(resp.Workflows), total, listWorkflowsLimit)
+	}
+	// requireActor's session lookup plus the single ListWorkflowsPage query is
+	// 2; the old shape issued 1+total (well past 500 here), so a generous
+	// constant ceiling still catches a regression back to per-row queries.
+	if issued > 5 {
+		t.Fatalf("ListWorkflows issued %d queries for %d workflow runs, want a small constant regardless of row count", issued, total)
 	}
 }
