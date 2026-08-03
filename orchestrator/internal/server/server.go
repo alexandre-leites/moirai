@@ -1486,6 +1486,17 @@ func normalizeLabels(labels []string) ([]string, error) {
 	}
 	return result, nil
 }
+func (s *Server) runner(ctx context.Context, id string) (*controlv1.Runner, error) {
+	if !validID(id) {
+		return nil, status.Error(codes.InvalidArgument, "runner ID is invalid")
+	}
+	runner := &controlv1.Runner{}
+	row := s.pool.QueryRow(ctx, `SELECT id::text, name, enabled, draining, status, labels::text, last_seen_at, version FROM app.runners WHERE id=$1`, id)
+	if err := scanRunnerRow(row, runner); err != nil {
+		return nil, err
+	}
+	return runner, nil
+}
 func scanRunner(rows pgx.Rows) (*controlv1.Runner, error) {
 	runner := &controlv1.Runner{}
 	if err := scanRunnerRow(rows, runner); err != nil {

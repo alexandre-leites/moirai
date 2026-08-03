@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator"
 	"github.com/loop-engineering/orchestrator/internal/config"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
@@ -103,7 +104,7 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
-	if err := migrate.Apply(ctx, cfg.DatabaseURL, os.DirFS(".")); err != nil {
+	if err := migrate.Apply(ctx, cfg.DatabaseURL, orchestrator.Migrations); err != nil {
 		return err
 	}
 	listener, err := net.Listen("tcp", cfg.GRPCBind)
