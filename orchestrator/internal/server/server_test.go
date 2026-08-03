@@ -39,6 +39,44 @@ func TestValidateProjectRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
+// existing_path projects can neither sync issues nor deliver workflows: both
+// operations resolve GitHub coordinates from repository_url, and a local
+// path gives them nothing to work with. validateProject must reject the mode
+// outright, at configuration time, rather than let the project run a
+// workflow to completion and only then fail at delivery.
+func TestValidateProjectRejectsExistingPath(t *testing.T) {
+	_, _, err := validateProject(&controlv1.ProjectConfiguration{
+		Name:                "demo",
+		RepositoryMode:      "existing_path",
+		LocalRepositoryPath: "/repositories/demo",
+		DefaultBranch:       "main",
+	})
+	if err == nil {
+		t.Fatal("expected existing_path to be rejected")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "repository_mode") || !strings.Contains(message, "existing_path") {
+		t.Fatalf("error should name the field and mode, got: %v", message)
+	}
+}
+
+// The same validation must run on UpdateProject, not just CreateProject, so
+// an existing project can't be edited into an existing_path configuration
+// either.
+func TestValidateProjectRejectsExistingPathEvenWithOtherwiseValidFields(t *testing.T) {
+	_, _, err := validateProject(&controlv1.ProjectConfiguration{
+		Name:                 "demo",
+		RepositoryMode:       "existing_path",
+		LocalRepositoryPath:  "/repositories/demo",
+		DefaultBranch:        "main",
+		RequiredRunnerLabels: []string{"go"},
+		PipelineSteps:        []*controlv1.PipelineStep{{Command: "go test ./...", TimeoutSeconds: 60, Position: 0}},
+	})
+	if err == nil {
+		t.Fatal("expected existing_path to be rejected even when all other fields are valid")
+	}
+}
+
 func TestPasswordHashCompatibility(t *testing.T) {
 	hash, err := passwordHash("Correct1!")
 	if err != nil {
