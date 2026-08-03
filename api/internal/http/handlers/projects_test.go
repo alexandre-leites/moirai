@@ -32,6 +32,18 @@ type fakeControlPlane struct {
 	// value reached the orchestrator without any response ever exposing it.
 	credentialWrites []credentialWrite
 	credentials      []*controlv1.ProjectCredential
+
+	taskSources map[string]*controlv1.TaskSource
+	// configuredSecrets tracks, per task source id, which secret keys this
+	// fake considers "configured" -- exactly the same "configured, never a
+	// value" fact the real orchestrator's credential store answers, kept
+	// here in memory so a test can assert an edit never disturbs it.
+	configuredSecrets map[string]map[string]bool
+	// lastUpdateSecrets is what the most recent UpdateTaskSource request
+	// actually carried in its `secrets` map, so a test can assert the API
+	// layer forwarded an omitted (untouched) field as omitted, not as an
+	// empty string the orchestrator could mistake for "replace with blank".
+	lastUpdateSecrets map[string]string
 }
 
 type credentialWrite struct {
@@ -70,8 +82,110 @@ func (f *fakeControlPlane) ListProjectCredentials(_ context.Context, _ *controlv
 	return &controlv1.ListProjectCredentialsResponse{Credentials: f.credentials}, nil
 }
 
+// fakeGithubTaskSourceType mirrors orchestrator/internal/server/descriptor.go's
+// githubTaskSourceType closely enough to exercise the API layer's generic
+// JSON translation: a required text field and a secret field, so a test can
+// check defaultValue decoding, options, and the configured/not-configured
+// secret summary all flow through untouched.
+func fakeGithubTaskSourceType() *controlv1.TaskSourceTypeDescriptor {
+	return &controlv1.TaskSourceTypeDescriptor{
+		Id: "github", DisplayName: "GitHub",
+		Fields: []*controlv1.TaskSourceField{
+			{Key: "ref", Label: "Repository", Help: "owner/name", Kind: "text", Required: true},
+			{Key: "token", Label: "Personal access token", Kind: "secret"},
+		},
+	}
+}
+
+func (f *fakeControlPlane) ListTaskSourceTypes(ctx context.Context, _ *controlv1.ListTaskSourceTypesRequest) (*controlv1.ListTaskSourceTypesResponse, error) {
+	if err := f.session(ctx, false); err != nil {
+		return nil, err
+	}
+	return &controlv1.ListTaskSourceTypesResponse{Types: []*controlv1.TaskSourceTypeDescriptor{fakeGithubTaskSourceType()}}, nil
+}
+
+func (f *fakeControlPlane) taskSourceSecretFields(id string) []*controlv1.TaskSourceSecretField {
+	configured := f.configuredSecrets[id]
+	return []*controlv1.TaskSourceSecretField{{Key: "token", Configured: configured["token"]}}
+}
+
+func (f *fakeControlPlane) CreateTaskSource(ctx context.Context, req *controlv1.CreateTaskSourceRequest) (*controlv1.CreateTaskSourceResponse, error) {
+	if err := f.session(ctx, true); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.taskSources == nil {
+		f.taskSources = map[string]*controlv1.TaskSource{}
+	}
+	if f.configuredSecrets == nil {
+		f.configuredSecrets = map[string]map[string]bool{}
+	}
+	id := "ts-new"
+	source := &controlv1.TaskSource{
+		Id: id, Provider: req.GetProvider(), Name: req.GetName(), Enabled: req.GetEnabled(),
+		Configuration: req.GetConfiguration(),
+	}
+	f.taskSources[id] = source
+	configured := map[string]bool{}
+	for key, value := range req.GetSecrets() {
+		if value != "" {
+			configured[key] = true
+		}
+	}
+	f.configuredSecrets[id] = configured
+	source.Secrets = f.taskSourceSecretFields(id)
+	return &controlv1.CreateTaskSourceResponse{TaskSource: source}, nil
+}
+
+func (f *fakeControlPlane) UpdateTaskSource(ctx context.Context, req *controlv1.UpdateTaskSourceRequest) (*controlv1.UpdateTaskSourceResponse, error) {
+	if err := f.session(ctx, true); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastUpdateSecrets = req.GetSecrets()
+	source, ok := f.taskSources[req.GetTaskSourceId()]
+	if !ok {
+		return nil, status.Error(codes.NotFound, "task source is unknown")
+	}
+	source.Name = req.GetName()
+	source.Enabled = req.GetEnabled()
+	source.Configuration = req.GetConfiguration()
+	configured := f.configuredSecrets[req.GetTaskSourceId()]
+	if configured == nil {
+		configured = map[string]bool{}
+	}
+	for key, value := range req.GetSecrets() {
+		if value != "" {
+			configured[key] = true
+		}
+	}
+	for _, key := range req.GetClearSecrets() {
+		delete(configured, key)
+	}
+	f.configuredSecrets[req.GetTaskSourceId()] = configured
+	source.Secrets = f.taskSourceSecretFields(req.GetTaskSourceId())
+	return &controlv1.UpdateTaskSourceResponse{TaskSource: source}, nil
+}
+
+func (f *fakeControlPlane) DeleteTaskSource(ctx context.Context, req *controlv1.DeleteTaskSourceRequest) (*controlv1.DeleteTaskSourceResponse, error) {
+	if err := f.session(ctx, true); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.taskSources[req.GetTaskSourceId()]; !ok {
+		return nil, status.Error(codes.NotFound, "task source is unknown")
+	}
+	delete(f.taskSources, req.GetTaskSourceId())
+	return &controlv1.DeleteTaskSourceResponse{}, nil
+}
+
 func newFakeControlPlane() *fakeControlPlane {
 	return &fakeControlPlane{
+		taskSources:       map[string]*controlv1.TaskSource{},
+		configuredSecrets: map[string]map[string]bool{},
 		projects: map[string]*controlv1.Project{
 			"p-1": {
 				Id:                   "p-1",
@@ -230,6 +344,7 @@ func startProjectServer(t *testing.T) (http.Handler, *fakeControlPlane) {
 
 	mux := http.NewServeMux()
 	NewProjectHandlers(client, auth.NewRateLimiter(time.Minute, 60)).RegisterRoutes(mux)
+	NewTaskSourceHandlers(client, auth.NewRateLimiter(time.Minute, 60)).RegisterRoutes(mux)
 	return mux, fake
 }
 

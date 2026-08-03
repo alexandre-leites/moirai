@@ -282,6 +282,7 @@ func projectPayload(p *controlv1.Project) map[string]any {
 		"pipelineSteps":        pipeline,
 		"executionImage":       p.ExecutionImage,
 		"requireHumanApproval": p.RequireHumanApproval,
+		"taskSources":          taskSourcesPayload(p.GetTaskSources()),
 	}
 }
 

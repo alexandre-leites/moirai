@@ -44,11 +44,85 @@ export type Project = {
    * this behaves exactly as it always did.
    */
   requireHumanApproval: boolean;
+  /** This project's configured task sources (see ListTaskSourceTypes, #294/#345). */
+  taskSources: TaskSource[];
 };
 
-type ProjectPayload = Omit<Project, "requiredRunnerLabels" | "pipelineSteps"> & {
+type ProjectPayload = Omit<Project, "requiredRunnerLabels" | "pipelineSteps" | "taskSources"> & {
   requiredRunnerLabels: string[] | null;
   pipelineSteps: PipelineStep[] | null;
+  taskSources: TaskSource[] | null;
+};
+
+// --- Task sources (#294/#345) ----------------------------------------------
+//
+// The whole point of this seam: the console never hardcodes a provider or a
+// field name. Every input it renders comes from a TaskSourceField the
+// discovery endpoint (GET /api/v1/task-source-types) describes, and every
+// write (create/update) is validated against that same descriptor
+// server-side -- this layer just carries the shape across the wire.
+
+/** How a field's value should be rendered and validated -- one form control per kind. */
+export type TaskSourceFieldKind = "text" | "number" | "bool" | "enum" | "string_list" | "secret";
+
+export type TaskSourceField = {
+  key: string;
+  label: string;
+  help: string;
+  kind: TaskSourceFieldKind;
+  required: boolean;
+  /** JSON-decoded default; absent when the field has none, always absent for a secret field. */
+  defaultValue?: unknown;
+  /** Valid values for an "enum" field; empty for every other kind. */
+  options: string[];
+  /** A regexp a "text" field's value must match; empty when unconstrained. */
+  pattern: string;
+};
+
+export type TaskSourceTypeDescriptor = {
+  id: string;
+  displayName: string;
+  fields: TaskSourceField[];
+};
+
+/** Whether a secret field has a value configured -- never the value itself. */
+export type TaskSourceSecretField = {
+  key: string;
+  configured: boolean;
+};
+
+export type TaskSource = {
+  id: string;
+  provider: string;
+  name: string;
+  enabled: boolean;
+  /** Non-secret configuration, keyed by TaskSourceField.key. Never contains a secret field's value. */
+  configuration: Record<string, unknown>;
+  secrets: TaskSourceSecretField[];
+};
+
+export type TaskSourceCreate = {
+  provider: string;
+  name: string;
+  enabled: boolean;
+  configuration: Record<string, unknown>;
+  /** Secret field key -> value. A field with no entry here is left unconfigured. */
+  secrets?: Record<string, string>;
+};
+
+export type TaskSourceUpdate = {
+  name: string;
+  enabled: boolean;
+  configuration: Record<string, unknown>;
+  /**
+   * Only the secret fields present here are replaced. Omit a key entirely to
+   * leave it unchanged -- do not send an empty string, which the server
+   * would (correctly) refuse to treat as "no change" for a value it must
+   * still validate.
+   */
+  secrets?: Record<string, string>;
+  /** Secret field keys to explicitly clear. */
+  clearSecrets?: string[];
 };
 
 /**
@@ -305,6 +379,11 @@ export type ApiClient = {
   ): Promise<ProjectCredential[]>;
   clearProjectCredential(id: string, kind: CredentialKind): Promise<ProjectCredential[]>;
 
+  listTaskSourceTypes(signal?: AbortSignal): Promise<TaskSourceTypeDescriptor[]>;
+  createTaskSource(projectId: string, data: TaskSourceCreate): Promise<TaskSource>;
+  updateTaskSource(taskSourceId: string, data: TaskSourceUpdate): Promise<TaskSource>;
+  deleteTaskSource(taskSourceId: string): Promise<void>;
+
   listRunners(signal?: AbortSignal): Promise<Runner[]>;
   setRunnerState(id: string, state: "drain" | "enable" | "revoke"): Promise<Runner>;
 
@@ -513,6 +592,35 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       return body.credentials ?? [];
     },
 
+    async listTaskSourceTypes(signal?: AbortSignal): Promise<TaskSourceTypeDescriptor[]> {
+      const body: { types?: TaskSourceTypeDescriptor[] } = await get("/api/v1/task-source-types", signal);
+      if (!Array.isArray(body.types)) throw new Error("The task source type list response was malformed.");
+      return body.types;
+    },
+
+    async createTaskSource(projectId: string, data: TaskSourceCreate): Promise<TaskSource> {
+      return post(`/api/v1/projects/${encodeURIComponent(projectId)}/task-sources`, data);
+    },
+
+    async updateTaskSource(taskSourceId: string, data: TaskSourceUpdate): Promise<TaskSource> {
+      const res = await fetchClient(`/api/v1/task-sources/${encodeURIComponent(taskSourceId)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...csrfHeaders() },
+        credentials: "include",
+        body: JSON.stringify(data),
+      });
+      return json(res);
+    },
+
+    async deleteTaskSource(taskSourceId: string): Promise<void> {
+      const res = await fetchClient(`/api/v1/task-sources/${encodeURIComponent(taskSourceId)}`, {
+        method: "DELETE",
+        headers: { ...csrfHeaders() },
+        credentials: "include",
+      });
+      if (!res.ok) throw await failure(res);
+    },
+
     async listRunners(signal?: AbortSignal): Promise<Runner[]> {
       const body: { runners?: RunnerPayload[] } = await get("/api/v1/runners", signal);
       // `runners` is required by the OpenAPI schema. If it is missing the
@@ -622,5 +730,6 @@ function normalizeProject(project: ProjectPayload): Project {
     pipelineSteps: project.pipelineSteps ?? [],
     executionImage: project.executionImage ?? "",
     requireHumanApproval: project.requireHumanApproval ?? false,
+    taskSources: project.taskSources ?? [],
   };
 }

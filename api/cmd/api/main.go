@@ -62,6 +62,7 @@ func main() {
 
 	handlers.NewAuthHandlers(client, runtimeConfig.CookieSecure, loginLimiter, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewProjectHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
+	handlers.NewTaskSourceHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerTokenHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewRunnerHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
 	handlers.NewQueueHandlers(client, mutationLimiter).RegisterRoutes(srv.Mux())
