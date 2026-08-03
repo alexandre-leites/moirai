@@ -13,16 +13,24 @@ import (
 type Querier interface {
 	CancelExpiredLeaseJobs(ctx context.Context, reason pgtype.Text) ([]string, error)
 	CancelUnansweredOfferJobs(ctx context.Context, arg CancelUnansweredOfferJobsParams) ([]string, error)
+	CreateRunnerRegistrationToken(ctx context.Context, arg CreateRunnerRegistrationTokenParams) (pgtype.Timestamptz, error)
 	DeleteProjectCredential(ctx context.Context, arg DeleteProjectCredentialParams) (int64, error)
 	ExpireUnansweredOffers(ctx context.Context, unansweredOffer pgtype.Interval) error
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
 	GetProjectCredentialSecret(ctx context.Context, arg GetProjectCredentialSecretParams) (GetProjectCredentialSecretRow, error)
+	GetSessionCSRFHash(ctx context.Context, tokenHash string) (string, error)
+	GetUserForUpdate(ctx context.Context, id string) (GetUserForUpdateRow, error)
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
+	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
 	MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error
 	ProjectExists(ctx context.Context, id string) (bool, error)
+	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
+	RevokeRunnerRegistrationToken(ctx context.Context, id string) (RevokeRunnerRegistrationTokenRow, error)
 	SelectAbandonedChecksWorkflows(ctx context.Context, abandonedChecks pgtype.Interval) ([]string, error)
 	SelectStrandedDeliveryWorkflows(ctx context.Context, strandedDelivery pgtype.Interval) ([]string, error)
 	UpdateProjectCredentialSecret(ctx context.Context, arg UpdateProjectCredentialSecretParams) (int64, error)
+	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
+	UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) error
 	UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error)
 }
 
