@@ -61,7 +61,7 @@ type Core struct {
 	pool     *pgxpool.Pool
 	queries  *db.Queries
 	version  string
-	github   GitHub
+	adapters providerAdapters
 	sessions map[string]chan *runnerv1.OrchestratorToRunner
 	mu       sync.Mutex
 	// shutdown is closed exactly once, by Shutdown, to tell every long-lived
@@ -154,14 +154,43 @@ func New(pool *pgxpool.Pool, version string) (*Core, error) {
 	github := NewGitHubCLI(nil, func(ctx context.Context, projectID string) (string, error) {
 		return resolveGitHubToken(ctx, queries, projectID)
 	})
-	return NewWithGitHub(pool, version, github)
+	return NewWithAdapters(pool, version, github, github, LocalFileTaskSource{})
 }
 
-func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Core, error) {
-	if pool == nil || github == nil {
+// gitHubLikeAdapter is satisfied by anything backing both TaskSource and
+// CodeHost from a single value -- what the real githubCLI does, and what
+// every pre-refactor test double for it still does after being updated to
+// the new method names/return types.
+type gitHubLikeAdapter interface {
+	TaskSource
+	CodeHost
+}
+
+// NewWithGitHub keeps the pre-refactor constructor shape for callers (chiefly
+// tests) that only need one adapter standing in for both TaskSource and
+// CodeHost, with no local-file task source configured. Use NewWithAdapters
+// directly to also wire up a local-file task source.
+func NewWithGitHub(pool *pgxpool.Pool, version string, github gitHubLikeAdapter) (*Core, error) {
+	return NewWithAdapters(pool, version, github, github, nil)
+}
+
+// NewWithAdapters is the general constructor: defaultTaskSource and
+// defaultCodeHost back every project whose issue_tracker_type/code_host_type
+// is unset or "github" (every project that predates this seam), and
+// localFileTaskSource additionally backs a project explicitly configured with
+// issue_tracker_type = "local_file" (see resolveTaskSource). localFileTaskSource
+// may be nil when no caller needs that path (e.g. most tests, and any process
+// that never registers a local-file project).
+func NewWithAdapters(pool *pgxpool.Pool, version string, defaultTaskSource TaskSource, defaultCodeHost CodeHost, localFileTaskSource TaskSource) (*Core, error) {
+	if pool == nil || defaultTaskSource == nil || defaultCodeHost == nil {
 		return nil, errors.New("server dependencies are required")
 	}
-	return &Core{pool: pool, queries: db.New(pool), version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner), shutdown: make(chan struct{})}, nil
+	adapters := providerAdapters{
+		defaultTaskSource:   defaultTaskSource,
+		defaultCodeHost:     defaultCodeHost,
+		localFileTaskSource: localFileTaskSource,
+	}
+	return &Core{pool: pool, queries: db.New(pool), version: version, adapters: adapters, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner), shutdown: make(chan struct{})}, nil
 }
 
 // Shutdown tells every stream handler currently blocked on Connect or
@@ -581,7 +610,7 @@ func (s *ControlServer) SyncNow(ctx context.Context, request *controlv1.SyncNowR
 	response := &controlv1.SyncNowResponse{}
 	for _, candidate := range candidates {
 		result := &controlv1.ProjectSyncResult{ProjectId: candidate.ID}
-		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl)); err != nil {
+		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl), candidate.IssueTrackerType); err != nil {
 			result.Error = syncErrorMessage(err)
 		} else {
 			count, err := s.queries.CountProjectIssues(ctx, candidate.ID)
@@ -617,7 +646,7 @@ func (s *Core) SyncProjects(ctx context.Context) error {
 	}
 	var failures []error
 	for _, candidate := range projects {
-		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl)); err != nil {
+		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl), candidate.IssueTrackerType); err != nil {
 			failures = append(failures, fmt.Errorf("project %s: %w", candidate.ID, err))
 		}
 	}
@@ -658,12 +687,45 @@ func (s *ControlServer) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueS
 	return response, nil
 }
 
-func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL string) error {
-	repository, err := repositoryRef(repositoryURL)
+// providerName normalizes a project's issue_tracker_type/code_host_type
+// column into the value persisted as app.issues.provider /
+// app.pull_requests.provider: the schema default and every pre-existing
+// project have it empty or "github" respectively, and both mean the same
+// thing to the rest of the system, so both are recorded identically.
+func providerName(configuredType string) string {
+	if configuredType == "" {
+		return "github"
+	}
+	return configuredType
+}
+
+// legacyTaskLabels extracts the GitHub-era "Labels" array back out of a
+// task's raw provider snapshot for app.issues.labels, kept only for
+// backward-compatible audit: nothing in the application reads that column
+// back. The neutral Task type intentionally carries no label list of its own
+// (only the already-derived Priority/Eligible) -- a source whose raw snapshot
+// has no such key (like LocalFileTaskSource's) simply leaves the column
+// empty.
+func legacyTaskLabels(raw json.RawMessage) []byte {
+	var decoded struct {
+		Labels []string `json:"Labels"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil || decoded.Labels == nil {
+		return []byte("[]")
+	}
+	encoded, err := json.Marshal(decoded.Labels)
+	if err != nil {
+		return []byte("[]")
+	}
+	return encoded
+}
+
+func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL, issueTrackerType string) error {
+	source, err := s.adapters.resolveTaskSource(issueTrackerType)
 	if err != nil {
 		return err
 	}
-	issues, err := s.github.ListIssues(ctx, projectID, repository)
+	tasks, err := source.ListTasks(ctx, projectID, repositoryURL)
 	if err != nil {
 		_ = s.recordSyncFailure(ctx, projectID, err)
 		return err
@@ -674,39 +736,41 @@ func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL string)
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	// Eligible is written unconditionally from the tracker's labels on every
-	// sync (issuePriority: agent:ready opts in, agent:blocked/agent:delivered
-	// opt back out) — it is not, by itself, the scheduler's candidate signal
-	// any more. A run that ends without delivering excludes its issue from
-	// scheduling via app.workflow_runs.status/superseded_at instead (see
-	// ListQueueEntries and ClaimSchedulableIssue), so removing agent:ready or
-	// adding agent:blocked here always takes effect, and only RetryWorkflow
+	provider := providerName(issueTrackerType)
+	// Eligible is written unconditionally from the source's own derivation on
+	// every sync (for GitHub: issuePriority reading agent:ready/agent:blocked/
+	// agent:delivered labels) — it is not, by itself, the scheduler's
+	// candidate signal any more. A run that ends without delivering excludes
+	// its issue from scheduling via app.workflow_runs.status/superseded_at
+	// instead (see ListQueueEntries and ClaimSchedulableIssue), so a source
+	// reporting a task ineligible always takes effect, and only RetryWorkflow
 	// (which supersedes the run) reopens work the scheduler had parked. See
 	// #268: this used to be a single label-driven bit the orchestrator's own
 	// lifecycle also wrote, which meant a sync pass had to stop recomputing
 	// it from labels entirely once any run existed, silently breaking
 	// operator label edits from that point on.
 	//
-	// issue.State likewise comes straight from GitHub on every sync (ListIssues
-	// now fetches --state all instead of --state open), so an issue closed on
-	// the tracker is reconciled to state='closed' here instead of staying
-	// 'open' -- and therefore schedulable -- forever just because a sync that
-	// only ever asked for open issues could never observe the close.
-	for _, issue := range issues {
-		labels, err := json.Marshal(issue.Labels)
-		if err != nil {
-			return err
-		}
-		raw, err := json.Marshal(issue)
-		if err != nil {
-			return err
+	// task.State likewise comes straight from the source on every sync (the
+	// GitHub adapter fetches --state all instead of --state open), so a task
+	// closed on the tracker is reconciled to state='closed' here instead of
+	// staying 'open' -- and therefore schedulable -- forever just because a
+	// sync that only ever asked for open issues could never observe the
+	// close.
+	for _, task := range tasks {
+		// raw_snapshot is NOT NULL; a TaskSource is not required to populate
+		// Task.Raw (it is an audit convenience, not part of the contract), so
+		// a nil snapshot here becomes an empty JSON object rather than a
+		// constraint violation.
+		raw := task.Raw
+		if raw == nil {
+			raw = json.RawMessage("{}")
 		}
 		if err := queries.UpsertIssue(ctx, db.UpsertIssueParams{
-			ID: idgen.NewID(), ProjectID: projectID, ExternalID: issue.ExternalID, Title: issue.Title, Body: issue.Body, Url: issue.URL,
-			State: issue.State, Column8: labels, Priority: int32(issue.Priority), Eligible: issue.Eligible,
-			ExternalCreatedAt: pgtype.Timestamptz{Time: issue.CreatedAt, Valid: true},
-			ExternalUpdatedAt: pgtype.Timestamptz{Time: issue.UpdatedAt, Valid: true},
-			Column13:          raw,
+			ID: idgen.NewID(), ProjectID: projectID, Provider: provider, ExternalID: task.ExternalID, Title: task.Title, Body: task.Body, Url: task.URL,
+			State: task.State, Column9: legacyTaskLabels(raw), Priority: int32(task.Priority), Eligible: task.Eligible,
+			ExternalCreatedAt: pgtype.Timestamptz{Time: task.CreatedAt, Valid: true},
+			ExternalUpdatedAt: pgtype.Timestamptz{Time: task.UpdatedAt, Valid: true},
+			Column14:          raw,
 		}); err != nil {
 			return databaseError(err)
 		}

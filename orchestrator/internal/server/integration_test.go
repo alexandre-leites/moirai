@@ -58,6 +58,15 @@ type harness struct {
 	t       *testing.T
 }
 
+// setGitHub swaps both the default TaskSource and the default CodeHost for
+// adapter, which is what every test double in this file needs: they all
+// implement gitHubLikeAdapter (both interfaces from one value), the same
+// shape the real githubCLI does.
+func (h *harness) setGitHub(adapter gitHubLikeAdapter) {
+	h.Core.adapters.defaultTaskSource = adapter
+	h.Core.adapters.defaultCodeHost = adapter
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	url := os.Getenv("LOOP_TEST_DATABASE_URL")
@@ -89,14 +98,14 @@ func newHarness(t *testing.T) *harness {
 // around an execution, not about talking to GitHub.
 type stubGitHub struct{}
 
-func (stubGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) { return nil, nil }
-func (stubGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (githubPR, error) {
-	return githubPR{Number: "1", URL: "https://example.test/pull/1", State: "OPEN", HeadSHA: "abc"}, nil
+func (stubGitHub) ListTasks(context.Context, string, string) ([]Task, error) { return nil, nil }
+func (stubGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (PullRequest, error) {
+	return PullRequest{Number: "1", URL: "https://example.test/pull/1", State: "OPEN", HeadSHA: "abc"}, nil
 }
-func (stubGitHub) Checks(context.Context, string, string, string) (checkState, error) {
+func (stubGitHub) Checks(context.Context, string, string, string) (CheckState, error) {
 	return checksPending, nil
 }
-func (stubGitHub) MergeSquash(context.Context, string, string, string) error { return nil }
+func (stubGitHub) Merge(context.Context, string, string, string) error { return nil }
 func (stubGitHub) Merged(context.Context, string, string, string) (bool, error) {
 	return false, nil
 }
@@ -112,7 +121,7 @@ type sequencedGitHub struct {
 	mu        sync.Mutex
 	errs      []error
 	alwaysErr error
-	pr        githubPR
+	pr        PullRequest
 }
 
 func (g *sequencedGitHub) nextErr() error {
@@ -126,26 +135,26 @@ func (g *sequencedGitHub) nextErr() error {
 	return g.alwaysErr
 }
 
-func (g *sequencedGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+func (g *sequencedGitHub) ListTasks(context.Context, string, string) ([]Task, error) {
 	return nil, nil
 }
-func (g *sequencedGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (githubPR, error) {
+func (g *sequencedGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (PullRequest, error) {
 	if err := g.nextErr(); err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	pr := g.pr
 	if pr.Number == "" {
-		pr = githubPR{Number: "9", URL: "https://example.test/pull/9", State: "OPEN", HeadSHA: "deadbeef"}
+		pr = PullRequest{Number: "9", URL: "https://example.test/pull/9", State: "OPEN", HeadSHA: "deadbeef"}
 	}
 	return pr, nil
 }
-func (g *sequencedGitHub) Checks(context.Context, string, string, string) (checkState, error) {
+func (g *sequencedGitHub) Checks(context.Context, string, string, string) (CheckState, error) {
 	if err := g.nextErr(); err != nil {
 		return checksPending, err
 	}
 	return checksGreen, nil
 }
-func (g *sequencedGitHub) MergeSquash(context.Context, string, string, string) error {
+func (g *sequencedGitHub) Merge(context.Context, string, string, string) error {
 	return g.nextErr()
 }
 func (g *sequencedGitHub) Merged(context.Context, string, string, string) (bool, error) {
@@ -527,7 +536,7 @@ func TestObserveWorkflowRecordsAConfirmedMergeEvenIfItsOwnStatusRaced(t *testing
 	// sequencedGitHub's zero value is the ordinary success path: Checks reports
 	// green, MergeSquash succeeds, and Merged confirms it -- exactly what
 	// observeWorkflow sees before it ever reaches its own confirming update.
-	h.github = &sequencedGitHub{}
+	h.setGitHub(&sequencedGitHub{})
 
 	// The race: an operator cancels the run (mirroring exactly what
 	// controlWorkflow's "cancel" case does -- status to 'cancelled', project
@@ -616,7 +625,7 @@ func TestObserveWorkflowStopsAtHumanApprovalWhenTheProjectRequiresIt(t *testing.
 	projectID, issueID := h.project()
 	h.requireApproval(projectID)
 	workflowID := h.seedWaitingChecks(projectID, issueID)
-	h.github = &sequencedGitHub{}
+	h.setGitHub(&sequencedGitHub{})
 
 	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
 		t.Fatalf("observeWorkflow: %v", err)
@@ -649,7 +658,7 @@ func TestObserveWorkflowMergesDirectlyWhenTheProjectDoesNotRequireApproval(t *te
 	h := newHarness(t)
 	projectID, issueID := h.project()
 	workflowID := h.seedWaitingChecks(projectID, issueID)
-	h.github = &sequencedGitHub{}
+	h.setGitHub(&sequencedGitHub{})
 
 	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
 		t.Fatalf("observeWorkflow: %v", err)
@@ -671,7 +680,7 @@ func TestSubmitHumanDecisionApprovesAndMerges(t *testing.T) {
 	projectID, issueID := h.project()
 	h.requireApproval(projectID)
 	workflowID := h.seedWaitingChecks(projectID, issueID)
-	h.github = &sequencedGitHub{}
+	h.setGitHub(&sequencedGitHub{})
 	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
 		t.Fatalf("observeWorkflow: %v", err)
 	}
@@ -711,7 +720,7 @@ func TestSubmitHumanDecisionRejectsAndBlocks(t *testing.T) {
 	projectID, issueID := h.project()
 	h.requireApproval(projectID)
 	workflowID := h.seedWaitingChecks(projectID, issueID)
-	h.github = &sequencedGitHub{}
+	h.setGitHub(&sequencedGitHub{})
 	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
 		t.Fatalf("observeWorkflow: %v", err)
 	}
@@ -766,7 +775,7 @@ func TestDeliveryRetriesATransientGitHubFailureInsteadOfBlocking(t *testing.T) {
 	workflowID := h.seedDelivering(projectID, issueID)
 
 	fake := &sequencedGitHub{errs: []error{errors.New("gh pr list: HTTP 502: Bad Gateway (HTTP 502)")}}
-	h.github = fake
+	h.setGitHub(fake)
 
 	if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
 		t.Fatalf("deliverWorkflow: %v", err)
@@ -803,7 +812,7 @@ func TestDeliveryBlocksImmediatelyOnATerminalGitHubFailure(t *testing.T) {
 	projectID, issueID := h.project()
 	workflowID := h.seedDelivering(projectID, issueID)
 
-	h.github = &sequencedGitHub{errs: []error{errors.New(`gh pr list: exit status 1: {"message":"Not Found"} gh: Not Found (HTTP 404)`)}}
+	h.setGitHub(&sequencedGitHub{errs: []error{errors.New(`gh pr list: exit status 1: {"message":"Not Found"} gh: Not Found (HTTP 404)`)}})
 
 	// blockExternal itself succeeds (it commits the run to 'blocked'), so
 	// deliverWorkflow returns nil here just like it does for a successfully
@@ -835,7 +844,7 @@ func TestDeliveryBlocksAfterExhaustingItsRetryBudget(t *testing.T) {
 	projectID, issueID := h.project()
 	workflowID := h.seedDelivering(projectID, issueID)
 
-	h.github = &sequencedGitHub{alwaysErr: errors.New("gh pr list: HTTP 503: Service Unavailable (HTTP 503)")}
+	h.setGitHub(&sequencedGitHub{alwaysErr: errors.New("gh pr list: HTTP 503: Service Unavailable (HTTP 503)")})
 
 	for attempt := 1; attempt <= maxDeliveryAttempts; attempt++ {
 		if err := h.deliverWorkflow(context.Background(), workflowID); err != nil {
@@ -1803,7 +1812,7 @@ type labelStub struct {
 	createdAt, updatedAt time.Time
 }
 
-func (s *labelStub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+func (s *labelStub) ListTasks(context.Context, string, string) ([]Task, error) {
 	priority, eligible := issuePriority(s.labels)
 	createdAt, updatedAt := s.createdAt, s.updatedAt
 	if createdAt.IsZero() {
@@ -1812,9 +1821,9 @@ func (s *labelStub) ListIssues(context.Context, string, string) ([]githubIssue, 
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
 	}
-	return []githubIssue{{
+	return []Task{{
 		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
-		Labels: s.labels, CreatedAt: createdAt, UpdatedAt: updatedAt,
+		CreatedAt: createdAt, UpdatedAt: updatedAt,
 		Priority: priority, Eligible: eligible, State: "open",
 	}}, nil
 }
@@ -1832,7 +1841,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	h := newHarness(t)
 	projectID, issueID := h.project()
 	stub := &labelStub{labels: []string{"agent:ready"}}
-	h.github = stub
+	h.setGitHub(stub)
 	runnerID := h.runner()
 	jobID, workflowID := h.runJob(runnerID)
 
@@ -1852,7 +1861,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Scenario 1: removing agent:ready after a run exists must actually take
 	// effect on the tracker's own bit, not be silently swallowed.
 	stub.labels = nil
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
@@ -1862,7 +1871,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Scenario 2: adding agent:blocked after a run exists must also take
 	// effect.
 	stub.labels = []string{"agent:ready", "agent:blocked"}
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
@@ -1872,7 +1881,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Restoring agent:ready brings the label bit back, but must not by
 	// itself reopen a failed run's issue: only RetryWorkflow does that.
 	stub.labels = []string{"agent:ready"}
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
@@ -1901,10 +1910,10 @@ type stateStub struct {
 	state string
 }
 
-func (s *stateStub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
-	return []githubIssue{{
+func (s *stateStub) ListTasks(context.Context, string, string) ([]Task, error) {
+	return []Task{{
 		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
-		Labels: []string{"agent:ready"}, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		Priority: 0, Eligible: s.state == "open", State: s.state,
 	}}, nil
 }
@@ -1921,9 +1930,9 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	h := newHarness(t)
 	projectID, issueID := h.project()
 	stub := &stateStub{state: "open"}
-	h.github = stub
+	h.setGitHub(stub)
 
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if !h.schedulable(issueID) {
@@ -1931,7 +1940,7 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	}
 
 	stub.state = "closed"
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if state := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND state='closed'`, issueID); state != 1 {
@@ -1947,11 +1956,61 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	// Reopening it on GitHub must bring it back, proving this is a live
 	// reconciliation and not a one-way trip.
 	stub.state = "open"
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if !h.schedulable(issueID) {
 		t.Fatal("reopening the issue on GitHub did not make it schedulable again")
+	}
+}
+
+// TestSyncSelectsTaskSourceFromProjectConfiguration is the config-driven-
+// selection acceptance test for #291: a project's own issue_tracker_type
+// (read straight off app.projects, never touched before this change) must
+// pick which TaskSource actually runs, with every project that predates the
+// column (issue_tracker_type = "" here, its schema default) behaving exactly
+// as it always did -- the GitHub adapter -- while a project explicitly
+// configured for "local_file" genuinely goes through LocalFileTaskSource
+// instead, never silently falling back to GitHub.
+func TestSyncSelectsTaskSourceFromProjectConfiguration(t *testing.T) {
+	h := newHarness(t)
+	h.Core.adapters.localFileTaskSource = LocalFileTaskSource{}
+
+	// An existing (unconfigured) project still resolves to the GitHub stub:
+	// countingGitHub counts its own ListTasks calls, so asserting exactly one
+	// call here proves this project's sync went through it and not silently
+	// through the local-file path instead.
+	githubOnly := &countingGitHub{}
+	h.setGitHub(githubOnly)
+	githubProjectID, githubIssueID := h.project()
+	if err := h.syncProject(context.Background(), githubProjectID, "https://github.com/acme/demo.git", ""); err != nil {
+		t.Fatalf("syncProject (github default): %v", err)
+	}
+	if githubOnly.calls != 1 {
+		t.Fatalf("github default project called the GitHub ListTasks %d times, want 1", githubOnly.calls)
+	}
+	if h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND provider='github'`, githubIssueID) != 1 {
+		t.Fatal("an unconfigured project's synced issue was not recorded with provider='github'")
+	}
+
+	// A project explicitly configured for local_file must go through
+	// LocalFileTaskSource, and its synced issue must be recorded under
+	// provider='local_file' -- persisting the adapter that actually produced
+	// it rather than the literal 'github' every issue used to get hardcoded
+	// to regardless of source.
+	dir := t.TempDir()
+	writeTaskFile(t, dir, "77.json", `{"title":"From a local file","eligible":true,"priority":3}`)
+	localProjectID := idgen.NewID()
+	h.exec(`INSERT INTO app.projects(id,name,repository_mode,repository_url,default_branch,issue_tracker_type) VALUES($1,$2,'managed_clone',$3,'main','local_file')`,
+		localProjectID, "local-"+localProjectID[:8], dir)
+	if err := h.syncProject(context.Background(), localProjectID, dir, "local_file"); err != nil {
+		t.Fatalf("syncProject (local_file): %v", err)
+	}
+	if h.scalar(`SELECT COUNT(*) FROM app.issues WHERE project_id=$1 AND external_id='77' AND title='From a local file' AND priority=3 AND eligible`, localProjectID) != 1 {
+		t.Fatal("local_file project's task did not sync via LocalFileTaskSource")
+	}
+	if h.scalar(`SELECT COUNT(*) FROM app.issues WHERE project_id=$1 AND provider='local_file'`, localProjectID) != 1 {
+		t.Fatal("local_file project's synced issue was not recorded with provider='local_file'")
 	}
 }
 
@@ -1974,7 +2033,7 @@ func TestUpsertIssueSkipsWritingWhenNothingChanged(t *testing.T) {
 	// like a real change regardless of the fix.
 	fixedTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	stub := &labelStub{labels: []string{"agent:ready"}, createdAt: fixedTime, updatedAt: fixedTime}
-	h.github = stub
+	h.setGitHub(stub)
 
 	xmin := func() uint32 {
 		t.Helper()
@@ -1987,20 +2046,20 @@ func TestUpsertIssueSkipsWritingWhenNothingChanged(t *testing.T) {
 
 	// The seeded issue (h.project) does not match labelStub's row exactly, so
 	// this first sync is expected to write once and establish a baseline xmin.
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject (baseline): %v", err)
 	}
 	baseline := xmin()
 
 	// Two consecutive no-op passes: GitHub reports the exact same issue both
 	// times, nothing on the tracker moved.
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject (no-op #1): %v", err)
 	}
 	if after := xmin(); after != baseline {
 		t.Fatalf("xmin changed from %d to %d on a no-op sync pass; the DO UPDATE guard did not skip the write", baseline, after)
 	}
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject (no-op #2): %v", err)
 	}
 	if after := xmin(); after != baseline {
@@ -2009,7 +2068,7 @@ func TestUpsertIssueSkipsWritingWhenNothingChanged(t *testing.T) {
 
 	// A real change (a new label flipping priority/eligible) must still write.
 	stub.labels = nil
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
 		t.Fatalf("syncProject (real change): %v", err)
 	}
 	if after := xmin(); after == baseline {
@@ -2285,7 +2344,7 @@ type failingGitHub struct {
 	err error
 }
 
-func (g *failingGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+func (g *failingGitHub) ListTasks(context.Context, string, string) ([]Task, error) {
 	return nil, g.err
 }
 
@@ -2361,7 +2420,7 @@ func TestSyncProjectsSkipsAProjectStillInsideItsBackoffWindow(t *testing.T) {
 	h := newHarness(t)
 	projectID, _ := h.project()
 	failing := &failingGitHub{err: errors.New("revoked token")}
-	h.github = failing
+	h.setGitHub(failing)
 
 	if err := h.SyncProjects(context.Background()); err == nil {
 		t.Fatal("SyncProjects: want an error surfaced from the failing project")
@@ -2377,7 +2436,7 @@ func TestSyncProjectsSkipsAProjectStillInsideItsBackoffWindow(t *testing.T) {
 	// Swap in a GitHub that would succeed, to prove a skip (not another
 	// failure) is why ListIssues is not called again.
 	succeeding := &countingGitHub{}
-	h.github = succeeding
+	h.setGitHub(succeeding)
 	if err := h.SyncProjects(context.Background()); err != nil {
 		t.Fatalf("SyncProjects: %v", err)
 	}
@@ -2404,7 +2463,7 @@ type countingGitHub struct {
 	calls int
 }
 
-func (g *countingGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+func (g *countingGitHub) ListTasks(context.Context, string, string) ([]Task, error) {
 	g.calls++
 	return nil, nil
 }
@@ -2420,7 +2479,7 @@ func (g *countingGitHub) ListIssues(context.Context, string, string) ([]githubIs
 func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
 	h := newHarness(t)
 	h.project()
-	h.github = &failingGitHub{err: errors.New("revoked token")}
+	h.setGitHub(&failingGitHub{err: errors.New("revoked token")})
 
 	resp, err := h.Control.SyncNow(h.adminContext(), &controlv1.SyncNowRequest{})
 	if err != nil {

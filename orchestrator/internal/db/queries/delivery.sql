@@ -1,6 +1,6 @@
 -- name: UpsertPullRequest :exec
 INSERT INTO app.pull_requests(id, workflow_run_id, provider, external_id, url, head_commit, state)
-VALUES (sqlc.arg(id), sqlc.arg(workflow_run_id), 'github', sqlc.arg(external_id), sqlc.arg(url), sqlc.arg(head_commit), sqlc.arg(state))
+VALUES (sqlc.arg(id), sqlc.arg(workflow_run_id), sqlc.arg(provider), sqlc.arg(external_id), sqlc.arg(url), sqlc.arg(head_commit), sqlc.arg(state))
 ON CONFLICT (workflow_run_id) DO UPDATE SET
   external_id = EXCLUDED.external_id,
   url = EXCLUDED.url,
@@ -122,7 +122,7 @@ VALUES (sqlc.arg(workflow_run_id), 'pull_request.merged', 'info', '{}'::jsonb);
 -- run's project-scoped delivery facts from.
 SELECT wr.project_id::text AS project_id, wr.issue_id::text AS issue_id, i.external_id, i.title, i.body,
        COALESCE(p.repository_url, '') AS repository_url, p.default_branch, p.configuration,
-       COALESCE(wr.branch_name, '') AS branch_name, pr.external_id AS pr_external_id
+       COALESCE(wr.branch_name, '') AS branch_name, pr.external_id AS pr_external_id, p.code_host_type
 FROM app.workflow_runs wr
 JOIN app.issues i ON i.id = wr.issue_id
 JOIN app.projects p ON p.id = wr.project_id

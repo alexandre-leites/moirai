@@ -23,7 +23,7 @@ func noToken(context.Context, string) (string, error) { return "", nil }
 
 func TestGitHubIssueParsing(t *testing.T) {
 	command := &fakeCommand{outputs: [][]byte{[]byte(`[{"number":42,"title":"Fix","body":"","url":"https://github.com/acme/demo/issues/42","state":"OPEN","labels":[{"name":"agent:ready"},{"name":"agent-priority:7"}],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}]`)}}
-	issues, err := NewGitHubCLI(command, noToken).ListIssues(context.Background(), "p1", "acme/demo")
+	issues, err := NewGitHubCLI(command, noToken).ListTasks(context.Background(), "p1", "acme/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestGitHubIssueParsing(t *testing.T) {
 // nobody removed agent:ready from it before closing it.
 func TestGitHubIssueParsingReconcilesClosedIssues(t *testing.T) {
 	command := &fakeCommand{outputs: [][]byte{[]byte(`[{"number":42,"title":"Fix","body":"","url":"https://github.com/acme/demo/issues/42","state":"CLOSED","labels":[{"name":"agent:ready"}],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}]`)}}
-	issues, err := NewGitHubCLI(command, noToken).ListIssues(context.Background(), "p1", "acme/demo")
+	issues, err := NewGitHubCLI(command, noToken).ListTasks(context.Background(), "p1", "acme/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestGitHubIssueParsingReconcilesClosedIssues(t *testing.T) {
 // way to distinguish "that was the whole list" from "the limit was hit".
 func TestGitHubIssueParsingLimit(t *testing.T) {
 	command := &fakeCommand{outputs: [][]byte{[]byte(`[]`)}}
-	if _, err := NewGitHubCLI(command, noToken).ListIssues(context.Background(), "p1", "acme/demo"); err != nil {
+	if _, err := NewGitHubCLI(command, noToken).ListTasks(context.Background(), "p1", "acme/demo"); err != nil {
 		t.Fatal(err)
 	}
 	for i, arg := range command.calls[0] {

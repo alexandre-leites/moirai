@@ -32,6 +32,12 @@ type deliveryWorkflow struct {
 	// (server.go's projectConfig), decoded here rather than re-fetched: only
 	// observeWorkflow reads it, but deliverWorkflow shares this same struct.
 	requireApproval bool
+	// codeHostType is the project's code_host_type configuration, resolved to
+	// a CodeHost via Core.adapters.resolveCodeHost. repositoryURL is handed to
+	// that CodeHost exactly as stored -- only the adapter itself (github.go's
+	// repositoryRef, for the GitHub CodeHost) ever parses it, never this
+	// generic delivery code.
+	codeHostType string
 }
 
 func (s *Core) deliverWorkflow(ctx context.Context, workflowID string) error {
@@ -39,11 +45,11 @@ func (s *Core) deliverWorkflow(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	repository, err := repositoryRef(workflow.repositoryURL)
+	codeHost, err := s.adapters.resolveCodeHost(workflow.codeHostType)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	pr, err := s.github.FindOrCreatePR(ctx, workflow.projectID, repository, workflow.branch, workflow.defaultBranch, workflow.issueTitle, "Resolves #"+workflow.externalID)
+	pr, err := codeHost.FindOrCreatePR(ctx, workflow.projectID, workflow.repositoryURL, workflow.branch, workflow.defaultBranch, workflow.issueTitle, "Resolves #"+workflow.externalID)
 	if err != nil {
 		return s.blockOrRetryExternal(ctx, workflowID, err)
 	}
@@ -56,6 +62,7 @@ func (s *Core) deliverWorkflow(ctx context.Context, workflowID string) error {
 	if err := queries.UpsertPullRequest(ctx, db.UpsertPullRequestParams{
 		ID:            idgen.NewID(),
 		WorkflowRunID: workflowID,
+		Provider:      providerName(workflow.codeHostType),
 		ExternalID:    pr.Number,
 		Url:           pr.URL,
 		HeadCommit:    pr.HeadSHA,
@@ -142,11 +149,11 @@ func (s *Core) observeWorkflow(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	repository, err := repositoryRef(workflow.repositoryURL)
+	codeHost, err := s.adapters.resolveCodeHost(workflow.codeHostType)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	checks, err := s.github.Checks(ctx, workflow.projectID, repository, workflow.prNumber)
+	checks, err := codeHost.Checks(ctx, workflow.projectID, workflow.repositoryURL, workflow.prNumber)
 	if err != nil {
 		return s.blockOrRetryExternal(ctx, workflowID, err)
 	}
@@ -180,7 +187,7 @@ func (s *Core) observeWorkflow(ctx context.Context, workflowID string) error {
 		}
 		return nil
 	}
-	return s.mergeWorkflow(ctx, workflow, repository)
+	return s.mergeWorkflow(ctx, workflow)
 }
 
 // mergeWorkflow performs the actual squash-merge once every gate (GitHub
@@ -189,11 +196,15 @@ func (s *Core) observeWorkflow(ctx context.Context, workflowID string) error {
 // human approval; approveWorkflow calls it directly too, once a human has
 // approved, deliberately bypassing observeWorkflow itself so the just-approved
 // run is not re-gated by the very requireApproval check that put it here.
-func (s *Core) mergeWorkflow(ctx context.Context, workflow deliveryWorkflow, repository string) error {
-	if err := s.github.MergeSquash(ctx, workflow.projectID, repository, workflow.prNumber); err != nil {
+func (s *Core) mergeWorkflow(ctx context.Context, workflow deliveryWorkflow) error {
+	codeHost, err := s.adapters.resolveCodeHost(workflow.codeHostType)
+	if err != nil {
+		return s.blockExternal(ctx, workflow.id, err)
+	}
+	if err := codeHost.Merge(ctx, workflow.projectID, workflow.repositoryURL, workflow.prNumber); err != nil {
 		return s.blockOrRetryExternal(ctx, workflow.id, err)
 	}
-	merged, err := s.github.Merged(ctx, workflow.projectID, repository, workflow.prNumber)
+	merged, err := codeHost.Merged(ctx, workflow.projectID, workflow.repositoryURL, workflow.prNumber)
 	if err != nil {
 		return s.blockOrRetryExternal(ctx, workflow.id, err)
 	}
@@ -280,6 +291,7 @@ func (s *Core) deliveryWorkflow(ctx context.Context, workflowID string, requireP
 		defaultBranch:   row.DefaultBranch,
 		branch:          row.BranchName,
 		requireApproval: config.RequireHumanApproval,
+		codeHostType:    row.CodeHostType,
 	}
 	if requirePR && !row.PrExternalID.Valid {
 		return deliveryWorkflow{}, errors.New("workflow pull request is missing")
@@ -349,11 +361,11 @@ func (s *Core) mergeApprovedWorkflow(ctx context.Context, workflowID string) err
 	if err != nil {
 		return err
 	}
-	repository, err := repositoryRef(workflow.repositoryURL)
+	codeHost, err := s.adapters.resolveCodeHost(workflow.codeHostType)
 	if err != nil {
 		return err
 	}
-	checks, err := s.github.Checks(ctx, workflow.projectID, repository, workflow.prNumber)
+	checks, err := codeHost.Checks(ctx, workflow.projectID, workflow.repositoryURL, workflow.prNumber)
 	if err != nil {
 		return err
 	}
@@ -366,7 +378,7 @@ func (s *Core) mergeApprovedWorkflow(ctx context.Context, workflowID string) err
 		// correctly on the next tick.
 		return nil
 	}
-	return s.mergeWorkflow(ctx, workflow, repository)
+	return s.mergeWorkflow(ctx, workflow)
 }
 
 // rejectWorkflow is SubmitHumanDecision's "changes_requested" branch: it ends

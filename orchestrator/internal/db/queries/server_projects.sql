@@ -15,7 +15,7 @@ WHERE id = $1;
 UPDATE app.projects SET enabled = $2, updated_at = now() WHERE id = $1;
 
 -- name: GetProject :one
-SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration
+SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration, issue_tracker_type, code_host_type
 FROM app.projects
 WHERE id = $1;
 
@@ -33,12 +33,12 @@ INSERT INTO app.project_pipeline_steps(id, project_id, position, name, command, 
 VALUES ($1, $2, $3, $4, $4, $5, $6);
 
 -- name: ListSyncableProjects :many
-SELECT id::text AS id, repository_url
+SELECT id::text AS id, repository_url, issue_tracker_type
 FROM app.projects
 WHERE enabled;
 
 -- name: ListSyncableProjectByID :many
-SELECT id::text AS id, repository_url
+SELECT id::text AS id, repository_url, issue_tracker_type
 FROM app.projects
 WHERE enabled AND id = $1;
 
@@ -51,7 +51,7 @@ WHERE enabled AND id = $1;
 -- through ListSyncableProjects/ListSyncableProjectByID instead and always
 -- bypasses backoff, since a human explicitly asking for a sync right now is
 -- exactly the case backoff should not stand in front of.
-SELECT p.id::text AS id, p.repository_url
+SELECT p.id::text AS id, p.repository_url, p.issue_tracker_type
 FROM app.projects p
 LEFT JOIN app.issue_sync_state s ON s.project_id = p.id
 WHERE p.enabled AND (s.next_retry_at IS NULL OR s.next_retry_at <= now());
@@ -104,7 +104,7 @@ ORDER BY p.name, p.id;
 -- the guard by always differing); a row with no other change simply keeps
 -- its previous last_synced_at rather than that column alone forcing a write.
 INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
-VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, now(), $13::jsonb)
+VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, now(), $14::jsonb)
 ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   display_number = EXCLUDED.display_number,
   title = EXCLUDED.title,
