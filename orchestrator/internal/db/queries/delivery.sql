@@ -46,9 +46,6 @@ WHERE id = sqlc.arg(id) AND status = 'waiting_github_checks';
 -- name: MarkPullRequestMerged :exec
 UPDATE app.pull_requests SET state = 'merged', merged_at = now() WHERE workflow_run_id = sqlc.arg(workflow_run_id);
 
--- name: MarkIssueIneligible :exec
-UPDATE app.issues SET eligible = false WHERE id = sqlc.arg(id);
-
 -- name: InsertPullRequestMergedEvent :exec
 INSERT INTO app.workflow_events(workflow_run_id, event_type, severity, payload)
 VALUES (sqlc.arg(workflow_run_id), 'pull_request.merged', 'info', '{}'::jsonb);

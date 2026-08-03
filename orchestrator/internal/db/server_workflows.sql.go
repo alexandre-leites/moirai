@@ -288,16 +288,6 @@ func (q *Queries) ListWorkflowsPage(ctx context.Context, limit int32) ([]ListWor
 	return items, nil
 }
 
-const reopenIssueForRetry = `-- name: ReopenIssueForRetry :exec
-UPDATE app.issues SET eligible = true
-WHERE app.issues.id = (SELECT wr.issue_id FROM app.workflow_runs wr WHERE wr.id = $1) AND state = 'open'
-`
-
-func (q *Queries) ReopenIssueForRetry(ctx context.Context, id string) error {
-	_, err := q.db.Exec(ctx, reopenIssueForRetry, id)
-	return err
-}
-
 const setWorkflowControlStatus = `-- name: SetWorkflowControlStatus :exec
 UPDATE app.workflow_runs SET
   status = $2,
@@ -317,5 +307,19 @@ type SetWorkflowControlStatusParams struct {
 
 func (q *Queries) SetWorkflowControlStatus(ctx context.Context, arg SetWorkflowControlStatusParams) error {
 	_, err := q.db.Exec(ctx, setWorkflowControlStatus, arg.ID, arg.Status, arg.TerminalReason)
+	return err
+}
+
+const supersedeWorkflowRun = `-- name: SupersedeWorkflowRun :exec
+UPDATE app.workflow_runs SET superseded_at = now() WHERE id = $1 AND superseded_at IS NULL
+`
+
+// Retry no longer writes app.issues.eligible directly (see #268 and migration
+// 023): the issue's eligible bit stays purely label-driven, and marking this
+// run superseded is what lets the scheduler's app.workflow_runs join stop
+// excluding its issue on this run's account. A fresh run is what actually
+// reopens the work; this only clears the way for one.
+func (q *Queries) SupersedeWorkflowRun(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, supersedeWorkflowRun, id)
 	return err
 }

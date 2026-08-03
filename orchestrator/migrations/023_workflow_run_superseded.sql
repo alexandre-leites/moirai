@@ -1,0 +1,25 @@
+-- app.issues.eligible had two writers with one bit between them (#268): the
+-- sync upsert set it from the tracker's agent:ready/agent:blocked labels, and
+-- the orchestrator's own lifecycle (a run that ends without delivering parks
+-- the issue, a manual retry reopens it) set it too. To stop the lifecycle
+-- writer being silently overwritten, the upsert had grown a CASE that stopped
+-- recomputing eligible from labels at all once an issue had any workflow
+-- run -- which meant removing agent:ready, or adding agent:blocked, became a
+-- no-op from that point on, even though #247 made those labels meaningful
+-- again.
+--
+-- docs/architecture.md diagnoses this exact shape for app.runners.draining
+-- and concludes separate columns are the clean answer there; the same fix
+-- applies here. superseded_at lets "has this issue already been worked on,
+-- and is that attempt still the one standing" live on the workflow run it
+-- actually describes, instead of being folded into the issue's single
+-- label-driven bit. eligible goes back to being purely what the tracker
+-- says; the scheduler additionally excludes an issue with a run that ended
+-- badly (failed, blocked, or delivered) and has not been superseded.
+--
+-- A run only needs superseding once it can no longer be scheduled around on
+-- its own: 'cancelled' already lets the scheduler pick the issue up again
+-- with no operator action (see server.go's controlWorkflow), so retrying a
+-- cancelled run supersedes a row that was never blocking anything -- allowed,
+-- just inert.
+ALTER TABLE app.workflow_runs ADD COLUMN superseded_at timestamptz;

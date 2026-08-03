@@ -5,7 +5,10 @@ SELECT p.id::text AS project_id, p.name AS project_name, i.external_id, i.title,
             ELSE '' END AS blocked_reason
 FROM app.issues i
 JOIN app.projects p ON p.id = i.project_id
-WHERE i.eligible AND i.state = 'open'
+WHERE i.eligible AND i.state = 'open' AND NOT EXISTS (
+  SELECT 1 FROM app.workflow_runs w
+  WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed', 'blocked', 'completed')
+)
 ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at, i.project_id, i.external_id
 LIMIT $1;
 
@@ -18,7 +21,11 @@ LIMIT $1;
 -- subtraction, which still uses only values this same statement read from
 -- the database's clock.
 SELECT
-  (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id = i.project_id WHERE p.enabled AND i.eligible AND i.state = 'open') AS queue_depth,
+  (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id = i.project_id
+   WHERE p.enabled AND i.eligible AND i.state = 'open' AND NOT EXISTS (
+     SELECT 1 FROM app.workflow_runs w
+     WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed', 'blocked', 'completed')
+   )) AS queue_depth,
   (SELECT COUNT(*) FROM app.workflow_runs WHERE status NOT IN ('completed','failed','blocked','cancelled')) AS active_workflows,
   (SELECT COUNT(*) FROM app.jobs WHERE status IN ('offered','preparing','running')) AS scheduled_jobs,
   (SELECT COUNT(*) FROM app.runners WHERE enabled AND revoked_at IS NULL) AS enabled_runners,
@@ -44,6 +51,10 @@ WHERE i.eligible AND i.state = 'open' AND p.enabled
   AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
   AND NOT EXISTS (SELECT 1 FROM app.project_locks l WHERE l.project_id = p.id)
   AND NOT EXISTS (SELECT 1 FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered','preparing','running'))
+  AND NOT EXISTS (
+    SELECT 1 FROM app.workflow_runs w
+    WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed', 'blocked', 'completed')
+  )
 ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at, i.project_id, i.external_id, r.id
 FOR UPDATE OF i, r SKIP LOCKED
 LIMIT 1;
@@ -144,6 +155,3 @@ WHERE id = $1;
 
 -- name: DeleteProjectLockByWorkflow :exec
 DELETE FROM app.project_locks WHERE workflow_run_id = $1;
-
--- name: ParkIssue :exec
-UPDATE app.issues SET eligible = false WHERE app.issues.id = (SELECT wr.issue_id FROM app.workflow_runs wr WHERE wr.id = $1);
