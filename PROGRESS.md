@@ -1019,3 +1019,34 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   its parameter bytes as literal text (`[31m`), where the runner's `sanitizeLogText` consumes the
   whole sequence. The injection is defused either way — no ESC means no escape sequence — and
   duplicating an escape parser in the orchestrator to tidy the residue was not worth it.
+
+## Issue #259 — StreamEvents replayed the whole event table, emitted no runner events, hardcoded event_type (2026-08-03)
+
+- Fixed. Relevant files: `orchestrator/internal/server/events.go` (rewritten), `orchestrator/internal/server/server.go`
+  (added `s.runner(ctx, id)`), `orchestrator/internal/server/events_test.go` (new).
+- Root cause confirmed against the real code: `StreamEvents` polled `app.workflow_events` every second
+  starting from cursor `0` with no `Last-Event-ID`, ran one `s.workflow()` query per row (N+1), always set
+  `EventType: "workflow"`, and never touched `app.runners` even though `017_dashboard_events.sql` already
+  installs a `runners_dashboard_notify` trigger that calls `pg_notify('moirai_dashboard_events', ...)`.
+- Fix: `StreamEvents` now acquires a dedicated `pgxpool` connection and `LISTEN`s on
+  `moirai_dashboard_events` *before* computing the starting cursor (avoids the read-then-subscribe race).
+  Cold connect (empty or non-numeric `Last-Event-ID`) defaults the cursor to `SELECT COALESCE(MAX(id),0)
+  FROM app.workflow_events`; `ListWorkflowEvents` remains how a client pages older history. Workflow
+  notifications trigger a batched catch-up query (`ANY($1)` against `workflow_runs`, one round trip
+  regardless of batch size) instead of a per-row lookup. Runner notifications re-read the named runner
+  (`s.runner`) and emit it as `EventType: "runner"` with `ControlPlaneEvent.Runner` populated.
+- Non-obvious bug caught by tests, not review: the trigger's JSON `id` field is a bare number for
+  workflow events but a quoted string for runner events, so a single `string`-typed field on the Go
+  notification struct silently failed to unmarshal every workflow notification. Fixed by decoding `id`
+  as `json.RawMessage` and only string-decoding it where it's actually used (the runner path).
+- Also handled: a client that reconnects right after a runner event sends that runner event's synthetic,
+  non-numeric id (`"runner:<uuid>:<epoch>"`) back as `Last-Event-ID`. Runner events aren't replayable
+  (live-only, no backing sequence), so that shape now falls back to the default cursor instead of
+  returning `InvalidArgument`.
+- Validation:
+  - `cd orchestrator && go build ./...` — pass.
+  - `cd orchestrator && go build -tags integration ./...` — pass.
+  - `cd orchestrator && go vet ./... && go vet -tags integration ./...` — pass.
+  - `gofmt -l orchestrator` — clean.
+  - `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:55432/loop_test go test -tags integration -race -count=1 ./internal/server/` — pass (includes 4 new `TestStreamEvents*` tests against a real Postgres, exercising cold-connect replay suppression, explicit-cursor reconnect, batched multi-workflow lookup, and runner insert/update notifications).
+  - `go test -race -count=1 ./...` (orchestrator, no integration tag) — pass, no regressions.
