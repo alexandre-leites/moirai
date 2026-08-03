@@ -26,7 +26,7 @@ All database access goes through [sqlc](https://sqlc.dev)-generated code — see
 
 `make sqlc-check` (from the repo root) regenerates and runs `git diff --exit-code` against `internal/db`, the same gate `proto-check` runs for the protobuf bindings. It runs in CI (`sqlc-check` job) and is part of `make validate`, so a `.sql` change committed without regenerating, or a manual edit to a generated file, fails the build.
 
-As of this writing, `recovery.go` and `credentials.go` are fully converted; `server.go`, `delivery.go`, and `management.go` still contain hand-written SQL pending follow-up conversion (tracked from issue #292).
+As of this writing, `recovery.go`, `credentials.go`, `management.go`, and `delivery.go` are fully converted; `server.go` still contains hand-written SQL pending follow-up conversion (tracked from issue #292).
 
 ## Run locally
 

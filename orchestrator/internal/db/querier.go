@@ -15,23 +15,35 @@ type Querier interface {
 	CancelUnansweredOfferJobs(ctx context.Context, arg CancelUnansweredOfferJobsParams) ([]string, error)
 	CreateRunnerRegistrationToken(ctx context.Context, arg CreateRunnerRegistrationTokenParams) (pgtype.Timestamptz, error)
 	DeleteProjectCredential(ctx context.Context, arg DeleteProjectCredentialParams) (int64, error)
+	DeleteProjectLock(ctx context.Context, arg DeleteProjectLockParams) error
 	ExpireUnansweredOffers(ctx context.Context, unansweredOffer pgtype.Interval) error
+	GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error)
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
 	GetProjectCredentialSecret(ctx context.Context, arg GetProjectCredentialSecretParams) (GetProjectCredentialSecretRow, error)
 	GetSessionCSRFHash(ctx context.Context, tokenHash string) (string, error)
 	GetUserForUpdate(ctx context.Context, id string) (GetUserForUpdateRow, error)
+	InsertPullRequestCreatedEvent(ctx context.Context, arg InsertPullRequestCreatedEventParams) error
+	InsertPullRequestMergedEvent(ctx context.Context, workflowRunID string) error
+	InsertWorkflowTerminationEvent(ctx context.Context, arg InsertWorkflowTerminationEventParams) error
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
 	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
+	MarkIssueIneligible(ctx context.Context, id string) error
+	MarkPullRequestMerged(ctx context.Context, workflowRunID string) error
 	MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error
+	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
+	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
 	RevokeRunnerRegistrationToken(ctx context.Context, id string) (RevokeRunnerRegistrationTokenRow, error)
 	SelectAbandonedChecksWorkflows(ctx context.Context, abandonedChecks pgtype.Interval) ([]string, error)
 	SelectStrandedDeliveryWorkflows(ctx context.Context, strandedDelivery pgtype.Interval) ([]string, error)
+	SelectWaitingGithubChecksWorkflows(ctx context.Context) ([]string, error)
+	TerminateWorkflowRun(ctx context.Context, arg TerminateWorkflowRunParams) (string, error)
 	UpdateProjectCredentialSecret(ctx context.Context, arg UpdateProjectCredentialSecretParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) error
 	UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error)
+	UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) error
 }
 
 var _ Querier = (*Queries)(nil)
