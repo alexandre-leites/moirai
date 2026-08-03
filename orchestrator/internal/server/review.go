@@ -31,9 +31,10 @@ const (
 // reviewExecutionID derives the execution ID a reopened job's reviewer
 // execution reports back against. Distinct per review cycle (rather than a
 // single fixed suffix the way implementExecutionID's "-implement" is) so a
-// repeat review -- reachable once a repair loop (#354) exists to dispatch a
-// second developer attempt and a second review after it -- never reuses an
-// execution ID already retired by an earlier RecordJobExecutionEvent call.
+// repeat review -- reachable now that the repair loop (#354, repair.go's
+// dispatchRepairJob) dispatches a second developer attempt and a second
+// review after it -- never reuses an execution ID already retired by an
+// earlier RecordJobExecutionEvent call.
 func reviewExecutionID(jobID string, cycle int32) string {
 	return fmt.Sprintf("%s-review-%d", jobID, cycle)
 }
@@ -46,9 +47,11 @@ func reviewExecutionID(jobID string, cycle int32) string {
 // V1 review is deliberately given a fresh checkout and no access to the
 // developer's session (AGENTS.md: "use fresh context for independent AI
 // review") instead of a diff computed here. acceptanceCriteria and
-// reviewFindings are left empty for the same reason developerPacket's are:
-// V1 has no planning phase to populate the former, and no repair loop (#354)
-// to make a second cycle's findings reachable yet.
+// reviewFindings are left empty for the same reason developerPacket's are: V1
+// has no planning phase to populate the former, and a reviewer packet itself
+// has no prior findings of its own to report -- repair.go's repairPacket is
+// what populates that field, for the developer-role repair attempt a
+// rejection dispatches, not for the reviewer packet reviewing it.
 func reviewerPacket(jobID string, cycle int32, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int) (map[string]any, error) {
 	if !idgen.ValidID(jobID) || !idgen.ValidID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
 		return nil, status.Error(codes.FailedPrecondition, "review dispatch is invalid")
@@ -249,10 +252,9 @@ func reviewResultJSON(payloadJSON string) []byte {
 }
 
 // reviewRejectionReason composes the blocking_reason a rejected review ends a
-// run at, in the same bounded, one-line shape agentBlockReason's
-// composeBlockReason already gives a developer's own declared block --
-// #354's repair loop is meant to read this the same way it would read a
-// failed deterministic pipeline check's reason.
+// run at (once repairOrBlock decides not to repair it, or exhausts its
+// bound), in the same bounded, one-line shape agentBlockReason's
+// composeBlockReason already gives a developer's own declared block.
 func reviewRejectionReason(findings []string) string {
 	return textutil.Truncate(composeReviewReason(findings), maxBlockingReasonBytes)
 }
@@ -268,15 +270,15 @@ func composeReviewReason(findings []string) string {
 // handleReviewCompletion runs once persistExecutionEvent's own transaction has
 // committed a reviewer's "completed" event -- the same after-commit shape
 // deliverWorkflow already runs in for a developer's "completed" event. It
-// records the verdict in app.ai_reviews (reserved, unused until now -- see
-// #353) and either lets the run proceed to delivery (an approving verdict, the
-// same deliverWorkflow call a project with AI review disabled always used) or
-// ends it at StatusBlocked with the reviewer's findings as the reason -- the
+// records the verdict in app.ai_reviews (reserved, unused until #353) and
+// either lets the run proceed to delivery (an approving verdict, the same
+// deliverWorkflow call a project with AI review disabled always used) or
+// hands the rejection to repairOrBlock (repair.go, #354): a project that
+// opted into the repair loop and still has attempts left gets a bounded,
+// findings-informed repair dispatch instead; every other rejection still ends
+// the run at StatusBlocked with the reviewer's findings as the reason, the
 // same terminal shape a failed deterministic pipeline check or an agent's own
-// declared block already use, and the signal #354's repair loop is meant to
-// consume: a blocked run whose latest app.ai_reviews row has a rejecting
-// verdict is a review rejection, not a developer crash or an external
-// delivery failure.
+// declared block already use.
 func (s *Core) handleReviewCompletion(ctx context.Context, workflowID, payloadJSON string) error {
 	verdict, findings := reviewVerdict(payloadJSON)
 	recordedVerdict := verdict
@@ -290,7 +292,7 @@ func (s *Core) handleReviewCompletion(ctx context.Context, workflowID, payloadJS
 		return databaseError(err)
 	}
 	if !reviewApproved(verdict) {
-		return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "ai_review.rejected", reviewRejectionReason(findings))
+		return s.repairOrBlock(ctx, workflowID, reviewRejectionReason(findings))
 	}
 	return s.approveReviewAndDeliver(ctx, workflowID)
 }
@@ -334,5 +336,5 @@ func (s *Core) applyRecordedReviewVerdict(ctx context.Context, workflowID string
 	if reviewApproved(verdict) {
 		return s.approveReviewAndDeliver(ctx, workflowID)
 	}
-	return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "ai_review.rejected", "independent AI review did not approve the change")
+	return s.repairOrBlock(ctx, workflowID, "independent AI review did not approve the change")
 }
