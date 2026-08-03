@@ -36,6 +36,7 @@ func (q *Queries) AcceptJob(ctx context.Context, arg AcceptJobParams) (AcceptJob
 }
 
 const acceptJobOffer = `-- name: AcceptJobOffer :one
+
 UPDATE app.job_offers SET status = 'accepted', responded_at = now()
 WHERE job_id = $1 AND runner_id = $2 AND status = 'offered' AND expires_at > now()
 RETURNING id::text AS id
@@ -46,6 +47,8 @@ type AcceptJobOfferParams struct {
 	RunnerID string
 }
 
+// DeleteProjectLock lives in delivery.sql (identical statement, already
+// generated there); reused as-is rather than duplicated.
 func (q *Queries) AcceptJobOffer(ctx context.Context, arg AcceptJobOfferParams) (string, error) {
 	row := q.db.QueryRow(ctx, acceptJobOffer, arg.JobID, arg.RunnerID)
 	var id string
@@ -283,20 +286,6 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 		arg.ThreadID,
 		arg.BranchName,
 	)
-	return err
-}
-
-const deleteProjectLock = `-- name: DeleteProjectLock :exec
-DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2
-`
-
-type DeleteProjectLockParams struct {
-	ProjectID     string
-	WorkflowRunID string
-}
-
-func (q *Queries) DeleteProjectLock(ctx context.Context, arg DeleteProjectLockParams) error {
-	_, err := q.db.Exec(ctx, deleteProjectLock, arg.ProjectID, arg.WorkflowRunID)
 	return err
 }
 

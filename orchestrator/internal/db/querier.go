@@ -12,6 +12,8 @@ import (
 
 type Querier interface {
 	AcceptJob(ctx context.Context, arg AcceptJobParams) (AcceptJobRow, error)
+	// DeleteProjectLock lives in delivery.sql (identical statement, already
+	// generated there); reused as-is rather than duplicated.
 	AcceptJobOffer(ctx context.Context, arg AcceptJobOfferParams) (string, error)
 	CancelExpiredLeaseJobs(ctx context.Context, reason pgtype.Text) ([]string, error)
 	CancelJob(ctx context.Context, arg CancelJobParams) error
@@ -48,6 +50,7 @@ type Querier interface {
 	DrainRunner(ctx context.Context, id string) (int64, error)
 	EnableRunner(ctx context.Context, id string) (int64, error)
 	ExpireUnansweredOffers(ctx context.Context, unansweredOffer pgtype.Interval) error
+	GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error)
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
 	GetProject(ctx context.Context, id string) (GetProjectRow, error)
@@ -74,6 +77,9 @@ type Querier interface {
 	// very first workflow scanned before a pull request exists.
 	GetWorkflowDetail(ctx context.Context, id string) (GetWorkflowDetailRow, error)
 	GetWorkflowForControl(ctx context.Context, id string) (GetWorkflowForControlRow, error)
+	InsertPullRequestCreatedEvent(ctx context.Context, arg InsertPullRequestCreatedEventParams) error
+	InsertPullRequestMergedEvent(ctx context.Context, workflowRunID string) error
+	InsertWorkflowTerminationEvent(ctx context.Context, arg InsertWorkflowTerminationEventParams) error
 	IssueSyncStatusEntries(ctx context.Context) ([]IssueSyncStatusEntriesRow, error)
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
 	ListProjectIDs(ctx context.Context) ([]string, error)
@@ -85,8 +91,12 @@ type Querier interface {
 	ListSyncableProjects(ctx context.Context) ([]ListSyncableProjectsRow, error)
 	ListWorkflowEvents(ctx context.Context, arg ListWorkflowEventsParams) ([]ListWorkflowEventsRow, error)
 	ListWorkflowIDs(ctx context.Context) ([]string, error)
+	MarkIssueIneligible(ctx context.Context, id string) error
+	MarkPullRequestMerged(ctx context.Context, workflowRunID string) error
 	MarkRegistrationTokenUsed(ctx context.Context, id string) error
 	MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error
+	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
+	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
 	ParkIssue(ctx context.Context, id string) error
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
@@ -101,11 +111,13 @@ type Querier interface {
 	SelectAbandonedChecksWorkflows(ctx context.Context, abandonedChecks pgtype.Interval) ([]string, error)
 	SelectStrandedDeliveryWorkflows(ctx context.Context, strandedDelivery pgtype.Interval) ([]string, error)
 	SelectValidRegistrationToken(ctx context.Context, arg SelectValidRegistrationTokenParams) (string, error)
+	SelectWaitingGithubChecksWorkflows(ctx context.Context) ([]string, error)
 	SetProjectEnabled(ctx context.Context, arg SetProjectEnabledParams) (int64, error)
 	SetRunnerDraining(ctx context.Context, arg SetRunnerDrainingParams) error
 	SetWorkflowControlStatus(ctx context.Context, arg SetWorkflowControlStatusParams) error
 	SetWorkflowPreparing(ctx context.Context, id string) error
 	SetWorkflowTerminalStatus(ctx context.Context, arg SetWorkflowTerminalStatusParams) error
+	TerminateWorkflowRun(ctx context.Context, arg TerminateWorkflowRunParams) (string, error)
 	UpdateProject(ctx context.Context, arg UpdateProjectParams) (int64, error)
 	UpdateProjectCredentialSecret(ctx context.Context, arg UpdateProjectCredentialSecretParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
@@ -114,6 +126,7 @@ type Querier interface {
 	UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error
 	UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error
 	UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error)
+	UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) error
 	UpsertSeedRunnerRegistrationToken(ctx context.Context, arg UpsertSeedRunnerRegistrationTokenParams) error
 }
 

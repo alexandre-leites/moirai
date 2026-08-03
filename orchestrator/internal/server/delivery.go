@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/loop-engineering/orchestrator/internal/db"
 )
 
 type deliveryWorkflow struct {
@@ -39,52 +41,39 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github',$3,$4,$5,$6) ON CONFLICT(workflow_run_id) DO UPDATE SET external_id=EXCLUDED.external_id,url=EXCLUDED.url,head_commit=EXCLUDED.head_commit,state=EXCLUDED.state`, newID(), workflowID, pr.Number, pr.URL, pr.HeadSHA, pr.State); err != nil {
+	queries := s.queries.WithTx(tx)
+	if err := queries.UpsertPullRequest(ctx, db.UpsertPullRequestParams{
+		ID:            newID(),
+		WorkflowRunID: workflowID,
+		ExternalID:    pr.Number,
+		Url:           pr.URL,
+		HeadCommit:    pr.HeadSHA,
+		State:         pr.State,
+	}); err != nil {
 		return databaseError(err)
 	}
-	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qWaitingGithubChecks+`,current_phase=`+qWaitingGithubChecks+`,updated_at=now(),completed_at=NULL WHERE id=$1 AND status=`+qDelivering, workflowID)
+	rowsAffected, err := queries.MarkWorkflowDelivered(ctx, workflowID)
 	if err != nil {
 		return databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if rowsAffected != 1 {
 		return errors.New("workflow delivery is no longer available")
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events(workflow_run_id,event_type,severity,payload) VALUES($1,'pull_request.created','info',$2::jsonb)`, workflowID, fmt.Sprintf(`{"number":%q,"url":%q}`, pr.Number, pr.URL)); err != nil {
+	if err := queries.InsertPullRequestCreatedEvent(ctx, db.InsertPullRequestCreatedEventParams{
+		WorkflowRunID: workflowID,
+		Payload:       []byte(fmt.Sprintf(`{"number":%q,"url":%q}`, pr.Number, pr.URL)),
+	}); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
 }
 
 func (s *Server) ObserveWorkflows(ctx context.Context) error {
-	return s.eachWorkflow(ctx, `SELECT wr.id::text FROM app.workflow_runs wr WHERE wr.status=`+qWaitingGithubChecks+` ORDER BY wr.updated_at,wr.id LIMIT 20`, s.observeWorkflow)
-}
-
-// eachWorkflow drains a batch of workflow identifiers and runs `do` against
-// every one of them, collecting failures rather than stopping at the first.
-// These batches are ordered oldest-first, so returning early would let one
-// persistently failing workflow sit at the head and starve the rest — and in
-// the recovery sweep that head-of-line row is one holding a project lock, so a
-// single bad row would block lock release for every other project.
-//
-// The cursor is drained before any work starts: `do` makes its own database
-// calls and shells out to GitHub, and holding the cursor's pooled connection
-// across that is how a small pool starves itself.
-func (s *Server) eachWorkflow(ctx context.Context, query string, do func(context.Context, string) error) error {
-	rows, err := s.pool.Query(ctx, query)
+	workflowIDs, err := s.queries.SelectWaitingGithubChecksWorkflows(ctx)
 	if err != nil {
 		return databaseError(err)
 	}
-	workflows, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return databaseError(err)
-	}
-	var failures []error
-	for _, workflowID := range workflows {
-		if err := do(ctx, workflowID); err != nil {
-			failures = append(failures, err)
-		}
-	}
-	return errors.Join(failures...)
+	return s.eachWorkflowID(ctx, workflowIDs, s.observeWorkflow)
 }
 
 // terminateWorkflow moves a run to a terminal state, releases the project lock
@@ -107,15 +96,19 @@ func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var projectID string
-	err = tx.QueryRow(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=$3,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1 AND status NOT IN (`+genuinelyTerminalStatusList+`) RETURNING project_id::text`, workflowID, state.String(), reason).Scan(&projectID)
+	queries := s.queries.WithTx(tx)
+	projectID, err := queries.TerminateWorkflowRun(ctx, db.TerminateWorkflowRunParams{
+		Status: state.String(),
+		Reason: pgText(reason),
+		ID:     workflowID,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID); err != nil {
+	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
 	}
 	// Without this the scheduler re-creates the run from the still-eligible
@@ -126,7 +119,11 @@ func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events(workflow_run_id,event_type,severity,payload) VALUES($1,$2,'error',$3::jsonb)`, workflowID, eventType, fmt.Sprintf(`{"reason":%q}`, reason)); err != nil {
+	if err := queries.InsertWorkflowTerminationEvent(ctx, db.InsertWorkflowTerminationEventParams{
+		WorkflowRunID: workflowID,
+		EventType:     eventType,
+		Payload:       []byte(fmt.Sprintf(`{"reason":%q}`, reason)),
+	}); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
@@ -166,43 +163,53 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qCompleted+`,current_phase=`+qCompleted+`,completed_at=now(),updated_at=now() WHERE id=$1 AND status=`+qWaitingGithubChecks, workflowID)
+	queries := s.queries.WithTx(tx)
+	rowsAffected, err := queries.MarkWorkflowCompleted(ctx, workflowID)
 	if err != nil {
 		return databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if rowsAffected != 1 {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.pull_requests SET state='merged',merged_at=now() WHERE workflow_run_id=$1`, workflowID); err != nil {
+	if err := queries.MarkPullRequestMerged(ctx, workflowID); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.issues SET eligible=false WHERE id=$1`, workflow.issueID); err != nil {
+	if err := queries.MarkIssueIneligible(ctx, workflow.issueID); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, workflow.projectID, workflowID); err != nil {
+	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: workflow.projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events(workflow_run_id,event_type,severity,payload) VALUES($1,'pull_request.merged','info','{}'::jsonb)`, workflowID); err != nil {
+	if err := queries.InsertPullRequestMergedEvent(ctx, workflowID); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
 }
 
 func (s *Server) deliveryWorkflow(ctx context.Context, workflowID string, requirePR bool) (deliveryWorkflow, error) {
-	workflow := deliveryWorkflow{id: workflowID}
-	var prNumber *string
-	err := s.pool.QueryRow(ctx, `SELECT wr.project_id::text,wr.issue_id::text,i.external_id,i.title,i.body,COALESCE(p.repository_url,''),p.default_branch,wr.branch_name,pr.external_id FROM app.workflow_runs wr JOIN app.issues i ON i.id=wr.issue_id JOIN app.projects p ON p.id=wr.project_id LEFT JOIN app.pull_requests pr ON pr.workflow_run_id=wr.id WHERE wr.id=$1`, workflowID).Scan(&workflow.projectID, &workflow.issueID, &workflow.externalID, &workflow.issueTitle, &workflow.issueBody, &workflow.repositoryURL, &workflow.defaultBranch, &workflow.branch, &prNumber)
+	row, err := s.queries.GetDeliveryWorkflow(ctx, workflowID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return deliveryWorkflow{}, errors.New("workflow is unknown")
 	}
 	if err != nil {
 		return deliveryWorkflow{}, databaseError(err)
 	}
-	if requirePR && prNumber == nil {
+	workflow := deliveryWorkflow{
+		id:            workflowID,
+		projectID:     row.ProjectID,
+		issueID:       row.IssueID,
+		externalID:    row.ExternalID,
+		issueTitle:    row.Title,
+		issueBody:     row.Body,
+		repositoryURL: row.RepositoryUrl,
+		defaultBranch: row.DefaultBranch,
+		branch:        row.BranchName,
+	}
+	if requirePR && !row.PrExternalID.Valid {
 		return deliveryWorkflow{}, errors.New("workflow pull request is missing")
 	}
-	if prNumber != nil {
-		workflow.prNumber = *prNumber
+	if row.PrExternalID.Valid {
+		workflow.prNumber = row.PrExternalID.String
 	}
 	if workflow.repositoryURL == "" || workflow.defaultBranch == "" || workflow.branch == "" {
 		return deliveryWorkflow{}, errors.New("workflow delivery configuration is invalid")

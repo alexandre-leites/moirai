@@ -77,8 +77,8 @@ WHERE job_id = $1 AND status = 'offered';
 UPDATE app.workflow_runs SET status = 'cancelled', current_phase = 'cancelled', completed_at = now(), terminal_reason = $2
 WHERE id = $1;
 
--- name: DeleteProjectLock :exec
-DELETE FROM app.project_locks WHERE project_id = $1 AND workflow_run_id = $2;
+-- DeleteProjectLock lives in delivery.sql (identical statement, already
+-- generated there); reused as-is rather than duplicated.
 
 -- name: AcceptJobOffer :one
 UPDATE app.job_offers SET status = 'accepted', responded_at = now()
