@@ -94,11 +94,34 @@ func sameEnvironment(first, second map[string]string) bool {
 
 func TestLocalRunnerStopsAtFailureAndRecordsExitCode(t *testing.T) {
 	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{
-		{Command: "printf before", Timeout: time.Second},
-		{Command: "false", Timeout: time.Second},
-		{Command: "printf after", Timeout: time.Second},
+		{Command: "printf before", Timeout: time.Second, Required: true},
+		{Command: "false", Timeout: time.Second, Required: true},
+		{Command: "printf after", Timeout: time.Second, Required: true},
 	})
 	if err == nil || len(results) != 2 || results[1].ExitCode != 1 {
+		t.Fatalf("results = %#v, error = %v", results, err)
+	}
+}
+
+func TestLocalRunnerContinuesPastNonRequiredFailure(t *testing.T) {
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{
+		{Command: "printf before", Timeout: time.Second, Required: true},
+		{Command: "false", Timeout: time.Second, Required: false},
+		{Command: "printf after", Timeout: time.Second, Required: true},
+	})
+	if err != nil || len(results) != 3 || results[1].ExitCode != 1 || results[2].Output != "after" {
+		t.Fatalf("results = %#v, error = %v", results, err)
+	}
+}
+
+func TestLocalRunnerStopsAtRequiredFailureAfterNonRequiredOne(t *testing.T) {
+	// The first command is non-required and fails; the pipeline must still run
+	// the second, required one, and fail overall on *that* one specifically.
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{
+		{Command: "false", Timeout: time.Second, Required: false},
+		{Command: "false", Timeout: time.Second, Required: true},
+	})
+	if err == nil || len(results) != 2 || results[0].ExitCode != 1 || results[1].ExitCode != 1 {
 		t.Fatalf("results = %#v, error = %v", results, err)
 	}
 }
@@ -116,8 +139,18 @@ func TestParseCommandTemplateRejectsShellSyntax(t *testing.T) {
 }
 
 func TestLocalRunnerMarksTimeout(t *testing.T) {
-	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{{Command: "sleep 1", Timeout: 10 * time.Millisecond}})
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{{Command: "sleep 1", Timeout: 10 * time.Millisecond, Required: true}})
 	if err == nil || len(results) != 1 || !results[0].TimedOut || results[0].ExitCode != -1 {
+		t.Fatalf("results = %#v, error = %v", results, err)
+	}
+}
+
+func TestLocalRunnerContinuesPastNonRequiredTimeout(t *testing.T) {
+	results, err := (LocalRunner{}).Run(context.Background(), t.TempDir(), nil, []Command{
+		{Command: "sleep 1", Timeout: 10 * time.Millisecond, Required: false},
+		{Command: "printf after", Timeout: time.Second, Required: true},
+	})
+	if err != nil || len(results) != 2 || !results[0].TimedOut || results[1].Output != "after" {
 		t.Fatalf("results = %#v, error = %v", results, err)
 	}
 }

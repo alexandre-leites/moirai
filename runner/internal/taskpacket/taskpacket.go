@@ -87,6 +87,14 @@ type Constraints struct {
 type PipelineCommand struct {
 	Command        string `json:"command"`
 	TimeoutSeconds int    `json:"timeoutSeconds"`
+	// Required marks a command whose own failure gates completion (PROJECT.md's
+	// "deterministic completion gate"): dispatch.go's runPipeline only turns a
+	// failing or timed-out command into a pipeline error when this is true. A
+	// command with Required false still runs, in order, and its result is still
+	// reported (control_loop.go's pipelineFailurePayload), it simply cannot by
+	// itself fail the execution -- see web/src/projects.tsx's "Required commands
+	// must pass before AI review. No required command blocks completion."
+	Required bool `json:"required"`
 }
 
 func Parse(contents []byte) (Packet, error) {

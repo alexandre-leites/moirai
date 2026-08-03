@@ -1335,7 +1335,11 @@ func (s *Core) ScheduleOnce(ctx context.Context) (bool, error) {
 		}
 		packet, err = plannerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
 	} else {
-		packet, err = developerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), nil)
+		pipeline, pipelineErr := pipelineStepsForPacket(ctx, queries, projectID)
+		if pipelineErr != nil {
+			return false, pipelineErr
+		}
+		packet, err = developerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), nil, pipeline)
 	}
 	if err != nil {
 		return false, err
@@ -1419,20 +1423,57 @@ func planExecutionID(jobID string) string {
 	return jobID + "-plan"
 }
 
-func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int, plan []string) (map[string]any, error) {
+func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int, plan []string, pipeline []map[string]any) (map[string]any, error) {
 	if !idgen.ValidID(jobID) || !idgen.ValidID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
 		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
 	}
 	if plan == nil {
 		plan = []string{}
 	}
+	if pipeline == nil {
+		pipeline = []map[string]any{}
+	}
 	return map[string]any{
 		"protocolVersion": "1.0", "jobId": jobID, "executionId": implementExecutionID(jobID), "role": "developer", "objective": "Implement " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
 		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": []any{}, "executionImage": executionImage,
-		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": plan, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
+		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": pipeline, "acceptanceCriteria": []string{}, "plan": plan, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
 	}, nil
+}
+
+// pipelineStepsForPacket reads a project's configured pipeline steps
+// (app.project_pipeline_steps, configured through ProjectConfiguration's
+// pipeline_steps -- see web/src/projects.tsx's "Local pipeline" fieldset) and
+// renders them as a developer or repair packet's pipeline field: PROJECT.md's
+// deterministic completion gate. A project with none configured -- every
+// project created before this was wired up, and any that simply never opted
+// in -- gets an empty slice, so the runner's own len(packet.Pipeline)>0 guard
+// (runner/internal/dispatch/dispatch.go) never runs a pipeline for it and its
+// behaviour is unchanged. Each step's own Required flag travels through
+// unchanged: the runner (runner/internal/pipeline) only gates completion on a
+// required step's own failure, exactly as web/src/projects.tsx's "Required
+// commands must pass before AI review. No required command blocks
+// completion" already promises.
+func pipelineStepsForPacket(ctx context.Context, queries *db.Queries, projectID string) ([]map[string]any, error) {
+	steps, err := queries.ListProjectPipelineSteps(ctx, projectID)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	commands := make([]map[string]any, 0, len(steps))
+	for _, step := range steps {
+		timeout := step.TimeoutSeconds
+		// project_pipeline_steps.timeout_seconds only CHECKs > 0; the task
+		// packet's own protocol ceiling (taskpacket.go, ProtocolVersion 1.0) is
+		// 3600 seconds per command. Clamped here rather than left to fail
+		// packet validation outright, which would silently stop this project's
+		// workflow from ever dispatching a developer execution again.
+		if timeout > 3600 {
+			timeout = 3600
+		}
+		commands = append(commands, map[string]any{"command": step.Command, "timeoutSeconds": timeout, "required": step.Required})
+	}
+	return commands, nil
 }
 
 // plannerPacket builds the execution a RequirePlanning project runs before its
@@ -1628,8 +1669,14 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	// enteringReview is set inside the terminalEvent branch below, for a
 	// developer's "completed" event on a project with EnableAiReview set, and
 	// read again after commit to decide dispatchReviewerJob vs deliverWorkflow
-	// -- one aiReviewEnabled read inside the transaction, not two.
-	var enteringReview bool
+	// -- one aiReviewEnabled read inside the transaction, not two. pipelineFailed
+	// is its counterpart for a developer (or repair) execution whose agent
+	// succeeded but whose own deterministic pipeline then failed a required
+	// command (#352): read again after commit to hand the decision to
+	// pipelineFailedOrBlock, the same shape enteringReview hands off to
+	// dispatchReviewerJob.
+	var enteringReview, pipelineFailed bool
+	var pipelineFailedReason string
 	if terminalEvent(event.GetType()) {
 		// The event type is the shared vocabulary and is stored as it arrived;
 		// the run's own terminal status is derived from it. An agent that
@@ -1719,6 +1766,19 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 					// completion and rejected the change, which is what the
 					// repair loop consumes.
 					runStatus, blockingReason = StatusBlocked, "independent AI review execution failed"
+				} else if reason, failed := pipelineFailureReason(payloadJSON); failed {
+					// A developer (or repair) execution's own agent completed --
+					// pipelineFailureReason can only ever find a pipelineResults
+					// entry when dispatch.go's own guard ("executeErr == nil &&
+					// result.Status == completed") let the pipeline run at all --
+					// but the project's configured pipeline then failed a required
+					// command. This is deliberately its own status rather than
+					// StatusBlocked outright: pipelineFailedOrBlock (repair.go,
+					// called after commit below) still has to decide whether the
+					// project's EnableRepairLoop opt-in and remaining
+					// pipeline_repair_attempts make this repairable.
+					runStatus, blockingReason = StatusPipelineFailed, reason
+					pipelineFailed, pipelineFailedReason = true, reason
 				} else if reason, blocked := agentBlockReason(payloadJSON); blocked {
 					runStatus, blockingReason = StatusBlocked, reason
 				}
@@ -1732,7 +1792,7 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 			}); err != nil {
 				return databaseError(err)
 			}
-			if runStatus != StatusDelivering && runStatus != StatusWaitingAiReview {
+			if runStatus != StatusDelivering && runStatus != StatusWaitingAiReview && runStatus != StatusPipelineFailed {
 				if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
 					return databaseError(err)
 				}
@@ -1758,6 +1818,8 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 		return s.dispatchImplementationJob(ctx, workflowID, event.GetJobId(), payloadJSON)
 	case enteringReview:
 		return s.dispatchReviewerJob(ctx, workflowID)
+	case pipelineFailed:
+		return s.pipelineFailedOrBlock(ctx, workflowID, pipelineFailedReason)
 	case event.GetType() == "completed":
 		return s.deliverWorkflow(ctx, workflowID)
 	}
@@ -1850,9 +1912,13 @@ func (s *Core) dispatchImplementationJob(ctx context.Context, workflowID, jobID,
 	if err := json.Unmarshal([]byte(facts.Configuration), &config); err != nil {
 		return configurationError(err)
 	}
+	pipeline, err := pipelineStepsForPacket(ctx, queries, facts.ProjectID)
+	if err != nil {
+		return err
+	}
 	packet, err := developerPacket(jobID, facts.ProjectID, facts.ExternalID, facts.Title, facts.Body, facts.RepositoryMode,
 		textutil.TextValue(facts.RepositoryUrl), textutil.TextValue(facts.LocalRepositoryPath), facts.DefaultBranch,
-		textutil.TextValue(facts.BranchName), config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), plan)
+		textutil.TextValue(facts.BranchName), config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), plan, pipeline)
 	if err != nil {
 		return err
 	}

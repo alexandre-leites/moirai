@@ -108,6 +108,21 @@ type Querier interface {
 	GetImplementationDispatchFacts(ctx context.Context, id string) (GetImplementationDispatchFactsRow, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
 	GetLatestAiReview(ctx context.Context, workflowRunID string) (string, error)
+	// Everything dispatchPipelineRepairJob (repair.go) needs to build and offer a
+	// repair developer execution against the one job a workflow run already has,
+	// informed by the failing command persistExecutionEvent recorded as
+	// blocking_reason. Guarded the same shape GetRepairDispatchWorkflow is: only
+	// a run sitting at 'pipeline_failed' whose job is still the failed developer
+	// job is ever repairable this way, and max_repair_attempts is enforced here
+	// too -- belt and suspenders alongside pipelineRepairEligible's own check.
+	GetPipelineRepairDispatchWorkflow(ctx context.Context, arg GetPipelineRepairDispatchWorkflowParams) (GetPipelineRepairDispatchWorkflowRow, error)
+	// pipelineRepairEligible's (repair.go) single read: whether the project
+	// opted into EnableRepairLoop (projectConfig, the same toggle #354's own
+	// ci_repair_attempts track uses) and how many pipeline-triggered repair
+	// attempts this run has already spent, so the decision to repair or block a
+	// failed deterministic pipeline can be made without assuming
+	// dispatchPipelineRepairJob's own guarded query below will ever run.
+	GetPipelineRepairState(ctx context.Context, id string) (GetPipelineRepairStateRow, error)
 	GetProject(ctx context.Context, id string) (GetProjectRow, error)
 	// persistExecutionEvent reads this once per developer "completed" event to
 	// decide whether the project opted into EnableAiReview (server.go's
@@ -168,6 +183,11 @@ type Querier interface {
 	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
 	GetUserForUpdate(ctx context.Context, id string) (GetUserForUpdateRow, error)
 	GetUserProfile(ctx context.Context, id string) (GetUserProfileRow, error)
+	// applyStrandedPipelineDecision's (recovery.go) read of the reason
+	// persistExecutionEvent already stored in blocking_reason when it set the run
+	// to 'pipeline_failed', so the sweep can re-apply pipelineFailedOrBlock
+	// without re-parsing the original runner payload (not re-fetched here).
+	GetWorkflowBlockingReason(ctx context.Context, id string) (string, error)
 	// pr.external_id/pr.url and wr.pull_request_external_id/wr.pull_request_url are
 	// combined in Go rather than with SQL COALESCE: sqlc's nullability inference
 	// does not reliably propagate through COALESCE of two nullable columns (one
@@ -279,6 +299,12 @@ type Querier interface {
 	MarkWorkflowAwaitingApproval(ctx context.Context, id string) (int64, error)
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
+	// Increments pipeline_repair_attempts and moves the run to 'repairing' in one
+	// guarded statement, so a caller that raced this one (the recovery sweep
+	// calling applyStrandedPipelineDecision against the same run
+	// dispatchPipelineRepairJob's inline call already claimed) affects 0 rows
+	// instead of double-spending an attempt.
+	MarkWorkflowPipelineRepairing(ctx context.Context, arg MarkWorkflowPipelineRepairingParams) (int64, error)
 	// Increments ci_repair_attempts and moves the run to 'repairing' in one
 	// guarded statement, so a caller that raced this one (the recovery sweep
 	// calling applyRecordedReviewVerdict against the same run dispatchRepairJob's
@@ -341,6 +367,14 @@ type Querier interface {
 	// incremented lease_generation is indistinguishable, to the runner, from any
 	// other new job -- no runner-side change was needed for this reopening.
 	ReopenJobForImplementation(ctx context.Context, id string) (ReopenJobForImplementationRow, error)
+	// Reuses the workflow run's single job row for another developer execution --
+	// role stays 'developer' throughout, unlike ReopenJobForRepair's
+	// reviewer-to-developer transition, since a pipeline failure never routed the
+	// job through a reviewer role in the first place. Guarded on the job still
+	// being the failed developer job whose pipeline failure triggered this
+	// repair; a second caller that raced this one finds 0 rows affected and does
+	// nothing further.
+	ReopenJobForPipelineRepair(ctx context.Context, arg ReopenJobForPipelineRepairParams) (int64, error)
 	// Reuses the workflow run's single job row for a third role -- back to
 	// 'developer', but this time for a repair attempt rather than the original
 	// implementation -- instead of inserting a new one (app.jobs.workflow_run_id
@@ -369,6 +403,14 @@ type Querier interface {
 	// guard instead, which is a cheap, harmless no-op.
 	SelectEligibleReviewRunner(ctx context.Context, arg SelectEligibleReviewRunnerParams) (string, error)
 	SelectStrandedDeliveryWorkflows(ctx context.Context, strandedDelivery pgtype.Interval) ([]string, error)
+	// resumeStrandedPipelineDecisions' (recovery.go) candidate set: a run still
+	// sitting at 'pipeline_failed' -- persistExecutionEvent committed the
+	// terminal event, then the process died (or found no connected/eligible
+	// runner) before pipelineFailedOrBlock's own repair-or-block decision landed.
+	// Unlike a rejected AI review, a failed pipeline needs no second execution to
+	// produce a verdict -- it already has one -- so this sweep exists only to
+	// retry the decision itself once a runner is available, not to wait for one.
+	SelectStrandedPipelineFailureWorkflows(ctx context.Context, strandedPipelineFailure pgtype.Interval) ([]string, error)
 	// resumeStrandedReviewDispatches' (recovery.go) candidate set: a run whose
 	// developer execution completed and whose project opted into AI review, but
 	// whose inline dispatchReviewerJob call never actually offered a reviewer job

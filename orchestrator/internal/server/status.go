@@ -88,24 +88,43 @@ const (
 	// repair loop is meant to consume.
 	StatusWaitingAiReview Status = "waiting_ai_review"
 	// StatusRepairing marks a run whose independent AI review rejected the
-	// developer's own attempt and whose project opted into the repair loop
-	// (projectConfig's EnableRepairLoop): repairOrBlock (repair.go) sets it, via
-	// dispatchRepairJob, in place of terminating the run at StatusBlocked --
-	// the same run.ci_repair_attempts-bounded escape hatch #354 adds so a
-	// rejection is not always the end of the run. The run holds its project
-	// lock across this status exactly like StatusWaitingAiReview: it is still
-	// doing work, a second (or third) developer attempt informed by the
-	// reviewer's own findings instead of a blind re-run.
+	// developer's own attempt, or whose own deterministic pipeline failed a
+	// required command (#352), and whose project opted into the repair loop
+	// (projectConfig's EnableRepairLoop): repairOrBlock/pipelineFailedOrBlock
+	// (repair.go) set it, via dispatchRepairJob/dispatchPipelineRepairJob, in
+	// place of terminating the run at StatusBlocked -- the same
+	// bounded escape hatch #354 adds so a rejection or a failed pipeline is not
+	// always the end of the run, spent from ci_repair_attempts or
+	// pipeline_repair_attempts respectively (two independent counters sharing
+	// one bound and one opt-in, so a project need not configure "retry a
+	// rejected review" and "retry a failed pipeline" separately). The run holds
+	// its project lock across this status exactly like StatusWaitingAiReview or
+	// StatusPipelineFailed: it is still doing work, a second (or third)
+	// developer attempt informed by the reviewer's findings or the pipeline's
+	// own failing command instead of a blind re-run.
 	//
 	// A repaired attempt's own "completed" event is not read any differently
 	// than the original developer attempt's: persistExecutionEvent's switch on
 	// job role and event type does not consult the run's current status, so the
 	// repaired attempt flows back through the exact same
-	// StatusDelivering/StatusWaitingAiReview branch the first attempt did --
-	// re-entering AI review, and from there either delivery or another bounded
-	// repair attempt, until ci_repair_attempts exhausts the bound and
-	// repairOrBlock falls through to StatusBlocked for good.
+	// StatusDelivering/StatusWaitingAiReview/StatusPipelineFailed branch the
+	// first attempt did, until its own attempts column exhausts the bound and
+	// the matching *OrBlock falls through to StatusBlocked for good.
 	StatusRepairing Status = "repairing"
+	// StatusPipelineFailed marks a run whose developer (or repair) execution's
+	// agent succeeded but whose project's own configured local pipeline --
+	// PROJECT.md's "deterministic completion gate" -- failed a required
+	// command (#352): persistExecutionEvent sets it in place of StatusDelivering
+	// (or StatusWaitingAiReview) for that event, and pipelineFailedOrBlock
+	// (repair.go) decides right after commit whether to repair the run
+	// (bounded by pipeline_repair_attempts, the same EnableRepairLoop opt-in
+	// #354's AI-review repair already uses) or end it at StatusBlocked. The run
+	// holds its project lock across this status exactly like
+	// StatusWaitingAiReview: the pipeline's own verdict already exists (unlike
+	// AI review, no second execution has to run before there is one to act
+	// on), so this status is a brief hand-off to the repair-or-block decision,
+	// not a wait for more information.
+	StatusPipelineFailed Status = "pipeline_failed"
 	// StatusCompleted marks a run whose pull request GitHub has confirmed
 	// merged (observeWorkflow) -- the true terminal "done" state. See
 	// StatusDelivering for the status this run passed through on the way
@@ -160,6 +179,7 @@ var knownStatuses = map[Status]bool{
 	StatusWaitingHuman:        true,
 	StatusWaitingAiReview:     true,
 	StatusRepairing:           true,
+	StatusPipelineFailed:      true,
 	StatusDelivering:          true,
 	StatusCompleted:           true,
 	StatusFailed:              true,
@@ -187,8 +207,8 @@ func ParseStatus(value string) (Status, bool) {
 //
 // StatusDelivering is deliberately absent: a run holding it is still doing
 // active work (opening a pull request), the same reason 'offered', 'preparing',
-// 'planning', 'waiting_github_checks', 'waiting_human' and 'repairing' are
-// absent -- a run running its planner execution holds the project lock
+// 'planning', 'waiting_github_checks', 'waiting_human', 'waiting_ai_review',
+// 'pipeline_failed' and 'repairing' are absent -- a run running its planner execution holds the project lock
 // exactly as actively as one running its developer execution, a run waiting
 // on a person to decide, or dispatching a bounded repair attempt, is exactly
 // as active as one waiting on GitHub's checks, and must keep its project lock

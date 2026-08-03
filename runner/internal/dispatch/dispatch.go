@@ -443,7 +443,7 @@ func (dispatcher Dispatcher) runPipeline(ctx context.Context, workspace string, 
 	}
 	pipelineCommands := make([]pipeline.Command, 0, len(commands))
 	for _, command := range commands {
-		pipelineCommands = append(pipelineCommands, pipeline.Command{Command: command.Command, Timeout: time.Duration(command.TimeoutSeconds) * time.Second})
+		pipelineCommands = append(pipelineCommands, pipeline.Command{Command: command.Command, Timeout: time.Duration(command.TimeoutSeconds) * time.Second, Required: command.Required})
 	}
 	return runner.Run(ctx, workspace, environment, pipelineCommands)
 }

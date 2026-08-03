@@ -7,7 +7,98 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const getPipelineRepairDispatchWorkflow = `-- name: GetPipelineRepairDispatchWorkflow :one
+SELECT wr.project_id::text AS project_id, i.external_id, i.title, i.body,
+       p.repository_mode, COALESCE(p.repository_url, '') AS repository_url,
+       COALESCE(p.local_repository_path, '') AS local_repository_path,
+       p.default_branch, COALESCE(wr.branch_name, '') AS branch_name,
+       p.configuration, wr.pipeline_repair_attempts, j.id::text AS job_id,
+       COALESCE(wr.blocking_reason, '') AS blocking_reason
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+JOIN app.projects p ON p.id = wr.project_id
+JOIN app.jobs j ON j.workflow_run_id = wr.id
+WHERE wr.id = $1 AND wr.status = 'pipeline_failed' AND j.role = 'developer' AND j.status = 'failed'
+  AND wr.pipeline_repair_attempts < $2::integer
+`
+
+type GetPipelineRepairDispatchWorkflowParams struct {
+	ID                string
+	MaxRepairAttempts int32
+}
+
+type GetPipelineRepairDispatchWorkflowRow struct {
+	ProjectID              string
+	ExternalID             string
+	Title                  string
+	Body                   string
+	RepositoryMode         string
+	RepositoryUrl          string
+	LocalRepositoryPath    string
+	DefaultBranch          string
+	BranchName             string
+	Configuration          []byte
+	PipelineRepairAttempts int32
+	JobID                  string
+	BlockingReason         string
+}
+
+// Everything dispatchPipelineRepairJob (repair.go) needs to build and offer a
+// repair developer execution against the one job a workflow run already has,
+// informed by the failing command persistExecutionEvent recorded as
+// blocking_reason. Guarded the same shape GetRepairDispatchWorkflow is: only
+// a run sitting at 'pipeline_failed' whose job is still the failed developer
+// job is ever repairable this way, and max_repair_attempts is enforced here
+// too -- belt and suspenders alongside pipelineRepairEligible's own check.
+func (q *Queries) GetPipelineRepairDispatchWorkflow(ctx context.Context, arg GetPipelineRepairDispatchWorkflowParams) (GetPipelineRepairDispatchWorkflowRow, error) {
+	row := q.db.QueryRow(ctx, getPipelineRepairDispatchWorkflow, arg.ID, arg.MaxRepairAttempts)
+	var i GetPipelineRepairDispatchWorkflowRow
+	err := row.Scan(
+		&i.ProjectID,
+		&i.ExternalID,
+		&i.Title,
+		&i.Body,
+		&i.RepositoryMode,
+		&i.RepositoryUrl,
+		&i.LocalRepositoryPath,
+		&i.DefaultBranch,
+		&i.BranchName,
+		&i.Configuration,
+		&i.PipelineRepairAttempts,
+		&i.JobID,
+		&i.BlockingReason,
+	)
+	return i, err
+}
+
+const getPipelineRepairState = `-- name: GetPipelineRepairState :one
+SELECT p.configuration, wr.pipeline_repair_attempts
+FROM app.workflow_runs wr
+JOIN app.projects p ON p.id = wr.project_id
+WHERE wr.id = $1
+`
+
+type GetPipelineRepairStateRow struct {
+	Configuration          []byte
+	PipelineRepairAttempts int32
+}
+
+// pipelineRepairEligible's (repair.go) single read: whether the project
+// opted into EnableRepairLoop (projectConfig, the same toggle #354's own
+// ci_repair_attempts track uses) and how many pipeline-triggered repair
+// attempts this run has already spent, so the decision to repair or block a
+// failed deterministic pipeline can be made without assuming
+// dispatchPipelineRepairJob's own guarded query below will ever run.
+func (q *Queries) GetPipelineRepairState(ctx context.Context, id string) (GetPipelineRepairStateRow, error) {
+	row := q.db.QueryRow(ctx, getPipelineRepairState, id)
+	var i GetPipelineRepairStateRow
+	err := row.Scan(&i.Configuration, &i.PipelineRepairAttempts)
+	return i, err
+}
 
 const getRepairDispatchWorkflow = `-- name: GetRepairDispatchWorkflow :one
 SELECT wr.project_id::text AS project_id, i.external_id, i.title, i.body,
@@ -77,6 +168,21 @@ func (q *Queries) GetRepairDispatchWorkflow(ctx context.Context, arg GetRepairDi
 	return i, err
 }
 
+const getWorkflowBlockingReason = `-- name: GetWorkflowBlockingReason :one
+SELECT COALESCE(blocking_reason, '') FROM app.workflow_runs WHERE id = $1
+`
+
+// applyStrandedPipelineDecision's (recovery.go) read of the reason
+// persistExecutionEvent already stored in blocking_reason when it set the run
+// to 'pipeline_failed', so the sweep can re-apply pipelineFailedOrBlock
+// without re-parsing the original runner payload (not re-fetched here).
+func (q *Queries) GetWorkflowBlockingReason(ctx context.Context, id string) (string, error) {
+	row := q.db.QueryRow(ctx, getWorkflowBlockingReason, id)
+	var blocking_reason string
+	err := row.Scan(&blocking_reason)
+	return blocking_reason, err
+}
+
 const getWorkflowRepairState = `-- name: GetWorkflowRepairState :one
 SELECT p.configuration, wr.ci_repair_attempts
 FROM app.workflow_runs wr
@@ -102,6 +208,30 @@ func (q *Queries) GetWorkflowRepairState(ctx context.Context, id string) (GetWor
 	return i, err
 }
 
+const markWorkflowPipelineRepairing = `-- name: MarkWorkflowPipelineRepairing :execrows
+UPDATE app.workflow_runs
+SET status = 'repairing', current_phase = 'repairing', pipeline_repair_attempts = pipeline_repair_attempts + 1, updated_at = now()
+WHERE id = $1 AND status = 'pipeline_failed' AND pipeline_repair_attempts < $2::integer
+`
+
+type MarkWorkflowPipelineRepairingParams struct {
+	ID                string
+	MaxRepairAttempts int32
+}
+
+// Increments pipeline_repair_attempts and moves the run to 'repairing' in one
+// guarded statement, so a caller that raced this one (the recovery sweep
+// calling applyStrandedPipelineDecision against the same run
+// dispatchPipelineRepairJob's inline call already claimed) affects 0 rows
+// instead of double-spending an attempt.
+func (q *Queries) MarkWorkflowPipelineRepairing(ctx context.Context, arg MarkWorkflowPipelineRepairingParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowPipelineRepairing, arg.ID, arg.MaxRepairAttempts)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const markWorkflowRepairing = `-- name: MarkWorkflowRepairing :execrows
 UPDATE app.workflow_runs
 SET status = 'repairing', current_phase = 'repairing', ci_repair_attempts = ci_repair_attempts + 1, updated_at = now()
@@ -124,6 +254,34 @@ func (q *Queries) MarkWorkflowRepairing(ctx context.Context, arg MarkWorkflowRep
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const reopenJobForPipelineRepair = `-- name: ReopenJobForPipelineRepair :one
+UPDATE app.jobs
+SET role = 'developer', runner_id = $1::uuid, status = 'offered',
+    offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL,
+    last_event_sequence = 0, lease_generation = lease_generation + 1, recovery_reason = NULL
+WHERE id = $2 AND role = 'developer' AND status = 'failed'
+RETURNING lease_generation
+`
+
+type ReopenJobForPipelineRepairParams struct {
+	RunnerID string
+	ID       string
+}
+
+// Reuses the workflow run's single job row for another developer execution --
+// role stays 'developer' throughout, unlike ReopenJobForRepair's
+// reviewer-to-developer transition, since a pipeline failure never routed the
+// job through a reviewer role in the first place. Guarded on the job still
+// being the failed developer job whose pipeline failure triggered this
+// repair; a second caller that raced this one finds 0 rows affected and does
+// nothing further.
+func (q *Queries) ReopenJobForPipelineRepair(ctx context.Context, arg ReopenJobForPipelineRepairParams) (int64, error) {
+	row := q.db.QueryRow(ctx, reopenJobForPipelineRepair, arg.RunnerID, arg.ID)
+	var lease_generation int64
+	err := row.Scan(&lease_generation)
+	return lease_generation, err
 }
 
 const reopenJobForRepair = `-- name: ReopenJobForRepair :one
@@ -152,4 +310,40 @@ func (q *Queries) ReopenJobForRepair(ctx context.Context, arg ReopenJobForRepair
 	var lease_generation int64
 	err := row.Scan(&lease_generation)
 	return lease_generation, err
+}
+
+const selectStrandedPipelineFailureWorkflows = `-- name: SelectStrandedPipelineFailureWorkflows :many
+SELECT wr.id::text AS id
+FROM app.workflow_runs wr
+WHERE wr.status = 'pipeline_failed'
+  AND wr.updated_at < now() - $1::interval
+ORDER BY wr.updated_at, wr.id
+LIMIT 20
+`
+
+// resumeStrandedPipelineDecisions' (recovery.go) candidate set: a run still
+// sitting at 'pipeline_failed' -- persistExecutionEvent committed the
+// terminal event, then the process died (or found no connected/eligible
+// runner) before pipelineFailedOrBlock's own repair-or-block decision landed.
+// Unlike a rejected AI review, a failed pipeline needs no second execution to
+// produce a verdict -- it already has one -- so this sweep exists only to
+// retry the decision itself once a runner is available, not to wait for one.
+func (q *Queries) SelectStrandedPipelineFailureWorkflows(ctx context.Context, strandedPipelineFailure pgtype.Interval) ([]string, error) {
+	rows, err := q.db.Query(ctx, selectStrandedPipelineFailureWorkflows, strandedPipelineFailure)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

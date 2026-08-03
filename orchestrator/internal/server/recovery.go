@@ -50,6 +50,15 @@ const strandedReviewDispatch = 2 * time.Minute
 // re-enters deliverWorkflow, the same external-GitHub-call path.
 const strandedReviewVerdict = strandedDelivery
 
+// strandedPipelineFailure bounds resumeStrandedPipelineDecisions: how long a
+// run may sit at 'pipeline_failed' before the sweep applies
+// pipelineFailedOrBlock itself. Short, like strandedReviewDispatch: unlike a
+// rejected review, a failed pipeline's verdict already exists the moment
+// persistExecutionEvent commits it, so the only reason this decision has not
+// landed yet is the same mundane one dispatchReviewerJob's own inline attempt
+// can hit -- no runner was connected, or none was eligible, at that moment.
+const strandedPipelineFailure = strandedReviewDispatch
+
 // abandonedChecks bounds the wait for GitHub checks. Nothing else ends that
 // wait: a repository whose checks never report — no CI configured, a workflow
 // that never queues — would otherwise hold its project lock forever, which is
@@ -75,6 +84,7 @@ func (s *Core) RecoverOnce(ctx context.Context) error {
 		s.resumeStrandedDeliveries(ctx),
 		s.resumeStrandedReviewDispatches(ctx),
 		s.resumeStrandedReviewVerdicts(ctx),
+		s.resumeStrandedPipelineDecisions(ctx),
 	)
 }
 
@@ -255,6 +265,33 @@ func (s *Core) resumeStrandedReviewVerdicts(ctx context.Context) error {
 		return databaseError(err)
 	}
 	return s.eachWorkflowID(ctx, workflowIDs, s.applyRecordedReviewVerdict)
+}
+
+// resumeStrandedPipelineDecisions re-drives a run stuck at 'pipeline_failed'
+// whose repair-or-block decision was never applied -- persistExecutionEvent
+// committed the terminal event, then the process died, or
+// dispatchPipelineRepairJob's own inline call found no connected or no
+// eligible runner, before pipelineFailedOrBlock's decision landed. See
+// SelectStrandedPipelineFailureWorkflows (repair.sql) for the exact guard.
+func (s *Core) resumeStrandedPipelineDecisions(ctx context.Context) error {
+	workflowIDs, err := s.queries.SelectStrandedPipelineFailureWorkflows(ctx, pgInterval(strandedPipelineFailure))
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, s.applyStrandedPipelineDecision)
+}
+
+// applyStrandedPipelineDecision is resumeStrandedPipelineDecisions' per-workflow
+// action: it re-reads the reason persistExecutionEvent already stored in
+// blocking_reason when it set the run to StatusPipelineFailed (rather than
+// re-parsing the original runner payload, not re-fetched here) and re-applies
+// pipelineFailedOrBlock, the same decision the inline call already attempted.
+func (s *Core) applyStrandedPipelineDecision(ctx context.Context, workflowID string) error {
+	reason, err := s.queries.GetWorkflowBlockingReason(ctx, workflowID)
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.pipelineFailedOrBlock(ctx, workflowID, reason)
 }
 
 // eachWorkflowID runs `do` against every already-fetched workflow identifier,

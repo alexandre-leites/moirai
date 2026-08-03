@@ -857,9 +857,22 @@ func agentFailureText(result Result) string {
 	return "agent reported no result status"
 }
 
+// pipelineFailurePayload reports the failing (or timed-out) command that
+// actually explains the run, not merely the first one in the list: a
+// non-required command (pipeline.Command.Required false) can fail earlier in
+// the sequence without stopping the pipeline, and Run keeps going past it, so
+// when a later *required* command is what actually stopped the pipeline, that
+// is the one an operator needs to see -- scanning from the end, like
+// logtail.go's failedPipelineOutput, finds it directly: Run only ever returns
+// with an error immediately after appending the one result that caused it, so
+// the last entry in results is that cause whenever the pipeline genuinely
+// failed. For a pipeline that did not fail at all (only non-required commands
+// tripped along the way), the last failing entry found this way is merely
+// informational, exactly as it would have been found scanning forward.
 func pipelineFailurePayload(results []pipeline.Result) []map[string]any {
 	failures := make([]map[string]any, 0, 1)
-	for _, result := range results {
+	for index := len(results) - 1; index >= 0; index-- {
+		result := results[index]
 		if result.ExitCode == 0 && !result.TimedOut {
 			continue
 		}

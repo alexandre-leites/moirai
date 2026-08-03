@@ -205,9 +205,24 @@ func TestDispatcherCapturesRepositoryRevisionAndChanges(t *testing.T) {
 func TestDispatcherRecordsPipelineFailure(t *testing.T) {
 	manager := &workspaceManager{workspace: testWorkspace(t)}
 	lease := validLease()
-	lease.Packet.Pipeline = []taskpacket.PipelineCommand{{Command: "false", TimeoutSeconds: 1}}
+	lease.Packet.Pipeline = []taskpacket.PipelineCommand{{Command: "false", TimeoutSeconds: 1, Required: true}}
 	result, err := (Dispatcher{Workspaces: manager, Backend: &backend{result: agents.Result{Status: "completed"}}}).Execute(context.Background(), lease)
 	if err == nil || result.Status != "failed" || len(result.PipelineResults) != 1 || result.PipelineResults[0].ExitCode != 1 {
+		t.Fatalf("Execute() = (%#v, %v)", result, err)
+	}
+}
+
+// TestDispatcherDoesNotGateOnANonRequiredPipelineFailure: web/src/projects.tsx
+// promises operators "No required command blocks completion" for a pipeline
+// step whose Required box is unchecked. A failing non-required command must
+// still run (and be recorded), but must not turn a completed agent result
+// into a failed one.
+func TestDispatcherDoesNotGateOnANonRequiredPipelineFailure(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	lease := validLease()
+	lease.Packet.Pipeline = []taskpacket.PipelineCommand{{Command: "false", TimeoutSeconds: 1, Required: false}}
+	result, err := (Dispatcher{Workspaces: manager, Backend: &backend{result: agents.Result{Status: "completed"}}}).Execute(context.Background(), lease)
+	if err != nil || result.Status != "completed" || len(result.PipelineResults) != 1 || result.PipelineResults[0].ExitCode != 1 {
 		t.Fatalf("Execute() = (%#v, %v)", result, err)
 	}
 }
