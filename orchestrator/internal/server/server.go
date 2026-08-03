@@ -65,8 +65,30 @@ type actor struct {
 }
 
 type projectConfig struct {
-	Labels         []string `json:"required_runner_labels"`
-	ExecutionImage string   `json:"execution_image"`
+	Labels                  []string `json:"required_runner_labels"`
+	ExecutionImage          string   `json:"execution_image"`
+	ExecutionTimeoutSeconds int32    `json:"execution_timeout_seconds"`
+}
+
+// defaultExecutionTimeoutSeconds bounds a dispatched developer execution's
+// total wall clock, continuations included (see runner/internal/dispatch's
+// goalgate.go), when the project has not configured one of its own. An hour
+// is generous for a single autonomous coding-agent attempt at a typical
+// issue -- implement, run the pipeline, iterate through a few continuations
+// -- while still well short of the 24-hour ceiling the runner's task packet
+// validation enforces, and it stops a wedged agent process from holding a
+// project's execution slot indefinitely (see issue #276).
+const defaultExecutionTimeoutSeconds = 3600
+
+// executionTimeoutSeconds resolves the timeout a developer packet carries: the
+// project's own configured value if it set one, or the fixed default. Zero
+// means "not configured" rather than "no deadline" -- a real, positive value
+// is always sent.
+func executionTimeoutSeconds(configured int32) int {
+	if configured > 0 {
+		return int(configured)
+	}
+	return defaultExecutionTimeoutSeconds
 }
 
 func New(pool *pgxpool.Pool, version string) (*Server, error) {
@@ -264,7 +286,7 @@ func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreatePro
 		return nil, err
 	}
 	id := newID()
-	encoded, _ := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage()})
+	encoded, _ := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, databaseError(err)
@@ -306,7 +328,7 @@ func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdatePro
 	if err != nil {
 		return nil, err
 	}
-	encoded, _ := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage()})
+	encoded, _ := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, databaseError(err)
@@ -1057,7 +1079,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	if err := json.Unmarshal(configuration, &config); err != nil {
 		return false, configurationError(err)
 	}
-	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textValue(repositoryURL), textValue(localPath), defaultBranch, branch, config.ExecutionImage)
+	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textValue(repositoryURL), textValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
 	if err != nil {
 		return false, err
 	}
@@ -1128,15 +1150,15 @@ func implementExecutionID(jobID string) string {
 	return jobID + "-implement"
 }
 
-func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string) (map[string]any, error) {
-	if !validID(jobID) || !validID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") {
+func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int) (map[string]any, error) {
+	if !validID(jobID) || !validID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
 		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
 	}
 	return map[string]any{
 		"protocolVersion": "1.0", "jobId": jobID, "executionId": implementExecutionID(jobID), "role": "developer", "objective": "Implement " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
-		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": 0, "environmentRefs": []any{}, "executionImage": executionImage,
+		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": []any{}, "executionImage": executionImage,
 		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": []string{}, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
 	}, nil
 }
@@ -1436,6 +1458,7 @@ func (s *Server) project(ctx context.Context, queries projectQuerier, id string)
 		return nil, configurationError(err)
 	}
 	project.RequiredRunnerLabels, project.ExecutionImage = config.Labels, config.ExecutionImage
+	project.ExecutionTimeoutSeconds = config.ExecutionTimeoutSeconds
 	steps, err := queries.ListProjectPipelineSteps(ctx, id)
 	if err != nil {
 		return nil, databaseError(err)
@@ -1644,6 +1667,13 @@ func validateProject(cfg *controlv1.ProjectConfiguration) (*controlv1.ProjectCon
 	if (cfg.GetRepositoryMode() == "managed_clone" && (cfg.GetRepositoryUrl() == "" || cfg.GetLocalRepositoryPath() != "")) || len(cfg.GetExecutionImage()) > 512 {
 		return nil, nil, status.Error(codes.InvalidArgument, "project configuration is invalid")
 	}
+	// 0 means "use the fixed default" (see executionTimeoutSeconds); anything
+	// else must be a real, positive duration inside the runner task packet's
+	// own ceiling (taskpacket.go's 86400-second ProtocolVersion 1.0 bound), so a
+	// project cannot configure a value the runner would refuse.
+	if cfg.GetExecutionTimeoutSeconds() < 0 || cfg.GetExecutionTimeoutSeconds() > 86400 {
+		return nil, nil, status.Error(codes.InvalidArgument, "project execution timeout is invalid")
+	}
 	labels, err := normalizeLabels(cfg.GetRequiredRunnerLabels())
 	if err != nil {
 		return nil, nil, status.Error(codes.InvalidArgument, "project labels are invalid")
@@ -1656,14 +1686,15 @@ func validateProject(cfg *controlv1.ProjectConfiguration) (*controlv1.ProjectCon
 		seen[step.GetPosition()] = true
 	}
 	return &controlv1.ProjectConfiguration{
-		Name:                 strings.TrimSpace(cfg.GetName()),
-		RepositoryMode:       cfg.GetRepositoryMode(),
-		RepositoryUrl:        cfg.GetRepositoryUrl(),
-		LocalRepositoryPath:  cfg.GetLocalRepositoryPath(),
-		DefaultBranch:        cfg.GetDefaultBranch(),
-		RequiredRunnerLabels: labels,
-		PipelineSteps:        cfg.GetPipelineSteps(),
-		ExecutionImage:       cfg.GetExecutionImage(),
+		Name:                    strings.TrimSpace(cfg.GetName()),
+		RepositoryMode:          cfg.GetRepositoryMode(),
+		RepositoryUrl:           cfg.GetRepositoryUrl(),
+		LocalRepositoryPath:     cfg.GetLocalRepositoryPath(),
+		DefaultBranch:           cfg.GetDefaultBranch(),
+		RequiredRunnerLabels:    labels,
+		PipelineSteps:           cfg.GetPipelineSteps(),
+		ExecutionImage:          cfg.GetExecutionImage(),
+		ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(),
 	}, cfg.GetPipelineSteps(), nil
 }
 

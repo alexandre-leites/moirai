@@ -121,7 +121,14 @@ func (packet Packet) Validate() error {
 	if !taskPath(packet.PromptPath) || packet.ExpectedOutput != ".loop/result.json" {
 		return errors.New("task packet artifact paths are invalid")
 	}
-	if packet.TimeoutSeconds < 0 || packet.TimeoutSeconds > 86400 {
+	// A packet must always carry a real deadline. This used to accept 0 (#247,
+	// reverted by #276) to accommodate a hardcoded orchestrator value -- but a
+	// zero timeout meant no deadline at all, so a wedged agent process held its
+	// project lock indefinitely: the lease sweep only reclaims a job whose
+	// runner has stopped, not one whose agent never returns. The orchestrator
+	// now always sends a positive value, so this guard is exercised on every
+	// real packet, not just relaxed around one.
+	if packet.TimeoutSeconds < 1 || packet.TimeoutSeconds > 86400 {
 		return errors.New("task packet timeout is invalid")
 	}
 	if err := validateEnvironmentRefs(packet.EnvironmentRefs); err != nil {

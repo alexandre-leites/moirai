@@ -42,9 +42,12 @@ import (
 // clock of an execution, continuations included, so the last slice of that
 // budget can be too small to do anything but launch a process and SIGTERM it.
 //
-// A packet that carries timeoutSeconds: 0 — what the orchestrator sends today,
-// issue #276 — bounds nothing, and its shared deadline is already spent when
-// the first attempt ends, so no continuation is ever funded.
+// The orchestrator once sent every packet with timeoutSeconds: 0, which bounds
+// nothing — the shared deadline was already spent when the first attempt
+// ended, so no continuation was ever funded (issue #276). The orchestrator now
+// always sends a real, positive value (defaultExecutionTimeoutSeconds in
+// orchestrator/internal/server, or a project's own configured one), and the
+// task packet validator rejects a packet that does not.
 const minimumContinuationRuntime = 5 * time.Second
 
 // gateReason names one piece of missing evidence. The vocabulary is closed and

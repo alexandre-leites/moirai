@@ -49,11 +49,7 @@ func (executor DockerExecutor) Execute(parent context.Context, request Request, 
 	}
 	defer os.Remove(environmentFile)
 	command := executor.runCommand(containerName, workspace, request, environmentFile)
-	ctx := parent
-	cancel := func() {}
-	if request.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(parent, request.Timeout)
-	}
+	ctx, cancel := context.WithTimeout(parent, request.Timeout)
 	defer cancel()
 	done := make(chan struct{})
 	monitorDone := make(chan struct{})
@@ -112,8 +108,11 @@ func (executor DockerExecutor) validate(request Request) error {
 	if len(request.Command) == 0 || request.Command[0] == "" {
 		return errors.New("command is required")
 	}
-	if request.Timeout < 0 {
-		return errors.New("timeout must not be negative")
+	// See local.go's Execute: a valid task packet never produces a non-positive
+	// timeout, so this is a defensive backstop (#276), not a path a real packet
+	// should ever reach.
+	if request.Timeout <= 0 {
+		return errors.New("timeout must be positive")
 	}
 	for key, value := range request.Environment {
 		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsAny(value, "\x00\r\n") {

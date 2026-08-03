@@ -52,8 +52,13 @@ func (supervisor *Supervisor) Execute(
 	if request.Workspace == "" {
 		return Result{}, errors.New("workspace is required")
 	}
-	if request.Timeout < 0 {
-		return Result{}, errors.New("timeout must not be negative")
+	// A valid task packet (see taskpacket.go's Validate) never produces a
+	// non-positive timeout, so this rejects rather than silently running an
+	// execution with no deadline (#276) -- the loud failure here is a defensive
+	// backstop against a caller bypassing that validation, not a path a real
+	// packet should ever reach.
+	if request.Timeout <= 0 {
+		return Result{}, errors.New("timeout must be positive")
 	}
 
 	workspace := filepath.Clean(request.Workspace)
@@ -64,11 +69,7 @@ func (supervisor *Supervisor) Execute(
 		return Result{}, fmt.Errorf("create workspace temporary directory: %w", err)
 	}
 
-	ctx := parent
-	cancel := func() {}
-	if request.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(parent, request.Timeout)
-	}
+	ctx, cancel := context.WithTimeout(parent, request.Timeout)
 	defer cancel()
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Dir = workspace

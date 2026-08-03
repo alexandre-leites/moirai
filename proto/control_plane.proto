@@ -63,6 +63,10 @@ message Project {
   repeated string required_runner_labels = 8;
   repeated PipelineStep pipeline_steps = 9;
   string execution_image = 10;
+  // The wall-clock budget given to a dispatched developer execution,
+  // continuations included. 0 means "unset" -- the orchestrator falls back to
+  // a sane fixed default rather than sending a packet with no deadline.
+  int32 execution_timeout_seconds = 11;
 }
 message ListProjectsResponse { repeated Project projects = 1; }
 message ProjectConfiguration {
@@ -74,6 +78,7 @@ message ProjectConfiguration {
   repeated string required_runner_labels = 6;
   repeated PipelineStep pipeline_steps = 7;
   string execution_image = 8;
+  int32 execution_timeout_seconds = 9;
 }
 message CreateProjectRequest { ProjectConfiguration project = 1; }
 message CreateProjectResponse { Project project = 1; }
