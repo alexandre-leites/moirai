@@ -86,7 +86,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE app.workflow_events,app.job_offers,app.jobs,app.project_locks,app.workflow_runs,app.issues,app.projects,app.runners,app.user_sessions,app.users,app.audit_events RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE app.workflow_events,app.job_offers,app.jobs,app.project_locks,app.ai_reviews,app.workflow_runs,app.issues,app.projects,app.runners,app.user_sessions,app.users,app.audit_events RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	core, err := NewWithGitHub(pool, "test", stubGitHub{})
@@ -669,9 +669,14 @@ func TestPlanningCompletionReoffersTheSameJobWithThePlan(t *testing.T) {
 		t.Fatalf("plan = %#v, did not carry the planner's summary and remaining work forward", packet.Plan)
 	}
 
+	// The run stays at 'planning' (dispatchImplementationJob's plannerCompleted
+	// case, server.go, touches nothing else) until the developer offer's own
+	// acceptOffer call moves it to 'preparing' directly -- the same one-status-
+	// covers-the-whole-offer shape 'waiting_ai_review' uses for a reviewer job
+	// in flight (review.go).
 	state := h.runState(workflowID)
-	if state.status != "offered" {
-		t.Fatalf("status = %q, want offered (re-offered for its developer execution)", state.status)
+	if state.status != "planning" {
+		t.Fatalf("status = %q, want planning (still covering the re-offered job until accepted)", state.status)
 	}
 	if attempts := h.scalar(`SELECT planning_attempts FROM app.workflow_runs WHERE id=$1`, workflowID); attempts != 1 {
 		t.Fatalf("planning_attempts = %d, want exactly 1 (not incremented again on completion)", attempts)
@@ -892,6 +897,15 @@ func (h *harness) receiveOffer(outbound chan *runnerv1.OrchestratorToRunner) *ru
 		h.t.Fatal("timed out waiting for a job offer")
 		return nil
 	}
+}
+
+// enableAiReview flips a seeded project's configuration to opt into the
+// independent-AI-review gate (projectConfig.EnableAiReview), read fresh by
+// aiReviewEnabled on every developer "completed" event, so this can run any
+// time before the persistExecutionEvent call under test.
+func (h *harness) enableAiReview(projectID string) {
+	h.t.Helper()
+	h.exec(`UPDATE app.projects SET configuration = configuration || '{"enable_ai_review":true}'::jsonb WHERE id=$1`, projectID)
 }
 
 // Before StatusWaitingHuman existed, observeWorkflow merged a pull request

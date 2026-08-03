@@ -15,10 +15,17 @@ const cancelExpiredLeaseJobs = `-- name: CancelExpiredLeaseJobs :many
 UPDATE app.jobs
 SET status = 'cancelled', finished_at = now(), lease_generation = lease_generation + 1,
     recovery_reason = $1
-WHERE status IN ('preparing', 'running') AND lease_expires_at < now()
+WHERE status IN ('preparing', 'running') AND role IN ('developer', 'planner') AND lease_expires_at < now()
 RETURNING workflow_run_id::text AS workflow_run_id
 `
 
+// Scoped to role IN ('developer', 'planner') for the same reason
+// CancelUnansweredOfferJobs is: failing the whole workflow run over a
+// reviewer's lapsed lease would discard a developer execution that already
+// succeeded, but a planner's lapsed lease has nothing of the sort behind it
+// yet -- it belongs with the developer case, failing the run outright, not
+// with the reviewer's. See ReclaimExpiredReviewLeases for the reviewer-scoped
+// counterpart.
 func (q *Queries) CancelExpiredLeaseJobs(ctx context.Context, reason pgtype.Text) ([]string, error) {
 	rows, err := q.db.Query(ctx, cancelExpiredLeaseJobs, reason)
 	if err != nil {
@@ -43,7 +50,7 @@ const cancelUnansweredOfferJobs = `-- name: CancelUnansweredOfferJobs :many
 UPDATE app.jobs
 SET status = 'cancelled', finished_at = now(), lease_generation = lease_generation + 1,
     recovery_reason = $1
-WHERE status = 'offered' AND offered_at < now() - $2::interval
+WHERE status = 'offered' AND role IN ('developer', 'planner') AND offered_at < now() - $2::interval
 RETURNING workflow_run_id::text AS workflow_run_id
 `
 
@@ -52,6 +59,15 @@ type CancelUnansweredOfferJobsParams struct {
 	UnansweredOffer pgtype.Interval
 }
 
+// Scoped to role IN ('developer', 'planner'): an unanswered reviewer offer
+// must not cancel the whole workflow run the way an unanswered developer or
+// planner offer does (nothing ran yet for either of those, so the issue is
+// simply offered again) -- the developer's work already happened by the time
+// a reviewer offer exists, and would otherwise be discarded. See
+// resumeStrandedReviewDispatches (recovery.go), which redrives that case
+// instead by age alone. A planner offer belongs with the developer one here,
+// not with the reviewer: it is the first execution a run makes, exactly like
+// an ordinary developer offer, just under a different role.
 func (q *Queries) CancelUnansweredOfferJobs(ctx context.Context, arg CancelUnansweredOfferJobsParams) ([]string, error) {
 	rows, err := q.db.Query(ctx, cancelUnansweredOfferJobs, arg.Reason, arg.UnansweredOffer)
 	if err != nil {
@@ -97,6 +113,74 @@ WHERE status = 'online'
 func (q *Queries) MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error {
 	_, err := q.db.Exec(ctx, markStaleRunnersOffline, staleRunner)
 	return err
+}
+
+const reclaimExpiredReviewLeases = `-- name: ReclaimExpiredReviewLeases :many
+UPDATE app.jobs
+SET status = 'completed', role = 'developer', recovery_reason = $1
+WHERE status IN ('preparing', 'running') AND role = 'reviewer' AND lease_expires_at < now()
+RETURNING workflow_run_id::text AS workflow_run_id
+`
+
+// The reviewer-scoped counterpart of CancelExpiredLeaseJobs: a runner that
+// stopped renewing a reviewer lease loses that attempt, not the run -- see
+// ReclaimUnansweredReviewOffers for why this resets rather than cancels.
+func (q *Queries) ReclaimExpiredReviewLeases(ctx context.Context, reason pgtype.Text) ([]string, error) {
+	rows, err := q.db.Query(ctx, reclaimExpiredReviewLeases, reason)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var workflow_run_id string
+		if err := rows.Scan(&workflow_run_id); err != nil {
+			return nil, err
+		}
+		items = append(items, workflow_run_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reclaimUnansweredReviewOffers = `-- name: ReclaimUnansweredReviewOffers :many
+UPDATE app.jobs
+SET status = 'completed', role = 'developer', recovery_reason = $1
+WHERE status = 'offered' AND role = 'reviewer' AND offered_at < now() - $2::interval
+RETURNING workflow_run_id::text AS workflow_run_id
+`
+
+type ReclaimUnansweredReviewOffersParams struct {
+	Reason          pgtype.Text
+	UnansweredOffer pgtype.Interval
+}
+
+// The reviewer-scoped counterpart of CancelUnansweredOfferJobs: instead of
+// cancelling the run, resets its job back to the shape
+// GetReviewDispatchWorkflow/SelectStrandedReviewDispatchWorkflows expect (a
+// completed developer job), so the next dispatch attempt -- the recovery
+// sweep's resumeStrandedReviewDispatches, on its next tick -- redrives it
+// against a (possibly different) connected runner.
+func (q *Queries) ReclaimUnansweredReviewOffers(ctx context.Context, arg ReclaimUnansweredReviewOffersParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, reclaimUnansweredReviewOffers, arg.Reason, arg.UnansweredOffer)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var workflow_run_id string
+		if err := rows.Scan(&workflow_run_id); err != nil {
+			return nil, err
+		}
+		items = append(items, workflow_run_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const selectAbandonedChecksWorkflows = `-- name: SelectAbandonedChecksWorkflows :many

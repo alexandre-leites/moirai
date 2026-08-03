@@ -14,7 +14,7 @@ import (
 const acceptJob = `-- name: AcceptJob :one
 UPDATE app.jobs SET status = 'preparing', accepted_at = now(), lease_expires_at = now() + $1::interval
 WHERE id = $2 AND runner_id = $3::uuid AND status = 'offered'
-RETURNING lease_generation, lease_expires_at
+RETURNING lease_generation, lease_expires_at, role
 `
 
 type AcceptJobParams struct {
@@ -26,12 +26,17 @@ type AcceptJobParams struct {
 type AcceptJobRow struct {
 	LeaseGeneration int64
 	LeaseExpiresAt  pgtype.Timestamptz
+	Role            string
 }
 
+// role travels back to acceptOffer (server.go) so it can decide whether to
+// call SetWorkflowPreparing at all: a reviewer's job offer being accepted
+// must not move the run off StatusWaitingAiReview the way a developer's
+// always has (see acceptOffer's own comment for why).
 func (q *Queries) AcceptJob(ctx context.Context, arg AcceptJobParams) (AcceptJobRow, error) {
 	row := q.db.QueryRow(ctx, acceptJob, arg.LeaseDuration, arg.ID, arg.RunnerID)
 	var i AcceptJobRow
-	err := row.Scan(&i.LeaseGeneration, &i.LeaseExpiresAt)
+	err := row.Scan(&i.LeaseGeneration, &i.LeaseExpiresAt, &i.Role)
 	return i, err
 }
 
@@ -200,8 +205,8 @@ func (q *Queries) ClaimSchedulableIssue(ctx context.Context, runnerIds []string)
 }
 
 const createJob = `-- name: CreateJob :exec
-INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, lease_generation, offered_at)
-VALUES ($1, $2, $3, $4::uuid, 'offered', 1, now())
+INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, role, lease_generation, offered_at)
+VALUES ($1, $2, $3, $4::uuid, 'offered', $5, 1, now())
 `
 
 type CreateJobParams struct {
@@ -209,14 +214,20 @@ type CreateJobParams struct {
 	WorkflowRunID string
 	ProjectID     string
 	RunnerID      string
+	Role          string
 }
 
+// role (028_workflow_run_ai_review.sql, #353) is 'developer' for every
+// ordinary dispatch, matching the column's own default -- ScheduleOnce passes
+// 'planner' instead for a project that opted into RequirePlanning (#351), so
+// the run's first execution is a planning one rather than the developer one.
 func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) error {
 	_, err := q.db.Exec(ctx, createJob,
 		arg.ID,
 		arg.WorkflowRunID,
 		arg.ProjectID,
 		arg.RunnerID,
+		arg.Role,
 	)
 	return err
 }
@@ -335,9 +346,9 @@ type GetImplementationDispatchFactsRow struct {
 	Configuration       string
 }
 
-// Everything dispatchImplementationAfterPlanning needs to build a developer
-// packet for a workflow whose planning execution just completed, mirroring
-// what ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+// Everything dispatchImplementationJob needs to build a developer packet for
+// a workflow whose planning execution just completed, mirroring what
+// ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
 // dispatch.
 func (q *Queries) GetImplementationDispatchFacts(ctx context.Context, id string) (GetImplementationDispatchFactsRow, error) {
 	row := q.db.QueryRow(ctx, getImplementationDispatchFacts, id)
@@ -433,34 +444,6 @@ func (q *Queries) GetSchedulerSnapshot(ctx context.Context) (GetSchedulerSnapsho
 	return i, err
 }
 
-const getWorkflowPhaseForJob = `-- name: GetWorkflowPhaseForJob :one
-SELECT current_phase FROM app.workflow_runs
-WHERE id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
-`
-
-// acceptOffer reads this before deciding whether the offer it is accepting is
-// the planning job's or the developer job's: it only ever has the job ID, not
-// the task packet, so ScheduleOnce's MarkWorkflowPlanningOffered marker (set
-// on current_phase before the offer goes out, distinct from the ordinary
-// 'offered' both phases otherwise share) is what tells the two apart.
-func (q *Queries) GetWorkflowPhaseForJob(ctx context.Context, id string) (string, error) {
-	row := q.db.QueryRow(ctx, getWorkflowPhaseForJob, id)
-	var current_phase string
-	err := row.Scan(&current_phase)
-	return current_phase, err
-}
-
-const getWorkflowStatusByID = `-- name: GetWorkflowStatusByID :one
-SELECT status FROM app.workflow_runs WHERE id = $1
-`
-
-func (q *Queries) GetWorkflowStatusByID(ctx context.Context, id string) (string, error) {
-	row := q.db.QueryRow(ctx, getWorkflowStatusByID, id)
-	var status string
-	err := row.Scan(&status)
-	return status, err
-}
-
 const incrementPlanningAttempts = `-- name: IncrementPlanningAttempts :exec
 UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_at = now() WHERE id = $1
 `
@@ -521,32 +504,6 @@ func (q *Queries) ListQueueEntries(ctx context.Context, limit int32) ([]ListQueu
 	return items, nil
 }
 
-const markWorkflowImplementationOffered = `-- name: MarkWorkflowImplementationOffered :exec
-UPDATE app.workflow_runs SET status = 'offered', current_phase = 'offered', updated_at = now() WHERE id = $1
-`
-
-// Flips the marker GetWorkflowPhaseForJob reads back to plain 'offered' when
-// the developer packet is dispatched on the same job that just ran planning,
-// so the developer job's own acceptance takes the ordinary SetWorkflowPreparing
-// branch rather than being mistaken for another planning offer.
-func (q *Queries) MarkWorkflowImplementationOffered(ctx context.Context, id string) error {
-	_, err := q.db.Exec(ctx, markWorkflowImplementationOffered, id)
-	return err
-}
-
-const markWorkflowPlanningOffered = `-- name: MarkWorkflowPlanningOffered :exec
-UPDATE app.workflow_runs SET current_phase = 'planning_offered', updated_at = now() WHERE id = $1
-`
-
-// Sets a marker distinct from plain 'offered' the instant ScheduleOnce
-// dispatches a planner packet instead of a developer one -- see
-// GetWorkflowPhaseForJob. status stays 'offered', the generic value both
-// phases start from.
-func (q *Queries) MarkWorkflowPlanningOffered(ctx context.Context, id string) error {
-	_, err := q.db.Exec(ctx, markWorkflowPlanningOffered, id)
-	return err
-}
-
 const recordJobExecutionEvent = `-- name: RecordJobExecutionEvent :one
 UPDATE app.jobs SET
   last_event_sequence = $1,
@@ -554,7 +511,7 @@ UPDATE app.jobs SET
   started_at = CASE WHEN $2 = 'started' THEN COALESCE(started_at, now()) ELSE started_at END,
   finished_at = CASE WHEN $2 IN ('completed','failed','cancelled') THEN now() ELSE finished_at END
 WHERE id = $3 AND runner_id = $4::uuid AND lease_generation = $5 AND status IN ('preparing','running') AND lease_expires_at > now() AND last_event_sequence < $1
-RETURNING workflow_run_id::text AS workflow_run_id
+RETURNING workflow_run_id::text AS workflow_run_id, role
 `
 
 type RecordJobExecutionEventParams struct {
@@ -565,7 +522,12 @@ type RecordJobExecutionEventParams struct {
 	LeaseGeneration int64
 }
 
-func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error) {
+type RecordJobExecutionEventRow struct {
+	WorkflowRunID string
+	Role          string
+}
+
+func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (RecordJobExecutionEventRow, error) {
 	row := q.db.QueryRow(ctx, recordJobExecutionEvent,
 		arg.EventSequence,
 		arg.EventType,
@@ -573,9 +535,9 @@ func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExec
 		arg.RunnerID,
 		arg.LeaseGeneration,
 	)
-	var workflow_run_id string
-	err := row.Scan(&workflow_run_id)
-	return workflow_run_id, err
+	var i RecordJobExecutionEventRow
+	err := row.Scan(&i.WorkflowRunID, &i.Role)
+	return i, err
 }
 
 const recordPlanSummary = `-- name: RecordPlanSummary :exec
@@ -617,30 +579,36 @@ func (q *Queries) RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (p
 	return lease_expires_at, err
 }
 
-const reofferJobForImplementation = `-- name: ReofferJobForImplementation :one
+const reopenJobForImplementation = `-- name: ReopenJobForImplementation :one
 UPDATE app.jobs SET
-  status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
-  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL
-WHERE id = $1 AND status = 'completed'
+  role = 'developer', status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
+  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL, recovery_reason = NULL
+WHERE id = $1 AND role = 'planner' AND status = 'completed'
 RETURNING lease_generation, runner_id::text AS runner_id
 `
 
-type ReofferJobForImplementationRow struct {
+type ReopenJobForImplementationRow struct {
 	LeaseGeneration int64
 	RunnerID        string
 }
 
-// Re-offers the one job a workflow run is ever given (app.jobs.workflow_run_id
-// is UNIQUE) for its developer execution, once its planning execution has
-// completed. This is a second offer/accept/lease cycle for the same job row,
-// not a second job: the runner's own offer/lease state (runner/internal/
-// control's OfferState) keys everything by job ID and forgets it entirely once
-// Abandon runs at the end of the first (planning) execution, so a fresh
-// JobOffer for the same ID with an incremented lease_generation is
-// indistinguishable, to the runner, from any other new job.
-func (q *Queries) ReofferJobForImplementation(ctx context.Context, id string) (ReofferJobForImplementationRow, error) {
-	row := q.db.QueryRow(ctx, reofferJobForImplementation, id)
-	var i ReofferJobForImplementationRow
+// Reuses the workflow run's single job row for its developer execution once
+// planning has completed (app.jobs.workflow_run_id stays UNIQUE), exactly the
+// shape ReopenJobForReview (review.sql, #353) reuses it for an independent
+// review after a developer execution -- here reopened backwards, from
+// 'planner' to 'developer', as the very first execution's follow-up rather
+// than a second one after it. Guarded on the job still being the completed
+// planner job, the same guard a racing caller (there is only ever one, this
+// is not retried by any sweep) would lose.
+//
+// The runner's own offer/lease state (runner/internal/control's OfferState)
+// keys everything by job ID and forgets it entirely once Abandon runs at the
+// end of the planner execution, so a fresh JobOffer for the same ID with an
+// incremented lease_generation is indistinguishable, to the runner, from any
+// other new job -- no runner-side change was needed for this reopening.
+func (q *Queries) ReopenJobForImplementation(ctx context.Context, id string) (ReopenJobForImplementationRow, error) {
+	row := q.db.QueryRow(ctx, reopenJobForImplementation, id)
+	var i ReopenJobForImplementationRow
 	err := row.Scan(&i.LeaseGeneration, &i.RunnerID)
 	return i, err
 }
@@ -651,6 +619,9 @@ WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.i
   AND status NOT IN ('completed','failed','blocked','cancelled')
 `
 
+// acceptOffer's planner-role branch: the same shape SetWorkflowPreparing is,
+// called instead of it when the accepted job's role (AcceptJob's own RETURNING)
+// is 'planner' rather than 'developer'.
 func (q *Queries) SetWorkflowPlanningActive(ctx context.Context, id string) error {
 	_, err := q.db.Exec(ctx, setWorkflowPlanningActive, id)
 	return err

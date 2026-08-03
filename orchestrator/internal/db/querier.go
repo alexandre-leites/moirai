@@ -11,15 +11,35 @@ import (
 )
 
 type Querier interface {
+	// role travels back to acceptOffer (server.go) so it can decide whether to
+	// call SetWorkflowPreparing at all: a reviewer's job offer being accepted
+	// must not move the run off StatusWaitingAiReview the way a developer's
+	// always has (see acceptOffer's own comment for why).
 	AcceptJob(ctx context.Context, arg AcceptJobParams) (AcceptJobRow, error)
 	// DeleteProjectLock lives in delivery.sql (identical statement, already
 	// generated there); reused as-is rather than duplicated.
 	AcceptJobOffer(ctx context.Context, arg AcceptJobOfferParams) (string, error)
+	// Scoped to role IN ('developer', 'planner') for the same reason
+	// CancelUnansweredOfferJobs is: failing the whole workflow run over a
+	// reviewer's lapsed lease would discard a developer execution that already
+	// succeeded, but a planner's lapsed lease has nothing of the sort behind it
+	// yet -- it belongs with the developer case, failing the run outright, not
+	// with the reviewer's. See ReclaimExpiredReviewLeases for the reviewer-scoped
+	// counterpart.
 	CancelExpiredLeaseJobs(ctx context.Context, reason pgtype.Text) ([]string, error)
 	CancelJob(ctx context.Context, arg CancelJobParams) error
 	CancelJobOfferByJob(ctx context.Context, jobID string) error
 	CancelJobOfferByRunner(ctx context.Context, arg CancelJobOfferByRunnerParams) error
 	CancelOfferedJob(ctx context.Context, arg CancelOfferedJobParams) error
+	// Scoped to role IN ('developer', 'planner'): an unanswered reviewer offer
+	// must not cancel the whole workflow run the way an unanswered developer or
+	// planner offer does (nothing ran yet for either of those, so the issue is
+	// simply offered again) -- the developer's work already happened by the time
+	// a reviewer offer exists, and would otherwise be discarded. See
+	// resumeStrandedReviewDispatches (recovery.go), which redrives that case
+	// instead by age alone. A planner offer belongs with the developer one here,
+	// not with the reviewer: it is the first execution a run makes, exactly like
+	// an ordinary developer offer, just under a different role.
 	CancelUnansweredOfferJobs(ctx context.Context, arg CancelUnansweredOfferJobsParams) ([]string, error)
 	CancelWorkflowExecutionRequests(ctx context.Context, workflowRunID string) error
 	CancelWorkflowJobOffers(ctx context.Context, workflowRunID string) error
@@ -40,6 +60,10 @@ type Querier interface {
 	CountUsers(ctx context.Context) (int64, error)
 	CreateAdminUser(ctx context.Context, arg CreateAdminUserParams) error
 	CreateAuditEvent(ctx context.Context, arg CreateAuditEventParams) error
+	// role (028_workflow_run_ai_review.sql, #353) is 'developer' for every
+	// ordinary dispatch, matching the column's own default -- ScheduleOnce passes
+	// 'planner' instead for a project that opted into RequirePlanning (#351), so
+	// the run's first execution is a planning one rather than the developer one.
 	CreateJob(ctx context.Context, arg CreateJobParams) error
 	CreateJobOffer(ctx context.Context, arg CreateJobOfferParams) error
 	CreateProject(ctx context.Context, arg CreateProjectParams) error
@@ -77,13 +101,19 @@ type Querier interface {
 	// run's project-scoped delivery facts from.
 	GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error)
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
-	// Everything dispatchImplementationAfterPlanning needs to build a developer
-	// packet for a workflow whose planning execution just completed, mirroring
-	// what ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+	// Everything dispatchImplementationJob needs to build a developer packet for
+	// a workflow whose planning execution just completed, mirroring what
+	// ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
 	// dispatch.
 	GetImplementationDispatchFacts(ctx context.Context, id string) (GetImplementationDispatchFactsRow, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
+	GetLatestAiReview(ctx context.Context, workflowRunID string) (string, error)
 	GetProject(ctx context.Context, id string) (GetProjectRow, error)
+	// persistExecutionEvent reads this once per developer "completed" event to
+	// decide whether the project opted into EnableAiReview (server.go's
+	// projectConfig) -- a project that never touches this key behaves exactly as
+	// it always has.
+	GetProjectConfigForWorkflow(ctx context.Context, id string) ([]byte, error)
 	// task_source_id (empty string = NULL, the same NULLIF convention CreateProject
 	// uses for repository_url) is the caller's scope: a CodeHost lookup always
 	// passes "" (a project has 0..1 code hosts, never per-source -- see
@@ -105,6 +135,15 @@ type Querier interface {
 	// global primary key so this is unambiguous, and every write those handlers
 	// go on to make still scopes by the project_id this returns.
 	GetProjectTaskSourceByID(ctx context.Context, id string) (GetProjectTaskSourceByIDRow, error)
+	// Everything dispatchReviewerJob (review.go) needs to build and offer a
+	// fresh, independent reviewer execution against the one job a workflow run
+	// already has. Guarded on the run's own status and the job's own role and
+	// status: only a run sitting at 'waiting_ai_review' whose job is still the
+	// completed developer job is ever reviewable, so a concurrent or repeated
+	// dispatch attempt (the recovery sweep racing the inline call
+	// persistExecutionEvent already made) finds no row and is a no-op rather than
+	// a double dispatch.
+	GetReviewDispatchWorkflow(ctx context.Context, id string) (GetReviewDispatchWorkflowRow, error)
 	GetRunner(ctx context.Context, id string) (GetRunnerRow, error)
 	GetRunnerCredentialHash(ctx context.Context, id string) (string, error)
 	// The oldest heartbeat is returned as a raw timestamp (rather than an
@@ -127,14 +166,9 @@ type Querier interface {
 	// very first workflow scanned before a pull request exists.
 	GetWorkflowDetail(ctx context.Context, id string) (GetWorkflowDetailRow, error)
 	GetWorkflowForControl(ctx context.Context, id string) (GetWorkflowForControlRow, error)
-	// acceptOffer reads this before deciding whether the offer it is accepting is
-	// the planning job's or the developer job's: it only ever has the job ID, not
-	// the task packet, so ScheduleOnce's MarkWorkflowPlanningOffered marker (set
-	// on current_phase before the offer goes out, distinct from the ordinary
-	// 'offered' both phases otherwise share) is what tells the two apart.
-	GetWorkflowPhaseForJob(ctx context.Context, id string) (string, error)
-	GetWorkflowStatusByID(ctx context.Context, id string) (string, error)
 	IncrementPlanningAttempts(ctx context.Context, id string) error
+	IncrementReviewCycles(ctx context.Context, id string) error
+	InsertAiReview(ctx context.Context, arg InsertAiReviewParams) error
 	InsertPullRequestCreatedEvent(ctx context.Context, arg InsertPullRequestCreatedEventParams) error
 	InsertPullRequestMergedEvent(ctx context.Context, workflowRunID string) error
 	InsertWorkflowTerminationEvent(ctx context.Context, arg InsertWorkflowTerminationEventParams) error
@@ -229,23 +263,30 @@ type Querier interface {
 	MarkWorkflowAwaitingApproval(ctx context.Context, id string) (int64, error)
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
-	// Flips the marker GetWorkflowPhaseForJob reads back to plain 'offered' when
-	// the developer packet is dispatched on the same job that just ran planning,
-	// so the developer job's own acceptance takes the ordinary SetWorkflowPreparing
-	// branch rather than being mistaken for another planning offer.
-	MarkWorkflowImplementationOffered(ctx context.Context, id string) error
-	// Sets a marker distinct from plain 'offered' the instant ScheduleOnce
-	// dispatches a planner packet instead of a developer one -- see
-	// GetWorkflowPhaseForJob. status stays 'offered', the generic value both
-	// phases start from.
-	MarkWorkflowPlanningOffered(ctx context.Context, id string) error
+	// An approving verdict's handoff to deliverWorkflow, which itself requires
+	// 'delivering' (MarkWorkflowDelivered's own guard) -- the same status a
+	// developer's own "completed" event moves a run through when AI review is
+	// disabled. Guarded on 'waiting_ai_review' so this is a no-op rather than a
+	// double transition if it ever raced another caller.
+	MarkWorkflowReviewApproved(ctx context.Context, id string) (int64, error)
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	// Distinguishes "unknown project" (no row, pgx.ErrNoRows) from "disabled
 	// project" (a row, enabled = false) for SyncNow's single-project path, which
 	// reports both as the same 404 -- syncing a specific project only ever makes
 	// sense for one that is both known and enabled.
 	ProjectIsEnabled(ctx context.Context, id string) (bool, error)
-	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
+	// The reviewer-scoped counterpart of CancelExpiredLeaseJobs: a runner that
+	// stopped renewing a reviewer lease loses that attempt, not the run -- see
+	// ReclaimUnansweredReviewOffers for why this resets rather than cancels.
+	ReclaimExpiredReviewLeases(ctx context.Context, reason pgtype.Text) ([]string, error)
+	// The reviewer-scoped counterpart of CancelUnansweredOfferJobs: instead of
+	// cancelling the run, resets its job back to the shape
+	// GetReviewDispatchWorkflow/SelectStrandedReviewDispatchWorkflows expect (a
+	// completed developer job), so the next dispatch attempt -- the recovery
+	// sweep's resumeStrandedReviewDispatches, on its next tick -- redrives it
+	// against a (possibly different) connected runner.
+	ReclaimUnansweredReviewOffers(ctx context.Context, arg ReclaimUnansweredReviewOffersParams) ([]string, error)
+	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (RecordJobExecutionEventRow, error)
 	RecordPlanSummary(ctx context.Context, arg RecordPlanSummaryParams) error
 	RecordRunnerHeartbeat(ctx context.Context, arg RecordRunnerHeartbeatParams) error
 	// Bumps the count of consecutive transient GitHub failures blockOrRetryExternal
@@ -263,27 +304,63 @@ type Querier interface {
 	// against a run genuinely sitting at the approval gate.
 	RejectWorkflowApproval(ctx context.Context, arg RejectWorkflowApprovalParams) (string, error)
 	RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (pgtype.Timestamptz, error)
-	// Re-offers the one job a workflow run is ever given (app.jobs.workflow_run_id
-	// is UNIQUE) for its developer execution, once its planning execution has
-	// completed. This is a second offer/accept/lease cycle for the same job row,
-	// not a second job: the runner's own offer/lease state (runner/internal/
-	// control's OfferState) keys everything by job ID and forgets it entirely once
-	// Abandon runs at the end of the first (planning) execution, so a fresh
-	// JobOffer for the same ID with an incremented lease_generation is
-	// indistinguishable, to the runner, from any other new job.
-	ReofferJobForImplementation(ctx context.Context, id string) (ReofferJobForImplementationRow, error)
+	// Reuses the workflow run's single job row for its developer execution once
+	// planning has completed (app.jobs.workflow_run_id stays UNIQUE), exactly the
+	// shape ReopenJobForReview (review.sql, #353) reuses it for an independent
+	// review after a developer execution -- here reopened backwards, from
+	// 'planner' to 'developer', as the very first execution's follow-up rather
+	// than a second one after it. Guarded on the job still being the completed
+	// planner job, the same guard a racing caller (there is only ever one, this
+	// is not retried by any sweep) would lose.
+	//
+	// The runner's own offer/lease state (runner/internal/control's OfferState)
+	// keys everything by job ID and forgets it entirely once Abandon runs at the
+	// end of the planner execution, so a fresh JobOffer for the same ID with an
+	// incremented lease_generation is indistinguishable, to the runner, from any
+	// other new job -- no runner-side change was needed for this reopening.
+	ReopenJobForImplementation(ctx context.Context, id string) (ReopenJobForImplementationRow, error)
+	// Reuses the workflow run's single job row for a second, independent
+	// execution instead of inserting a new one (app.jobs.workflow_run_id stays
+	// UNIQUE). Guarded on the job still being the completed developer job, the
+	// same guard GetReviewDispatchWorkflow reads under -- a second caller that
+	// raced this one finds 0 rows affected and does nothing further.
+	ReopenJobForReview(ctx context.Context, arg ReopenJobForReviewParams) (int64, error)
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
 	RevokeRunner(ctx context.Context, id string) (int64, error)
 	RevokeRunnerCredentials(ctx context.Context, runnerID string) error
 	RevokeRunnerRegistrationToken(ctx context.Context, id string) (RevokeRunnerRegistrationTokenRow, error)
 	RevokeSessionByTokens(ctx context.Context, arg RevokeSessionByTokensParams) (int64, error)
 	SelectAbandonedChecksWorkflows(ctx context.Context, abandonedChecks pgtype.Interval) ([]string, error)
+	// Picks a runner to hand the reviewer packet to, restricted to the connected
+	// set the caller already holds gRPC control streams for (sqlc.arg(runner_ids)).
+	// Deliberately simpler than ClaimSchedulableIssue: there is no competing
+	// issue to arbitrate over here, only one workflow's one review, so this reads
+	// without FOR UPDATE/SKIP LOCKED -- a race loses at ReopenJobForReview's own
+	// guard instead, which is a cheap, harmless no-op.
+	SelectEligibleReviewRunner(ctx context.Context, arg SelectEligibleReviewRunnerParams) (string, error)
 	SelectStrandedDeliveryWorkflows(ctx context.Context, strandedDelivery pgtype.Interval) ([]string, error)
+	// resumeStrandedReviewDispatches' (recovery.go) candidate set: a run whose
+	// developer execution completed and whose project opted into AI review, but
+	// whose inline dispatchReviewerJob call never actually offered a reviewer job
+	// -- typically because no runner was connected yet. The same guard
+	// GetReviewDispatchWorkflow uses (job still the completed developer job)
+	// doubles as "dispatch has not happened yet", so a run this sweep already
+	// redispatched successfully stops matching on its own.
+	SelectStrandedReviewDispatchWorkflows(ctx context.Context, strandedReview pgtype.Interval) ([]string, error)
+	// resumeStrandedReviewVerdicts' (recovery.go) candidate set: a reviewer
+	// execution finished (the job is 'completed' with role 'reviewer'), but the
+	// run is still sitting at 'waiting_ai_review' -- persistExecutionEvent
+	// committed the terminal event, then the process died before
+	// handleReviewCompletion's follow-on delivery/block decision landed.
+	SelectStrandedReviewVerdictWorkflows(ctx context.Context, strandedReview pgtype.Interval) ([]string, error)
 	SelectValidRegistrationToken(ctx context.Context, arg SelectValidRegistrationTokenParams) (string, error)
 	SelectWaitingGithubChecksWorkflows(ctx context.Context) ([]string, error)
 	SetProjectEnabled(ctx context.Context, arg SetProjectEnabledParams) (int64, error)
 	SetRunnerDraining(ctx context.Context, arg SetRunnerDrainingParams) error
 	SetWorkflowControlStatus(ctx context.Context, arg SetWorkflowControlStatusParams) error
+	// acceptOffer's planner-role branch: the same shape SetWorkflowPreparing is,
+	// called instead of it when the accepted job's role (AcceptJob's own RETURNING)
+	// is 'planner' rather than 'developer'.
 	SetWorkflowPlanningActive(ctx context.Context, id string) error
 	SetWorkflowPreparing(ctx context.Context, id string) error
 	SetWorkflowTerminalStatus(ctx context.Context, arg SetWorkflowTerminalStatusParams) error

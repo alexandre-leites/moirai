@@ -131,6 +131,14 @@ type projectConfig struct {
 	// reason RequireHumanApproval is -- a missing JSON key decodes to false,
 	// not an error.
 	RequirePlanning bool `json:"require_planning"`
+	// EnableAiReview opts a project into dispatching an independent reviewer
+	// execution after a developer execution reports success and before
+	// delivery (review.go's dispatchReviewerJob). Absent (the zero value,
+	// false) on every project created before this field existed, for the same
+	// reason RequireHumanApproval is: a missing JSON key decodes to false, not
+	// an error, so an existing project's behaviour is unchanged until it opts
+	// in. See persistExecutionEvent (server.go) for where it is read.
+	EnableAiReview bool `json:"enable_ai_review"`
 }
 
 // defaultExecutionTimeoutSeconds bounds a dispatched developer execution's
@@ -1289,27 +1297,28 @@ func (s *Core) ScheduleOnce(ctx context.Context) (bool, error) {
 	if lockRows != 1 {
 		return false, nil
 	}
-	if err := queries.CreateJob(ctx, db.CreateJobParams{ID: jobID, WorkflowRunID: workflowID, ProjectID: projectID, RunnerID: runnerID}); err != nil {
+	var config projectConfig
+	if err := json.Unmarshal(configuration, &config); err != nil {
+		return false, configurationError(err)
+	}
+	// A project that opted into RequirePlanning gets a 'planner' job: its
+	// first execution is a planner-role packet rather than the developer one,
+	// and dispatchImplementationJob (server.go) reopens this same job (app.jobs.
+	// workflow_run_id stays UNIQUE) from 'planner' back to 'developer' once
+	// that execution completes, carrying its plan forward as the developer
+	// packet's Plan context. See jobRolePlanner's doc comment (review.go).
+	role := jobRoleDeveloper
+	if config.RequirePlanning {
+		role = jobRolePlanner
+	}
+	if err := queries.CreateJob(ctx, db.CreateJobParams{ID: jobID, WorkflowRunID: workflowID, ProjectID: projectID, RunnerID: runnerID, Role: role}); err != nil {
 		return false, databaseError(err)
 	}
 	if err := queries.CreateJobOffer(ctx, db.CreateJobOfferParams{ID: offerID, JobID: jobID, RunnerID: runnerID}); err != nil {
 		return false, databaseError(err)
 	}
-	var config projectConfig
-	if err := json.Unmarshal(configuration, &config); err != nil {
-		return false, configurationError(err)
-	}
 	var packet map[string]any
 	if config.RequirePlanning {
-		// A planner-role packet goes out first; dispatchImplementationAfterPlanning
-		// (persistExecutionEvent) builds and sends the developer packet once it
-		// completes, re-offering this same job (see ReofferJobForImplementation's
-		// doc comment for why that is a second offer/accept/lease cycle rather
-		// than a second job). MarkWorkflowPlanningOffered is what lets acceptOffer
-		// tell the two offers apart later, since it only ever has the job ID.
-		if err := queries.MarkWorkflowPlanningOffered(ctx, workflowID); err != nil {
-			return false, databaseError(err)
-		}
 		if err := queries.IncrementPlanningAttempts(ctx, workflowID); err != nil {
 			return false, databaseError(err)
 		}
@@ -1472,21 +1481,24 @@ func (s *Core) acceptOffer(ctx context.Context, runnerID, jobID string) (int64, 
 		return 0, time.Time{}, databaseError(err)
 	}
 	generation, expiresAt := accepted.LeaseGeneration, accepted.LeaseExpiresAt.Time
-	// GetWorkflowPhaseForJob is how acceptOffer tells a planning offer apart
-	// from a developer one: it only ever has the job ID, never the task
-	// packet, and ScheduleOnce (or dispatchImplementationAfterPlanning) is
-	// what stamped this marker onto current_phase before the offer went out.
-	phase, err := queries.GetWorkflowPhaseForJob(ctx, jobID)
-	if err != nil {
-		return 0, time.Time{}, databaseError(err)
-	}
-	if phase == "planning_offered" {
-		err = queries.SetWorkflowPlanningActive(ctx, jobID)
-	} else {
-		err = queries.SetWorkflowPreparing(ctx, jobID)
-	}
-	if err != nil {
-		return 0, time.Time{}, databaseError(err)
+	// accepted.Role (AcceptJob's own RETURNING) is how acceptOffer tells a
+	// planning offer apart from a developer or reviewer one: it only ever has
+	// the job ID, never the task packet. A reviewer's own job offer being
+	// accepted must not move the run off StatusWaitingAiReview: unlike a
+	// developer's or a planner's job, there is no separate "in flight" status
+	// for a review -- StatusWaitingAiReview itself covers the whole of
+	// dispatch, offer, acceptance and execution, the same way StatusPreparing
+	// alone covers a developer's, and StatusPlanning a planner's, without a
+	// distinct "running" status of their own (see status.go).
+	switch accepted.Role {
+	case jobRoleDeveloper:
+		if err := queries.SetWorkflowPreparing(ctx, jobID); err != nil {
+			return 0, time.Time{}, databaseError(err)
+		}
+	case jobRolePlanner:
+		if err := queries.SetWorkflowPlanningActive(ctx, jobID); err != nil {
+			return 0, time.Time{}, databaseError(err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, time.Time{}, databaseError(err)
@@ -1571,7 +1583,7 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	workflowID, err := queries.RecordJobExecutionEvent(ctx, db.RecordJobExecutionEventParams{
+	recorded, err := queries.RecordJobExecutionEvent(ctx, db.RecordJobExecutionEventParams{
 		ID: event.GetJobId(), RunnerID: runnerID, LeaseGeneration: event.GetLeaseGeneration(),
 		EventSequence: event.GetEventSequence(), EventType: event.GetType(),
 	})
@@ -1581,6 +1593,18 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	if err != nil {
 		return databaseError(err)
 	}
+	workflowID, jobRole := recorded.WorkflowRunID, recorded.Role
+	// A reviewer's own "completed" event is not an ordinary developer success:
+	// its verdict, not its mere existence, decides what happens next, and that
+	// decision (handleReviewCompletion, review.go) needs the payload this
+	// transaction is about to commit, so it runs after commit, the same
+	// after-commit shape deliverWorkflow already runs in below. A planner's own
+	// "completed" event (#351) is the same shape again: the plan it produced,
+	// not its mere existence, is what dispatchImplementationJob needs, so it
+	// too runs after commit rather than being folded into the generic terminal
+	// handling below.
+	reviewerCompleted := jobRole == jobRoleReviewer && event.GetType() == "completed"
+	plannerCompleted := jobRole == jobRolePlanner && event.GetType() == "completed"
 	// The event type is stored unprefixed because it is a vocabulary shared with
 	// the console, which switches on bare "log", "started", "failed" and friends
 	// to build the timeline and the agent log pane. Writing "runner.log" here
@@ -1590,28 +1614,11 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	}); err != nil {
 		return databaseError(err)
 	}
-	if event.GetType() == "completed" {
-		// A "completed" event from a job currently running its planning
-		// execution (#351) means the plan is ready, not that the workflow's
-		// deliverable work is done -- it takes a completely different path
-		// than the generic terminal handling below: no StatusDelivering, no
-		// deliverWorkflow, and no project-lock release, since the same job
-		// is about to be re-offered for its developer execution instead.
-		workflowStatus, err := queries.GetWorkflowStatusByID(ctx, workflowID)
-		if err != nil {
-			return databaseError(err)
-		}
-		if Status(workflowStatus) == StatusPlanning {
-			dispatch, err := s.preparePlanningCompletion(ctx, queries, workflowID, event.GetJobId(), payloadJSON)
-			if err != nil {
-				return err
-			}
-			if err := tx.Commit(ctx); err != nil {
-				return databaseError(err)
-			}
-			return s.dispatchOrReleaseImplementation(dispatch)
-		}
-	}
+	// enteringReview is set inside the terminalEvent branch below, for a
+	// developer's "completed" event on a project with EnableAiReview set, and
+	// read again after commit to decide dispatchReviewerJob vs deliverWorkflow
+	// -- one aiReviewEnabled read inside the transaction, not two.
+	var enteringReview bool
 	if terminalEvent(event.GetType()) {
 		// The event type is the shared vocabulary and is stored as it arrived;
 		// the run's own terminal status is derived from it. An agent that
@@ -1640,56 +1647,105 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 		// fixed. The event row above still records the runner's own
 		// "completed", since that is the separate, shared vocabulary the
 		// console's event timeline switches on.
-		runStatus, blockingReason := Status(event.GetType()), ""
-		switch event.GetType() {
-		case "completed":
-			runStatus = StatusDelivering
-		case "failed":
-			if reason, blocked := agentBlockReason(payloadJSON); blocked {
-				runStatus, blockingReason = StatusBlocked, reason
-			}
-		}
-		if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
-			ID: workflowID, Status: runStatus.String(), Column3: blockingReason,
-		}); err != nil {
-			return databaseError(err)
-		}
-		if event.GetType() != "completed" {
-			if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
+		//
+		// A reviewer's own "completed" event is handled entirely separately,
+		// below and after commit (handleReviewCompletion): its status
+		// transition depends on a verdict this switch has no business parsing
+		// mid-transaction, and the run must stay at StatusWaitingAiReview,
+		// untouched, until that decision lands -- exactly the reasoning
+		// StatusDelivering's own doc comment already gives for why a run
+		// holding an in-progress status must not be mistaken for one at rest.
+		switch {
+		case reviewerCompleted:
+			// Touches nothing but updated_at (same status in, same status
+			// out), so resumeStrandedReviewVerdicts' age bound (recovery.go's
+			// strandedReviewVerdict) starts counting from this commit rather
+			// than from whenever the review was first dispatched -- a review
+			// execution can run for as long as its own timeout allows, and
+			// without this the sweep would race handleReviewCompletion's own
+			// inline call below on every single review.
+			if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
+				ID: workflowID, Status: StatusWaitingAiReview.String(), Column3: "",
+			}); err != nil {
 				return databaseError(err)
 			}
-			// V1 has no automatic retry: a run that lands on 'failed' or
-			// 'blocked' here is excluded from the scheduler's candidate set
-			// (ListQueueEntries, ClaimSchedulableIssue) by its own status,
-			// via the app.workflow_runs join those queries run, until
-			// RetryWorkflow supersedes it. Nothing needs writing to the issue
-			// itself any more -- see #268. A 'cancelled' event lands on a
-			// status that join does not exclude, so it is picked up again
-			// with no operator action, the same as an operator-cancelled or
-			// unanswered-offer run.
+		case plannerCompleted:
+			// Touches nothing but updated_at, the same reasoning
+			// reviewerCompleted's case gives: the run stays at StatusPlanning
+			// until dispatchImplementationJob (called after commit, below)
+			// reopens the same job for its developer execution and this
+			// status is overwritten by that job's own acceptOffer call into
+			// SetWorkflowPreparing.
+			if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
+				ID: workflowID, Status: StatusPlanning.String(), Column3: "",
+			}); err != nil {
+				return databaseError(err)
+			}
+		default:
+			runStatus, blockingReason := Status(event.GetType()), ""
+			switch event.GetType() {
+			case "completed":
+				runStatus = StatusDelivering
+				enabled, cfgErr := aiReviewEnabled(ctx, queries, workflowID)
+				if cfgErr != nil {
+					return cfgErr
+				}
+				if enabled {
+					runStatus = StatusWaitingAiReview
+					enteringReview = true
+				}
+			case "failed":
+				if jobRole == jobRoleReviewer {
+					// A reviewer execution that crashed or was cancelled
+					// without producing a verdict is not an ordinary agent
+					// failure to fold into agentBlockReason's developer-shaped
+					// account: block outright with a reason distinct from it,
+					// since #354's repair loop is meant to treat this the same
+					// as a rejecting verdict, not as a developer mistake.
+					runStatus, blockingReason = StatusBlocked, "independent AI review execution failed"
+				} else if reason, blocked := agentBlockReason(payloadJSON); blocked {
+					runStatus, blockingReason = StatusBlocked, reason
+				}
+			case "cancelled":
+				if jobRole == jobRoleReviewer {
+					runStatus, blockingReason = StatusBlocked, "independent AI review execution was cancelled"
+				}
+			}
+			if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
+				ID: workflowID, Status: runStatus.String(), Column3: blockingReason,
+			}); err != nil {
+				return databaseError(err)
+			}
+			if runStatus != StatusDelivering && runStatus != StatusWaitingAiReview {
+				if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
+					return databaseError(err)
+				}
+				// V1 has no automatic retry: a run that lands on 'failed' or
+				// 'blocked' here is excluded from the scheduler's candidate set
+				// (ListQueueEntries, ClaimSchedulableIssue) by its own status,
+				// via the app.workflow_runs join those queries run, until
+				// RetryWorkflow supersedes it. Nothing needs writing to the issue
+				// itself any more -- see #268. A 'cancelled' event lands on a
+				// status that join does not exclude, so it is picked up again
+				// with no operator action, the same as an operator-cancelled or
+				// unanswered-offer run.
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return databaseError(err)
 	}
-	if event.GetType() == "completed" {
+	switch {
+	case reviewerCompleted:
+		return s.handleReviewCompletion(ctx, workflowID, payloadJSON)
+	case plannerCompleted:
+		return s.dispatchImplementationJob(ctx, workflowID, event.GetJobId(), payloadJSON)
+	case enteringReview:
+		return s.dispatchReviewerJob(ctx, workflowID)
+	case event.GetType() == "completed":
 		return s.deliverWorkflow(ctx, workflowID)
 	}
 	return nil
-}
-
-// implementationDispatch is what preparePlanningCompletion commits before
-// dispatchOrReleaseImplementation sends (or, on a disconnected runner, undoes)
-// the developer offer it describes -- the same commit-then-enqueue shape
-// ScheduleOnce itself uses, since a gRPC send must never happen inside an open
-// transaction its own failure would need to roll back.
-type implementationDispatch struct {
-	workflowID      string
-	jobID           string
-	runnerID        string
-	projectID       string
-	packetJSON      string
-	leaseGeneration int64
 }
 
 // planFromPayload extracts the plan a planner execution's terminal payload
@@ -1717,83 +1773,90 @@ func planFromPayload(payloadJSON string) []string {
 	return plan
 }
 
-// preparePlanningCompletion runs inside persistExecutionEvent's own
-// transaction, once a "completed" event arrives for a job currently at
-// StatusPlanning: it records the plan, re-offers that same job (app.jobs.
-// workflow_run_id stays UNIQUE -- see ReofferJobForImplementation) for its
-// developer execution, and returns what dispatchOrReleaseImplementation needs
-// to deliver that offer after the transaction commits.
-func (s *Core) preparePlanningCompletion(ctx context.Context, queries *db.Queries, workflowID, jobID, payloadJSON string) (implementationDispatch, error) {
+// dispatchImplementationJob runs once persistExecutionEvent's own transaction
+// has committed a planner's "completed" event (#351) -- the same after-commit
+// shape dispatchReviewerJob (review.go, #353) already runs in for a
+// developer's own "completed" event. It records the plan, reopens the
+// workflow run's one job (app.jobs.workflow_run_id stays UNIQUE) from
+// 'planner' back to 'developer' via ReopenJobForImplementation -- the same
+// one-job-many-roles mechanism ReopenJobForReview uses, just reopened
+// backwards, from the first execution to the second rather than after it --
+// and offers the resulting developer packet, carrying the plan forward as its
+// Plan context.
+//
+// Unlike dispatchReviewerJob, a disconnected or unreachable runner is not
+// retried by a recovery sweep: the job is re-offered to the same runner_id
+// planning already ran on (no fresh eligible-runner selection, since planning
+// and implementation are one continuous attempt, not an independent second
+// pass), and a failed enqueue undoes the offer via releaseUndeliveredOffer --
+// the same fallback ScheduleOnce's own enqueue failure uses -- rather than
+// leaving the run stranded waiting for a runner that may never reconnect.
+func (s *Core) dispatchImplementationJob(ctx context.Context, workflowID, jobID, payloadJSON string) error {
 	plan := planFromPayload(payloadJSON)
 	summary := ""
 	if len(plan) > 0 {
 		summary = plan[0]
 	}
-	if err := queries.RecordPlanSummary(ctx, db.RecordPlanSummaryParams{ID: workflowID, PlanSummary: summary}); err != nil {
-		return implementationDispatch{}, databaseError(err)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return databaseError(err)
 	}
-	// A dedicated event, distinct from the "completed" row CreateWorkflowEvent
-	// already wrote above, so the console's timeline reads "the plan is ready"
-	// rather than "an agent execution completed" for a phase an operator has
-	// no other way to tell apart from the developer one that follows it.
+	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
+	if err := queries.RecordPlanSummary(ctx, db.RecordPlanSummaryParams{ID: workflowID, PlanSummary: summary}); err != nil {
+		return databaseError(err)
+	}
+	// A dedicated event, distinct from the "completed" row persistExecutionEvent
+	// already wrote, so the console's timeline reads "the plan is ready" rather
+	// than "an agent execution completed" for a phase an operator has no other
+	// way to tell apart from the developer one that follows it.
 	planPayload, err := json.Marshal(map[string]any{"plan": plan})
 	if err != nil {
-		return implementationDispatch{}, databaseError(err)
+		return databaseError(err)
 	}
 	if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
 		WorkflowRunID: workflowID, EventType: "plan.recorded", Severity: "info", Column4: planPayload,
 	}); err != nil {
-		return implementationDispatch{}, databaseError(err)
+		return databaseError(err)
 	}
-	reoffer, err := queries.ReofferJobForImplementation(ctx, jobID)
+	reopened, err := queries.ReopenJobForImplementation(ctx, jobID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return implementationDispatch{}, errors.New("planning job is no longer available to re-offer")
+		return nil // raced with another dispatch attempt for this same job
 	}
 	if err != nil {
-		return implementationDispatch{}, databaseError(err)
+		return databaseError(err)
 	}
 	facts, err := queries.GetImplementationDispatchFacts(ctx, workflowID)
 	if err != nil {
-		return implementationDispatch{}, databaseError(err)
+		return databaseError(err)
 	}
 	var config projectConfig
 	if err := json.Unmarshal([]byte(facts.Configuration), &config); err != nil {
-		return implementationDispatch{}, configurationError(err)
+		return configurationError(err)
 	}
 	packet, err := developerPacket(jobID, facts.ProjectID, facts.ExternalID, facts.Title, facts.Body, facts.RepositoryMode,
 		textutil.TextValue(facts.RepositoryUrl), textutil.TextValue(facts.LocalRepositoryPath), facts.DefaultBranch,
 		textutil.TextValue(facts.BranchName), config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), plan)
 	if err != nil {
-		return implementationDispatch{}, err
+		return err
 	}
 	encoded, err := json.Marshal(packet)
 	if err != nil {
-		return implementationDispatch{}, databaseError(err)
+		return databaseError(err)
 	}
-	if err := queries.CreateJobOffer(ctx, db.CreateJobOfferParams{ID: idgen.NewID(), JobID: jobID, RunnerID: reoffer.RunnerID}); err != nil {
-		return implementationDispatch{}, databaseError(err)
+	if err := queries.CreateJobOffer(ctx, db.CreateJobOfferParams{ID: idgen.NewID(), JobID: jobID, RunnerID: reopened.RunnerID}); err != nil {
+		return databaseError(err)
 	}
-	if err := queries.MarkWorkflowImplementationOffered(ctx, workflowID); err != nil {
-		return implementationDispatch{}, databaseError(err)
+	if err := tx.Commit(ctx); err != nil {
+		return databaseError(err)
 	}
-	return implementationDispatch{
-		workflowID: workflowID, jobID: jobID, runnerID: reoffer.RunnerID, projectID: facts.ProjectID,
-		packetJSON: string(encoded), leaseGeneration: reoffer.LeaseGeneration,
-	}, nil
-}
-
-// dispatchOrReleaseImplementation delivers the developer offer
-// preparePlanningCompletion just committed, or -- if the runner that ran
-// planning is no longer connected -- undoes it exactly the way ScheduleOnce's
-// own enqueue failure does, via the same releaseUndeliveredOffer.
-func (s *Core) dispatchOrReleaseImplementation(dispatch implementationDispatch) error {
 	message := &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: &runnerv1.JobOffer{
-		JobId: dispatch.jobID, LeaseGeneration: dispatch.leaseGeneration, TaskPacketJson: dispatch.packetJSON,
+		JobId: jobID, LeaseGeneration: reopened.LeaseGeneration, TaskPacketJson: string(encoded),
 	}}}
-	if s.enqueue(dispatch.runnerID, message) {
+	if s.enqueue(reopened.RunnerID, message) {
 		return nil
 	}
-	return s.releaseUndeliveredOffer(dispatch.jobID, dispatch.workflowID, dispatch.projectID)
+	return s.releaseUndeliveredOffer(jobID, workflowID, facts.ProjectID)
 }
 
 // jsonUnicodeEscapeMarker is how a `\uXXXX` escape spells in JSON text --

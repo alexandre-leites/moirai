@@ -67,6 +67,26 @@ const (
 	// StatusBlocked with the reviewer's comment as the reason, the same
 	// terminal shape an agent's own declared block uses.
 	StatusWaitingHuman Status = "waiting_human"
+	// StatusWaitingAiReview marks a run whose developer execution reported
+	// success and whose project opted into the independent-AI-review gate
+	// (projectConfig's EnableAiReview): persistExecutionEvent sets it in place
+	// of StatusDelivering for that project, and dispatchReviewerJob
+	// (review.go) reopens the run's one job for a second, independent
+	// execution -- a fresh reviewer session with no access to the developer's
+	// own conversation, per AGENTS.md's "use fresh context for independent AI
+	// review". The run holds its project lock across this status exactly like
+	// StatusWaitingHuman: it is still doing work, just work a second agent
+	// is doing instead of the first.
+	//
+	// handleReviewCompletion (review.go) is what moves a run away from this
+	// status once the reviewer's own terminal event arrives: an approving
+	// verdict hands off to deliverWorkflow, the same path a project with AI
+	// review disabled always used; a rejecting verdict (or a reviewer
+	// execution that crashed without one) ends the run at StatusBlocked with
+	// the verdict recorded in app.ai_reviews -- the same terminal shape a
+	// failed deterministic pipeline check would use, and the signal #354's
+	// repair loop is meant to consume.
+	StatusWaitingAiReview Status = "waiting_ai_review"
 	// StatusCompleted marks a run whose pull request GitHub has confirmed
 	// merged (observeWorkflow) -- the true terminal "done" state. See
 	// StatusDelivering for the status this run passed through on the way
@@ -119,6 +139,7 @@ var knownStatuses = map[Status]bool{
 	StatusPlanning:            true,
 	StatusWaitingGithubChecks: true,
 	StatusWaitingHuman:        true,
+	StatusWaitingAiReview:     true,
 	StatusDelivering:          true,
 	StatusCompleted:           true,
 	StatusFailed:              true,

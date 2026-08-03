@@ -78,8 +78,12 @@ VALUES ($1, $2)
 ON CONFLICT(project_id) DO NOTHING;
 
 -- name: CreateJob :exec
-INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, lease_generation, offered_at)
-VALUES (sqlc.arg(id), sqlc.arg(workflow_run_id), sqlc.arg(project_id), sqlc.arg(runner_id)::uuid, 'offered', 1, now());
+-- role (028_workflow_run_ai_review.sql, #353) is 'developer' for every
+-- ordinary dispatch, matching the column's own default -- ScheduleOnce passes
+-- 'planner' instead for a project that opted into RequirePlanning (#351), so
+-- the run's first execution is a planning one rather than the developer one.
+INSERT INTO app.jobs(id, workflow_run_id, project_id, runner_id, status, role, lease_generation, offered_at)
+VALUES (sqlc.arg(id), sqlc.arg(workflow_run_id), sqlc.arg(project_id), sqlc.arg(runner_id)::uuid, 'offered', sqlc.arg(role), 1, now());
 
 -- name: CreateJobOffer :exec
 INSERT INTO app.job_offers(id, job_id, runner_id, status, expires_at)
@@ -106,38 +110,26 @@ WHERE job_id = $1 AND runner_id = $2 AND status = 'offered' AND expires_at > now
 RETURNING id::text AS id;
 
 -- name: AcceptJob :one
+-- role travels back to acceptOffer (server.go) so it can decide whether to
+-- call SetWorkflowPreparing at all: a reviewer's job offer being accepted
+-- must not move the run off StatusWaitingAiReview the way a developer's
+-- always has (see acceptOffer's own comment for why).
 UPDATE app.jobs SET status = 'preparing', accepted_at = now(), lease_expires_at = now() + sqlc.arg(lease_duration)::interval
 WHERE id = sqlc.arg(id) AND runner_id = sqlc.arg(runner_id)::uuid AND status = 'offered'
-RETURNING lease_generation, lease_expires_at;
+RETURNING lease_generation, lease_expires_at, role;
 
 -- name: SetWorkflowPreparing :exec
 UPDATE app.workflow_runs SET status = 'preparing', updated_at = now()
 WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
   AND status NOT IN ('completed','failed','blocked','cancelled');
 
--- name: GetWorkflowPhaseForJob :one
--- acceptOffer reads this before deciding whether the offer it is accepting is
--- the planning job's or the developer job's: it only ever has the job ID, not
--- the task packet, so ScheduleOnce's MarkWorkflowPlanningOffered marker (set
--- on current_phase before the offer goes out, distinct from the ordinary
--- 'offered' both phases otherwise share) is what tells the two apart.
-SELECT current_phase FROM app.workflow_runs
-WHERE id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1);
-
--- name: MarkWorkflowPlanningOffered :exec
--- Sets a marker distinct from plain 'offered' the instant ScheduleOnce
--- dispatches a planner packet instead of a developer one -- see
--- GetWorkflowPhaseForJob. status stays 'offered', the generic value both
--- phases start from.
-UPDATE app.workflow_runs SET current_phase = 'planning_offered', updated_at = now() WHERE id = $1;
-
 -- name: SetWorkflowPlanningActive :exec
+-- acceptOffer's planner-role branch: the same shape SetWorkflowPreparing is,
+-- called instead of it when the accepted job's role (AcceptJob's own RETURNING)
+-- is 'planner' rather than 'developer'.
 UPDATE app.workflow_runs SET status = 'planning', current_phase = 'planning', updated_at = now()
 WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
   AND status NOT IN ('completed','failed','blocked','cancelled');
-
--- name: GetWorkflowStatusByID :one
-SELECT status FROM app.workflow_runs WHERE id = $1;
 
 -- name: IncrementPlanningAttempts :exec
 UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_at = now() WHERE id = $1;
@@ -145,32 +137,31 @@ UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_
 -- name: RecordPlanSummary :exec
 UPDATE app.workflow_runs SET plan_summary = NULLIF(sqlc.arg(plan_summary)::text, ''), updated_at = now() WHERE id = sqlc.arg(id);
 
--- name: MarkWorkflowImplementationOffered :exec
--- Flips the marker GetWorkflowPhaseForJob reads back to plain 'offered' when
--- the developer packet is dispatched on the same job that just ran planning,
--- so the developer job's own acceptance takes the ordinary SetWorkflowPreparing
--- branch rather than being mistaken for another planning offer.
-UPDATE app.workflow_runs SET status = 'offered', current_phase = 'offered', updated_at = now() WHERE id = $1;
-
--- name: ReofferJobForImplementation :one
--- Re-offers the one job a workflow run is ever given (app.jobs.workflow_run_id
--- is UNIQUE) for its developer execution, once its planning execution has
--- completed. This is a second offer/accept/lease cycle for the same job row,
--- not a second job: the runner's own offer/lease state (runner/internal/
--- control's OfferState) keys everything by job ID and forgets it entirely once
--- Abandon runs at the end of the first (planning) execution, so a fresh
--- JobOffer for the same ID with an incremented lease_generation is
--- indistinguishable, to the runner, from any other new job.
+-- name: ReopenJobForImplementation :one
+-- Reuses the workflow run's single job row for its developer execution once
+-- planning has completed (app.jobs.workflow_run_id stays UNIQUE), exactly the
+-- shape ReopenJobForReview (review.sql, #353) reuses it for an independent
+-- review after a developer execution -- here reopened backwards, from
+-- 'planner' to 'developer', as the very first execution's follow-up rather
+-- than a second one after it. Guarded on the job still being the completed
+-- planner job, the same guard a racing caller (there is only ever one, this
+-- is not retried by any sweep) would lose.
+--
+-- The runner's own offer/lease state (runner/internal/control's OfferState)
+-- keys everything by job ID and forgets it entirely once Abandon runs at the
+-- end of the planner execution, so a fresh JobOffer for the same ID with an
+-- incremented lease_generation is indistinguishable, to the runner, from any
+-- other new job -- no runner-side change was needed for this reopening.
 UPDATE app.jobs SET
-  status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
-  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL
-WHERE id = $1 AND status = 'completed'
+  role = 'developer', status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
+  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL, recovery_reason = NULL
+WHERE id = $1 AND role = 'planner' AND status = 'completed'
 RETURNING lease_generation, runner_id::text AS runner_id;
 
 -- name: GetImplementationDispatchFacts :one
--- Everything dispatchImplementationAfterPlanning needs to build a developer
--- packet for a workflow whose planning execution just completed, mirroring
--- what ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+-- Everything dispatchImplementationJob needs to build a developer packet for
+-- a workflow whose planning execution just completed, mirroring what
+-- ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
 -- dispatch.
 SELECT wr.project_id::text AS project_id, wr.branch_name,
        i.external_id, i.title, i.body,
@@ -212,7 +203,7 @@ UPDATE app.jobs SET
   started_at = CASE WHEN sqlc.arg(event_type) = 'started' THEN COALESCE(started_at, now()) ELSE started_at END,
   finished_at = CASE WHEN sqlc.arg(event_type) IN ('completed','failed','cancelled') THEN now() ELSE finished_at END
 WHERE id = sqlc.arg(id) AND runner_id = sqlc.arg(runner_id)::uuid AND lease_generation = sqlc.arg(lease_generation) AND status IN ('preparing','running') AND lease_expires_at > now() AND last_event_sequence < sqlc.arg(event_sequence)
-RETURNING workflow_run_id::text AS workflow_run_id;
+RETURNING workflow_run_id::text AS workflow_run_id, role;
 
 -- name: CreateWorkflowEvent :exec
 INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload)
