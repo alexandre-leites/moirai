@@ -17,6 +17,8 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/db"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -31,7 +33,7 @@ func (s *Server) SetProjectCredential(ctx context.Context, request *controlv1.Se
 		return nil, err
 	}
 	kind, err := validateCredential(request.GetKind(), request.GetFilePath())
-	if err != nil || !validID(request.GetProjectId()) || request.GetValue() == "" || len(request.GetValue()) > 64*1024 {
+	if err != nil || !idgen.ValidID(request.GetProjectId()) || request.GetValue() == "" || len(request.GetValue()) > 64*1024 {
 		return nil, status.Error(codes.InvalidArgument, "project credential is invalid")
 	}
 	aead, err := configuredCipher()
@@ -72,7 +74,7 @@ func (s *Server) ClearProjectCredential(ctx context.Context, request *controlv1.
 		return nil, err
 	}
 	kind, err := validateCredential(request.GetKind(), "")
-	if err != nil || !validID(request.GetProjectId()) {
+	if err != nil || !idgen.ValidID(request.GetProjectId()) {
 		return nil, status.Error(codes.InvalidArgument, "project credential is invalid")
 	}
 	rowsAffected, err := s.queries.DeleteProjectCredential(ctx, db.DeleteProjectCredentialParams{
@@ -109,7 +111,7 @@ func (s *Server) ResolveJobSecret(ctx context.Context, request *runnerv1.Resolve
 	if !secureContext(ctx) {
 		return nil, status.Error(codes.FailedPrecondition, "the control plane will not serve a secret over an insecure channel")
 	}
-	if !validID(request.GetRunnerId()) || !validID(request.GetJobId()) || request.GetCredential() == "" || request.GetLeaseGeneration() < 1 {
+	if !idgen.ValidID(request.GetRunnerId()) || !idgen.ValidID(request.GetJobId()) || request.GetCredential() == "" || request.GetLeaseGeneration() < 1 {
 		return nil, status.Error(codes.InvalidArgument, "secret resolution request is invalid")
 	}
 	if err := s.authenticateRunner(ctx, request.GetRunnerId(), request.GetCredential()); err != nil {
@@ -152,7 +154,7 @@ func (s *Server) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobS
 	if !secureContext(ctx) {
 		return nil, status.Error(codes.FailedPrecondition, "the control plane will not accept a secret over an insecure channel")
 	}
-	if !validID(request.GetRunnerId()) || !validID(request.GetJobId()) || request.GetCredential() == "" || request.GetLeaseGeneration() < 1 || request.GetValue() == "" || len(request.GetValue()) > 64*1024 {
+	if !idgen.ValidID(request.GetRunnerId()) || !idgen.ValidID(request.GetJobId()) || request.GetCredential() == "" || request.GetLeaseGeneration() < 1 || request.GetValue() == "" || len(request.GetValue()) > 64*1024 {
 		return nil, status.Error(codes.InvalidArgument, "secret storage request is invalid")
 	}
 	if err := s.authenticateRunner(ctx, request.GetRunnerId(), request.GetCredential()); err != nil {
@@ -212,7 +214,7 @@ func (s *Server) fencedJobProject(ctx context.Context, jobID, runnerID string, g
 }
 
 func (s *Server) projectCredentials(ctx context.Context, projectID string) ([]*controlv1.ProjectCredential, error) {
-	if !validID(projectID) {
+	if !idgen.ValidID(projectID) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
 	exists, err := s.queries.ProjectExists(ctx, projectID)
@@ -230,8 +232,8 @@ func (s *Server) projectCredentials(ctx context.Context, projectID string) ([]*c
 	for _, row := range rows {
 		credentials = append(credentials, &controlv1.ProjectCredential{
 			Kind:      row.Kind,
-			CreatedAt: timestamp(row.CreatedAt.Time),
-			UpdatedAt: timestamp(row.UpdatedAt.Time),
+			CreatedAt: textutil.Timestamp(row.CreatedAt.Time),
+			UpdatedAt: textutil.Timestamp(row.UpdatedAt.Time),
 			FilePath:  row.FilePath,
 		})
 	}

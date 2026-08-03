@@ -10,6 +10,7 @@ import (
 	"time"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -83,9 +84,9 @@ func (h *harness) startStream(t *testing.T, lastEventID string) (*fakeEventStrea
 // app.workflow_events rows can reference it.
 func (h *harness) workflowRun(projectID string) (workflowID string) {
 	h.t.Helper()
-	issueID := newID()
+	issueID := idgen.NewID()
 	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github',$3,$3,'Test issue','https://example.test/issues/'||$3,'open',true,now(),now())`, issueID, projectID, issueID[:8])
-	workflowID = newID()
+	workflowID = idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, workflowID, projectID, issueID, "thread-"+workflowID)
 	return workflowID
 }
@@ -186,7 +187,7 @@ func TestStreamEventsEmitsRunnerEvents(t *testing.T) {
 	stream, _ := h.startStream(t, "")
 	time.Sleep(200 * time.Millisecond)
 
-	runnerID := newID()
+	runnerID := idgen.NewID()
 	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1.2.3','["gpu"]'::jsonb,now())`, runnerID, "runner-"+runnerID[:8])
 
 	waitFor(t, 5*time.Second, func() bool { return len(stream.snapshot()) >= 1 })

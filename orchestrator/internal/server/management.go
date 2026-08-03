@@ -11,6 +11,9 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	"github.com/loop-engineering/orchestrator/internal/db"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
+	"github.com/loop-engineering/orchestrator/internal/secrethash"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -21,7 +24,7 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 	if err != nil {
 		return nil, err
 	}
-	if request.GetNewPassword() != "" && !validPassword(request.GetNewPassword()) {
+	if request.GetNewPassword() != "" && !secrethash.ValidPassword(request.GetNewPassword()) {
 		return nil, status.Error(codes.InvalidArgument, "new password is invalid")
 	}
 	if request.GetNewEmail() != "" && (len(request.GetNewEmail()) > 254 || !strings.Contains(request.GetNewEmail(), "@")) {
@@ -45,18 +48,18 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 	response.Username, response.Email, response.DisplayName = row.Username, row.Email, row.DisplayName
 	storedHash := row.PasswordHash
 	if request.GetNewPassword() != "" {
-		matched, err := passwordMatches(request.GetCurrentPassword(), storedHash)
+		matched, err := secrethash.PasswordMatches(request.GetCurrentPassword(), storedHash)
 		if err != nil || !matched {
 			return nil, status.Error(codes.Unauthenticated, "current password is incorrect")
 		}
-		storedHash, err = passwordHash(request.GetNewPassword())
+		storedHash, err = secrethash.PasswordHash(request.GetNewPassword())
 		if err != nil {
 			return nil, status.Error(codes.Internal, "hash password")
 		}
 		if err := queries.UpdateUserPassword(ctx, db.UpdateUserPasswordParams{ID: actor.id, PasswordHash: storedHash}); err != nil {
 			return nil, databaseError(err)
 		}
-		if err := queries.RevokeOtherUserSessions(ctx, db.RevokeOtherUserSessionsParams{UserID: actor.id, TokenHash: hashSecret(md.Get(sessionHeader)[0])}); err != nil {
+		if err := queries.RevokeOtherUserSessions(ctx, db.RevokeOtherUserSessionsParams{UserID: actor.id, TokenHash: secrethash.HashSecret(md.Get(sessionHeader)[0])}); err != nil {
 			return nil, databaseError(err)
 		}
 	}
@@ -91,20 +94,20 @@ func (s *Server) CreateRunnerRegistrationToken(ctx context.Context, request *con
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode runner token labels")
 	}
-	token := randomSecret()
+	token := idgen.RandomSecret()
 	expiresAt, err := s.queries.CreateRunnerRegistrationToken(ctx, db.CreateRunnerRegistrationTokenParams{
-		ID:              newID(),
-		TokenHash:       hashSecret(token),
+		ID:              idgen.NewID(),
+		TokenHash:       secrethash.HashSecret(token),
 		CreatedByUserID: actor.id,
 		AllowedLabels:   []byte(encodedLabels),
 	})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if err := audit(ctx, s.queries, actor.id, "runner.token.create", "runner_registration_token", hashSecret(token)); err != nil {
+	if err := audit(ctx, s.queries, actor.id, "runner.token.create", "runner_registration_token", secrethash.HashSecret(token)); err != nil {
 		return nil, err
 	}
-	return &controlv1.CreateRunnerRegistrationTokenResponse{Token: token, ExpiresAt: timestamp(expiresAt.Time)}, nil
+	return &controlv1.CreateRunnerRegistrationTokenResponse{Token: token, ExpiresAt: textutil.Timestamp(expiresAt.Time)}, nil
 }
 
 func (s *Server) ListRunnerRegistrationTokens(ctx context.Context, _ *controlv1.ListRunnerRegistrationTokensRequest) (*controlv1.ListRunnerRegistrationTokensResponse, error) {
@@ -131,7 +134,7 @@ func (s *Server) RevokeRunnerRegistrationToken(ctx context.Context, request *con
 	if err != nil {
 		return nil, err
 	}
-	if !validID(request.GetTokenId()) {
+	if !idgen.ValidID(request.GetTokenId()) {
 		return nil, status.Error(codes.InvalidArgument, "runner token ID is invalid")
 	}
 	row, err := s.queries.RevokeRunnerRegistrationToken(ctx, request.GetTokenId())
@@ -167,7 +170,7 @@ func (s *Server) SubmitHumanDecision(ctx context.Context, request *controlv1.Sub
 	}
 	id := request.GetWorkflowRunId()
 	comment := strings.TrimSpace(request.GetComment())
-	if !validID(id) || len(comment) > 1024 {
+	if !idgen.ValidID(id) || len(comment) > 1024 {
 		return nil, status.Error(codes.InvalidArgument, "human decision request is invalid")
 	}
 	var action string
@@ -215,8 +218,8 @@ func (s *Server) requireUserMutation(ctx context.Context) (actor, error) {
 	if len(md.Get(csrfHeader)) != 1 {
 		return actor{}, status.Error(codes.PermissionDenied, "CSRF token is invalid")
 	}
-	expected, err := s.queries.GetSessionCSRFHash(ctx, hashSecret(md.Get(sessionHeader)[0]))
-	if err != nil || subtle.ConstantTimeCompare([]byte(expected), []byte(hashSecret(md.Get(csrfHeader)[0]))) != 1 {
+	expected, err := s.queries.GetSessionCSRFHash(ctx, secrethash.HashSecret(md.Get(sessionHeader)[0]))
+	if err != nil || subtle.ConstantTimeCompare([]byte(expected), []byte(secrethash.HashSecret(md.Get(csrfHeader)[0]))) != 1 {
 		return actor{}, status.Error(codes.PermissionDenied, "CSRF token is invalid")
 	}
 	return current, nil
@@ -227,12 +230,12 @@ func scanRegistrationToken(id, labels string, created, expires, used, revoked pg
 	if err := json.Unmarshal([]byte(labels), &token.AllowedLabels); err != nil {
 		return nil, configurationError(err)
 	}
-	token.CreatedAt, token.ExpiresAt = timestamp(created.Time), timestamp(expires.Time)
+	token.CreatedAt, token.ExpiresAt = textutil.Timestamp(created.Time), textutil.Timestamp(expires.Time)
 	if used.Valid {
-		token.UsedAt = timestamp(used.Time)
+		token.UsedAt = textutil.Timestamp(used.Time)
 	}
 	if revoked.Valid {
-		token.RevokedAt = timestamp(revoked.Time)
+		token.RevokedAt = textutil.Timestamp(revoked.Time)
 	}
 	return token, nil
 }
