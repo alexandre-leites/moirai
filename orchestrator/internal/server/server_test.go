@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -265,16 +266,85 @@ func TestAgentBlockReasonSanitizesAgentProse(t *testing.T) {
 	}
 }
 
+// Unicode format characters are the same lie as a terminal escape and reach
+// further, because HTML escaping does not stop them: a right-to-left override
+// makes the console render a reason as text other than the one stored. None of
+// them is a control character as far as unicode.IsControl is concerned.
+func TestAgentBlockReasonStripsBidiAndFormatCharacters(t *testing.T) {
+	// U+202E right-to-left override, U+2066 isolate, U+200B zero-width space,
+	// U+FEFF byte-order mark, U+00AD soft hyphen.
+	for _, hidden := range []string{"\u202e", "\u2066", "\u200b", "\ufeff", "\u00ad"} {
+		encoded, err := json.Marshal(map[string]any{"blocked": true, "summary": "credential " + hidden + "rotated"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reason, blocked := agentBlockReason(string(encoded))
+		if !blocked {
+			t.Fatalf("the declaration carrying %+q was not read", hidden)
+		}
+		if strings.Contains(reason, hidden) {
+			t.Fatalf("reason = %+q kept %+q, so the console can render it as text other than what is stored", reason, hidden)
+		}
+		if !strings.Contains(reason, "credential") || !strings.Contains(reason, "rotated") {
+			t.Fatalf("reason = %q lost the agent's words along with %+q", reason, hidden)
+		}
+	}
+}
+
 // The runner bounds the summary and the remaining work it sends, but the
 // orchestrator does not get to assume a runner it does not control did so.
+// Every case here is multi-byte throughout, because a byte-sliced bound would
+// leave invalid UTF-8 and PostgreSQL rejects that on a text column.
 func TestAgentBlockReasonIsBounded(t *testing.T) {
-	// Multi-byte throughout, so a byte-sliced bound would leave invalid UTF-8
-	// and PostgreSQL would reject the write.
-	entries := make([]string, 64)
-	for index := range entries {
-		entries[index] = strings.Repeat("汉", 500)
+	long := func(count int) []string {
+		entries := make([]string, count)
+		for index := range entries {
+			entries[index] = strings.Repeat("汉", 500)
+		}
+		return entries
 	}
-	encoded, err := json.Marshal(map[string]any{"blocked": true, "summary": strings.Repeat("é", 8000), "remainingWork": entries})
+	for name, payload := range map[string]map[string]any{
+		"one oversized summary":       {"blocked": true, "summary": strings.Repeat("é", 8000)},
+		"one oversized entry":         {"blocked": true, "summary": "short", "remainingWork": long(1)},
+		"many oversized entries":      {"blocked": true, "summary": "short", "remainingWork": long(64)},
+		"an oversized summary and 64": {"blocked": true, "summary": strings.Repeat("é", 8000), "remainingWork": long(64)},
+		"many short entries":          {"blocked": true, "remainingWork": strings.Split(strings.Repeat("汉汉汉 ", 200), " ")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason, blocked := agentBlockReason(string(encoded))
+			if !blocked {
+				t.Fatal("the declaration was not read")
+			}
+			if len(reason) > maxBlockingReasonBytes {
+				t.Fatalf("reason is %d bytes, over the %d byte bound blocking_reason carries", len(reason), maxBlockingReasonBytes)
+			}
+			if !utf8.ValidString(reason) {
+				t.Fatalf("reason %q is not valid UTF-8; PostgreSQL rejects it on a text column", reason)
+			}
+			// An opened list must close. A reason trailing an unclosed
+			// "(remaining work:" reads as malformed rather than as truncated.
+			if strings.Contains(reason, remainingWorkLead) && !strings.HasSuffix(reason, ")") {
+				t.Fatalf("reason ends %q with its remaining-work list unclosed", reason[max(0, len(reason)-40):])
+			}
+		})
+	}
+}
+
+// A verbose agent must not be able to push its own list of remaining work out
+// of the reason. Bounding the summary on its own did exactly that: the summary
+// alone filled the budget, the loop broke on its first iteration, and the
+// operator saw truncated prose with no sign that any remaining work was
+// reported at all -- which is the actionable half of the account.
+func TestAgentBlockReasonKeepsRemainingWorkBesideAVerboseSummary(t *testing.T) {
+	encoded, err := json.Marshal(map[string]any{
+		"blocked":       true,
+		"summary":       strings.Repeat("prose ", 400),
+		"remainingWork": []string{"obtain DEPLOY_KEY", "re-run the migration"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,28 +352,49 @@ func TestAgentBlockReasonIsBounded(t *testing.T) {
 	if !blocked {
 		t.Fatal("the declaration was not read")
 	}
+	if !strings.Contains(reason, "prose") {
+		t.Fatalf("reason = %q dropped the summary entirely", reason)
+	}
+	if !strings.Contains(reason, "obtain DEPLOY_KEY") {
+		t.Fatalf("reason = %q lost the remaining work to a verbose summary", reason)
+	}
 	if len(reason) > maxBlockingReasonBytes {
-		t.Fatalf("reason is %d bytes, over the %d byte bound blocking_reason carries", len(reason), maxBlockingReasonBytes)
-	}
-	if !utf8.ValidString(reason) {
-		t.Fatalf("reason %q is not valid UTF-8; PostgreSQL rejects it on a text column", reason)
-	}
-	if !strings.HasSuffix(reason, reasonTruncationMarker) {
-		t.Fatalf("reason ends %q, want the truncation to be marked", reason[max(0, len(reason)-32):])
+		t.Fatalf("reason is %d bytes, over the %d byte bound", len(reason), maxBlockingReasonBytes)
 	}
 }
 
 // moirai_active_workflows says "runs that have not reached a terminal status",
-// and the SQL behind it is generated from this one list. Routing an agent block
-// to `blocked` only keeps that promise while `blocked` is on the list -- and
-// the partial index in 020_metrics_indexes.sql excludes exactly these four.
+// and the SQL behind it is generated from `terminalStatuses`. Routing an agent
+// block to `blocked` only keeps that promise while `blocked` is on that list.
+//
+// The migration is read rather than restated because it is an independent copy:
+// `020_metrics_indexes.sql` hardcodes its own status list in a partial index,
+// and a fifth terminal status added to the Go slice and not to the index leaves
+// the gauge's count scanning the whole history instead of the in-flight set.
+// Comparing the two is the only thing here that can fail on its own.
 func TestBlockedIsATerminalStatusTheActiveGaugeExcludes(t *testing.T) {
 	if !terminalStatus("blocked") {
 		t.Fatal("blocked is not terminal, so moirai_active_workflows counts an agent-declared block as work still in flight")
 	}
-	for _, state := range []string{"completed", "failed", "blocked", "cancelled"} {
-		if !terminalStatus(state) || !strings.Contains(terminalStatusList, "'"+state+"'") {
-			t.Fatalf("terminalStatuses/%s omits %q; the gauge and the metrics index would disagree", terminalStatusList, state)
+	migration, err := os.ReadFile("../../migrations/020_metrics_indexes.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, definition, found := strings.Cut(string(migration), "workflow_runs_active_idx")
+	if !found {
+		t.Fatal("020_metrics_indexes.sql no longer defines workflow_runs_active_idx")
+	}
+	_, predicate, found := strings.Cut(definition, " WHERE ")
+	if !found {
+		t.Fatal("workflow_runs_active_idx is no longer partial, so it no longer tracks the terminal statuses at all")
+	}
+	predicate, _, _ = strings.Cut(predicate, ";")
+	for _, state := range terminalStatuses {
+		if !strings.Contains(predicate, "'"+state+"'") {
+			t.Fatalf("workflow_runs_active_idx excludes %s but terminalStatuses has %q; the gauge's count no longer matches its index", predicate, state)
 		}
+	}
+	if excluded := strings.Count(predicate, "'"); excluded != 2*len(terminalStatuses) {
+		t.Fatalf("workflow_runs_active_idx excludes %s, which is not the %d statuses terminalStatuses lists", predicate, len(terminalStatuses))
 	}
 }

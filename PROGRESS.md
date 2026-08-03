@@ -969,7 +969,9 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
     "compose.tls-stack.yaml is out of date". Pre-existing and environment-dependent, not caused by
     this branch: no compose file is touched by it, and the only difference is a leading `name:` key
     that Docker Compose v5.3.1 emits and the committed generated file (rendered by an older
-    version) does not. CI runs neither `compose-overlays` nor `validate`, so it is invisible there.
+    version) does not. No CI job runs `make compose-overlays` or the `validate` Make target — the
+    job named `validate` in `ci.yml` is a fan-in gate (`run: true`) over the other jobs — so it is
+    invisible in CI, and CI on this branch is green.
 - Out of scope and untouched: **#298** (web console specification citing deleted Python symbols) and
   **#300** (console event-timeline parsing of the retired Python event envelope). #300 in particular
   still owns the timeline: with this change a blocked run's *status* and *blocking reason* render
@@ -977,3 +979,43 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   payload through the retired nested envelope, so the timeline line for that event is still wrong.
   That is #300's fix, not this one's. The runner's event vocabulary and the lock/parking behavior
   were deliberately left alone.
+- Adversarial self-review of the diff, and what it changed. The review cleared the things that
+  would have been worst — no reachable path turns a genuine crash into a `blocked` run (the runner
+  gates the flag on `err == nil`, and `Dispatcher.Execute` forces `Status = "failed"` whenever the
+  process failed), no panic, out-of-range slice, unbounded loop or bound violation in the composer,
+  `moirai_active_workflows` unaffected, lock release and issue parking byte-for-byte identical for
+  all four outcomes, and `completed_at` semantics unchanged for every reachable path. It found five
+  real defects, all fixed before merge:
+  1. **A long summary silently discarded every remaining-work entry.** The summary was bounded to
+     1024 bytes *on its own*, so a 1 KiB summary plus the prefix already exceeded the budget and the
+     entry loop broke on its first iteration — the operator saw truncated prose with no sign that
+     any remaining work had been reported. The budget is now shared: when there is remaining work,
+     the summary may take at most half of what the prefix leaves.
+     `TestAgentBlockReasonKeepsRemainingWorkBesideAVerboseSummary` pins it.
+  2. **Both bounding tests were vacuous on the path they were named for.** Because of (1) they fed
+     an oversized summary *and* a long list, so the multi-entry append — the only place the
+     separator and the closing parenthesis run — had zero coverage. `TestAgentBlockReasonIsBounded`
+     is now five cases including short-summary/long-entries and many-short-entries.
+  3. **Unicode format characters survived sanitisation.** `unicode.IsControl` is false for every
+     rune above U+00FF, so a right-to-left override (U+202E), a bidi isolate, a zero-width space or
+     a BOM reached `blocking_reason` intact — the console would render a reason as text other than
+     the one stored, which HTML escaping does not stop. `unicode.Cf` is now stripped too, pinned by
+     `TestAgentBlockReasonStripsBidiAndFormatCharacters`.
+  4. **The terminal-status test was a tautology.** `terminalStatusList` is *derived* from
+     `terminalStatuses`, so asserting one contains the other could never fail, while the real drift
+     risk — `020_metrics_indexes.sql` hardcodes an independent copy of the list — went untested. The
+     test now reads the migration and compares. Proved non-vacuous by adding a fifth terminal status
+     to the Go slice: `workflow_runs_active_idx excludes status NOT IN ('completed', 'blocked',
+     'failed', 'cancelled') but terminalStatuses has "abandoned"`.
+  5. **Truncation could leave an unclosed `(remaining work:`.** The list's room now stops one byte
+     short so its closing parenthesis always fits, asserted in both suites.
+  Also acted on: the `COALESCE` comment claimed it protects against a writer that cannot reach that
+  state (both other writers of `blocking_reason` terminate the run *and* fence its job, and a
+  terminal event must pass the fence), so it now says it is a backstop rather than a live case; and
+  `TestOnlyAFailedEventIsReadForABlockDeclaration` pins the `event.GetType() == "failed"` guard,
+  since a `completed` event diverted to `blocked` would fail `deliverWorkflow`'s
+  `WHERE id=$1 AND status='completed'` and lose a delivered branch.
+  Left as observed, not fixed: `agentReasonText` turns an ANSI introducer into a space but leaves
+  its parameter bytes as literal text (`[31m`), where the runner's `sanitizeLogText` consumes the
+  whole sequence. The injection is defused either way — no ESC means no escape sequence — and
+  duplicating an escape parser in the orchestrator to tidy the residue was not worth it.

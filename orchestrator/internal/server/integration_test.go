@@ -854,7 +854,7 @@ func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
 		// cannot be tested here: jsonb rejects one anywhere in the payload,
 		// so the whole event insert fails before the reason is composed --
 		// a separate defect, pinned against the composer in server_test.go.
-		"summary":       "credential missing\x1b[31m and " + strings.Repeat("é", 4000),
+		"summary":       "credential missing\x1b[31m and more prose",
 		"remainingWork": entries,
 	})
 	if err != nil {
@@ -879,5 +879,44 @@ func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
 	}
 	if !strings.Contains(state.blocking, "credential missing") {
 		t.Fatalf("blocking_reason = %q lost the agent's words", state.blocking)
+	}
+	// The remaining-work list is the half an operator acts on, so it has to
+	// survive the bound rather than be crowded out by prose, and the list it
+	// opens has to close.
+	if !strings.Contains(state.blocking, "\u6f22") || !strings.HasSuffix(state.blocking, ")") {
+		t.Fatalf("blocking_reason = %q dropped the remaining work or left its list unclosed", state.blocking)
+	}
+}
+
+// Only a `failed` event is read for a block declaration. The guard matters
+// because `completed` is the delivery path: deliverWorkflow opens the pull
+// request under `WHERE id=$1 AND status='completed'`, so a `completed` event
+// diverted to `blocked` would lose a delivered branch, and a `cancelled` one
+// reached no outcome of its own to declare. Neither carries the flag today —
+// the runner only sets it beside a `failed` event — so this pins the guard
+// rather than any current runner behaviour.
+func TestOnlyAFailedEventIsReadForABlockDeclaration(t *testing.T) {
+	for eventType, want := range map[string]string{"completed": "waiting_github_checks", "cancelled": "cancelled"} {
+		t.Run(eventType, func(t *testing.T) {
+			h := newHarness(t)
+			h.project()
+			runnerID := h.runner()
+			jobID, workflowID := h.runJob(runnerID)
+
+			if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+				JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: eventType,
+				PayloadJson: `{"status":"blocked","blocked":true,"summary":"the deployment credential is missing"}`,
+			}); err != nil {
+				t.Fatalf("persistExecutionEvent(%s): %v", eventType, err)
+			}
+
+			state := h.runState(workflowID)
+			if state.status != want {
+				t.Fatalf("a %s event carrying blocked:true left the run %q, want %q", eventType, state.status, want)
+			}
+			if state.blocking != "" {
+				t.Fatalf("blocking_reason = %q for a %s event, want it left empty", state.blocking, eventType)
+			}
+		})
 	}
 }

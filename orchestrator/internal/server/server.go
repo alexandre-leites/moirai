@@ -1192,8 +1192,12 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		// console's needs-attention triage, which is waiting_human ∪ blocked.
 		//
 		// blocking_reason and terminal_reason are left untouched when no reason
-		// was derived, which is every path but this one: a crash has nothing of
-		// its own to say and must not blank a reason another writer recorded.
+		// was derived, which is every path but this one, so an ordinary failure
+		// writes exactly the columns it wrote before. No competing value should
+		// exist to preserve — the other two writers of those columns terminate
+		// the run and fence its job, and this statement is only reached by an
+		// event that passed the fence — so the COALESCE is a backstop against
+		// that reasoning changing, not a case anything is known to hit.
 		runStatus, blockingReason := event.GetType(), ""
 		if event.GetType() == "failed" {
 			if reason, blocked := agentBlockReason(event.GetPayloadJson()); blocked {
@@ -1685,7 +1689,15 @@ const agentBlockPrefix = "the agent reported itself blocked"
 // orchestrator must not depend on a runner it does not control to have done so.
 const maxBlockingReasonBytes = 1024
 
-const reasonTruncationMarker = "…"
+const (
+	reasonTruncationMarker = "…"
+	summaryLead            = ": "
+	remainingWorkLead      = " (remaining work: "
+	remainingWorkJoin      = "; "
+	// A slot too small to say anything in is not worth the separator that
+	// introduces it, so the list stops rather than trailing an ellipsis.
+	minReasonEntryBytes = 16
+)
 
 // agentBlockReason reads a terminal `failed` payload for the agent's own
 // declaration that it stopped deliberately, and composes the operator-facing
@@ -1729,27 +1741,48 @@ func agentBlockReason(payloadJSON string) (string, bool) {
 // already carries: one bounded line of plain English, written to
 // blocking_reason and terminal_reason together, exactly as the operator block
 // path and terminateWorkflow write it.
+//
+// The budget is shared rather than spent first-come. Bounding the summary on
+// its own let a verbose agent fill the reason with prose and push its own list
+// of remaining work out of it silently — and the list is the actionable half of
+// the account, the part a human reads to decide what to do next. So when there
+// is remaining work to report, the summary may take at most half of what the
+// prefix leaves, and the list's room stops one byte short so its closing
+// parenthesis always fits: a reason ending in an unclosed "(remaining work:"
+// reads as malformed rather than as truncated.
 func composeBlockReason(summary string, remaining []string) string {
+	items := make([]string, 0, len(remaining))
+	for _, entry := range remaining {
+		if text := agentReasonText(entry); text != "" {
+			items = append(items, text)
+		}
+	}
 	reason := agentBlockPrefix
 	if text := agentReasonText(summary); text != "" {
-		reason += ": " + boundedReason(text)
+		share := maxBlockingReasonBytes - len(reason) - len(summaryLead)
+		if len(items) > 0 {
+			share /= 2
+		}
+		if text = boundedReason(text, share); text != "" {
+			reason += summaryLead + text
+		}
 	}
-	separator := " (remaining work: "
-	for _, entry := range remaining {
-		if len(reason) >= maxBlockingReasonBytes {
+	lead := remainingWorkLead
+	for _, entry := range items {
+		room := maxBlockingReasonBytes - len(reason) - len(lead) - len(")")
+		if room < minReasonEntryBytes {
 			break
 		}
-		text := agentReasonText(entry)
-		if text == "" {
-			continue
-		}
-		reason += separator + boundedReason(text)
-		separator = "; "
+		reason += lead + boundedReason(entry, room)
+		lead = remainingWorkJoin
 	}
-	if separator == "; " {
+	if lead == remainingWorkJoin {
 		reason += ")"
 	}
-	return boundedReason(reason)
+	// The arithmetic above already holds the result to the bound; this is the
+	// backstop, because what is on the other side of it is a text column that
+	// rejects the write outright rather than storing something too long.
+	return boundedReason(reason, maxBlockingReasonBytes)
 }
 
 // agentReasonText makes agent-written prose fit to store and to show. The text
@@ -1760,9 +1793,15 @@ func composeBlockReason(summary string, remaining []string) string {
 // wherever the value is later printed. Control characters therefore become
 // spaces, invalid UTF-8 is dropped, and the runs of whitespace that leaves are
 // collapsed, because blocking_reason is rendered as a single line.
+//
+// Unicode format characters go the same way, and they are not covered by
+// unicode.IsControl: a right-to-left override (U+202E) or a bidirectional
+// isolate makes the console render a reason as text other than the one stored,
+// which is the same class of lie as a terminal escape and reaches further,
+// since it survives HTML escaping.
 func agentReasonText(value string) string {
 	cleaned := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return ' '
 		}
 		return r
@@ -1770,17 +1809,22 @@ func agentReasonText(value string) string {
 	return strings.Join(strings.Fields(cleaned), " ")
 }
 
-// boundedReason caps a reason at maxBlockingReasonBytes without splitting a
-// rune. A byte slice through a multi-byte character would leave invalid UTF-8,
-// which PostgreSQL rejects on a text column -- the whole terminal event would
-// fail, for no reason other than where a bound happened to land.
-func boundedReason(value string) string {
-	if len(value) <= maxBlockingReasonBytes {
+// boundedReason caps text at limit bytes without splitting a rune, marking what
+// it cut. A byte slice through a multi-byte character would leave invalid
+// UTF-8, which PostgreSQL rejects on a text column — the whole terminal event
+// would fail, for no reason other than where a bound happened to land. A limit
+// with no room for even one rune plus the marker yields nothing, so a caller
+// never appends a separator introducing an empty fragment.
+func boundedReason(value string, limit int) string {
+	if len(value) <= limit {
 		return value
 	}
-	end := maxBlockingReasonBytes - len(reasonTruncationMarker)
+	end := limit - len(reasonTruncationMarker)
 	for end > 0 && !utf8.RuneStart(value[end]) {
 		end--
+	}
+	if end <= 0 {
+		return ""
 	}
 	return value[:end] + reasonTruncationMarker
 }
