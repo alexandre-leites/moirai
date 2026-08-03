@@ -14,7 +14,7 @@ name: CI
 # - docker compose: v2 plugin
 # - curl: >= 7.68
 # - bash: >= 5.0
-# - base: Ubuntu 22.04 / 24.04 LTS
+# - base: Ubuntu 20.04+ LTS (glibc >= 2.31)
 
 on:
   push:
