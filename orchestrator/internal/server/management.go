@@ -87,12 +87,16 @@ func (s *Server) CreateRunnerRegistrationToken(ctx context.Context, request *con
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "runner token labels are invalid")
 	}
+	encodedLabels, err := jsonLabels(labels)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "encode runner token labels")
+	}
 	token := randomSecret()
 	expiresAt, err := s.queries.CreateRunnerRegistrationToken(ctx, db.CreateRunnerRegistrationTokenParams{
 		ID:              newID(),
 		TokenHash:       hashSecret(token),
 		CreatedByUserID: actor.id,
-		AllowedLabels:   []byte(jsonLabels(labels)),
+		AllowedLabels:   []byte(encodedLabels),
 	})
 	if err != nil {
 		return nil, databaseError(err)
