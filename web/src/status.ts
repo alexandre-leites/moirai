@@ -177,25 +177,24 @@ export const GATE_LABEL: Record<GateState, string> = {
  * moves this rendering to the orchestrator so every client agrees on the wording.
  * Until then it lives here.
  *
- * The branches below were written against the retired Python writer, which
- * wrapped every runner event in an envelope (`{job_id, runner_id, …, payload:
- * {…}}`) and emitted recovery event types of its own. `persistExecutionEvent`
- * (orchestrator/internal/server/server.go) stores the runner's payload flat and
- * unwrapped, and the Go vocabulary is `started`/`log`/`progress`/`completed`/
- * `failed`/`cancelled` plus `workflow_transition`, `pull_request.created`,
- * `pull_request.merged` and `delivery.failed` — so the nested reads and the
- * `offer_unanswered`/`lease_recovery_offered`/`execution_requeued` branches no
- * longer match anything, and the pull-request events fall through to the
- * default. Realigning them is issue #300, not a comment's job.
+ * `persistExecutionEvent` (orchestrator/internal/server/server.go) stores the
+ * runner's payload flat and unwrapped — there is no envelope to unwrap. The Go
+ * vocabulary is `started`/`log`/`progress`/`completed`/`failed`/`cancelled`
+ * (runner/internal/control/events.go's `validEventType`) plus
+ * `workflow_transition`, `pull_request.created`, `pull_request.merged` and
+ * `delivery.failed` (orchestrator/internal/server/{server,delivery}.go). The
+ * Python writer's envelope and its recovery event types
+ * (`offer_unanswered`/`lease_recovery_offered`/`execution_requeued`) were
+ * retired with it in #247 and are not read here: no writer in the current
+ * system produces them, so a fallback for that shape would be dead code.
  */
 export function executionError(event: WorkflowEvent): string | null {
   if (event.type !== "failed") return null;
-  return text(asRecord(asRecord(event.payload).payload).error) || null;
+  return text(asRecord(event.payload).error) || null;
 }
 
 export function describeEvent(event: WorkflowEvent): { text: string; phase: string; warn: boolean } {
   const payload = asRecord(event.payload);
-  const inner = asRecord(payload.payload);
 
   switch (event.type) {
     case "workflow_transition": {
@@ -212,9 +211,13 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
       };
     }
     case "started":
-      return { text: `Agent execution started on runner ${text(payload.runner_id) || "unknown"}`, phase: "execution", warn: false };
+      // The runner's started payload is just `{"status":"running"}`
+      // (control_loop.go's `execute`) — no runner or job identity travels with
+      // it, and the events API doesn't surface either alongside the payload
+      // (see `WorkflowEvent` in api.ts), so there is nothing more to report.
+      return { text: "Agent execution started", phase: "execution", warn: false };
     case "progress":
-      return { text: text(inner.message) || "Agent reported progress", phase: "execution", warn: false };
+      return { text: text(payload.message) || "Agent reported progress", phase: "execution", warn: false };
     case "log": {
       // The timeline reads as sentences, so the escape sequences the agent wrote
       // for a terminal are dropped here rather than rendered. The agent log pane
@@ -225,7 +228,10 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
     case "completed":
       return { text: "Agent execution completed", phase: "execution", warn: false };
     case "failed": {
-      const exit = inner.exit_code ?? payload.exit_code;
+      // `terminalPayload` (runner/internal/dispatch/control_loop.go) always
+      // sets `exitCode`, but guard `undefined` anyway rather than rendering
+      // "exit undefined" if a future writer omits it.
+      const exit = payload.exitCode;
       return {
         text: exit === undefined ? "Agent execution failed" : `Agent execution failed (exit ${String(exit)})`,
         phase: "execution",
@@ -234,12 +240,18 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
     }
     case "cancelled":
       return { text: "Agent execution cancelled", phase: "execution", warn: true };
-    case "offer_unanswered":
-      return { text: `Job offer went unanswered — ${text(payload.reason) || "no runner accepted it"}`, phase: "schedule", warn: true };
-    case "lease_recovery_offered":
-      return { text: `Lease expired on runner ${text(payload.runner_id) || "unknown"} — the job was re-offered`, phase: "recovery", warn: true };
-    case "execution_requeued":
-      return { text: `Execution lost and requeued (${text(payload.role) || "agent"}, attempt ${String(payload.attempt ?? "?")})`, phase: "recovery", warn: true };
+    case "pull_request.created": {
+      // delivery.go's INSERT writes `{"number": "<pr.Number>", "url": "..."}`.
+      const number = text(payload.number);
+      return { text: number ? `Pull request #${number} opened` : "Pull request opened", phase: "pr", warn: false };
+    }
+    case "pull_request.merged":
+      return { text: "Pull request merged", phase: "merge", warn: false };
+    case "delivery.failed": {
+      // Written by `terminateWorkflow` with `{"reason": "<cause>"}`.
+      const reason = text(payload.reason);
+      return { text: reason ? `Delivery failed: ${reason}` : "Delivery failed", phase: "event", warn: true };
+    }
     default:
       return { text: event.type.replaceAll("_", " "), phase: "event", warn: false };
   }
@@ -252,20 +264,15 @@ function shortPhase(status: string): string {
 }
 
 /**
- * The text a `log` event carried. The nested shape it digs through is the
- * envelope the retired Python writer wrapped runner events in
- * (`{job_id, runner_id, …, payload: {…}}`); the Go writer stores the runner's
- * payload flat, which the plain-string and top-level cases below cover (#300).
+ * The text a `log` event carried. `EmitLog` (runner/internal/control/events.go)
+ * writes `{"message": "<chunk>", "chunkIndex": …, "chunkCount": …}` flat, which
+ * the top-level `message` key below covers; `log`/`text`/`line` are kept as
+ * fallbacks for any other flat shape a future writer might use.
  */
 export function logText(payload: unknown): string | null {
   if (typeof payload === "string") return payload;
   if (!payload || typeof payload !== "object") return null;
   const record = payload as Record<string, unknown>;
-  const nested = record.payload;
-  if (nested && typeof nested === "object") {
-    const value = logText(nested);
-    if (value) return value;
-  }
   for (const key of ["message", "log", "text", "line"]) {
     if (typeof record[key] === "string") return record[key] as string;
   }

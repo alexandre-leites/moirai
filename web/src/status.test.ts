@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Workflow } from "./api";
 import {
-  ATTEMPT_BUDGETS, PHASES, attemptRows, describeEvent, deriveGates, logText, reachedPhase, statusMeta,
+  ATTEMPT_BUDGETS, PHASES, attemptRows, describeEvent, deriveGates, executionError, logText, reachedPhase, statusMeta,
 } from "./status";
 import { workflow } from "./test-console";
 
@@ -104,30 +104,66 @@ describe("describeEvent", () => {
     expect(described.text).toBe("reopened by manual retry");
   });
 
-  it("flags the recovery and failure events as warnings", () => {
-    expect(describeEvent({ id: "1", type: "offer_unanswered", createdAt: "", payload: { reason: "ttl" } }).warn).toBe(true);
-    expect(describeEvent({ id: "2", type: "execution_requeued", createdAt: "", payload: { role: "developer", attempt: 2 } }).warn).toBe(true);
-    expect(describeEvent({ id: "3", type: "failed", createdAt: "", payload: { payload: { exit_code: 1 } } }))
-      .toMatchObject({ warn: true });
+  it("has no runner identity to report on the runner's started payload", () => {
+    // control_loop.go's `execute` emits `{"status":"running"}` and the events
+    // API carries no runner/job id alongside the payload.
+    const described = describeEvent({ id: "1", type: "started", createdAt: "", payload: { status: "running" } });
+    expect(described.text).toBe("Agent execution started");
+    expect(described.warn).toBe(false);
   });
 
-  it("reads a log line out of the envelope the orchestrator wraps runner events in", () => {
+  it("reads the flat exitCode terminalPayload writes, not a nested exit_code", () => {
     const described = describeEvent({
-      id: "4", type: "log", createdAt: "",
-      payload: { job_id: "j1", runner_id: "loom-01", payload: { message: "applying plan step 3/6" } },
+      id: "2", type: "failed", createdAt: "",
+      payload: { status: "failed", exitCode: 1, error: "agent reported status blocked without a summary" },
+    });
+    expect(described.text).toBe("Agent execution failed (exit 1)");
+    expect(described.warn).toBe(true);
+  });
+
+  it("renders the three delivery events delivery.go writes instead of falling through to default", () => {
+    expect(describeEvent({ id: "3", type: "pull_request.created", createdAt: "", payload: { number: "42", url: "https://example.test/pull/42" } }).text)
+      .toBe("Pull request #42 opened");
+    expect(describeEvent({ id: "4", type: "pull_request.merged", createdAt: "", payload: {} }).text)
+      .toBe("Pull request merged");
+    const failed = describeEvent({ id: "5", type: "delivery.failed", createdAt: "", payload: { reason: "external delivery failed: no runner available" } });
+    expect(failed.text).toBe("Delivery failed: external delivery failed: no runner available");
+    expect(failed.warn).toBe(true);
+  });
+
+  it("reads a log line out of the flat payload EmitLog writes", () => {
+    const described = describeEvent({
+      id: "6", type: "log", createdAt: "",
+      payload: { message: "applying plan step 3/6", chunkIndex: 0, chunkCount: 1 },
     });
     expect(described.text).toBe("applying plan step 3/6");
   });
 
   it("shows an unknown event type as itself instead of swallowing it", () => {
-    expect(describeEvent({ id: "5", type: "some_new_event", createdAt: "", payload: {} }).text)
+    expect(describeEvent({ id: "7", type: "some_new_event", createdAt: "", payload: {} }).text)
       .toBe("some new event");
   });
 });
 
+describe("executionError", () => {
+  it("reads the flat error field terminalPayload writes on a failed event", () => {
+    const event = { id: "1", type: "failed", createdAt: "", payload: { status: "failed", exitCode: 1, error: "boom" } };
+    expect(executionError(event)).toBe("boom");
+  });
+
+  it("returns null for non-failed events and for a failed event without an error", () => {
+    expect(executionError({ id: "2", type: "completed", createdAt: "", payload: { status: "completed" } })).toBeNull();
+    expect(executionError({ id: "3", type: "failed", createdAt: "", payload: { status: "failed", exitCode: 1 } })).toBeNull();
+  });
+});
+
 describe("logText", () => {
+  it("reads the flat message key EmitLog writes", () => {
+    expect(logText({ message: "applying plan step 3/6", chunkIndex: 0, chunkCount: 1 })).toBe("applying plan step 3/6");
+  });
+
   it("returns null when there is no text anywhere in the payload", () => {
-    expect(logText({ job_id: "j1", payload: { exit_code: 0 } })).toBeNull();
+    expect(logText({ status: "running" })).toBeNull();
     expect(logText(null)).toBeNull();
   });
 });
