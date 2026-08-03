@@ -569,6 +569,9 @@ func TestEventReporterRetainsEveryExpiredGenerationOfAJob(t *testing.T) {
 }
 
 func TestEventReporterRestoresEvictedEventWhenPersistFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write anywhere")
+	}
 	outboxDirectory := t.TempDir()
 	outboxPath := filepath.Join(outboxDirectory, "events.json")
 	disconnected := errors.New("disconnected")

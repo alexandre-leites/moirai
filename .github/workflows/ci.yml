@@ -71,6 +71,18 @@ jobs:
   test-postgres-integration:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    # Runs in a container with the service's published port reached over
+    # --network host, not directly on the runner: a job that runs directly on
+    # the runner depends on the *runner machine's* own network stack seeing
+    # the service's host-published port, which breaks for any self-hosted
+    # runner that itself executes inside a container without a network
+    # namespace shared with the Docker host -- the "connection refused to
+    # localhost:5432" failure mode this replaced. --network host attaches this
+    # container to the same host network the service's port is actually
+    # published on, regardless of the runner process's own namespace.
+    container:
+      image: golang:1.25.12
+      options: --network host
     env:
       LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
     services:
