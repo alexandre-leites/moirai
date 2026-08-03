@@ -97,6 +97,13 @@ describe("describeEvent", () => {
     expect(described.warn).toBe(false);
   });
 
+  it("renders the reason the Go orchestrator's retry transition carries, instead of a generic message", () => {
+    const described = describeEvent({
+      id: "2", type: "workflow_transition", createdAt: "", payload: { reason: "reopened by manual retry" },
+    });
+    expect(described.text).toBe("reopened by manual retry");
+  });
+
   it("flags the recovery and failure events as warnings", () => {
     expect(describeEvent({ id: "1", type: "offer_unanswered", createdAt: "", payload: { reason: "ttl" } }).warn).toBe(true);
     expect(describeEvent({ id: "2", type: "execution_requeued", createdAt: "", payload: { role: "developer", attempt: 2 } }).warn).toBe(true);

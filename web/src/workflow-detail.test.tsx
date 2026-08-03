@@ -45,6 +45,21 @@ describe("WorkflowDetailPage", () => {
     expect(button(container, /Retry workflow/)).toBeTruthy();
   });
 
+  it("shows a cancelled banner with a retry affordance, since cancelled runs are retryable server-side", async () => {
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "cancelled" }) });
+    const container = await mountDetail(api);
+    expect(container.querySelector(".banner")?.textContent).toContain("Cancelled.");
+    expect(button(container, /Retry workflow/)).toBeTruthy();
+  });
+
+  it("does not claim retry carries prior-failure context, since V1 does not carry any", async () => {
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "failed", blockingReason: "Offer expired" }) });
+    const container = await mountDetail(api);
+    await click(button(container, /Retry workflow/));
+    expect(document.querySelector("#toast")?.textContent).not.toContain("prior-failure context");
+    expect(document.querySelector("#toast")?.textContent).toContain("reopened");
+  });
+
   it("posts the decision and its comment when the gate is approved", async () => {
     const submitWorkflowDecision = vi.fn(async () => workflow({ status: "merging" }));
     const api = stubApi({
