@@ -473,7 +473,7 @@ func TestBlockedIsATerminalStatusTheActiveGaugeExcludes(t *testing.T) {
 	}
 	predicate, _, _ = strings.Cut(predicate, ";")
 	for _, state := range terminalStatuses {
-		if !strings.Contains(predicate, "'"+state+"'") {
+		if !strings.Contains(predicate, "'"+state.String()+"'") {
 			t.Fatalf("workflow_runs_active_idx excludes %s but terminalStatuses has %q; the gauge's count no longer matches its index", predicate, state)
 		}
 	}

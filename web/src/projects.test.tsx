@@ -27,7 +27,7 @@ describe("ProjectsPage", () => {
   it("links the run currently holding a project's lock", async () => {
     const api = stubApi({
       listProjects: async () => [project()],
-      listWorkflows: async () => [workflow({ id: "wf-9", projectId: "project-1", status: "implementing", issueExternalId: "#103" })],
+      listWorkflows: async () => [workflow({ id: "wf-9", projectId: "project-1", status: "preparing", issueExternalId: "#103" })],
     });
     const container = await mountView(<ProjectsPage api={api} />, api);
 

@@ -19,7 +19,7 @@ class FakeEventSource {
 }
 
 const RUNS = [
-  workflow({ id: "wf-1", status: "implementing", issueExternalId: "#103", issueTitle: "Close execution requests" }),
+  workflow({ id: "wf-1", status: "preparing", issueExternalId: "#103", issueTitle: "Close execution requests" }),
   workflow({
     id: "wf-2", status: "waiting_human", issueExternalId: "#58", issueTitle: "Fix flaky token refresh",
     branchName: "agent/58-flaky-token-refresh",

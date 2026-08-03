@@ -20,8 +20,8 @@ export function workflow(overrides: Partial<Workflow> = {}): Workflow {
   return {
     id: "wf-1",
     projectId: "project-1",
-    status: "implementing",
-    phase: "implementing",
+    status: "preparing",
+    phase: "preparing",
     issueExternalId: "#103",
     issueTitle: "Close execution requests on terminal transitions",
     branchName: "agent/103-close-execution-requests",
@@ -101,7 +101,7 @@ export function event(overrides: Partial<WorkflowEvent> = {}): WorkflowEvent {
     id: "10",
     type: "workflow_transition",
     createdAt: NOW,
-    payload: { status: "implementing" },
+    payload: { status: "preparing" },
     ...overrides,
   };
 }

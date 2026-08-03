@@ -103,7 +103,7 @@ func TestEventStreamDeliversWorkflowAndTearsDown(t *testing.T) {
 
 	client.events <- &controlv1.ControlPlaneEvent{
 		Id: "42", EventType: "workflow",
-		Workflow: &controlv1.Workflow{Id: "wf-1", ProjectId: "p-1", Status: "implementing", Phase: "implementing"},
+		Workflow: &controlv1.Workflow{Id: "wf-1", ProjectId: "p-1", Status: "preparing", Phase: "preparing"},
 	}
 	select {
 	case <-rec.wrote:
@@ -124,7 +124,7 @@ func TestEventStreamDeliversWorkflowAndTearsDown(t *testing.T) {
 	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("content type %q", got)
 	}
-	if !strings.Contains(rec.body(), `"status":"implementing"`) {
+	if !strings.Contains(rec.body(), `"status":"preparing"`) {
 		t.Fatalf("workflow event missing: %q", rec.body())
 	}
 }

@@ -20,7 +20,7 @@ describe("PhaseThread", () => {
   });
 
   it("spins thread behind the run and leaves the rest dashed", async () => {
-    const container = await mount(<PhaseThread workflow={workflow({ status: "ai_review", reviewCycles: 1 })} />);
+    const container = await mount(<PhaseThread workflow={workflow({ status: "preparing", reviewCycles: 1 })} />);
     // Cubic curves, not straight lines: the spun thread has to read as thread.
     expect(spun(container)?.getAttribute("d")).toContain("C");
     expect(ahead(container)?.getAttribute("d")).toContain("L");
@@ -28,7 +28,7 @@ describe("PhaseThread", () => {
   });
 
   it("draws the spindle on the current phase", async () => {
-    const container = await mount(<PhaseThread workflow={workflow({ status: "implementing" })} />);
+    const container = await mount(<PhaseThread workflow={workflow({ status: "preparing" })} />);
     expect(container.querySelector(".spindle-core")).not.toBeNull();
   });
 

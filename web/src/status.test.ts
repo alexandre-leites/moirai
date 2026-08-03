@@ -10,9 +10,9 @@ const at = (phase: (typeof PHASES)[number]) => PHASES.indexOf(phase);
 describe("statusMeta", () => {
   it("maps the domain statuses to the labels the specification names", () => {
     expect(statusMeta("waiting_human").label).toBe("Needs decision");
-    expect(statusMeta("local_pipeline").label).toBe("Pipeline");
+    expect(statusMeta("waiting_github_checks").label).toBe("Waiting on checks");
     expect(statusMeta("completed")).toMatchObject({ label: "Delivered", variant: "ok", pulse: false });
-    expect(statusMeta("repairing")).toMatchObject({ variant: "warn", pulse: true });
+    expect(statusMeta("preparing")).toMatchObject({ variant: "run", pulse: true });
   });
 
   it("names a status added server-side rather than dropping it", () => {
@@ -24,9 +24,9 @@ describe("reachedPhase", () => {
   it("reads progress off the attempt counters, not the status alone", () => {
     expect(reachedPhase(workflow({ planningAttempts: 0, implementationAttempts: 0, status: "preparing" })))
       .toBe(at("prepare"));
-    expect(reachedPhase(workflow({ planningAttempts: 1, implementationAttempts: 0, status: "planning" })))
+    expect(reachedPhase(workflow({ planningAttempts: 1, implementationAttempts: 0, status: "preparing" })))
       .toBe(at("plan"));
-    expect(reachedPhase(workflow({ reviewCycles: 2, status: "ai_review" }))).toBe(at("review"));
+    expect(reachedPhase(workflow({ reviewCycles: 2, status: "preparing" }))).toBe(at("review"));
   });
 
   it("uses the pull request as evidence the run got past the push", () => {
@@ -39,11 +39,11 @@ describe("reachedPhase", () => {
   });
 
   it("never regresses below the phase the live status implies", () => {
-    // Counters are all zero, but the run says it is merging.
+    // Counters are all zero, but the run is already waiting on GitHub checks.
     const run = workflow({
-      status: "merging", planningAttempts: 0, implementationAttempts: 0, reviewCycles: 0,
+      status: "waiting_github_checks", planningAttempts: 0, implementationAttempts: 0, reviewCycles: 0,
     });
-    expect(reachedPhase(run)).toBe(at("merge"));
+    expect(reachedPhase(run)).toBe(at("checks"));
   });
 });
 
@@ -52,7 +52,7 @@ describe("deriveGates", () => {
     deriveGates(run).find((gate) => gate.label === label)?.state;
 
   it("marks everything before the current phase passed and the rest not reached", () => {
-    const run = workflow({ status: "ai_review", reviewCycles: 1 });
+    const run = workflow({ status: "preparing", reviewCycles: 1 });
     expect(stateOf(run, "Plan valid")).toBe("passed");
     expect(stateOf(run, "Local pipeline")).toBe("passed");
     expect(stateOf(run, "AI review")).toBe("pending");
