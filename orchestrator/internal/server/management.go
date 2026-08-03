@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	"github.com/loop-engineering/orchestrator/internal/db"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -35,11 +36,14 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 		return nil, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
 	response := &controlv1.UpdateAccountResponse{UserId: actor.id, Role: actor.role}
-	var storedHash string
-	if err := tx.QueryRow(ctx, `SELECT username,password_hash,email,display_name FROM app.users WHERE id=$1 FOR UPDATE`, actor.id).Scan(&response.Username, &storedHash, &response.Email, &response.DisplayName); err != nil {
+	row, err := queries.GetUserForUpdate(ctx, actor.id)
+	if err != nil {
 		return nil, databaseError(err)
 	}
+	response.Username, response.Email, response.DisplayName = row.Username, row.Email, row.DisplayName
+	storedHash := row.PasswordHash
 	if request.GetNewPassword() != "" {
 		matched, err := passwordMatches(request.GetCurrentPassword(), storedHash)
 		if err != nil || !matched {
@@ -49,10 +53,10 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 		if err != nil {
 			return nil, status.Error(codes.Internal, "hash password")
 		}
-		if _, err := tx.Exec(ctx, `UPDATE app.users SET password_hash=$2,updated_at=now() WHERE id=$1`, actor.id, storedHash); err != nil {
+		if err := queries.UpdateUserPassword(ctx, db.UpdateUserPasswordParams{ID: actor.id, PasswordHash: storedHash}); err != nil {
 			return nil, databaseError(err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE app.user_sessions SET revoked_at=now() WHERE user_id=$1 AND token_hash<>$2 AND revoked_at IS NULL`, actor.id, hashSecret(md.Get(sessionHeader)[0])); err != nil {
+		if err := queries.RevokeOtherUserSessions(ctx, db.RevokeOtherUserSessionsParams{UserID: actor.id, TokenHash: hashSecret(md.Get(sessionHeader)[0])}); err != nil {
 			return nil, databaseError(err)
 		}
 	}
@@ -62,7 +66,7 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 	if request.GetDisplayName() != "" {
 		response.DisplayName = strings.TrimSpace(request.GetDisplayName())
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.users SET email=$2,display_name=$3,updated_at=now() WHERE id=$1`, actor.id, response.Email, response.DisplayName); err != nil {
+	if err := queries.UpdateUserProfile(ctx, db.UpdateUserProfileParams{ID: actor.id, Email: response.Email, DisplayName: response.DisplayName}); err != nil {
 		return nil, databaseError(err)
 	}
 	if err := audit(ctx, tx, actor.id, "user.account.update", "user", actor.id); err != nil {
@@ -84,36 +88,36 @@ func (s *Server) CreateRunnerRegistrationToken(ctx context.Context, request *con
 		return nil, status.Error(codes.InvalidArgument, "runner token labels are invalid")
 	}
 	token := randomSecret()
-	var expiresAt time.Time
-	err = s.pool.QueryRow(ctx, `INSERT INTO app.runner_registration_tokens(id,token_hash,created_by_user_id,allowed_labels,expires_at) VALUES($1,$2,$3,$4::jsonb,now()+interval '15 minutes') RETURNING expires_at`, newID(), hashSecret(token), actor.id, jsonLabels(labels)).Scan(&expiresAt)
+	expiresAt, err := s.queries.CreateRunnerRegistrationToken(ctx, db.CreateRunnerRegistrationTokenParams{
+		ID:              newID(),
+		TokenHash:       hashSecret(token),
+		CreatedByUserID: actor.id,
+		AllowedLabels:   []byte(jsonLabels(labels)),
+	})
 	if err != nil {
 		return nil, databaseError(err)
 	}
 	if err := audit(ctx, s.pool, actor.id, "runner.token.create", "runner_registration_token", hashSecret(token)); err != nil {
 		return nil, err
 	}
-	return &controlv1.CreateRunnerRegistrationTokenResponse{Token: token, ExpiresAt: timestamp(expiresAt)}, nil
+	return &controlv1.CreateRunnerRegistrationTokenResponse{Token: token, ExpiresAt: timestamp(expiresAt.Time)}, nil
 }
 
 func (s *Server) ListRunnerRegistrationTokens(ctx context.Context, _ *controlv1.ListRunnerRegistrationTokensRequest) (*controlv1.ListRunnerRegistrationTokensResponse, error) {
 	if _, err := s.requireAdmin(ctx); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text,allowed_labels::text,created_at,expires_at,used_at,revoked_at FROM app.runner_registration_tokens ORDER BY created_at DESC,id`)
+	rows, err := s.queries.ListRunnerRegistrationTokens(ctx)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.ListRunnerRegistrationTokensResponse{}
-	for rows.Next() {
-		token, err := scanRegistrationToken(rows)
+	for _, row := range rows {
+		token, err := scanRegistrationToken(row.ID, row.AllowedLabels, row.CreatedAt, row.ExpiresAt, row.UsedAt, row.RevokedAt)
 		if err != nil {
 			return nil, err
 		}
 		response.Tokens = append(response.Tokens, token)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	return response, nil
 }
@@ -126,11 +130,14 @@ func (s *Server) RevokeRunnerRegistrationToken(ctx context.Context, request *con
 	if !validID(request.GetTokenId()) {
 		return nil, status.Error(codes.InvalidArgument, "runner token ID is invalid")
 	}
-	row := s.pool.QueryRow(ctx, `UPDATE app.runner_registration_tokens SET revoked_at=COALESCE(revoked_at,now()) WHERE id=$1 RETURNING id::text,allowed_labels::text,created_at,expires_at,used_at,revoked_at`, request.GetTokenId())
-	token, err := scanRegistrationTokenRow(row)
+	row, err := s.queries.RevokeRunnerRegistrationToken(ctx, request.GetTokenId())
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.NotFound, "runner token is unknown")
 	}
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	token, err := scanRegistrationToken(row.ID, row.AllowedLabels, row.CreatedAt, row.ExpiresAt, row.UsedAt, row.RevokedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -167,43 +174,24 @@ func (s *Server) requireUserMutation(ctx context.Context) (actor, error) {
 	if len(md.Get(csrfHeader)) != 1 {
 		return actor{}, status.Error(codes.PermissionDenied, "CSRF token is invalid")
 	}
-	var expected string
-	err = s.pool.QueryRow(ctx, `SELECT csrf_token_hash FROM app.user_sessions WHERE token_hash=$1 AND revoked_at IS NULL AND expires_at>now()`, hashSecret(md.Get(sessionHeader)[0])).Scan(&expected)
+	expected, err := s.queries.GetSessionCSRFHash(ctx, hashSecret(md.Get(sessionHeader)[0]))
 	if err != nil || subtle.ConstantTimeCompare([]byte(expected), []byte(hashSecret(md.Get(csrfHeader)[0]))) != 1 {
 		return actor{}, status.Error(codes.PermissionDenied, "CSRF token is invalid")
 	}
 	return current, nil
 }
 
-func scanRegistrationToken(rows pgx.Rows) (*controlv1.RunnerRegistrationToken, error) {
-	token, err := scanRegistrationTokenValues(rows)
-	if err != nil {
-		return nil, err
-	}
-	return token, nil
-}
-
-func scanRegistrationTokenRow(row pgx.Row) (*controlv1.RunnerRegistrationToken, error) {
-	return scanRegistrationTokenValues(row)
-}
-
-func scanRegistrationTokenValues(row interface{ Scan(...any) error }) (*controlv1.RunnerRegistrationToken, error) {
-	token := &controlv1.RunnerRegistrationToken{}
-	var labels []byte
-	var created, expires time.Time
-	var used, revoked *time.Time
-	if err := row.Scan(&token.Id, &labels, &created, &expires, &used, &revoked); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(labels, &token.AllowedLabels); err != nil {
+func scanRegistrationToken(id, labels string, created, expires, used, revoked pgtype.Timestamptz) (*controlv1.RunnerRegistrationToken, error) {
+	token := &controlv1.RunnerRegistrationToken{Id: id}
+	if err := json.Unmarshal([]byte(labels), &token.AllowedLabels); err != nil {
 		return nil, databaseError(err)
 	}
-	token.CreatedAt, token.ExpiresAt = timestamp(created), timestamp(expires)
-	if used != nil {
-		token.UsedAt = timestamp(*used)
+	token.CreatedAt, token.ExpiresAt = timestamp(created.Time), timestamp(expires.Time)
+	if used.Valid {
+		token.UsedAt = timestamp(used.Time)
 	}
-	if revoked != nil {
-		token.RevokedAt = timestamp(*revoked)
+	if revoked.Valid {
+		token.RevokedAt = timestamp(revoked.Time)
 	}
 	return token, nil
 }
