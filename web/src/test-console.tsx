@@ -53,6 +53,7 @@ export function project(overrides: Partial<Project> = {}): Project {
     requiredRunnerLabels: ["go"],
     pipelineSteps: [],
     executionImage: "",
+    requireHumanApproval: false,
     ...overrides,
   };
 }

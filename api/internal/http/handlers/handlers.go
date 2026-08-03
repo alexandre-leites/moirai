@@ -96,6 +96,7 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 		RequiredRunnerLabels []string              `json:"requiredRunnerLabels"`
 		PipelineSteps        []pipelineStepPayload `json:"pipelineSteps"`
 		ExecutionImage       string                `json:"executionImage"`
+		RequireHumanApproval bool                  `json:"requireHumanApproval"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -111,6 +112,7 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 			RequiredRunnerLabels: body.RequiredRunnerLabels,
 			PipelineSteps:        pipelineSteps(body.PipelineSteps),
 			ExecutionImage:       body.ExecutionImage,
+			RequireHumanApproval: body.RequireHumanApproval,
 		},
 	})
 	if err != nil {
@@ -131,6 +133,7 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 		RequiredRunnerLabels []string              `json:"requiredRunnerLabels"`
 		PipelineSteps        []pipelineStepPayload `json:"pipelineSteps"`
 		ExecutionImage       string                `json:"executionImage"`
+		RequireHumanApproval bool                  `json:"requireHumanApproval"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -147,6 +150,7 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 			RequiredRunnerLabels: body.RequiredRunnerLabels,
 			PipelineSteps:        pipelineSteps(body.PipelineSteps),
 			ExecutionImage:       body.ExecutionImage,
+			RequireHumanApproval: body.RequireHumanApproval,
 		},
 	})
 	if err != nil {
@@ -277,6 +281,7 @@ func projectPayload(p *controlv1.Project) map[string]any {
 		"requiredRunnerLabels": labels,
 		"pipelineSteps":        pipeline,
 		"executionImage":       p.ExecutionImage,
+		"requireHumanApproval": p.RequireHumanApproval,
 	}
 }
 

@@ -791,6 +791,13 @@ components:
         executionImage:
           type: string
           description: Docker image used for agent and pipeline execution; empty uses runner environment.
+        requireHumanApproval:
+          type: boolean
+          description: >-
+            Opt-in human-approval gate: when true, a run stops at the
+            'waiting_human' status once every automated gate (implementation,
+            GitHub checks) passes, and only merges once an admin approves it
+            via the decision panel. Defaults to false.
     Project:
       type: object
       required: [id, name, enabled]
@@ -816,6 +823,13 @@ components:
         executionImage:
           type: string
           description: Docker image used for agent and pipeline execution; empty uses runner environment.
+        requireHumanApproval:
+          type: boolean
+          description: >-
+            Opt-in human-approval gate: when true, a run stops at the
+            'waiting_human' status once every automated gate (implementation,
+            GitHub checks) passes, and only merges once an admin approves it
+            via the decision panel. Defaults to false.
     PipelineStep:
       type: object
       required: [command, timeoutSeconds, position, required]

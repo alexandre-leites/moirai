@@ -257,6 +257,14 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
       const reason = text(payload.reason);
       return { text: reason ? `Delivery failed: ${reason}` : "Delivery failed", phase: "event", warn: true };
     }
+    case "human.rejected": {
+      // Written by `rejectWorkflow` (orchestrator/internal/server/delivery.go)
+      // with `{"reason": "changes requested[: <comment>]"}` when an admin
+      // rejects a run at the human-approval gate -- already self-describing,
+      // unlike delivery.failed's bare cause, so it is rendered verbatim.
+      const reason = text(payload.reason);
+      return { text: reason || "Changes requested", phase: "human", warn: true };
+    }
     default:
       return { text: event.type.replaceAll("_", " "), phase: "event", warn: false };
   }

@@ -15,7 +15,7 @@ func TestParseStatusAcceptsEveryKnownValue(t *testing.T) {
 }
 
 func TestParseStatusRejectsUnknownValues(t *testing.T) {
-	for _, value := range []string{"", "implementing", "planning", "waiting_human", "Offered", "running"} {
+	for _, value := range []string{"", "implementing", "planning", "reviewing", "Offered", "running"} {
 		if _, ok := ParseStatus(value); ok {
 			t.Fatalf("ParseStatus(%q) = (_, true), want false: %q is not a status any writer produces", value, value)
 		}

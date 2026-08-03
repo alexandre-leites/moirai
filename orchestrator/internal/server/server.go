@@ -83,6 +83,12 @@ type projectConfig struct {
 	Labels                  []string `json:"required_runner_labels"`
 	ExecutionImage          string   `json:"execution_image"`
 	ExecutionTimeoutSeconds int32    `json:"execution_timeout_seconds"`
+	// RequireHumanApproval opts a project into the human-approval gate: absent
+	// (the zero value, false) on every project created before this field
+	// existed, since app.projects.configuration defaults to '{}'::jsonb and a
+	// missing JSON key decodes to false, not an error. See
+	// observeWorkflow/deliveryWorkflow (delivery.go) for where it is read.
+	RequireHumanApproval bool `json:"require_human_approval"`
 }
 
 // defaultExecutionTimeoutSeconds bounds a dispatched developer execution's
@@ -305,7 +311,7 @@ func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreatePro
 		return nil, err
 	}
 	id := newID()
-	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
 	}
@@ -350,7 +356,7 @@ func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdatePro
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
 	}
@@ -1643,6 +1649,7 @@ func (s *Server) project(ctx context.Context, queries projectQuerier, id string)
 	}
 	project.RequiredRunnerLabels, project.ExecutionImage = config.Labels, config.ExecutionImage
 	project.ExecutionTimeoutSeconds = config.ExecutionTimeoutSeconds
+	project.RequireHumanApproval = config.RequireHumanApproval
 	steps, err := queries.ListProjectPipelineSteps(ctx, id)
 	if err != nil {
 		return nil, databaseError(err)
@@ -1879,6 +1886,7 @@ func validateProject(cfg *controlv1.ProjectConfiguration) (*controlv1.ProjectCon
 		PipelineSteps:           cfg.GetPipelineSteps(),
 		ExecutionImage:          cfg.GetExecutionImage(),
 		ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(),
+		RequireHumanApproval:    cfg.GetRequireHumanApproval(),
 	}, cfg.GetPipelineSteps(), nil
 }
 

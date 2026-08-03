@@ -571,6 +571,178 @@ func (h *harness) seedDelivering(projectID, issueID string) (workflowID string) 
 	return workflowID
 }
 
+// seedWaitingChecks inserts a workflow run at 'waiting_github_checks' with an
+// open pull request and its project lock held -- the state observeWorkflow
+// expects to find itself invoked against once GitHub reports checks green.
+func (h *harness) seedWaitingChecks(projectID, issueID string) (workflowID string) {
+	h.t.Helper()
+	workflowID = newID()
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'waiting_github_checks','waiting_github_checks',$5)`,
+		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
+	h.exec(`INSERT INTO app.project_locks(project_id, workflow_run_id) VALUES($1,$2)`, projectID, workflowID)
+	h.exec(`INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github','11','https://example.test/pull/11','abc','open')`, newID(), workflowID)
+	return workflowID
+}
+
+// requireApproval flips a seeded project's configuration to opt into the
+// human-approval gate (projectConfig.RequireHumanApproval), decoded fresh by
+// deliveryWorkflow on every call, so this can run any time before the
+// observeWorkflow/SubmitHumanDecision call under test.
+func (h *harness) requireApproval(projectID string) {
+	h.t.Helper()
+	h.exec(`UPDATE app.projects SET configuration = configuration || '{"require_human_approval":true}'::jsonb WHERE id=$1`, projectID)
+}
+
+// Before StatusWaitingHuman existed, observeWorkflow merged a pull request
+// the instant GitHub reported its checks green, with no way for a project to
+// have a person look first: SubmitHumanDecision (management.go) answered
+// "V1 has no approval phase" no matter what. This pins the gate end to end:
+// green checks stop the run at 'waiting_human' instead of merging, the
+// project lock and pull request are untouched while it waits, and the
+// transition is recorded as its own event.
+func TestObserveWorkflowStopsAtHumanApprovalWhenTheProjectRequiresIt(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	h.requireApproval(projectID)
+	workflowID := h.seedWaitingChecks(projectID, issueID)
+	h.github = &sequencedGitHub{}
+
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+
+	state := h.runState(workflowID)
+	if state.status != "waiting_human" {
+		t.Fatalf("status = %q, want waiting_human", state.status)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 1 {
+		t.Fatal("the project lock was released while the run is only waiting on a human, not finished")
+	}
+	if merged := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1 AND state='merged'`, workflowID); merged != 0 {
+		t.Fatal("the pull request was merged before a human approved it")
+	}
+	if events := h.scalar(`SELECT COUNT(*) FROM app.workflow_events WHERE workflow_run_id=$1 AND event_type='workflow_transition'`, workflowID); events != 1 {
+		t.Fatal("the transition into waiting_human was not recorded as an event")
+	}
+	// h.schedulable only models the permanent failed/blocked/completed
+	// exclusion (see its own doc comment); the exclusion that actually matters
+	// while a run is merely waiting -- on GitHub checks or, here, on a human --
+	// is ClaimSchedulableIssue's own `NOT EXISTS project_locks` clause, which
+	// is exactly what the lock assertion above already pins.
+}
+
+// A project that never opted in must merge exactly as it always did: this is
+// the regression guard that RequireHumanApproval's zero value (every project
+// created before this field existed defaults to it) changes nothing.
+func TestObserveWorkflowMergesDirectlyWhenTheProjectDoesNotRequireApproval(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := h.seedWaitingChecks(projectID, issueID)
+	h.github = &sequencedGitHub{}
+
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+
+	if state := h.runState(workflowID); state.status != "completed" {
+		t.Fatalf("status = %q, want completed: a project that did not opt in must merge exactly as before", state.status)
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("a completed run left its issue schedulable")
+	}
+}
+
+// SubmitHumanDecision's "approved" branch, exercised through the actual gRPC
+// entry point the console's decision panel calls: the run sitting at the
+// gate is sent on to merge the already-green pull request.
+func TestSubmitHumanDecisionApprovesAndMerges(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	h.requireApproval(projectID)
+	workflowID := h.seedWaitingChecks(projectID, issueID)
+	h.github = &sequencedGitHub{}
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "waiting_human" {
+		t.Fatalf("setup: status = %q, want waiting_human", state.status)
+	}
+
+	resp, err := h.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
+		WorkflowRunId: workflowID, Decision: "approved", Comment: "looks good",
+	})
+	if err != nil {
+		t.Fatalf("SubmitHumanDecision: %v", err)
+	}
+	if resp.GetWorkflow().GetStatus() != "completed" {
+		t.Fatalf("response status = %q, want completed", resp.GetWorkflow().GetStatus())
+	}
+	if state := h.runState(workflowID); state.status != "completed" {
+		t.Fatalf("status = %q, want completed: approval must merge the already-green pull request", state.status)
+	}
+	if merged := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1 AND state='merged'`, workflowID); merged != 1 {
+		t.Fatal("the pull request was not merged after approval")
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("the project lock is still held after the approved run completed")
+	}
+	if audits := h.scalar(`SELECT COUNT(*) FROM app.audit_events WHERE target_id=$1 AND action='workflow.approve'`, workflowID); audits != 1 {
+		t.Fatal("the approval was not recorded in the audit log")
+	}
+}
+
+// SubmitHumanDecision's "changes_requested" branch: the run ends the same
+// terminal way any other rejection does -- blocked, with the reviewer's
+// comment as the reason, project lock released so the project is schedulable
+// again once an operator retries the issue.
+func TestSubmitHumanDecisionRejectsAndBlocks(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	h.requireApproval(projectID)
+	workflowID := h.seedWaitingChecks(projectID, issueID)
+	h.github = &sequencedGitHub{}
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+
+	resp, err := h.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
+		WorkflowRunId: workflowID, Decision: "changes_requested", Comment: "please add tests",
+	})
+	if err != nil {
+		t.Fatalf("SubmitHumanDecision: %v", err)
+	}
+	if resp.GetWorkflow().GetStatus() != "blocked" {
+		t.Fatalf("response status = %q, want blocked", resp.GetWorkflow().GetStatus())
+	}
+	state := h.runState(workflowID)
+	if state.status != "blocked" || !strings.Contains(state.blocking, "please add tests") {
+		t.Fatalf("state = %+v, want blocked with the reviewer's comment as the reason", state)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("the project lock is still held after a rejected run was blocked")
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("a rejected, blocked run left its issue schedulable")
+	}
+	if merged := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1 AND state='merged'`, workflowID); merged != 0 {
+		t.Fatal("a rejected run's pull request was merged")
+	}
+}
+
+// A decision against a run that is not (or no longer) at the gate must fail
+// loudly rather than silently doing nothing or acting on the wrong run.
+func TestSubmitHumanDecisionRejectsADecisionAgainstARunNotAwaitingApproval(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := h.seedWaitingChecks(projectID, issueID) // still waiting_github_checks, not waiting_human
+
+	if _, err := h.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
+		WorkflowRunId: workflowID, Decision: "approved",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("err = %v, want FailedPrecondition", err)
+	}
+}
+
 // Before this, every GitHub error deliverWorkflow/observeWorkflow saw -- a
 // rate limit, a DNS blip, a 502 -- funnelled straight to blockExternal, which
 // is terminal: it releases the project lock and parks the issue. A single
