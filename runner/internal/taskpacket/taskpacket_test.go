@@ -27,12 +27,26 @@ func TestParseAcceptsValidRolePackets(t *testing.T) {
 	}
 }
 
-func TestPacketAllowsNoDeadline(t *testing.T) {
+// #276: a packet with no deadline used to be accepted (timeoutSeconds: 0
+// meant "no deadline"), which is exactly how a wedged agent process ended up
+// holding its project lock forever -- the lease sweep only reclaims a job
+// whose runner stopped, not one whose agent never returns. Every packet must
+// carry a real, positive deadline.
+func TestPacketRejectsZeroTimeout(t *testing.T) {
 	packet := validPacket(RoleDeveloper)
 	packet.Constraints.MayModifyFiles = true
 	packet.TimeoutSeconds = 0
-	if err := packet.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v", err)
+	if err := packet.Validate(); err == nil {
+		t.Fatal("Validate() accepted a zero timeout")
+	}
+}
+
+func TestPacketRejectsNegativeTimeout(t *testing.T) {
+	packet := validPacket(RoleDeveloper)
+	packet.Constraints.MayModifyFiles = true
+	packet.TimeoutSeconds = -1
+	if err := packet.Validate(); err == nil {
+		t.Fatal("Validate() accepted a negative timeout")
 	}
 }
 

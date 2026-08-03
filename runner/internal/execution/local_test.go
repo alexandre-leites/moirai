@@ -66,15 +66,31 @@ func TestSupervisorReportsStartedProcessID(t *testing.T) {
 	}
 }
 
-func TestSupervisorAllowsNoDeadline(t *testing.T) {
-	result, err := NewSupervisor().Execute(context.Background(), Request{
-		ExecutionID: "execution-no-deadline",
+// #276: a zero timeout used to mean "no deadline," which is exactly how a
+// wedged agent process ended up holding its project lock forever. A valid
+// task packet can no longer produce one, so this is now rejected rather than
+// silently run without a deadline.
+func TestSupervisorRejectsZeroTimeout(t *testing.T) {
+	_, err := NewSupervisor().Execute(context.Background(), Request{
+		ExecutionID: "execution-zero-timeout",
 		Workspace:   t.TempDir(),
 		Command:     []string{"true"},
 		Timeout:     0,
 	}, nil, nil)
-	if err != nil || result.ExitCode != 0 {
-		t.Fatalf("Execute() = (%+v, %v)", result, err)
+	if err == nil {
+		t.Fatal("Execute() accepted a zero timeout")
+	}
+}
+
+func TestSupervisorRejectsNegativeTimeout(t *testing.T) {
+	_, err := NewSupervisor().Execute(context.Background(), Request{
+		ExecutionID: "execution-negative-timeout",
+		Workspace:   t.TempDir(),
+		Command:     []string{"true"},
+		Timeout:     -1,
+	}, nil, nil)
+	if err == nil {
+		t.Fatal("Execute() accepted a negative timeout")
 	}
 }
 

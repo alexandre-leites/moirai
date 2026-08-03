@@ -114,7 +114,7 @@ func TestPasswordHashCompatibility(t *testing.T) {
 }
 
 func TestDeveloperPacket(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "")
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,12 +123,43 @@ func TestDeveloperPacket(t *testing.T) {
 	}
 }
 
+// #276: every execution used to be dispatched with a hardcoded
+// timeoutSeconds of 0, which the runner's task packet validation treated as
+// "no deadline" -- a wedged agent then held its project lock forever, since
+// the lease sweep only reclaims a job whose runner has stopped, not one whose
+// agent process never returns. developerPacket must always carry the caller's
+// resolved, positive timeout.
+func TestDeveloperPacketSendsRealTimeout(t *testing.T) {
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet["timeoutSeconds"] != 1800 {
+		t.Fatalf("timeoutSeconds = %#v, want 1800", packet["timeoutSeconds"])
+	}
+}
+
+func TestDeveloperPacketRejectsNonPositiveTimeout(t *testing.T) {
+	if _, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 0); err == nil {
+		t.Fatal("developerPacket accepted a zero timeout")
+	}
+}
+
+func TestExecutionTimeoutSecondsFallsBackToDefault(t *testing.T) {
+	if got := executionTimeoutSeconds(0); got != defaultExecutionTimeoutSeconds {
+		t.Fatalf("executionTimeoutSeconds(0) = %d, want %d", got, defaultExecutionTimeoutSeconds)
+	}
+	if got := executionTimeoutSeconds(120); got != 120 {
+		t.Fatalf("executionTimeoutSeconds(120) = %d, want 120", got)
+	}
+}
+
 // The delivery step opens a pull request from the agent branch, which only
 // exists on the remote if the runner was allowed to push it. The runner grants
 // that to a developer packet and refuses it for a planner, so these two
 // constraints are what stand between a scheduled job and a deliverable branch.
 func TestDeveloperPacketMayModifyAndPush(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "")
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
