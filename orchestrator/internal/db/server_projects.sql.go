@@ -410,6 +410,18 @@ ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   external_updated_at = EXCLUDED.external_updated_at,
   last_synced_at = now(),
   raw_snapshot = EXCLUDED.raw_snapshot
+WHERE
+  app.issues.display_number IS DISTINCT FROM EXCLUDED.display_number OR
+  app.issues.title IS DISTINCT FROM EXCLUDED.title OR
+  app.issues.body IS DISTINCT FROM EXCLUDED.body OR
+  app.issues.url IS DISTINCT FROM EXCLUDED.url OR
+  app.issues.state IS DISTINCT FROM EXCLUDED.state OR
+  app.issues.labels IS DISTINCT FROM EXCLUDED.labels OR
+  app.issues.priority IS DISTINCT FROM EXCLUDED.priority OR
+  app.issues.eligible IS DISTINCT FROM EXCLUDED.eligible OR
+  app.issues.external_created_at IS DISTINCT FROM EXCLUDED.external_created_at OR
+  app.issues.external_updated_at IS DISTINCT FROM EXCLUDED.external_updated_at OR
+  app.issues.raw_snapshot IS DISTINCT FROM EXCLUDED.raw_snapshot
 `
 
 type UpsertIssueParams struct {
@@ -443,6 +455,16 @@ type UpsertIssueParams struct {
 // it, with no separate lifecycle write required. The caller also ANDs
 // eligible with "still open on the tracker", so a closed issue is reported
 // ineligible too, not just excluded via state.
+// The DO UPDATE's WHERE guard (added for #290) is what keeps a steady-state
+// sync pass -- nothing changed on the tracker since the last one -- from
+// rewriting every issue row, full raw_snapshot JSONB included, on every
+// single pass. Without it, Postgres has no way to know the SET list would
+// produce an identical row and pays a full tuple write (and a fresh xmin,
+// and a dead tuple for autovacuum to reclaim) regardless. The comparison
+// covers every column the SET list actually writes from EXCLUDED except
+// last_synced_at itself (which always advances and would otherwise defeat
+// the guard by always differing); a row with no other change simply keeps
+// its previous last_synced_at rather than that column alone forcing a write.
 func (q *Queries) UpsertIssue(ctx context.Context, arg UpsertIssueParams) error {
 	_, err := q.db.Exec(ctx, upsertIssue,
 		arg.ID,

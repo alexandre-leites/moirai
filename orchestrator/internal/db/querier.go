@@ -185,6 +185,16 @@ type Querier interface {
 	// it, with no separate lifecycle write required. The caller also ANDs
 	// eligible with "still open on the tracker", so a closed issue is reported
 	// ineligible too, not just excluded via state.
+	// The DO UPDATE's WHERE guard (added for #290) is what keeps a steady-state
+	// sync pass -- nothing changed on the tracker since the last one -- from
+	// rewriting every issue row, full raw_snapshot JSONB included, on every
+	// single pass. Without it, Postgres has no way to know the SET list would
+	// produce an identical row and pays a full tuple write (and a fresh xmin,
+	// and a dead tuple for autovacuum to reclaim) regardless. The comparison
+	// covers every column the SET list actually writes from EXCLUDED except
+	// last_synced_at itself (which always advances and would otherwise defeat
+	// the guard by always differing); a row with no other change simply keeps
+	// its previous last_synced_at rather than that column alone forcing a write.
 	UpsertIssue(ctx context.Context, arg UpsertIssueParams) error
 	// next_retry_at backs off exponentially with consecutive_failures (1 minute,
 	// 2, 4, 8, ...), capped at 1 hour. The exponent itself is capped (via the
