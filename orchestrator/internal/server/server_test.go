@@ -311,6 +311,119 @@ func TestEventAndIdentifierValidation(t *testing.T) {
 	}
 }
 
+// literalUnicodeEscape builds the six-character JSON `\uXXXX` escape sequence
+// for the given four hex digits out of individual bytes, rather than as a Go
+// string literal spelling the escape directly, purely so this source file
+// never contains that literal backslash-u sequence itself.
+func literalUnicodeEscape(hex string) string {
+	return string([]byte{0x5c, 'u'}) + hex
+}
+
+// TestSanitizeEventPayloadLeavesOrdinaryPayloadsByteForByteAlone pins the
+// fast path: a payload with no `\u` escape at all -- the overwhelming
+// majority of runner events -- must come back identical, not merely
+// equivalent, so an ordinary event's stored bytes (and object key order)
+// never change.
+func TestSanitizeEventPayloadLeavesOrdinaryPayloadsByteForByteAlone(t *testing.T) {
+	payload := `{"summary":"plain text","remainingWork":["a","b"],"exitCode":0}`
+	if got := sanitizeEventPayload(payload); got != payload {
+		t.Fatalf("sanitizeEventPayload(%q) = %q, want it unchanged", payload, got)
+	}
+}
+
+// TestSanitizeEventPayloadReplacesANULByteAtAnyDepth is the core of #302: a
+// NUL byte reaches persistExecutionEvent as a backslash-u-0000 escape (the only
+// spelling json.Valid accepts for it -- a raw NUL byte fails json.Valid
+// outright and never reaches this function), and Postgres's jsonb refuses to
+// store it verbatim. This pins that sanitizeEventPayload finds and replaces
+// it wherever it sits: a top-level field, nested inside an object several
+// levels deep, inside an array element, and inside an object key -- not just
+// the top-level string field a narrower fix might have special-cased.
+func TestSanitizeEventPayloadReplacesANULByteAtAnyDepth(t *testing.T) {
+	nul := literalUnicodeEscape("0000")
+	payload := `{"summary":"a` + nul + `b","result":{"raw":"c` + nul + `d","deep":["e` + nul + `f",{"k` + nul + `ey":"g` + nul + `h"}]}}`
+
+	got := sanitizeEventPayload(payload)
+
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("sanitizeEventPayload(%q) = %q, not valid JSON", payload, got)
+	}
+	if strings.ContainsRune(got, 0) || strings.Contains(got, nul) {
+		t.Fatalf("sanitizeEventPayload(%q) = %q, still carries a NUL byte or its escape", payload, got)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("re-decoding the sanitized payload: %v", err)
+	}
+	if !strings.Contains(decoded["summary"].(string), "a") || !strings.HasSuffix(decoded["summary"].(string), "b") {
+		t.Fatalf("summary lost content around the replaced NUL: %q", decoded["summary"])
+	}
+	result := decoded["result"].(map[string]any)
+	if raw, _ := result["raw"].(string); !strings.HasPrefix(raw, "c") || !strings.HasSuffix(raw, "d") {
+		t.Fatalf("result.raw lost content around the replaced NUL: %q", raw)
+	}
+	deep := result["deep"].([]any)
+	if s, _ := deep[0].(string); !strings.HasPrefix(s, "e") || !strings.HasSuffix(s, "f") {
+		t.Fatalf("result.deep[0] lost content around the replaced NUL: %q", s)
+	}
+	nested := deep[1].(map[string]any)
+	if len(nested) != 1 {
+		t.Fatalf("result.deep[1] has %d keys, want the one NUL-bearing key sanitized in place: %v", len(nested), nested)
+	}
+	for k, v := range nested {
+		if strings.ContainsRune(k, 0) {
+			t.Fatalf("object key %q still carries a NUL byte", k)
+		}
+		if s, _ := v.(string); !strings.HasPrefix(s, "g") || !strings.HasSuffix(s, "h") {
+			t.Fatalf("result.deep[1] value lost content around the replaced NUL: %q", s)
+		}
+	}
+}
+
+// TestSanitizeEventPayloadReplacesAnUnpairedSurrogate pins the other
+// documented case: a lone UTF-16 surrogate half inside a `\uXXXX` escape is,
+// like a NUL byte, legal as far as json.Valid is concerned but rejected by
+// jsonb ("invalid input syntax for type json ... Unicode low surrogate must
+// follow a high surrogate"). encoding/json already folds it to the Unicode
+// replacement character on decode, and re-marshalling produces valid UTF-8,
+// so sanitizeEventPayload fixes this case for free once it decodes the
+// payload at all.
+func TestSanitizeEventPayloadReplacesAnUnpairedSurrogate(t *testing.T) {
+	lone := literalUnicodeEscape("d800")
+	payload := `{"summary":"a` + lone + `b"}`
+
+	got := sanitizeEventPayload(payload)
+
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("sanitizeEventPayload(%q) = %q, not valid JSON", payload, got)
+	}
+	if strings.Contains(got, lone) {
+		t.Fatalf("sanitizeEventPayload(%q) = %q, still carries the unpaired surrogate escape", payload, got)
+	}
+}
+
+// TestSanitizeEventPayloadPreservesLargeIntegers guards against a decode
+// path that looks correct but silently corrupts data: unmarshalling into
+// `any` with encoding/json's default number handling turns every JSON number
+// into a float64, which cannot represent every int64 exactly. sanitizeEventPayload
+// must use json.Decoder.UseNumber so a large integer elsewhere in the same
+// payload that also happens to need NUL sanitization survives the round trip
+// unrounded.
+func TestSanitizeEventPayloadPreservesLargeIntegers(t *testing.T) {
+	nul := literalUnicodeEscape("0000")
+	payload := `{"summary":"a` + nul + `b","count":9007199254740993}`
+
+	got := sanitizeEventPayload(payload)
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("re-decoding the sanitized payload: %v", err)
+	}
+	if !strings.Contains(got, "9007199254740993") {
+		t.Fatalf("sanitizeEventPayload(%q) = %q, large integer was rounded through float64", payload, got)
+	}
+}
+
 // An agent-declared block is the one terminal payload the orchestrator reads
 // rather than only stores. The payload is agent-supplied, so the whole surface
 // is pinned here: what counts as a declaration, what a declaration composes

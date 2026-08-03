@@ -1318,6 +1318,20 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 	if !validID(event.GetJobId()) || event.GetLeaseGeneration() < 1 || event.GetEventSequence() < 1 || !validEventType(event.GetType()) || !json.Valid([]byte(event.GetPayloadJson())) {
 		return status.Error(codes.InvalidArgument, "execution event is invalid")
 	}
+	// payload_json is agent-supplied end to end: the runner forwards
+	// payload["result"] (the agent's own result document) verbatim, so nothing
+	// here may reject it outright -- losing a terminal event strands the run
+	// and its project lock with no operator recourse. json.Valid above only
+	// proves it parses; it does not prove Postgres can store it. jsonb's
+	// underlying text type has no representation for an embedded NUL or an
+	// unpaired UTF-16 surrogate half, both legal inside a `\uXXXX` escape as
+	// far as encoding/json is concerned, and rejects them with "unsupported
+	// Unicode escape sequence" / "invalid input syntax for type json",
+	// aborting the whole INSERT. sanitizeEventPayload neutralises both before
+	// the payload reaches CreateWorkflowEvent's ::jsonb argument (and before
+	// agentBlockReason below, since blocking_reason is a plain text column
+	// with the same restriction).
+	payloadJSON := sanitizeEventPayload(event.GetPayloadJson())
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return databaseError(err)
@@ -1339,7 +1353,7 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 	// to build the timeline and the agent log pane. Writing "runner.log" here
 	// left every one of those rows falling through to the default branch.
 	if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
-		WorkflowRunID: workflowID, EventType: event.GetType(), Severity: eventSeverity(event.GetType()), Column4: []byte(event.GetPayloadJson()),
+		WorkflowRunID: workflowID, EventType: event.GetType(), Severity: eventSeverity(event.GetType()), Column4: []byte(payloadJSON),
 	}); err != nil {
 		return databaseError(err)
 	}
@@ -1376,7 +1390,7 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		case "completed":
 			runStatus = StatusDelivering
 		case "failed":
-			if reason, blocked := agentBlockReason(event.GetPayloadJson()); blocked {
+			if reason, blocked := agentBlockReason(payloadJSON); blocked {
 				runStatus, blockingReason = StatusBlocked, reason
 			}
 		}
@@ -1407,6 +1421,95 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		return s.deliverWorkflow(ctx, workflowID)
 	}
 	return nil
+}
+
+// jsonUnicodeEscapeMarker is how a `\uXXXX` escape spells in JSON text --
+// the only place either of the two bytes sanitizeEventPayload cares about,
+// NUL and an unpaired surrogate half, can appear in text that already passed
+// json.Valid: a literal NUL byte is a raw control character, which json.Valid
+// itself rejects (encoding/json requires it escaped), and a bare surrogate
+// half has no other spelling. Payload text with no `\u` escape at all -- the
+// overwhelming majority of events -- is guaranteed clean and returned
+// untouched, so the decode-and-rebuild path below only runs, and only
+// reorders map keys, on the rare payload that needs it.
+const jsonUnicodeEscapeMarker = `\u`
+
+// sanitizeEventPayload returns payloadJSON, or an equivalent JSON document
+// with every NUL byte and unpaired UTF-16 surrogate replaced by U+FFFD
+// (the Unicode replacement character), if either was present. Both are legal
+// inside a JSON `\uXXXX` escape -- json.Valid accepts them -- but Postgres's
+// jsonb rejects both when storing them ("unsupported Unicode escape
+// sequence" for NUL, "invalid input syntax for type json" for a lone
+// surrogate), which would otherwise abort the INSERT this payload is headed
+// for. The fix runs here, not in the runner, because this is the trust
+// boundary: payloadJSON forwards an agent's own result document verbatim,
+// and an event this server cannot store must still not be dropped -- a lost
+// terminal event stops the run from ever reaching a terminal status.
+//
+// Decoding into `any` and walking it (rather than a textual replace) is what
+// makes this correct at any nesting depth, including inside object keys, and
+// UseNumber preserves large integers exactly instead of rounding them
+// through float64. If payloadJSON is somehow no longer valid JSON by the
+// time this runs (unreachable: the caller already ran json.Valid on the same
+// bytes), decoding fails and the original text is returned -- returning the
+// untouched payload is still strictly better than failing the event outright,
+// and the ::jsonb insert will surface the real error if it still cannot
+// store it.
+func sanitizeEventPayload(payloadJSON string) string {
+	if !strings.Contains(payloadJSON, jsonUnicodeEscapeMarker) {
+		return payloadJSON
+	}
+	dec := json.NewDecoder(strings.NewReader(payloadJSON))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return payloadJSON
+	}
+	sanitized, err := json.Marshal(stripNUL(v))
+	if err != nil {
+		return payloadJSON
+	}
+	return string(sanitized)
+}
+
+// nulReplacement is what a NUL byte, or an unpaired surrogate half already
+// folded to U+FFFD by json.Decode, becomes in stored payload text. It is
+// printable so the console's event timeline still renders the field as
+// plain text rather than showing a hole in the string.
+const nulReplacement = "�"
+
+// stripNUL walks a decoded JSON value replacing every NUL byte, in any
+// string it finds at any depth -- object keys included, since a NUL is just
+// as fatal to jsonb there as in a value -- with nulReplacement. Unpaired
+// surrogates need no separate handling: json.Decode already replaced them
+// with U+FFFD (a valid rune) while producing v, so only a literal NUL byte
+// (the one escape sequence encoding/json does not itself reject) can still
+// be present here.
+func stripNUL(v any) any {
+	switch t := v.(type) {
+	case string:
+		if !strings.ContainsRune(t, 0) {
+			return t
+		}
+		return strings.ReplaceAll(t, "\x00", nulReplacement)
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if strings.ContainsRune(k, 0) {
+				k = strings.ReplaceAll(k, "\x00", nulReplacement)
+			}
+			out[k] = stripNUL(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, val := range t {
+			out[i] = stripNUL(val)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // databaseError maps an error from a database call to the opaque, constant
