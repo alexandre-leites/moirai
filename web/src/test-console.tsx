@@ -145,7 +145,7 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     cancelWorkflow: async () => workflow(),
     blockWorkflow: async () => workflow(),
     listQueue: async () => [],
-    schedulerMetrics: async () => ({ queueDepth: 0, activeWorkflows: 0, scheduledJobs: 0 }),
+    schedulerMetrics: async () => ({ queueDepth: 0, activeWorkflows: 0, scheduledJobs: 0, loops: [] }),
     issueSyncStatus: async () => [],
     syncNow: async () => [],
   };

@@ -48,10 +48,28 @@ func (h *ProjectHandlers) schedulerMetrics(w http.ResponseWriter, r *http.Reques
 		writeClientError(w, err)
 		return
 	}
+	type loopStatus struct {
+		Name          string `json:"name"`
+		Healthy       bool   `json:"healthy"`
+		LastSuccessAt string `json:"lastSuccessAt,omitempty"`
+		LastError     string `json:"lastError,omitempty"`
+		LastErrorAt   string `json:"lastErrorAt,omitempty"`
+	}
+	loops := make([]loopStatus, len(resp.LoopStatuses))
+	for i, status := range resp.LoopStatuses {
+		loops[i] = loopStatus{
+			Name:          status.Name,
+			Healthy:       status.Healthy,
+			LastSuccessAt: status.LastSuccessAt,
+			LastError:     status.LastError,
+			LastErrorAt:   status.LastErrorAt,
+		}
+	}
 	apiserver.WriteJSON(w, http.StatusOK, map[string]any{
 		"queueDepth":      resp.QueueDepth,
 		"activeWorkflows": resp.ActiveWorkflows,
 		"scheduledJobs":   resp.ScheduledJobs,
+		"loops":           loops,
 	})
 }
 

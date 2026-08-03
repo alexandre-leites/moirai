@@ -72,6 +72,40 @@ describe("OverviewPage", () => {
     expect(container.textContent).not.toContain("Runner: loom-02");
   });
 
+  it("flags a stalled background loop and names it", async () => {
+    const client = stubApi({
+      schedulerMetrics: async () => ({
+        queueDepth: 0,
+        activeWorkflows: 0,
+        scheduledJobs: 0,
+        loops: [
+          { name: "issue_sync", healthy: true, lastSuccessAt: "2026-08-03T12:00:00Z" },
+          { name: "recovery_sweep", healthy: false, lastError: "gh: rate limited" },
+        ],
+      }),
+    });
+    const container = await mountView(<OverviewPage api={client} />, client);
+
+    expect(container.textContent).toContain("Background loops");
+    expect(container.textContent).toContain("recovery_sweep");
+    expect(container.textContent).toContain("stalled");
+  });
+
+  it("reports background loops as healthy when every one is", async () => {
+    const client = stubApi({
+      schedulerMetrics: async () => ({
+        queueDepth: 0,
+        activeWorkflows: 0,
+        scheduledJobs: 0,
+        loops: [{ name: "issue_sync", healthy: true }],
+      }),
+    });
+    const container = await mountView(<OverviewPage api={client} />, client);
+
+    expect(container.textContent).toContain("Background loops");
+    expect(container.textContent).toContain("all healthy");
+  });
+
   it("shows Unknown for component versions omitted by a remote build", async () => {
     const client = stubApi();
     const container = await mountView(<OverviewPage api={client} />, client);

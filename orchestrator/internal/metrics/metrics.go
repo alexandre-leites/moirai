@@ -20,6 +20,7 @@ package metrics
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -42,9 +43,11 @@ const scrapeTimeout = 5 * time.Second
 // `loop` label cannot grow: a name outside it is folded into LoopUnknown rather
 // than minting a series.
 const (
-	LoopRecoverySweep = "recovery_sweep"
-	LoopIssueSync     = "issue_sync"
-	LoopUnknown       = "unknown"
+	LoopScheduler        = "scheduler_tick"
+	LoopWorkflowObserver = "workflow_observer"
+	LoopRecoverySweep    = "recovery_sweep"
+	LoopIssueSync        = "issue_sync"
+	LoopUnknown          = "unknown"
 )
 
 const (
@@ -58,9 +61,35 @@ const (
 // for it would publish a series that grows forever by construction, since
 // nothing ever succeeds under that name.
 var (
-	scheduledLoops = []string{LoopRecoverySweep, LoopIssueSync}
+	scheduledLoops = []string{LoopScheduler, LoopWorkflowObserver, LoopRecoverySweep, LoopIssueSync}
 	loopNames      = append(append([]string{}, scheduledLoops...), LoopUnknown)
 )
+
+// defaultLoopIntervals mirrors the tick interval each loop actually runs on
+// (see cmd/orchestrator/main.go's `every` calls). Issue sync is the one
+// exception — its interval is operator-configurable — so main.go overrides it
+// with SetLoopInterval once cfg.IssueSyncInterval is known; every other loop's
+// interval is fixed in code, so the default here is the real one.
+var defaultLoopIntervals = map[string]time.Duration{
+	LoopScheduler:        time.Second,
+	LoopWorkflowObserver: 15 * time.Second,
+	LoopRecoverySweep:    30 * time.Second,
+	LoopIssueSync:        2 * time.Minute,
+}
+
+// loopStalenessMultiplier bounds how many missed intervals a loop may accumulate
+// before it is reported unhealthy. 5x tolerates an isolated slow pass (a rate
+// limit, a slow query) without flagging the loop, while still catching a loop
+// that has genuinely stopped well before symptoms downstream (stuck workflow
+// locks, a silent scheduler) would otherwise be the only evidence.
+const loopStalenessMultiplier = 5
+
+// loopStalenessFloor lower-bounds the staleness threshold independent of the
+// multiplier. The scheduler tick runs every second, so 5x is only 5 seconds —
+// too tight to tell "one slow database round trip" apart from "the loop
+// stopped". 30s comfortably covers worst-case jitter on the fastest loop
+// without materially delaying detection on any of the slower ones.
+const loopStalenessFloor = 30 * time.Second
 
 // Snapshot is one reading of the orchestrator-owned state, taken from a single
 // database query.
@@ -148,6 +177,37 @@ type Recorder struct {
 	// monotonic reading survives and a wall-clock step cannot report a loop as
 	// having just succeeded.
 	lastSuccess map[string]*atomic.Pointer[time.Time]
+	// lastError holds the most recent failure a loop hit, independent of
+	// lastSuccess: a loop that is currently healthy still keeps the last error
+	// it ever saw, which is what makes a since-recovered flake visible to an
+	// operator instead of erased the moment the loop next succeeds.
+	lastError map[string]*atomic.Pointer[loopFailure]
+	// interval holds each loop's own tick interval, read when deciding whether
+	// its last success is stale. A pointer per loop rather than a plain map
+	// because issue sync's interval is set once at startup (SetLoopInterval)
+	// after the recorder already exists and loops may already be recording
+	// into it.
+	interval map[string]*atomic.Pointer[time.Duration]
+}
+
+// loopFailure is one reconciliation loop's most recent error and when it
+// happened.
+type loopFailure struct {
+	message string
+	at      time.Time
+}
+
+// LoopStatus is one loop's liveness as read at a single instant: the same
+// shape the GetSchedulerMetrics RPC and the readiness endpoint both report, so
+// neither can disagree with the other about which loop is stalled.
+type LoopStatus struct {
+	Name        string
+	LastSuccess time.Time
+	LastError   string
+	LastErrorAt time.Time
+	// Healthy is false once LastSuccess has aged past loopStalenessMultiplier
+	// times the loop's own interval (floored at loopStalenessFloor).
+	Healthy bool
 }
 
 func newRecorder(now func() time.Time) *Recorder {
@@ -161,6 +221,8 @@ func newRecorder(now func() time.Time) *Recorder {
 			Help: "Reconciliation loop passes, by loop and result.",
 		}, []string{"loop", "result"}),
 		lastSuccess: make(map[string]*atomic.Pointer[time.Time], len(loopNames)),
+		lastError:   make(map[string]*atomic.Pointer[loopFailure], len(loopNames)),
+		interval:    make(map[string]*atomic.Pointer[time.Duration], len(loopNames)),
 	}
 	started := now()
 	// Every label child is materialised now, so each series exists at zero from
@@ -171,11 +233,32 @@ func newRecorder(now func() time.Time) *Recorder {
 			recorder.loopRuns.WithLabelValues(loop, result)
 		}
 		seed := started
-		pointer := &atomic.Pointer[time.Time]{}
-		pointer.Store(&seed)
-		recorder.lastSuccess[loop] = pointer
+		successPointer := &atomic.Pointer[time.Time]{}
+		successPointer.Store(&seed)
+		recorder.lastSuccess[loop] = successPointer
+		recorder.lastError[loop] = &atomic.Pointer[loopFailure]{}
+		intervalPointer := &atomic.Pointer[time.Duration]{}
+		configured := defaultLoopIntervals[loop]
+		intervalPointer.Store(&configured)
+		recorder.interval[loop] = intervalPointer
 	}
 	return recorder
+}
+
+// SetLoopInterval overrides the tick interval a loop's staleness threshold is
+// computed from. Every loop but issue sync runs on a fixed interval known at
+// compile time; issue sync's is operator-configurable (LOOP_ISSUE_SYNC_INTERVAL),
+// so main.go calls this once cfg.IssueSyncInterval is known, before the loop
+// itself starts running.
+func (r *Recorder) SetLoopInterval(loop string, interval time.Duration) {
+	if r == nil {
+		return
+	}
+	pointer, known := r.interval[loop]
+	if !known {
+		return
+	}
+	pointer.Store(&interval)
 }
 
 // RecordLoopRun counts one pass of a reconciliation loop. A loop name outside
@@ -185,11 +268,15 @@ func (r *Recorder) RecordLoopRun(loop string, err error) {
 		return
 	}
 	last, known := r.lastSuccess[loop]
+	errPointer := r.lastError[loop]
 	if !known {
-		loop, last = LoopUnknown, r.lastSuccess[LoopUnknown]
+		loop = LoopUnknown
+		last, errPointer = r.lastSuccess[LoopUnknown], r.lastError[LoopUnknown]
 	}
 	if err != nil {
 		r.loopRuns.WithLabelValues(loop, resultFailure).Inc()
+		failure := loopFailure{message: err.Error(), at: r.now()}
+		errPointer.Store(&failure)
 		return
 	}
 	r.loopRuns.WithLabelValues(loop, resultSuccess).Inc()
@@ -202,19 +289,144 @@ func (r *Recorder) RecordLoopRun(loop string, err error) {
 // clock that genuinely runs backwards, since no consumer of an age has a
 // meaning for a negative one.
 func (r *Recorder) loopSuccessAge(loop string) float64 {
+	age, _ := r.successAge(loop)
+	return age.Seconds()
+}
+
+// successAge reports how long ago loop last succeeded, and whether the loop
+// name is one the recorder actually tracks.
+func (r *Recorder) successAge(loop string) (time.Duration, bool) {
 	stored, known := r.lastSuccess[loop]
 	if !known {
-		return 0
+		return 0, false
 	}
 	last := stored.Load()
 	if last == nil {
-		return 0
+		return 0, true
 	}
 	age := r.now().Sub(*last)
 	if age < 0 {
-		return 0
+		age = 0
 	}
-	return age.Seconds()
+	return age, true
+}
+
+// stalenessThreshold is how long a loop's last success may age before it is
+// reported unhealthy: loopStalenessMultiplier times its own interval, floored
+// at loopStalenessFloor so a fast-ticking loop is not flagged over a single
+// slow pass.
+func (r *Recorder) stalenessThreshold(loop string) time.Duration {
+	interval := defaultLoopIntervals[loop]
+	if pointer, known := r.interval[loop]; known {
+		if stored := pointer.Load(); stored != nil {
+			interval = *stored
+		}
+	}
+	threshold := interval * loopStalenessMultiplier
+	if threshold < loopStalenessFloor {
+		threshold = loopStalenessFloor
+	}
+	return threshold
+}
+
+// LoopStatuses reads every scheduled loop's current liveness in one pass —
+// the same computation the readiness endpoint and GetSchedulerMetrics both
+// build on, so they can never report the fleet differently. A nil recorder
+// (a server wired up before the metrics recorder existed) reports no loops
+// rather than panicking.
+func (r *Recorder) LoopStatuses() []LoopStatus {
+	if r == nil {
+		return nil
+	}
+	statuses := make([]LoopStatus, 0, len(scheduledLoops))
+	for _, loop := range scheduledLoops {
+		statuses = append(statuses, r.loopStatus(loop))
+	}
+	return statuses
+}
+
+func (r *Recorder) loopStatus(loop string) LoopStatus {
+	status := LoopStatus{Name: loop, Healthy: true}
+	if age, known := r.successAge(loop); known {
+		if stored := r.lastSuccess[loop].Load(); stored != nil {
+			status.LastSuccess = *stored
+		}
+		status.Healthy = age <= r.stalenessThreshold(loop)
+	}
+	if pointer, known := r.lastError[loop]; known {
+		if failure := pointer.Load(); failure != nil {
+			status.LastError = failure.message
+			status.LastErrorAt = failure.at
+		}
+	}
+	return status
+}
+
+// Ready reports whether every scheduled loop has succeeded recently enough to
+// be considered healthy, and the per-loop detail behind that verdict. This is
+// what the readiness endpoint answers with, and it is deliberately the exact
+// same computation GetSchedulerMetrics exposes over gRPC — a healthcheck and a
+// console that disagreed about which loop stalled would be worse than either
+// alone.
+func (r *Recorder) Ready() (bool, []LoopStatus) {
+	if r == nil {
+		return true, nil
+	}
+	statuses := r.LoopStatuses()
+	healthy := true
+	for _, status := range statuses {
+		if !status.Healthy {
+			healthy = false
+		}
+	}
+	return healthy, statuses
+}
+
+// readyLoopStatus is LoopStatus reshaped for JSON: timestamps as RFC3339, and
+// omitted rather than zero-valued when the loop has not reached that outcome
+// yet, so an unmarshalling client can tell "never happened" from "happened at
+// the Unix epoch".
+type readyLoopStatus struct {
+	Name        string `json:"name"`
+	Healthy     bool   `json:"healthy"`
+	LastSuccess string `json:"lastSuccessAt,omitempty"`
+	LastError   string `json:"lastError,omitempty"`
+	LastErrorAt string `json:"lastErrorAt,omitempty"`
+}
+
+type readyResponse struct {
+	Healthy bool              `json:"healthy"`
+	Loops   []readyLoopStatus `json:"loops"`
+}
+
+// readyHandler answers the orchestrator's own readiness, computed from the
+// recorder's current loop liveness. It is what turns "the healthcheck
+// subprocess cannot see the running server's memory" into something it can
+// still act on: an HTTP fetch on a loopback port the running process itself
+// serves, rather than a bare TCP dial that only proves the listener is bound.
+func readyHandler(recorder *Recorder) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		healthy, statuses := recorder.Ready()
+		response := readyResponse{Healthy: healthy, Loops: make([]readyLoopStatus, 0, len(statuses))}
+		for _, status := range statuses {
+			entry := readyLoopStatus{Name: status.Name, Healthy: status.Healthy}
+			if !status.LastSuccess.IsZero() {
+				entry.LastSuccess = status.LastSuccess.UTC().Format(time.RFC3339Nano)
+			}
+			if status.LastError != "" {
+				entry.LastError = status.LastError
+				entry.LastErrorAt = status.LastErrorAt.UTC().Format(time.RFC3339Nano)
+			}
+			response.Loops = append(response.Loops, entry)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if !healthy {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			slog.Error("readyz encode failed", "error", err)
+		}
+	})
 }
 
 // collector reads the database at scrape time and emits the state series. It is
@@ -322,6 +534,12 @@ func NewWithClock(bind string, source Source, now func() time.Time) *Server {
 	// the control plane. Anything beyond that gets 503, which is the honest
 	// answer to "scrape faster than I can read".
 	mux.Handle("GET /metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{MaxRequestsInFlight: 2}))
+	// /readyz exists so the healthcheck subprocess (cmd/orchestrator's
+	// `healthcheck` verb, a *separate* process from the running server) has
+	// something to read: it cannot see this process's in-memory loop state
+	// directly, only what it can dial or fetch. This is that fetchable state,
+	// reported from the exact same recorder GetSchedulerMetrics reads.
+	mux.Handle("GET /readyz", readyHandler(recorder))
 	return &Server{
 		bind:     bind,
 		recorder: recorder,
