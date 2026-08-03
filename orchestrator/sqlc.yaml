@@ -1,0 +1,22 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    queries: "internal/db/queries"
+    schema: "migrations"
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: true
+        emit_exact_table_names: false
+        # The codebase represents every ID as a plain string end to end (see
+        # `validID`/`newID` in internal/server/server.go) and lets pgx cast
+        # to/from `uuid` at the wire level rather than modelling a UUID Go
+        # type. These overrides keep sqlc-generated call sites drop-in
+        # compatible with that convention instead of forcing every caller to
+        # juggle pgtype.UUID.
+        overrides:
+          - db_type: "uuid"
+            go_type: "string"

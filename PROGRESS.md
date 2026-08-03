@@ -16,6 +16,63 @@
 
 _Nothing is claimed._
 
+## sqlc migration (issue #292)
+
+- [x] Move recovery.go and credentials.go off hand-written SQL onto sqlc, and wire sqlc into the build
+  - Completed: 2026-08-03
+  - Relevant files: `orchestrator/sqlc.yaml`, `orchestrator/internal/db/` (generated, checked in),
+    `orchestrator/internal/db/queries/{credentials,recovery}.sql`,
+    `orchestrator/internal/server/{credentials,recovery,server}.go`, `Makefile`,
+    `.github/workflows/ci.yml`, `AGENTS.md`, `orchestrator/README.md`
+  - Behavior delivered: `orchestrator/internal/server/recovery.go` and `credentials.go` no
+    longer contain any `pool.Exec(ctx, \`...\`)` / `Query` / `QueryRow` SQL string literal.
+    All 15 statements from those two files (9 in credentials.go, 6 distinct statements behind
+    recovery.go's original 9 call sites, two of which built their SQL by string-concatenating a
+    duration constant into the query text) now live as named queries in
+    `orchestrator/internal/db/queries/*.sql` and are generated into `orchestrator/internal/db`
+    (package `db`) via `sqlc` (pgx/v5 driver, schema = `orchestrator/migrations/`). `uuid` columns
+    are generated as plain Go `string` via a `sqlc.yaml` override to match the existing
+    `validID`/`newID` string-ID convention, so call sites needed no type-shape changes beyond
+    swapping the call. The three interval literals recovery.go built by concatenating a string
+    constant into the SQL text (`unansweredOffer`, `abandonedChecks`, `strandedDelivery`, plus
+    the already-parameterized `staleRunner`) are now `time.Duration` Go constants passed as a
+    real `pgtype.Interval` query parameter instead of formatted into SQL — same behavior, no
+    longer string-built SQL. `Server` gained a `queries *db.Queries` field built from the same
+    `*pgxpool.Pool` in `New`/`NewWithGitHub`.
+  - Build wiring: `make sqlc-generate` (root Makefile) runs the pinned `sqlc/sqlc:1.29.0` Docker
+    image against `orchestrator/`, mirroring `proto-generate`'s `bufbuild/buf` pattern. `make
+    sqlc-check` regenerates and runs `git diff --exit-code` against `orchestrator/internal/db`,
+    mirroring `proto-check`; it is now a dependency of `make validate` and its own CI job
+    (`sqlc-check`), which is also in the `validate` gate's `needs:` list.
+  - Documentation: `AGENTS.md` Engineering rules (§12) now states sqlc-generated code is
+    required for orchestrator database access and hand-written SQL literals in Go are not
+    accepted; `orchestrator/README.md` gained a "Database queries (sqlc)" section describing
+    where query files live, how to regenerate, how to add a query, and the `sqlc-check` gate.
+  - Scope: intentionally partial per the issue's own guidance ("best done in several PRs by
+    file"). `server.go`, `delivery.go`, and `management.go` still contain hand-written SQL
+    (~91 statements combined) and are unconverted — see follow-up issues (opened against
+    #292, `ai-doable` label) for `server.go`, `delivery.go`, and `management.go`. `sqlc.yaml`
+    and the Makefile/CI wiring landed in this PR so those follow-ups only need to add `.sql`
+    files and swap call sites, not re-plumb the build.
+  - Known minor duplication left for the file that eventually converts it: `delivery.go`'s
+    `eachWorkflow(ctx, query string, do)` (still query-string-based, since delivery.go is out
+    of this PR's scope) and the new `eachWorkflowID(ctx, []string, do)` in recovery.go
+    (identical loop body, over a pre-fetched slice) should collapse into one helper once
+    delivery.go converts its own queries to sqlc and can supply pre-fetched IDs too.
+  - Validation performed: `go build ./...`, `go vet ./...`, `gofmt -l` (clean), `go test -race
+    ./...` (unit, all packages), `go test -tags integration -race -count=1
+    ./internal/server/` against a throwaway `postgres:16-alpine` container on a
+    non-default port (namespaced container name `moirai-pg-292`) — all passing, including the
+    four `TestRecoverySweep*` integration tests that exercise the converted recovery.go
+    behavior end-to-end. `make sqlc-generate` followed by `git diff --exit-code -- orchestrator/internal/db`
+    confirmed generation is reproducible (`make sqlc-check` passes clean).
+  - Commands executed: `cd orchestrator && go build ./... && go vet ./... && gofmt -l
+    $(git ls-files --cached --others --exclude-standard -- '*.go') && go test -race ./...`;
+    `docker run -d --name moirai-pg-292 -e POSTGRES_DB=loop_test -e POSTGRES_USER=loop -e
+    POSTGRES_PASSWORD=loop-test-password -p 15432:5432 postgres:16-alpine`; `LOOP_TEST_DATABASE_URL=
+    postgresql://loop:loop-test-password@localhost:15432/loop_test go test -tags integration -race
+    -count=1 ./internal/server/`; `make sqlc-generate && git diff --exit-code -- orchestrator/internal/db`.
+
 ## Go V1 Orchestrator Refactor
 
 - [x] Replace Python/LangGraph orchestrator with Go V1

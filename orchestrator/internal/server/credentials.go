@@ -11,11 +11,11 @@ import (
 	"path"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/db"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
@@ -42,11 +42,17 @@ func (s *Server) SetProjectCredential(ctx context.Context, request *controlv1.Se
 		return nil, status.Error(codes.Internal, "generate credential nonce")
 	}
 	ciphertext := aead.Seal(nil, nonce, []byte(request.GetValue()), nil)
-	command, err := s.pool.Exec(ctx, `INSERT INTO app.project_credentials(project_id,kind,ciphertext,nonce,file_path) SELECT $1,$2,$3,$4,$5 WHERE EXISTS(SELECT 1 FROM app.projects WHERE id=$1) ON CONFLICT(project_id,kind) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,nonce=EXCLUDED.nonce,file_path=EXCLUDED.file_path,updated_at=now()`, request.GetProjectId(), kind, ciphertext, nonce, request.GetFilePath())
+	rowsAffected, err := s.queries.UpsertProjectCredential(ctx, db.UpsertProjectCredentialParams{
+		ProjectID:  request.GetProjectId(),
+		Kind:       kind,
+		Ciphertext: ciphertext,
+		Nonce:      nonce,
+		FilePath:   request.GetFilePath(),
+	})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if rowsAffected != 1 {
 		return nil, status.Error(codes.NotFound, "project is unknown")
 	}
 	if err := audit(ctx, s.pool, actor.id, "project.credential.set", "project", request.GetProjectId()); err != nil {
@@ -68,11 +74,14 @@ func (s *Server) ClearProjectCredential(ctx context.Context, request *controlv1.
 	if err != nil || !validID(request.GetProjectId()) {
 		return nil, status.Error(codes.InvalidArgument, "project credential is invalid")
 	}
-	command, err := s.pool.Exec(ctx, `DELETE FROM app.project_credentials WHERE project_id=$1 AND kind=$2`, request.GetProjectId(), kind)
+	rowsAffected, err := s.queries.DeleteProjectCredential(ctx, db.DeleteProjectCredentialParams{
+		ProjectID: request.GetProjectId(),
+		Kind:      kind,
+	})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if command.RowsAffected() > 0 {
+	if rowsAffected > 0 {
 		if err := audit(ctx, s.pool, actor.id, "project.credential.clear", "project", request.GetProjectId()); err != nil {
 			return nil, err
 		}
@@ -113,9 +122,10 @@ func (s *Server) ResolveJobSecret(ctx context.Context, request *runnerv1.Resolve
 	if err != nil {
 		return nil, err
 	}
-	var ciphertext, nonce []byte
-	var filePath string
-	err = s.pool.QueryRow(ctx, `SELECT ciphertext,nonce,file_path FROM app.project_credentials WHERE project_id=$1 AND kind=$2`, projectID, kind).Scan(&ciphertext, &nonce, &filePath)
+	secret, err := s.queries.GetProjectCredentialSecret(ctx, db.GetProjectCredentialSecretParams{
+		ProjectID: projectID,
+		Kind:      kind,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.NotFound, "no credential is configured for this project")
 	}
@@ -126,12 +136,12 @@ func (s *Server) ResolveJobSecret(ctx context.Context, request *runnerv1.Resolve
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
-	plaintext, err := aead.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := aead.Open(nil, secret.Nonce, secret.Ciphertext, nil)
 	if err != nil {
 		return nil, status.Error(codes.FailedPrecondition, "stored secret could not be opened")
 	}
 	delivery := "environment"
-	if kind == "ssh_private_key" || filePath != "" {
+	if kind == "ssh_private_key" || secret.FilePath != "" {
 		delivery = "file"
 	}
 	return &runnerv1.ResolveJobSecretResponse{Value: string(plaintext), Delivery: delivery}, nil
@@ -164,16 +174,24 @@ func (s *Server) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobS
 		return nil, status.Error(codes.Internal, "generate credential nonce")
 	}
 	ciphertext := aead.Seal(nil, nonce, []byte(request.GetValue()), nil)
-	command, err := s.pool.Exec(ctx, `UPDATE app.project_credentials SET ciphertext=$3,nonce=$4,updated_at=now() WHERE project_id=$1 AND kind=$2`, projectID, kind, ciphertext, nonce)
+	rowsAffected, err := s.queries.UpdateProjectCredentialSecret(ctx, db.UpdateProjectCredentialSecretParams{
+		ProjectID:  projectID,
+		Kind:       kind,
+		Ciphertext: ciphertext,
+		Nonce:      nonce,
+	})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	return &runnerv1.StoreJobSecretResponse{Stored: command.RowsAffected() == 1}, nil
+	return &runnerv1.StoreJobSecretResponse{Stored: rowsAffected == 1}, nil
 }
 
 func (s *Server) fencedJobProject(ctx context.Context, jobID, runnerID string, generation int64) (string, error) {
-	var projectID string
-	err := s.pool.QueryRow(ctx, `SELECT project_id::text FROM app.jobs WHERE id=$1 AND runner_id=$2 AND lease_generation=$3 AND status IN ('preparing','running') AND lease_expires_at>now()`, jobID, runnerID, generation).Scan(&projectID)
+	projectID, err := s.queries.GetFencedJobProject(ctx, db.GetFencedJobProjectParams{
+		JobID:           jobID,
+		RunnerID:        runnerID,
+		LeaseGeneration: generation,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", status.Error(codes.FailedPrecondition, "runner does not hold this job")
 	}
@@ -187,30 +205,25 @@ func (s *Server) projectCredentials(ctx context.Context, projectID string) ([]*c
 	if !validID(projectID) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
-	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM app.projects WHERE id=$1)`, projectID).Scan(&exists); err != nil {
+	exists, err := s.queries.ProjectExists(ctx, projectID)
+	if err != nil {
 		return nil, databaseError(err)
 	}
 	if !exists {
 		return nil, status.Error(codes.NotFound, "project is unknown")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT kind,created_at,updated_at,file_path FROM app.project_credentials WHERE project_id=$1 ORDER BY kind`, projectID)
+	rows, err := s.queries.ListProjectCredentials(ctx, projectID)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	credentials := []*controlv1.ProjectCredential{}
-	for rows.Next() {
-		credential := &controlv1.ProjectCredential{}
-		var created, updated time.Time
-		if err := rows.Scan(&credential.Kind, &created, &updated, &credential.FilePath); err != nil {
-			return nil, databaseError(err)
-		}
-		credential.CreatedAt, credential.UpdatedAt = timestamp(created), timestamp(updated)
-		credentials = append(credentials, credential)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
+	for _, row := range rows {
+		credentials = append(credentials, &controlv1.ProjectCredential{
+			Kind:      row.Kind,
+			CreatedAt: timestamp(row.CreatedAt.Time),
+			UpdatedAt: timestamp(row.UpdatedAt.Time),
+			FilePath:  row.FilePath,
+		})
 	}
 	return credentials, nil
 }

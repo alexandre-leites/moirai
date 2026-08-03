@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/db"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"golang.org/x/crypto/scrypt"
 	"google.golang.org/grpc"
@@ -42,6 +43,7 @@ type Server struct {
 	controlv1.UnimplementedControlPlaneServer
 	runnerv1.UnimplementedRunnerControlServer
 	pool     *pgxpool.Pool
+	queries  *db.Queries
 	version  string
 	github   GitHub
 	sessions map[string]chan *runnerv1.OrchestratorToRunner
@@ -69,7 +71,7 @@ func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Server, 
 	if pool == nil || github == nil {
 		return nil, errors.New("server dependencies are required")
 	}
-	return &Server{pool: pool, version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner)}, nil
+	return &Server{pool: pool, queries: db.New(pool), version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner)}, nil
 }
 
 func (s *Server) Bootstrap(ctx context.Context) error {
