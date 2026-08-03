@@ -869,3 +869,111 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
     publish 9090.
   - Out of scope and untouched: #297 (blocked-status derivation), #298 (web console spec symbols),
     #300 (console event envelope).
+
+## Issue #297 — An agent-declared block ended its run as `failed` (2026-08-03)
+
+- Status: **Done.** Branch `issue-297`, PR [#303](https://github.com/alexandre-leites/moirai/pull/303).
+- The defect: the runner goes to some length to keep an agent's declared block distinguishable from
+  a crash (`runner/README.md`, "An agent-reported block is not a crash") — the terminal event type
+  stays `failed` because that vocabulary is shared with `app.jobs.status` and the console, and the
+  payload instead carries `status: "blocked"`, `blocked: true`, the agent's bounded `summary` and
+  its `remainingWork`. `persistExecutionEvent` (`orchestrator/internal/server/server.go`) read none
+  of it: it stored the payload verbatim in `app.workflow_events` and then set the run's `status` and
+  `current_phase` to the *event type*. A deliberate, explained stop was therefore stored as an
+  anonymous crash — `Failed` in the console, `blocking_reason` empty, and missing from
+  `NEEDS_ATTENTION_STATUSES` (`web/src/status.ts`, `waiting_human ∪ blocked`), which is the one set
+  the console's triage is built from. The agent's account survived only inside a payload nothing
+  parsed.
+- Behavior delivered: a terminal `failed` event whose payload carries the boolean `blocked: true`
+  now terminates the run as `blocked`, with `blocking_reason` and `terminal_reason` composed from
+  the agent's `summary` and `remainingWork`. Everything else about that path is unchanged — the
+  event row keeps its `failed` type and `error` severity, `app.jobs.status` stays `failed`, the
+  project lock is still released and the issue still parked by the same `event.GetType() !=
+  "completed"` guard, and `RetryWorkflow` is still the only way back.
+- Relevant files:
+  - `orchestrator/internal/server/server.go` — the derivation in `persistExecutionEvent`, plus
+    `agentBlockReason` / `composeBlockReason` / `agentReasonText` / `boundedReason`.
+  - `orchestrator/internal/server/server_test.go` — six unit tests over the composer.
+  - `orchestrator/internal/server/integration_test.go` — three integration tests against real
+    PostgreSQL.
+  - `runner/README.md` — the sentence that said this routing was "target scope, not current
+    behavior" is now false and was rewritten.
+- Decisions:
+  - **The flag is the contract, and only the flag.** `blocked` must decode as the JSON literal
+    `true`. A `status: "blocked"` with no flag, a `"true"` string, a `1`, a `null`, a payload that
+    is not an object — all fall back to `failed`. The inverse defect is worse than the one being
+    fixed: a crash filed as a deliberate block hides a real failure behind "a human decided to
+    stop", where nobody is looking for it. The runner already refuses to let a *failing process*
+    report a block, so the flag only ever appears on a clean exit with a `blocked` result document.
+  - **Nothing in the parse may fail the event.** The payload is agent-supplied and a lost terminal
+    event strands the run holding its project lock, so the payload is decoded field by field into
+    `json.RawMessage` and every field is best effort. There is no input for which
+    `persistExecutionEvent` now returns an error it did not return before.
+  - **The reason matches the column, not a new shape.** `blocking_reason` is written today by
+    `controlWorkflow` (operator block, ≤1024 bytes, rejected above that) and by `terminateWorkflow`
+    (`truncate(cause, 1024)`, written to `blocking_reason` and `terminal_reason` together). The
+    composed reason is plain single-line English bounded to the same 1024 bytes and written to the
+    same two columns. Its prefix — "the agent reported itself blocked" — is the phrasing the
+    runner's goal gate already uses for the same fact.
+  - **Agent prose is sanitised before it reaches a text column.** Control characters become spaces,
+    invalid UTF-8 is dropped, whitespace runs collapse, and the bound never splits a rune. A byte
+    slice through a multi-byte character leaves invalid UTF-8 and a NUL is rejected outright by
+    PostgreSQL; either would fail the terminal event at the point of storing it, which is the
+    failure mode this whole path exists to avoid.
+  - **`blocking_reason` / `terminal_reason` are left untouched when no reason was derived**
+    (`COALESCE(NULLIF($3,''),…)`), so an ordinary failure cannot blank a reason another writer set.
+- `moirai_active_workflows` coupling (flagged by #296 / PR #301): **no change was needed, and it was
+  verified rather than assumed.** `terminalStatuses` in `server.go` already listed `blocked`, and
+  `readSchedulerSnapshot`'s active-workflow subquery is generated from that one list via
+  `terminalStatusList`, so routing a block to `blocked` moves the run *out* of the gauge — which is
+  exactly what the help text ("Workflow runs that have not reached a terminal status") promises.
+  Pinned two ways: `TestBlockedIsATerminalStatusTheActiveGaugeExcludes` asserts the Go predicate and
+  the generated SQL literal agree on all four statuses, and the integration test scrapes
+  `MetricsSnapshot` after the block and requires `ActiveWorkflows == 0`. The partial index from
+  `020_metrics_indexes.sql` already excludes `blocked`; `EXPLAIN` against the real database with
+  `enable_seqscan = off` confirms the count still plans as `Index Only Scan using
+  workflow_runs_active_idx`, so the literal-ordering difference between the index predicate and
+  `terminalStatusList` does not defeat the implication proof. No migration was needed.
+- Validation performed (all commands run from the `issue-297` worktree; a throwaway PostgreSQL 16
+  container was bound to port **55297** and removed afterwards, so no shared port or temp path was
+  touched):
+  - **Failing test first.** With the derivation reverted in place and everything else identical:
+    ```
+    LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:55297/loop_test \
+      go test -tags integration -race -count=1 -run 'TestAgentDeclaredBlock…' ./internal/server/
+    --- FAIL: TestAgentDeclaredBlockEndsTheRunBlockedWithItsReason (0.08s)
+        integration_test.go:729: status = "failed", want blocked: a stated stop is being filed as an anonymous failure
+    --- FAIL: TestAnAgentBlockSurvivesHostileAndOversizedProse (0.08s)
+        integration_test.go:872: status = "failed", want blocked
+    ```
+    `TestOnlyAGenuineBlockDeclarationDivertsTheTerminalStatus` passed against the pre-fix code, as
+    it must: it pins the behavior that had to survive.
+  - `make test-orchestrator` — ok (all five packages).
+  - `LOOP_TEST_DATABASE_URL=…:55297/loop_test make test-postgres-integration` — ok, 4.063s, the
+    whole integration suite including the three new tests.
+  - `make test-runner` — ok (twelve packages). `make test-api` — ok (five packages).
+  - `make lint` (gofmt) — clean. `make typecheck` (`go vet ./...`) — clean.
+  - `make compose`, `make test-release-tags`, `make proto-check` — all pass.
+- Known issues found and **not** fixed here:
+  - **A NUL byte anywhere in an execution-event payload wedges the run.** `json.Valid` accepts
+    `"\u0000"`, `jsonb` does not (`ERROR: unsupported Unicode escape sequence`), so the
+    `app.workflow_events` insert aborts the transaction and `persistExecutionEvent` answers
+    `Internal`. For a terminal event that means no terminal status, a project lock never released
+    and an issue never parked. It is reachable because `payload["result"]` is the agent's own
+    document forwarded verbatim, unlike `summary`/`remainingWork`/`logTail` which the runner
+    sanitises. Found when a `\u0000` in a test payload failed *before* reaching the behavior under
+    test, on both the pre-fix and post-fix orchestrator. Filed as
+    [#302](https://github.com/alexandre-leites/moirai/issues/302) with `ai-doable`; the test here
+    was narrowed to an ANSI escape rather than expanding this issue's scope.
+  - `make compose-overlays` fails locally on `sh scripts/render-tls-stack.sh --check` with
+    "compose.tls-stack.yaml is out of date". Pre-existing and environment-dependent, not caused by
+    this branch: no compose file is touched by it, and the only difference is a leading `name:` key
+    that Docker Compose v5.3.1 emits and the committed generated file (rendered by an older
+    version) does not. CI runs neither `compose-overlays` nor `validate`, so it is invisible there.
+- Out of scope and untouched: **#298** (web console specification citing deleted Python symbols) and
+  **#300** (console event-timeline parsing of the retired Python event envelope). #300 in particular
+  still owns the timeline: with this change a blocked run's *status* and *blocking reason* render
+  correctly, but `describeEvent`/`executionError` in `web/src/status.ts` still read the terminal
+  payload through the retired nested envelope, so the timeline line for that event is still wrong.
+  That is #300's fix, not this one's. The runner's event vocabulary and the lock/parking behavior
+  were deliberately left alone.
