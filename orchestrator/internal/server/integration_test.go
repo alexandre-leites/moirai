@@ -673,6 +673,35 @@ func TestHeartbeatAgeCountsANeverConnectedRunnerFromRegistration(t *testing.T) {
 	}
 }
 
+// outboundChannel returns the control-stream channel registered for a runner,
+// which is what a test reads to observe messages the orchestrator enqueues
+// for it (JobOffer, CancelExecution, DrainRunner, ...).
+func (h *harness) outboundChannel(runnerID string) chan *runnerv1.OrchestratorToRunner {
+	h.t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	outbound := h.sessions[runnerID]
+	if outbound == nil {
+		h.t.Fatalf("runner %s has no registered session", runnerID)
+	}
+	return outbound
+}
+
+// drainOffer discards the JobOffer message ScheduleOnce leaves on a runner's
+// channel, so a test can then look past it at whatever the orchestrator sends
+// next.
+func (h *harness) drainOffer(outbound chan *runnerv1.OrchestratorToRunner) {
+	h.t.Helper()
+	select {
+	case message := <-outbound:
+		if message.GetOffer() == nil {
+			h.t.Fatalf("expected a JobOffer to drain, got %T", message.GetMessage())
+		}
+	case <-time.After(time.Second):
+		h.t.Fatal("timed out waiting for the job offer")
+	}
+}
+
 // leaseGeneration reads the fencing generation the runner holds, which every
 // execution event has to carry to be accepted.
 func (h *harness) leaseGeneration(jobID string) int64 {
@@ -918,5 +947,153 @@ func TestOnlyAFailedEventIsReadForABlockDeclaration(t *testing.T) {
 				t.Fatalf("blocking_reason = %q for a %s event, want it left empty", state.blocking, eventType)
 			}
 		})
+	}
+}
+
+// Cancelling or blocking a workflow used to only update the database: the
+// runner still holding the job's lease was never told, so it kept the agent
+// running indefinitely (issue #260). Both actions must reach the runner's
+// control stream with the execution ID and the lease generation it is
+// currently holding, so the runner can match it against its active
+// execution before the database's own bump of that generation.
+func TestCancelAndBlockNotifyTheRunnersControlStream(t *testing.T) {
+	for _, action := range []string{"cancel", "block"} {
+		t.Run(action, func(t *testing.T) {
+			h := newHarness(t)
+			h.project()
+			runnerID := h.runner()
+			outbound := h.outboundChannel(runnerID)
+			jobID, workflowID := h.runJob(runnerID)
+			h.drainOffer(outbound)
+			generationBeforeCancel := h.leaseGeneration(jobID)
+
+			ctx := h.adminContext()
+			var err error
+			if action == "block" {
+				_, err = h.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+			} else {
+				_, err = h.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", action, err)
+			}
+
+			select {
+			case message := <-outbound:
+				cancellation := message.GetCancel()
+				if cancellation == nil {
+					t.Fatalf("%s sent %T on the control stream, want a CancelExecution", action, message.GetMessage())
+				}
+				if want := implementExecutionID(jobID); cancellation.GetExecutionId() != want {
+					t.Fatalf("%s sent execution ID %q, want %q", action, cancellation.GetExecutionId(), want)
+				}
+				if cancellation.GetLeaseGeneration() != generationBeforeCancel {
+					t.Fatalf("%s sent lease generation %d, want the generation the runner was holding (%d)", action, cancellation.GetLeaseGeneration(), generationBeforeCancel)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("%s never sent a CancelExecution to the runner", action)
+			}
+		})
+	}
+}
+
+// A workflow can be cancelled or blocked before the scheduler ever gave it a
+// job — while the run is still in "planning", say — in which case there is no
+// runner to notify. That must stay a no-op rather than an error or a panic.
+func TestCancelWithoutAJobDoesNotErrorOrNotifyAnyone(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	runnerID := h.runner()
+	outbound := h.outboundChannel(runnerID)
+	workflowID := newID()
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'planning','planning','agent/'||$4)`, workflowID, projectID, issueID, workflowID)
+
+	if _, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
+		t.Fatalf("CancelWorkflow: %v", err)
+	}
+
+	select {
+	case message := <-outbound:
+		t.Fatalf("cancelling a jobless run sent %T to an unrelated runner", message.GetMessage())
+	default:
+	}
+}
+
+// A workflow's job can outlive the runner's session — the runner crashed or
+// lost its connection, and the recovery sweep has not yet reclaimed the lease.
+// Cancelling it must still succeed and must not block waiting for a session
+// that will never accept a send.
+func TestCancelWithADisconnectedRunnerStillSucceeds(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+	h.removeSession(runnerID, h.outboundChannel(runnerID))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CancelWorkflow: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CancelWorkflow blocked waiting on a disconnected runner's session")
+	}
+	if cancelled := h.scalar(`SELECT COUNT(*) FROM app.jobs WHERE id=$1 AND status='cancelled'`, jobID); cancelled != 1 {
+		t.Fatal("cancelling with a disconnected runner did not still cancel the job in the database")
+	}
+}
+
+// Draining or revoking a runner used to only flip its database row: a runner
+// with an in-flight job kept running it and only stopped receiving new offers.
+// Both actions must push a DrainRunner down the runner's control stream.
+func TestSetRunnerStateNotifiesTheRunnerOnDrainAndRevoke(t *testing.T) {
+	for _, state := range []string{"drain", "revoke"} {
+		t.Run(state, func(t *testing.T) {
+			h := newHarness(t)
+			runnerID := h.runner()
+			outbound := h.outboundChannel(runnerID)
+
+			if _, err := h.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state}); err != nil {
+				t.Fatalf("SetRunnerState(%s): %v", state, err)
+			}
+
+			select {
+			case message := <-outbound:
+				if message.GetDrain() == nil {
+					t.Fatalf("SetRunnerState(%s) sent %T, want a DrainRunner", state, message.GetMessage())
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("SetRunnerState(%s) never sent DrainRunner to the runner", state)
+			}
+		})
+	}
+}
+
+// Enabling a runner is neither a drain nor a revoke, so it must not push
+// anything to the control stream — an enable that also cancelled the runner's
+// current job would be a much larger behavior change than "let it take new
+// work again".
+func TestSetRunnerStateEnableDoesNotNotifyTheRunner(t *testing.T) {
+	h := newHarness(t)
+	runnerID := h.runner()
+	outbound := h.outboundChannel(runnerID)
+	if _, err := h.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: "drain"}); err != nil {
+		t.Fatalf("SetRunnerState(drain): %v", err)
+	}
+	<-outbound // discard the drain notification from setting up the precondition
+
+	if _, err := h.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: "enable"}); err != nil {
+		t.Fatalf("SetRunnerState(enable): %v", err)
+	}
+
+	select {
+	case message := <-outbound:
+		t.Fatalf("SetRunnerState(enable) sent %T to the runner, want nothing", message.GetMessage())
+	default:
 	}
 }

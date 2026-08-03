@@ -641,6 +641,13 @@ func (s *Server) SetRunnerState(ctx context.Context, request *controlv1.SetRunne
 	if err := audit(ctx, s.pool, actor.id, "runner."+request.GetState(), "runner", request.GetRunnerId()); err != nil {
 		return nil, err
 	}
+	if request.GetState() == "drain" || request.GetState() == "revoke" {
+		// Best-effort, same as workflow cancellation above: a runner with no
+		// active session is already not receiving new offers, which is the
+		// only thing draining/revoking otherwise guarantees, so a missed
+		// delivery here is not a correctness problem — just a slower stop.
+		s.enqueue(request.GetRunnerId(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Drain{Drain: &runnerv1.DrainRunner{}}})
+	}
 	var runner controlv1.Runner
 	row := s.pool.QueryRow(ctx, `SELECT id::text, name, enabled, draining, status, labels::text, last_seen_at, version FROM app.runners WHERE id=$1`, request.GetRunnerId())
 	if err := scanRunnerRow(row, &runner); err != nil {
@@ -1061,12 +1068,20 @@ func (s *Server) releaseUndeliveredOffer(jobID, workflowID, projectID string) er
 // mayMerge stays false in every packet: merging is the orchestrator's decision,
 // taken after GitHub reports the checks green, and the runner rejects a packet
 // that claims otherwise.
+// implementExecutionID derives the execution ID the runner will report back
+// against a job's single "implement" execution. Deterministic from the job
+// ID rather than stored, so cancelling a job can address the runner's active
+// execution without another round trip through the database.
+func implementExecutionID(jobID string) string {
+	return jobID + "-implement"
+}
+
 func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string) (map[string]any, error) {
 	if !validID(jobID) || !validID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") {
 		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
 	}
 	return map[string]any{
-		"protocolVersion": "1.0", "jobId": jobID, "executionId": jobID + "-implement", "role": "developer", "objective": "Implement " + externalID + ": " + title,
+		"protocolVersion": "1.0", "jobId": jobID, "executionId": implementExecutionID(jobID), "role": "developer", "objective": "Implement " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
 		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": 0, "environmentRefs": []any{}, "executionImage": executionImage,
@@ -1367,6 +1382,14 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	// Populated only when cancelling/blocking finds a job still in flight,
+	// which is the case the runner needs to hear about: nothing to notify if
+	// the run never got past planning. lease_generation-1 is the generation
+	// the runner's lease was actually acknowledged at — the UPDATE below bumps
+	// it to fence a lease renewal or event racing the cancellation, so the
+	// value the runner is told to cancel must be read from before that bump.
+	var jobToCancel, runnerHoldingLease string
+	var leaseGenerationAtCancel int64
 	switch action {
 	case "retry":
 		if current != "failed" && current != "blocked" && current != "cancelled" {
@@ -1400,7 +1423,8 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 			if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=CASE WHEN $2='blocked' THEN $3 ELSE blocking_reason END,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1`, id, next, defaultReason(action, reason)); err != nil {
 				return nil, databaseError(err)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running')`, id, defaultReason(action, reason)); err != nil {
+			err = tx.QueryRow(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running') RETURNING id::text,runner_id::text,lease_generation-1`, id, defaultReason(action, reason)).Scan(&jobToCancel, &runnerHoldingLease, &leaseGenerationAtCancel)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return nil, databaseError(err)
 			}
 			// Blocking parks the issue; cancelling does not. Blocking says "stop
@@ -1433,6 +1457,15 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, databaseError(err)
+	}
+	// Best-effort: the runner may already be disconnected, in which case the
+	// lease sweep is the backstop. Never fail the RPC over it — the database
+	// state is already committed and correct regardless of delivery.
+	if jobToCancel != "" && runnerHoldingLease != "" {
+		s.enqueue(runnerHoldingLease, &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Cancel{Cancel: &runnerv1.CancelExecution{
+			ExecutionId:     implementExecutionID(jobToCancel),
+			LeaseGeneration: leaseGenerationAtCancel,
+		}}})
 	}
 	return s.workflow(ctx, id)
 }
