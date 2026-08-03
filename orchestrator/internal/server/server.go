@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -463,7 +464,11 @@ func (s *Server) ListWorkflowEvents(ctx context.Context, request *controlv1.List
 			CreatedAt:   timestamp(row.CreatedAt.Time),
 		}
 		response.Events = append(response.Events, &event)
-		last, _ = parseInt(event.Id)
+		parsed, err := parseInt(event.Id)
+		if err != nil {
+			return nil, eventIDError(event.Id, err)
+		}
+		last = parsed
 	}
 	if len(response.Events) == int(limit) {
 		response.NextCursor = fmt.Sprintf("%d", last)
@@ -523,7 +528,7 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 	for _, candidate := range candidates {
 		result := &controlv1.ProjectSyncResult{ProjectId: candidate.ID}
 		if err := s.syncProject(ctx, candidate.ID, textValue(candidate.RepositoryUrl)); err != nil {
-			result.Error = err.Error()
+			result.Error = syncErrorMessage(err)
 		} else {
 			count, err := s.queries.CountProjectIssues(ctx, candidate.ID)
 			if err != nil {
@@ -1494,6 +1499,20 @@ func databaseError(err error) error {
 	return status.Error(codes.Internal, "database operation failed")
 }
 
+// syncErrorMessage renders a per-project SyncNow failure for the console.
+// syncProject's error can be a plain Go error (a malformed repository URL) or
+// one already run through databaseError/configurationError, which wraps it as
+// a gRPC status so it survives the RPC boundary correctly elsewhere in this
+// server. But ProjectSyncResult.Error is a plain string field read straight
+// by an operator, not another gRPC hop, so passing a status error through
+// err.Error() would print the wrapper verbatim: "rpc error: code = Internal
+// desc = database operation failed". status.Convert treats a non-status error
+// as an Unknown-code status carrying the original message unchanged, so
+// Message() gives the clean text either way.
+func syncErrorMessage(err error) string {
+	return status.Convert(err).Message()
+}
+
 // configurationError reports a stored-configuration value (project
 // configuration, runner labels, registration-token labels) that failed to
 // decode. Unlike databaseError, the cause here has nothing to do with the
@@ -1508,6 +1527,19 @@ func configurationError(err error) error {
 	}
 	slog.Error("stored configuration is invalid", "error", err)
 	return status.Error(codes.Internal, "stored configuration is invalid")
+}
+
+// eventIDError reports a workflow event whose id (a bigint stored as text)
+// failed to parse back into a number. In practice the column is a BIGSERIAL,
+// so this should be unreachable, but ListWorkflowEvents used to ignore
+// parseInt's error and build its pagination cursor from whatever "last" last
+// held anyway: a caller that keeps ignoring it would silently pin the cursor
+// to a stale or wrong value and could hand a client the same page forever.
+// The real id is logged server-side for investigation; the client sees a
+// distinct, opaque message rather than a fabricated cursor.
+func eventIDError(id string, err error) error {
+	slog.Error("workflow event id is not numeric", "event_id", id, "error", err)
+	return status.Error(codes.Internal, "workflow event id is invalid")
 }
 
 func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error) {
@@ -2233,8 +2265,14 @@ func truncate(value string, length int) string {
 	}
 	return value
 }
+
+// parseInt converts a decimal string to an int64, rejecting the whole value
+// on any malformed input. fmt.Sscan was tried here previously, but it scans a
+// leading numeric prefix and reports success even when trailing characters
+// remain (e.g. "123abc" silently becomes 123) and leaves its destination
+// holding whatever it held before the call when nothing scans (e.g. "abc"),
+// which is a second way to fail without returning an error. strconv.ParseInt
+// requires the entire string to be a valid integer.
 func parseInt(value string) (int64, error) {
-	var result int64
-	_, err := fmt.Sscan(value, &result)
-	return result, err
+	return strconv.ParseInt(value, 10, 64)
 }

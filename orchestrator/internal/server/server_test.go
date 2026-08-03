@@ -779,3 +779,67 @@ func TestJsonLabelsPropagatesItsMarshalError(t *testing.T) {
 		t.Fatalf("jsonLabels(nil) = %q, want the literal JSON null json.Marshal(nil) produces", empty)
 	}
 }
+
+// TestParseIntRejectsMalformedInput pins #287: parseInt used to be built on
+// fmt.Sscan, which scans a leading numeric prefix and reports success even
+// when characters remain unconsumed ("123abc" silently became 123), and on
+// total failure ("abc") left its destination holding whatever the caller's
+// variable held before the call rather than a defined value. ListWorkflowEvents
+// built its pagination cursor straight from this result while discarding the
+// error, so either failure mode could hand a client a wrong cursor and no
+// signal that anything was wrong. strconv.ParseInt must reject both forms
+// outright.
+func TestParseIntRejectsMalformedInput(t *testing.T) {
+	for _, value := range []string{"123abc", "abc", "", "12.5", " 123", "123 ", "0x1F"} {
+		if _, err := parseInt(value); err == nil {
+			t.Fatalf("parseInt(%q): want an error, got none", value)
+		}
+	}
+}
+
+func TestParseIntAcceptsValidIntegers(t *testing.T) {
+	for value, want := range map[string]int64{"0": 0, "123": 123, "9223372036854775807": 9223372036854775807} {
+		got, err := parseInt(value)
+		if err != nil {
+			t.Fatalf("parseInt(%q): unexpected error %v", value, err)
+		}
+		if got != want {
+			t.Fatalf("parseInt(%q) = %d, want %d", value, got, want)
+		}
+	}
+}
+
+// TestSyncErrorMessageStripsGRPCStatusWrapper pins #287: SyncNow used to
+// report a per-project failure with err.Error(), which for anything already
+// wrapped by databaseError/configurationError rendered the gRPC status
+// wrapper verbatim ("rpc error: code = Internal desc = database operation
+// failed") on ProjectSyncResult.Error -- a field an operator reads directly,
+// not another gRPC hop. syncErrorMessage must strip that wrapper down to the
+// bare message.
+func TestSyncErrorMessageStripsGRPCStatusWrapper(t *testing.T) {
+	logs := captureLogs(t)
+	wrapped := databaseError(errors.New("pq: connection reset"))
+
+	got := syncErrorMessage(wrapped)
+
+	if strings.Contains(got, "rpc error") {
+		t.Fatalf("syncErrorMessage(%v) = %q, want the gRPC status wrapper stripped", wrapped, got)
+	}
+	const want = "database operation failed"
+	if got != want {
+		t.Fatalf("syncErrorMessage = %q, want %q", got, want)
+	}
+	_ = logs // databaseError already has its own logging test; this just avoids polluting test output.
+}
+
+// TestSyncErrorMessagePassesThroughPlainErrors is the adversarial half of the
+// fix above: a plain Go error (e.g. a malformed repository URL) never went
+// through status.Error, so it must come out exactly as its own message
+// rather than something mangled by treating it as a status.
+func TestSyncErrorMessagePassesThroughPlainErrors(t *testing.T) {
+	plain := errors.New("repository URL is invalid")
+
+	if got := syncErrorMessage(plain); got != plain.Error() {
+		t.Fatalf("syncErrorMessage(%v) = %q, want %q unchanged", plain, got, plain.Error())
+	}
+}
