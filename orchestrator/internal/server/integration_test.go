@@ -977,6 +977,55 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	}
 }
 
+// GetSchedulerMetrics is where the console would read background-loop
+// liveness (issue #278): it has to agree with the recorder that main.go wires
+// every loop's outcome into, including reporting a loop unhealthy once it has
+// gone stale and surfacing the error the loop last hit.
+func TestGetSchedulerMetricsReportsLoopLiveness(t *testing.T) {
+	h := newHarness(t)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	recorder := metrics.NewWithClock("", nil, func() time.Time { return now }).Recorder()
+	h.Server.SetLoopRecorder(recorder)
+
+	recorder.RecordLoopRun(metrics.LoopIssueSync, errors.New("gh: rate limited"))
+	now = now.Add(time.Second)
+	recorder.RecordLoopRun(metrics.LoopIssueSync, nil)
+	// recovery_sweep never succeeds and its interval (30s) is well under this
+	// gap, so it must come back unhealthy.
+	now = now.Add(10 * time.Minute)
+
+	resp, err := h.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
+	if err != nil {
+		t.Fatalf("GetSchedulerMetrics: %v", err)
+	}
+	byName := make(map[string]*controlv1.LoopStatus, len(resp.GetLoopStatuses()))
+	for _, status := range resp.GetLoopStatuses() {
+		byName[status.GetName()] = status
+	}
+
+	issueSync, ok := byName[metrics.LoopIssueSync]
+	if !ok {
+		t.Fatal("GetSchedulerMetrics did not report issue_sync")
+	}
+	if !issueSync.GetHealthy() {
+		t.Errorf("issue_sync reported unhealthy right after a fresh success: %+v", issueSync)
+	}
+	if issueSync.GetLastError() != "gh: rate limited" {
+		t.Errorf("issue_sync LastError = %q, want the earlier failure preserved", issueSync.GetLastError())
+	}
+	if issueSync.GetLastSuccessAt() == "" {
+		t.Error("issue_sync LastSuccessAt is empty after a recorded success")
+	}
+
+	recoverySweep, ok := byName[metrics.LoopRecoverySweep]
+	if !ok {
+		t.Fatal("GetSchedulerMetrics did not report recovery_sweep")
+	}
+	if recoverySweep.GetHealthy() {
+		t.Errorf("recovery_sweep reported healthy after never succeeding for 10 minutes: %+v", recoverySweep)
+	}
+}
+
 // A scrape must not be able to take the orchestrator down, and must not report
 // zeros it did not measure, when the database is gone.
 func TestScrapeSurvivesAnUnreachableDatabase(t *testing.T) {

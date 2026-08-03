@@ -233,6 +233,8 @@ function Vitality({ vitals, error }: { vitals: Vitals | null; error: string | nu
     .at(-1);
   const backingOff = vitals.sync.filter((entry) => entry.backingOff);
   const eligible = vitals.sync.reduce((total, entry) => total + entry.eligibleCount, 0);
+  const loops = vitals.metrics.loops ?? [];
+  const stalledLoops = loops.filter((loop) => !loop.healthy);
 
   return (
     <HealthStrip label="Orchestrator health">
@@ -244,6 +246,15 @@ function Vitality({ vitals, error }: { vitals: Vitals | null; error: string | nu
         value={backingOff.length > 0 ? `${backingOff.length} backing off` : ageAgo(freshest, "no pass yet")}
       />
       <Probe tone="ok" name="Scheduled jobs" value={vitals.metrics.scheduledJobs} />
+      <Probe
+        tone={stalledLoops.length > 0 ? "crit" : "ok"}
+        name="Background loops"
+        value={
+          stalledLoops.length > 0
+            ? `${plural(stalledLoops.length, "loop")} stalled: ${stalledLoops.map((loop) => loop.name).join(", ")}`
+            : "all healthy"
+        }
+      />
       <Probe tone="idle" trailing value={`${eligible} eligible issues tracked`} />
     </HealthStrip>
   );

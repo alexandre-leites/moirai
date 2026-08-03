@@ -986,8 +986,26 @@ components:
         orchestratorVersion: { type: string, maxLength: 12 }
     SchedulerMetrics:
       type: object
-      required: [queueDepth, activeWorkflows, scheduledJobs]
+      required: [queueDepth, activeWorkflows, scheduledJobs, loops]
       properties:
         queueDepth: { type: integer }
         activeWorkflows: { type: integer }
         scheduledJobs: { type: integer }
+        loops:
+          type: array
+          description: >-
+            Liveness of each orchestrator background loop (scheduler tick,
+            workflow observer, recovery sweep, issue sync). A loop is
+            unhealthy once its last success has aged past a threshold sized
+            to its own tick interval.
+          items:
+            $ref: '#/components/schemas/LoopStatus'
+    LoopStatus:
+      type: object
+      required: [name, healthy]
+      properties:
+        name: { type: string }
+        healthy: { type: boolean }
+        lastSuccessAt: { type: string, format: date-time }
+        lastError: { type: string }
+        lastErrorAt: { type: string, format: date-time }

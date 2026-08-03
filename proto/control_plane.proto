@@ -221,7 +221,26 @@ message CancelWorkflowResponse { Workflow workflow = 1; }
 message BlockWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
 message BlockWorkflowResponse { Workflow workflow = 1; }
 message GetSchedulerMetricsRequest {}
-message GetSchedulerMetricsResponse { int32 queue_depth = 1; int32 active_workflows = 2; int32 scheduled_jobs = 3; }
+// LoopStatus is one background reconciliation loop's liveness: when it last
+// completed a pass without error, and the most recent error it hit (which may
+// be well in the past for a loop that has since recovered). last_success_at
+// and last_error_at are empty until the loop has reached that outcome at
+// least once. healthy is the same threshold the process's own healthcheck
+// enforces, so the console and the container orchestrator cannot disagree
+// about which loop is stalled.
+message LoopStatus {
+  string name = 1;
+  string last_success_at = 2;
+  string last_error = 3;
+  string last_error_at = 4;
+  bool healthy = 5;
+}
+message GetSchedulerMetricsResponse {
+  int32 queue_depth = 1;
+  int32 active_workflows = 2;
+  int32 scheduled_jobs = 3;
+  repeated LoopStatus loop_statuses = 4;
+}
 message GetSystemVersionRequest {}
 message GetSystemVersionResponse { string version = 1; }
 message StreamEventsRequest { string last_event_id = 1; }
