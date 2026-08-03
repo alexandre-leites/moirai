@@ -199,9 +199,14 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
 
   switch (event.type) {
     case "workflow_transition": {
+      // The Go writer's only producer today (controlWorkflow's retry branch)
+      // writes `{"reason": ...}` with no `status` field, so the `status`-keyed
+      // branch below is dead against real payloads; `reason` is what carries
+      // the operator-facing text and is rendered directly when present.
       const status = text(payload.status);
+      const reason = text(payload.reason);
       return {
-        text: status ? `Workflow entered ${statusMeta(status).label.toLowerCase()}` : "Workflow state changed",
+        text: reason || (status ? `Workflow entered ${statusMeta(status).label.toLowerCase()}` : "Workflow state changed"),
         phase: status ? shortPhase(status) : "workflow",
         warn: status === "blocked" || status === "failed",
       };

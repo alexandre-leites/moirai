@@ -76,7 +76,7 @@ export function WorkflowDetailPage({ api }: { api: ApiClient }) {
               type="button"
               className="btn sm"
               disabled={busy}
-              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Workflow requeued with prior-failure context")}
+              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
             >
               Retry with fresh context
             </button>
@@ -94,13 +94,31 @@ export function WorkflowDetailPage({ api }: { api: ApiClient }) {
               type="button"
               className="btn sm"
               disabled={busy}
-              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Workflow requeued with prior-failure context")}
+              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
             >
               Retry workflow
             </button>
           ) : undefined}
         >
           {run.blockingReason || "The run ended without delivering."}
+        </Banner>
+      )}
+
+      {run.status === "cancelled" && (
+        <Banner
+          lead="Cancelled."
+          actions={isAdmin ? (
+            <button
+              type="button"
+              className="btn sm"
+              disabled={busy}
+              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
+            >
+              Retry workflow
+            </button>
+          ) : undefined}
+        >
+          {run.blockingReason || "The run was cancelled."}
         </Banner>
       )}
 
