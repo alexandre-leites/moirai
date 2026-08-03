@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
@@ -173,5 +175,135 @@ func TestEventAndIdentifierValidation(t *testing.T) {
 	}
 	if !validID("1b5f4a4d-2345-4ff2-a014-189531caf2d7") || validID("not-a-uuid") {
 		t.Fatal("identifier validation is incorrect")
+	}
+}
+
+// An agent-declared block is the one terminal payload the orchestrator reads
+// rather than only stores. The payload is agent-supplied, so the whole surface
+// is pinned here: what counts as a declaration, what a declaration composes
+// into, and what must fall back to the ordinary `failed` outcome rather than
+// fail the event.
+//
+// This half matters most. Misreading a crash as a deliberate block is worse
+// than the bug being fixed: it files a real failure under "a human decided to
+// stop", where nobody is looking for it.
+func TestAgentBlockReasonReadsOnlyAGenuineDeclaration(t *testing.T) {
+	for name, payload := range map[string]string{
+		"a crash with no block marker":  `{"status":"failed","exitCode":1,"error":"agent exited 1"}`,
+		"an empty payload":              `{}`,
+		"a payload that is not object":  `"blocked"`,
+		"a payload that is a list":      `[{"blocked":true}]`,
+		"a null blocked field":          `{"blocked":null,"summary":"x"}`,
+		"a false blocked field":         `{"blocked":false,"summary":"x"}`,
+		"a stringly-typed blocked flag": `{"blocked":"true","summary":"x"}`,
+		"a numeric blocked flag":        `{"blocked":1,"summary":"x"}`,
+		"a blocked object":              `{"blocked":{"yes":true}}`,
+		// A bare `status: "blocked"` is what a hand-built payload looks like.
+		// The runner sets the flag alongside it, and the flag is the contract.
+		"a status without the flag": `{"status":"blocked","summary":"x"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if reason, blocked := agentBlockReason(payload); blocked {
+				t.Fatalf("agentBlockReason(%s) = (%q, true); a run that did not declare a block must stay failed", payload, reason)
+			}
+		})
+	}
+}
+
+func TestAgentBlockReasonComposesTheAgentsAccount(t *testing.T) {
+	reason, blocked := agentBlockReason(`{"status":"blocked","blocked":true,"exitCode":0,"summary":"the deployment credential is missing","remainingWork":["obtain DEPLOY_KEY","re-run the migration"]}`)
+	if !blocked {
+		t.Fatal("a payload marked blocked:true was not read as a block")
+	}
+	want := "the agent reported itself blocked: the deployment credential is missing (remaining work: obtain DEPLOY_KEY; re-run the migration)"
+	if reason != want {
+		t.Fatalf("reason = %q, want %q", reason, want)
+	}
+}
+
+// A declaration with nothing said is still a declaration: the run is blocked,
+// and blocking_reason must not come out empty, because an empty one renders as
+// "No reason was recorded" -- indistinguishable from the bug being fixed.
+func TestAgentBlockReasonAlwaysCarriesAReason(t *testing.T) {
+	for name, payload := range map[string]string{
+		"no summary at all":            `{"blocked":true}`,
+		"a blank summary":              `{"blocked":true,"summary":"   "}`,
+		"a summary of the wrong type":  `{"blocked":true,"summary":42,"remainingWork":["ask a human"]}`,
+		"remaining work of wrong type": `{"blocked":true,"remainingWork":"lots"}`,
+		"remaining work of blanks":     `{"blocked":true,"remainingWork":["","  "]}`,
+		"remaining work part-typed":    `{"blocked":true,"remainingWork":["ask a human",7]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			reason, blocked := agentBlockReason(payload)
+			if !blocked {
+				t.Fatalf("agentBlockReason(%s) did not read the declaration", payload)
+			}
+			if !strings.HasPrefix(reason, agentBlockPrefix) {
+				t.Fatalf("reason = %q, want it to open with %q", reason, agentBlockPrefix)
+			}
+		})
+	}
+}
+
+// The reason is agent prose on its way to a text column and an operator's
+// screen. PostgreSQL rejects a NUL byte outright -- the terminal event would
+// fail and the run would keep its project lock forever -- and an escape
+// sequence in an operator-facing field is a terminal-injection vector.
+func TestAgentBlockReasonSanitizesAgentProse(t *testing.T) {
+	// The escapes are JSON, not Go: the raw string carries them through so the
+	// payload really does contain an ANSI introducer and the NUL byte
+	// PostgreSQL refuses on a text column.
+	reason, blocked := agentBlockReason(`{"blocked":true,"summary":"line one \u001b[31mred\u0000\nline two","remainingWork":["tab\there"]}`)
+	if !blocked {
+		t.Fatal("the declaration was not read")
+	}
+	if strings.ContainsAny(reason, "\x00\x1b\n\t") {
+		t.Fatalf("reason = %q still carries a control character", reason)
+	}
+	if !strings.Contains(reason, "line one") || !strings.Contains(reason, "line two") || !strings.Contains(reason, "tab here") {
+		t.Fatalf("reason = %q lost the agent's words along with the control characters", reason)
+	}
+}
+
+// The runner bounds the summary and the remaining work it sends, but the
+// orchestrator does not get to assume a runner it does not control did so.
+func TestAgentBlockReasonIsBounded(t *testing.T) {
+	// Multi-byte throughout, so a byte-sliced bound would leave invalid UTF-8
+	// and PostgreSQL would reject the write.
+	entries := make([]string, 64)
+	for index := range entries {
+		entries[index] = strings.Repeat("汉", 500)
+	}
+	encoded, err := json.Marshal(map[string]any{"blocked": true, "summary": strings.Repeat("é", 8000), "remainingWork": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason, blocked := agentBlockReason(string(encoded))
+	if !blocked {
+		t.Fatal("the declaration was not read")
+	}
+	if len(reason) > maxBlockingReasonBytes {
+		t.Fatalf("reason is %d bytes, over the %d byte bound blocking_reason carries", len(reason), maxBlockingReasonBytes)
+	}
+	if !utf8.ValidString(reason) {
+		t.Fatalf("reason %q is not valid UTF-8; PostgreSQL rejects it on a text column", reason)
+	}
+	if !strings.HasSuffix(reason, reasonTruncationMarker) {
+		t.Fatalf("reason ends %q, want the truncation to be marked", reason[max(0, len(reason)-32):])
+	}
+}
+
+// moirai_active_workflows says "runs that have not reached a terminal status",
+// and the SQL behind it is generated from this one list. Routing an agent block
+// to `blocked` only keeps that promise while `blocked` is on the list -- and
+// the partial index in 020_metrics_indexes.sql excludes exactly these four.
+func TestBlockedIsATerminalStatusTheActiveGaugeExcludes(t *testing.T) {
+	if !terminalStatus("blocked") {
+		t.Fatal("blocked is not terminal, so moirai_active_workflows counts an agent-declared block as work still in flight")
+	}
+	for _, state := range []string{"completed", "failed", "blocked", "cancelled"} {
+		if !terminalStatus(state) || !strings.Contains(terminalStatusList, "'"+state+"'") {
+			t.Fatalf("terminalStatuses/%s omits %q; the gauge and the metrics index would disagree", terminalStatusList, state)
+		}
 	}
 }
