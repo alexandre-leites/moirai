@@ -843,3 +843,28 @@ func TestSyncErrorMessagePassesThroughPlainErrors(t *testing.T) {
 		t.Fatalf("syncErrorMessage(%v) = %q, want %q unchanged", plain, got, plain.Error())
 	}
 }
+
+// TestLoginsDummyHashForUnknownUsernamesStillParses pins the username-
+// enumeration defence Login runs for a username that does not exist: it
+// still calls passwordMatches against this exact hardcoded scrypt hash, so an
+// unknown username costs the same wall-clock time as a wrong password for a
+// real one. That defence is silent by construction (Login returns the same
+// "login was rejected" either way), so the only way to pin it at all is to
+// confirm the literal hash it depends on still parses as valid scrypt$...
+// input and never matches -- if this hash ever bit-rots (a typo on edit,
+// wrong field count), passwordMatches would start returning a parse error
+// nothing here would otherwise catch, and the dummy comparison would stop
+// costing anything close to a real one.
+func TestLoginsDummyHashForUnknownUsernamesStillParses(t *testing.T) {
+	logs := captureLogs(t)
+	matches, err := passwordMatches("whatever-password", "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatalf("Login's dummy hash failed to parse: %v", err)
+	}
+	if matches {
+		t.Fatal("Login's dummy hash matched an arbitrary password")
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a hash that parses fine logged something unexpected: %s", logs.String())
+	}
+}

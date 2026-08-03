@@ -34,9 +34,11 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 type harness struct {
@@ -2250,4 +2252,637 @@ func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
 	if strings.Contains(resp.Results[0].Error, "rpc error") {
 		t.Fatalf("SyncNow result error leaked a gRPC status wrapper: %q", resp.Results[0].Error)
 	}
+}
+
+// ===========================================================================
+// Auth and authorization (#273)
+// ===========================================================================
+
+// userSession creates a user with the given role (`admin` or `viewer`) and a
+// live session, returning a context carrying its session and CSRF metadata
+// alongside the raw tokens themselves, so a test can also assemble a
+// deliberately wrong pair from them.
+func (h *harness) userSession(role string) (ctx context.Context, session, csrf string) {
+	h.t.Helper()
+	userID, session, csrf := newID(), newID(), newID()
+	hash, err := passwordHash("Correct-Horse-1")
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.exec(`INSERT INTO app.users(id,username,password_hash,role) VALUES($1,$2,$3,$4)`, userID, "user-"+userID[:8], hash, role)
+	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()+interval '1 hour',now())`, newID(), userID, hashSecret(session), hashSecret(csrf))
+	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, csrf)), session, csrf
+}
+
+func TestRequireActorRejectsNoSessionMetadataAtAll(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.requireActor(context.Background(), false); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("requireActor with no session metadata = %v, want Unauthenticated", err)
+	}
+}
+
+func TestRequireActorRejectsAnUnknownSessionToken(t *testing.T) {
+	h := newHarness(t)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, "no-such-session-token", csrfHeader, "whatever"))
+	if _, err := h.requireActor(ctx, false); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("requireActor with an unknown session token = %v, want Unauthenticated", err)
+	}
+}
+
+// A session past its expires_at must be rejected exactly like one that never
+// existed -- GetSessionActor's own WHERE clause is the actual enforcement,
+// and this is what pins that the predicate keeps checking it.
+func TestRequireActorRejectsAnExpiredSession(t *testing.T) {
+	h := newHarness(t)
+	userID, session, csrf := newID(), newID(), newID()
+	hash, err := passwordHash("Correct-Horse-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.exec(`INSERT INTO app.users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')`, userID, "expired-"+userID[:8], hash)
+	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()-interval '1 minute',now())`, newID(), userID, hashSecret(session), hashSecret(csrf))
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, csrf))
+	if _, err := h.requireActor(ctx, false); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("requireActor with an expired session = %v, want Unauthenticated", err)
+	}
+}
+
+// This is the highest-value test in the whole issue, called out by name: the
+// admin gate inside requireActor(ctx, true) is a single `role != "admin"`
+// comparison, and flipping it to `role == "admin"` passed the entire existing
+// suite. Driving both an admin and a non-admin session through the same
+// mutation check and requiring opposite outcomes is what actually catches
+// that inversion -- a test that only ever exercises the admin path would
+// still pass after the flip.
+func TestRequireMutationRequiresTheAdminRoleNotJustAnyActor(t *testing.T) {
+	h := newHarness(t)
+
+	viewerCtx, _, _ := h.userSession("viewer")
+	if _, err := h.requireMutation(viewerCtx); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("requireMutation for a non-admin (viewer) actor = %v, want PermissionDenied", err)
+	}
+
+	adminCtx := h.adminContext()
+	if _, err := h.requireMutation(adminCtx); err != nil {
+		t.Fatalf("requireMutation for an admin actor = %v, want nil", err)
+	}
+
+	// The non-mutation path must not itself gate on role: a viewer can still
+	// read.
+	if _, err := h.requireActor(viewerCtx, false); err != nil {
+		t.Fatalf("requireActor(mutation=false) for a viewer = %v, want nil", err)
+	}
+}
+
+// requireActor's CSRF check is a constant-time comparison of hashed tokens,
+// not the session lookup itself, so a valid session with either a wrong or a
+// missing CSRF header must still be refused.
+func TestRequireMutationRejectsAWrongOrMissingCSRFToken(t *testing.T) {
+	h := newHarness(t)
+	_, session, _ := h.userSession("admin")
+
+	wrongCSRF := metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, "not-the-real-csrf-token"))
+	if _, err := h.requireMutation(wrongCSRF); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("requireMutation with a wrong CSRF token = %v, want PermissionDenied", err)
+	}
+
+	noCSRF := metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session))
+	if _, err := h.requireMutation(noCSRF); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("requireMutation with no CSRF header at all = %v, want PermissionDenied", err)
+	}
+}
+
+// requireUserMutation backs UpdateAccount, every user's own self-service
+// endpoint, and is deliberately weaker than requireMutation: it still
+// enforces the session/CSRF pair like any mutation, but does not gate on the
+// admin role at all. A viewer must be accepted (unlike requireMutation
+// above), and a wrong CSRF token must still be refused.
+func TestRequireUserMutationAcceptsANonAdminButStillEnforcesCSRF(t *testing.T) {
+	h := newHarness(t)
+	ctx, session, _ := h.userSession("viewer")
+
+	if _, err := h.requireUserMutation(ctx); err != nil {
+		t.Fatalf("requireUserMutation for a non-admin (viewer) actor = %v, want nil", err)
+	}
+
+	wrongCSRF := metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, "not-the-real-csrf-token"))
+	if _, err := h.requireUserMutation(wrongCSRF); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("requireUserMutation with a wrong CSRF token = %v, want PermissionDenied", err)
+	}
+}
+
+// ===========================================================================
+// The runner Connect stream (#273)
+// ===========================================================================
+
+// fakeRunnerStream is a minimal grpc.BidiStreamingServer[RunnerToOrchestrator,
+// OrchestratorToRunner] driven entirely in-process, standing in for the
+// simulatedRunner the issue asked about: Connect only ever calls Recv, Send,
+// and Context on the stream it is handed, so a fake need only implement
+// those (plus the rest of grpc.ServerStream, unused here) to drive the real
+// handler directly, with no network or TLS involved.
+type fakeRunnerStream struct {
+	ctx        context.Context
+	fromRunner chan *runnerv1.RunnerToOrchestrator
+	streamErr  chan error
+	toRunner   chan *runnerv1.OrchestratorToRunner
+}
+
+func newFakeRunnerStream(ctx context.Context) *fakeRunnerStream {
+	return &fakeRunnerStream{
+		ctx:        ctx,
+		fromRunner: make(chan *runnerv1.RunnerToOrchestrator, 8),
+		streamErr:  make(chan error, 1),
+		toRunner:   make(chan *runnerv1.OrchestratorToRunner, 32),
+	}
+}
+
+func (f *fakeRunnerStream) Recv() (*runnerv1.RunnerToOrchestrator, error) {
+	select {
+	case message := <-f.fromRunner:
+		return message, nil
+	case err := <-f.streamErr:
+		return nil, err
+	}
+}
+
+func (f *fakeRunnerStream) Send(message *runnerv1.OrchestratorToRunner) error {
+	f.toRunner <- message
+	return nil
+}
+
+func (f *fakeRunnerStream) SetHeader(metadata.MD) error  { return nil }
+func (f *fakeRunnerStream) SendHeader(metadata.MD) error { return nil }
+func (f *fakeRunnerStream) SetTrailer(metadata.MD)       {}
+func (f *fakeRunnerStream) Context() context.Context     { return f.ctx }
+func (f *fakeRunnerStream) SendMsg(any) error            { return nil }
+func (f *fakeRunnerStream) RecvMsg(any) error            { return nil }
+
+// send queues a message as if the runner had sent it.
+func (f *fakeRunnerStream) send(message *runnerv1.RunnerToOrchestrator) { f.fromRunner <- message }
+
+// close ends the stream the way a real one ends when the runner disconnects.
+func (f *fakeRunnerStream) close(err error) { f.streamErr <- err }
+
+func heartbeatMessage(runnerID, credential string) *runnerv1.RunnerToOrchestrator {
+	return &runnerv1.RunnerToOrchestrator{
+		RunnerId: runnerID, Credential: credential,
+		Message: &runnerv1.RunnerToOrchestrator_Heartbeat{Heartbeat: &runnerv1.Heartbeat{Version: "1"}},
+	}
+}
+
+// runnerCredential seeds a runner row and a matching runner_credentials row
+// with a caller-known plaintext credential, without registering a control-
+// stream session -- the Connect tests below drive that themselves.
+func (h *harness) runnerCredential() (runnerID, credential string) {
+	h.t.Helper()
+	runnerID, credential = newID(), randomSecret()
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'offline','1','[]'::jsonb,now())`, runnerID, "runner-"+runnerID[:8])
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret(credential))
+	return runnerID, credential
+}
+
+// waitForConnectedRunner polls the server's live session set for runnerID, so
+// a test driving Connect in a background goroutine can synchronize on the
+// session actually being registered before acting as if it were.
+func waitForConnectedRunner(t *testing.T, s *Server, runnerID string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		for _, connected := range s.connectedRunners() {
+			if connected == runnerID {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("runner %s never registered a Connect session", runnerID)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// Connect must reject a runner ID/credential pair that does not authenticate,
+// exactly like RegisterRunner's own credential check, and it must do so
+// before ever registering a session.
+func TestConnectRejectsAnInvalidCredential(t *testing.T) {
+	h := newHarness(t)
+	runnerID, _ := h.runnerCredential()
+
+	stream := newFakeRunnerStream(context.Background())
+	stream.send(heartbeatMessage(runnerID, "not-the-real-credential"))
+
+	if err := h.Connect(stream); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("Connect() with a bad credential = %v, want Unauthenticated", err)
+	}
+	for _, connected := range h.connectedRunners() {
+		if connected == runnerID {
+			t.Fatal("Connect registered a session for a runner that failed to authenticate")
+		}
+	}
+}
+
+// A second Connect stream for a runner ID that already holds one must be
+// rejected outright, rather than silently replacing the first: that is what
+// stops a reconnecting runner (or an attacker who obtained its credential)
+// from displacing a live stream that is mid-lease.
+func TestConnectRejectsADuplicateStreamForTheSameRunner(t *testing.T) {
+	h := newHarness(t)
+	runnerID, credential := h.runnerCredential()
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	stream1 := newFakeRunnerStream(ctx1)
+	stream1.send(heartbeatMessage(runnerID, credential))
+	done1 := make(chan error, 1)
+	go func() { done1 <- h.Connect(stream1) }()
+	waitForConnectedRunner(t, h.Server, runnerID)
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	stream2 := newFakeRunnerStream(ctx2)
+	stream2.send(heartbeatMessage(runnerID, credential))
+	done2 := make(chan error, 1)
+	go func() { done2 <- h.Connect(stream2) }()
+	select {
+	case err := <-done2:
+		if status.Code(err) != codes.AlreadyExists {
+			t.Fatalf("Connect() for a runner ID already holding a stream = %v, want AlreadyExists", err)
+		}
+	case <-time.After(2 * time.Second):
+		// A regression here would not return with a competing error at all --
+		// it would let the second stream's session register and then block
+		// forever in Connect's ordinary send/receive loop, exactly like a
+		// second, still-open connection. Timing out is that failure, not a
+		// slow pass, so it is reported as one rather than left to hang.
+		t.Fatal("Connect() for a duplicate runner ID never returned; the second stream was accepted instead of rejected")
+	}
+
+	cancel1()
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first stream's Connect() never returned after its context was cancelled")
+	}
+}
+
+// Every message after the first is re-authenticated, not just pinned to the
+// runner ID the stream opened with: a later message naming a different
+// runner, carrying no credential, or carrying the wrong one must all end the
+// stream rather than being silently accepted as if it came from whoever
+// authenticated first.
+func TestConnectReAuthenticatesEveryMessageNotJustTheFirst(t *testing.T) {
+	h := newHarness(t)
+	runnerID, credential := h.runnerCredential()
+	otherRunnerID, otherCredential := h.runnerCredential()
+
+	for name, second := range map[string]*runnerv1.RunnerToOrchestrator{
+		"a different runner ID (with that runner's own valid credential)": heartbeatMessage(otherRunnerID, otherCredential),
+		"an empty credential":                           {RunnerId: runnerID, Credential: "", Message: heartbeatMessage(runnerID, credential).Message},
+		"the wrong credential for the pinned runner ID": heartbeatMessage(runnerID, "not-the-real-credential"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stream := newFakeRunnerStream(ctx)
+			stream.send(heartbeatMessage(runnerID, credential))
+			stream.send(second)
+
+			done := make(chan error, 1)
+			go func() { done <- h.Connect(stream) }()
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(2 * time.Second):
+				// A regression here would not surface as a different error --
+				// it would accept the unauthenticated message and simply keep
+				// the stream open, so a hang is exactly the failure to catch.
+				t.Fatal("Connect() never returned; a later message carrying " + name + " was accepted instead of rejected")
+			}
+			if status.Code(err) != codes.Unauthenticated {
+				t.Fatalf("Connect() = %v, want Unauthenticated once a later message carried %s", err, name)
+			}
+			for _, connected := range h.connectedRunners() {
+				if connected == runnerID {
+					t.Fatal("the session was left registered after the stream ended on a re-auth failure")
+				}
+			}
+		})
+	}
+}
+
+// The outbound buffer per runner session is exactly 16 deep: the 17th queued
+// message must be dropped (enqueue reports false) rather than block the
+// caller or grow without bound, and freeing one slot must free capacity for
+// exactly one more.
+func TestEnqueueDropsOnceTheSixteenDeepBufferIsFull(t *testing.T) {
+	h := newHarness(t)
+	runnerID := newID()
+	outbound := make(chan *runnerv1.OrchestratorToRunner, 16)
+	if !h.addSession(runnerID, outbound) {
+		t.Fatal("addSession rejected a fresh runner ID")
+	}
+
+	for i := range 16 {
+		if !boundedEnqueue(t, h.Server, runnerID) {
+			t.Fatalf("enqueue #%d was dropped before the buffer was full", i+1)
+		}
+	}
+	if boundedEnqueue(t, h.Server, runnerID) {
+		t.Fatal("enqueue succeeded past the 16-deep buffer's capacity; the 17th message should be dropped, not queued or blocked on")
+	}
+
+	<-outbound // free exactly one slot
+	if !boundedEnqueue(t, h.Server, runnerID) {
+		t.Fatal("enqueue was still dropped immediately after a slot was freed")
+	}
+	if boundedEnqueue(t, h.Server, runnerID) {
+		t.Fatal("enqueue succeeded twice after only one slot was freed")
+	}
+}
+
+// boundedEnqueue calls enqueue on its own goroutine with a hard timeout: a
+// dropping enqueue must never block on a full channel send in the first
+// place, so a regression back to an unconditional `outbound <- message`
+// would otherwise hang this test for its full -timeout rather than fail
+// promptly with a clear cause.
+func boundedEnqueue(t *testing.T, s *Server, runnerID string) bool {
+	t.Helper()
+	done := make(chan bool, 1)
+	go func() { done <- s.enqueue(runnerID, &runnerv1.OrchestratorToRunner{}) }()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue blocked instead of returning immediately; the drop path is gone")
+		return false
+	}
+}
+
+// A reconnecting runner's predecessor session must not be able to evict the
+// new one out from under it. The defer in Connect runs removeSession(id,
+// itsOwnChannel) unconditionally on the way out, including when it returns
+// long after a successor has already taken the runnerID's slot in the map;
+// removeSession's own identity check (delete only if the map still holds
+// exactly this channel) is what stops that stale deferred call from deleting
+// the live session.
+func TestRemoveSessionDoesNotEvictAReconnectedRunnersNewSession(t *testing.T) {
+	h := newHarness(t)
+	runnerID := newID()
+
+	oldSession := make(chan *runnerv1.OrchestratorToRunner, 16)
+	if !h.addSession(runnerID, oldSession) {
+		t.Fatal("addSession rejected a fresh runner ID")
+	}
+	h.removeSession(runnerID, oldSession) // the old stream ends...
+	newSession := make(chan *runnerv1.OrchestratorToRunner, 16)
+	if !h.addSession(runnerID, newSession) {
+		t.Fatal("addSession rejected the reconnecting runner's new session")
+	}
+
+	// ...and only now does the old handler's deferred removeSession(id,
+	// oldSession) actually run, late, holding a reference to a channel that
+	// is no longer in the map at all.
+	h.removeSession(runnerID, oldSession)
+
+	if got := h.outboundChannel(runnerID); got != newSession {
+		t.Fatal("removeSession evicted the reconnected runner's live session using its predecessor's stale channel reference")
+	}
+}
+
+// ===========================================================================
+// Credential storage (#273)
+// ===========================================================================
+
+// SetProjectCredential must never write the plaintext value to
+// app.project_credentials: the ciphertext column must differ from the
+// plaintext, and decrypting it with the configured key must recover exactly
+// the value that was set. A fresh nonce must also be generated on every
+// write, even for the exact same plaintext -- reusing a nonce breaks AES-GCM's
+// confidentiality guarantee outright.
+func TestSetProjectCredentialStoresCiphertextWithAFreshNoncePerWrite(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
+	projectID, _ := h.project()
+	const plaintext = "super-secret-github-token-value"
+
+	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+		ProjectId: projectID, Kind: "github_token", Value: plaintext,
+	}); err != nil {
+		t.Fatalf("SetProjectCredential: %v", err)
+	}
+	var firstCiphertext, firstNonce []byte
+	if err := h.pool.QueryRow(context.Background(), `SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id=$1 AND kind='github_token'`, projectID).Scan(&firstCiphertext, &firstNonce); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(firstCiphertext), plaintext) {
+		t.Fatalf("app.project_credentials.ciphertext contains the plaintext value verbatim: %x", firstCiphertext)
+	}
+	aead, err := configuredCipher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := aead.Open(nil, firstNonce, firstCiphertext, nil)
+	if err != nil || string(decrypted) != plaintext {
+		t.Fatalf("decrypting the stored ciphertext = (%q, %v), want (%q, nil)", decrypted, err, plaintext)
+	}
+
+	// Setting the exact same plaintext again must produce a different nonce
+	// and a different ciphertext, not reuse either.
+	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+		ProjectId: projectID, Kind: "github_token", Value: plaintext,
+	}); err != nil {
+		t.Fatalf("SetProjectCredential (second write): %v", err)
+	}
+	var secondCiphertext, secondNonce []byte
+	if err := h.pool.QueryRow(context.Background(), `SELECT ciphertext, nonce FROM app.project_credentials WHERE project_id=$1 AND kind='github_token'`, projectID).Scan(&secondCiphertext, &secondNonce); err != nil {
+		t.Fatal(err)
+	}
+	if string(secondNonce) == string(firstNonce) {
+		t.Fatal("writing the same credential twice reused the same AES-GCM nonce")
+	}
+	if string(secondCiphertext) == string(firstCiphertext) {
+		t.Fatal("writing the same plaintext twice produced identical ciphertext, which a reused nonce would also do")
+	}
+}
+
+// ResolveJobSecret is the read side of the same store: it must decrypt back
+// to exactly the value SetProjectCredential encrypted, over the plaintext
+// name a runner asks for.
+func TestResolveJobSecretRoundTripsTheEncryptedValue(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
+	projectID, _ := h.project()
+	runnerID, credential := h.runnerCredential()
+	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+		ProjectId: projectID, Kind: "github_token", Value: "ghp_the-real-secret-value",
+	}); err != nil {
+		t.Fatalf("SetProjectCredential: %v", err)
+	}
+	jobID, generation := h.seedFencedJob(runnerID, projectID)
+
+	resp, err := h.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
+		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation, Name: "GITHUB_TOKEN",
+	})
+	if err != nil {
+		t.Fatalf("ResolveJobSecret: %v", err)
+	}
+	if resp.GetValue() != "ghp_the-real-secret-value" {
+		t.Fatalf("ResolveJobSecret returned %q, want the original plaintext", resp.GetValue())
+	}
+}
+
+// seedFencedJob puts a runner in possession of a live, fenced job on
+// projectID -- exactly what StoreJobSecret/ResolveJobSecret's fencedJobProject
+// lookup requires -- without going through the full scheduler/runJob path
+// those tests don't otherwise need.
+func (h *harness) seedFencedJob(runnerID, projectID string) (jobID string, generation int64) {
+	h.t.Helper()
+	workflowID, issueID := newID(), newID()
+	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github',$3,$3,'issue','https://example.test/issues/x','open',true,now(),now())`, issueID, projectID, issueID[:8])
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, workflowID, projectID, issueID, "thread-"+workflowID)
+	jobID = newID()
+	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,runner_id,status,lease_generation,lease_expires_at) VALUES($1,$2,$3,$4,'running',1,now()+interval '1 hour')`, jobID, workflowID, projectID, runnerID)
+	return jobID, 1
+}
+
+// StoreJobSecret's rotation gate is the only thing standing between a
+// compromised runner and overwriting a project's github_token or ssh key: it
+// accepts only names that resolve to an `agent:`-prefixed kind, rejecting
+// github_token and ssh_private_key outright even though ResolveJobSecret (the
+// read side) serves both.
+func TestStoreJobSecretRejectsNonAgentCredentialKinds(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
+	projectID, _ := h.project()
+	runnerID, credential := h.runnerCredential()
+	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+		ProjectId: projectID, Kind: "github_token", Value: "ghp_original-value",
+	}); err != nil {
+		t.Fatalf("SetProjectCredential: %v", err)
+	}
+	jobID, generation := h.seedFencedJob(runnerID, projectID)
+
+	for _, name := range []string{"GITHUB_TOKEN", "GIT_SSH_KEY"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+				RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation,
+				Name: name, Value: "attacker-controlled-replacement",
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("StoreJobSecret(%s) = %v, want InvalidArgument: a runner must not be able to rotate a non-agent credential", name, err)
+			}
+		})
+	}
+	var stored string
+	if err := h.pool.QueryRow(context.Background(), `SELECT ciphertext::text FROM app.project_credentials WHERE project_id=$1 AND kind='github_token'`, projectID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := h.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
+		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation, Name: "GITHUB_TOKEN",
+	})
+	if err != nil || resp.GetValue() != "ghp_original-value" {
+		t.Fatalf("github_token = (%q, %v) after the rejected rotation attempts, want the untouched original", resp.GetValue(), err)
+	}
+}
+
+// The positive case beside the rejection above: an agent: credential is
+// exactly what the gate is meant to allow through.
+func TestStoreJobSecretAllowsAnAgentCredentialKind(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
+	projectID, _ := h.project()
+	runnerID, credential := h.runnerCredential()
+	h.exec(`INSERT INTO app.project_credentials(project_id,kind,ciphertext,nonce) VALUES($1,'agent:OPENROUTER_API_KEY','\x00'::bytea,'\x00'::bytea)`, projectID)
+	jobID, generation := h.seedFencedJob(runnerID, projectID)
+
+	resp, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation,
+		Name: "OPENROUTER_API_KEY", Value: "new-rotated-value",
+	})
+	if err != nil {
+		t.Fatalf("StoreJobSecret: %v", err)
+	}
+	if !resp.GetStored() {
+		t.Fatal("StoreJobSecret reported the agent credential was not stored")
+	}
+	fetched, err := h.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
+		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation, Name: "OPENROUTER_API_KEY",
+	})
+	if err != nil || fetched.GetValue() != "new-rotated-value" {
+		t.Fatalf("ResolveJobSecret after rotation = (%q, %v), want the rotated value", fetched.GetValue(), err)
+	}
+}
+
+// ===========================================================================
+// Registration tokens (#273)
+// ===========================================================================
+
+// A registration token is single-use: RegisterRunner consumes it inside the
+// same transaction that creates the runner, and SelectValidRegistrationToken
+// filters on used_at IS NULL, so a second registration attempt with the exact
+// same token must be refused even though the first attempt succeeded.
+func TestRegistrationTokenIsSingleUse(t *testing.T) {
+	h := newHarness(t)
+	token := h.createRegistrationToken(t, []string{"linux"})
+
+	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+		Name: "runner-one", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},
+	}); err != nil {
+		t.Fatalf("first RegisterRunner: %v", err)
+	}
+	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+		Name: "runner-two", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},
+	}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("second RegisterRunner with an already-used token = %v, want PermissionDenied", err)
+	}
+}
+
+// An expired token must be refused even though it was never used.
+func TestRegistrationTokenExpiryIsEnforced(t *testing.T) {
+	h := newHarness(t)
+	token := h.createRegistrationToken(t, []string{"linux"})
+	h.exec(`UPDATE app.runner_registration_tokens SET expires_at=now()-interval '1 minute' WHERE token_hash=$1`, hashSecret(token))
+
+	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+		Name: "runner-one", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},
+	}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("RegisterRunner with an expired token = %v, want PermissionDenied", err)
+	}
+}
+
+// A token's allowed_labels is the ceiling a registering runner's requested
+// labels must fit inside (allowed_labels @> requested), not an exact-match
+// set and not a floor: a runner asking for a subset of what the token allows
+// must succeed, and one asking for even one label outside that set must be
+// refused, matching the issue's "label-subset matching" description exactly.
+func TestRegistrationTokenLabelSubsetMatching(t *testing.T) {
+	h := newHarness(t)
+
+	subsetToken := h.createRegistrationToken(t, []string{"linux", "docker", "gpu"})
+	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+		Name: "runner-subset", Token: subsetToken, ProtocolVersion: "1.0", Labels: []string{"linux", "docker"},
+	}); err != nil {
+		t.Fatalf("RegisterRunner requesting a subset of the token's allowed labels: %v", err)
+	}
+
+	supersetToken := h.createRegistrationToken(t, []string{"linux"})
+	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+		Name: "runner-superset", Token: supersetToken, ProtocolVersion: "1.0", Labels: []string{"linux", "windows"},
+	}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("RegisterRunner requesting a label (windows) outside the token's allowed set = %v, want PermissionDenied", err)
+	}
+}
+
+// createRegistrationToken drives the real admin-facing RPC to create a
+// registration token restricted to allowedLabels, returning the raw token a
+// runner would present. Using CreateRunnerRegistrationToken rather than a raw
+// insert also exercises that RPC as a side effect of every test above.
+func (h *harness) createRegistrationToken(t *testing.T, allowedLabels []string) string {
+	t.Helper()
+	resp, err := h.CreateRunnerRegistrationToken(h.adminContext(), &controlv1.CreateRunnerRegistrationTokenRequest{AllowedLabels: allowedLabels})
+	if err != nil {
+		t.Fatalf("CreateRunnerRegistrationToken: %v", err)
+	}
+	return resp.GetToken()
 }
