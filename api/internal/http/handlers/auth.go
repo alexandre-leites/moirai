@@ -108,7 +108,13 @@ func (h *AuthHandlers) updateAccount(w http.ResponseWriter, r *http.Request) {
 	apiserver.WriteJSON(w, http.StatusOK, userPayload(resp))
 }
 
-func userPayload(resp interface{ GetUserId() string; GetUsername() string; GetRole() string; GetEmail() string; GetDisplayName() string }) map[string]string {
+func userPayload(resp interface {
+	GetUserId() string
+	GetUsername() string
+	GetRole() string
+	GetEmail() string
+	GetDisplayName() string
+}) map[string]string {
 	return map[string]string{
 		"userId":      resp.GetUserId(),
 		"username":    resp.GetUsername(),

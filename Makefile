@@ -33,7 +33,7 @@ test-web:
 	cd web && npm ci && npm run typecheck && npm run lint && npm test
 
 lint:
-	cd orchestrator && test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard -- '*.go'))"
+	test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard -- '*.go'))"
 
 typecheck:
 	cd orchestrator && $(GO) vet ./...
