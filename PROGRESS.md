@@ -1077,6 +1077,32 @@ were each rejected by the CHECK, and a `file_path` on a git kind was rejected.
   whole sequence. The injection is defused either way — no ESC means no escape sequence — and
   duplicating an escape parser in the orchestrator to tidy the residue was not worth it.
 
+---
+
+## Issue #289 — `make lint` only format-checked the orchestrator (2026-08-03)
+
+- Branch/worktree: `issue-289` in `.claude/worktrees/issue-289`.
+- Root cause: `lint` was `cd orchestrator && test -z "$(gofmt -l $(git ls-files ... -- '*.go'))"` — the `cd`
+  scoped `git ls-files` to that directory alone, so `api`, `runner`, and `gen/go` were never format-checked
+  by anything (their CI jobs run `go test`/`go vet`, not `gofmt`).
+- Fix: dropped the `cd orchestrator`; `git ls-files` from the repo root already spans all four Go modules
+  (`orchestrator`, `api`, `runner`, `gen/go`), so no per-module duplication or CI workflow change was needed
+  — the existing single `lint` job now covers everything.
+- Formatted the two files the issue named as already-unformatted on `main`: `api/internal/http/handlers/auth.go`
+  (a multi-line interface literal collapsed onto one line) and `runner/internal/agents/opencode.go` (misaligned
+  struct field tags after a field was added without running gofmt). Both diffs are whitespace-only, confirmed
+  with `gofmt -d` before writing and `git diff` after.
+- Adversarial check: temporarily reintroduced a formatting error in `api/internal/http/handlers/auth.go` and
+  confirmed `make lint` now fails on it (it did not before this fix, since `api` was outside the scoped
+  pathspec); reverted and re-applied `gofmt -w` to restore the clean state.
+- `typecheck` (`go vet` for orchestrator only) was left as-is: `runner` and `api` already run `go vet` in
+  their own CI job steps, so coverage there was already complete — matching the issue's own note to verify
+  before changing it.
+- Deferred: adding `staticcheck`. The issue names it as a "consider" item, not required; wiring it into three
+  modules' `go.mod`/CI would be new tooling and config surface beyond this issue's core (gofmt scope +
+  formatting the two files), so left for a follow-up issue.
+- Validation: `make lint` and `make typecheck` pass; `go build ./...` and `go vet ./...` pass in `api`,
+  `runner`, and `orchestrator`; `go test ./...` passes in `api` and `runner`.
 ## Issue #259 — StreamEvents replayed the whole event table, emitted no runner events, hardcoded event_type (2026-08-03)
 
 - Fixed. Relevant files: `orchestrator/internal/server/events.go` (rewritten), `orchestrator/internal/server/server.go`

@@ -28,11 +28,11 @@ type Request struct {
 	LeaseGeneration int64
 	ExecutionID     string
 	Role            Role
-	Workspace   string
-	Prompt      string
-	ResultPath  string
-	Timeout     time.Duration
-	Environment map[string]string
+	Workspace       string
+	Prompt          string
+	ResultPath      string
+	Timeout         time.Duration
+	Environment     map[string]string
 	// Output, when set, receives a live copy of the agent's stdout and
 	// stderr as it is produced, in addition to the on-disk log files.
 	Output io.Writer
