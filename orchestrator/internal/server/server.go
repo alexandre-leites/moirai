@@ -1453,7 +1453,15 @@ func validateProject(cfg *controlv1.ProjectConfiguration) (*controlv1.ProjectCon
 	if cfg == nil || strings.TrimSpace(cfg.GetName()) == "" || len(cfg.GetName()) > 256 || (cfg.GetRepositoryMode() != "managed_clone" && cfg.GetRepositoryMode() != "existing_path") || strings.TrimSpace(cfg.GetDefaultBranch()) == "" || len(cfg.GetDefaultBranch()) > 256 {
 		return nil, nil, status.Error(codes.InvalidArgument, "project configuration is invalid")
 	}
-	if (cfg.GetRepositoryMode() == "managed_clone" && (cfg.GetRepositoryUrl() == "" || cfg.GetLocalRepositoryPath() != "")) || (cfg.GetRepositoryMode() == "existing_path" && (cfg.GetLocalRepositoryPath() == "" || cfg.GetRepositoryUrl() != "")) || len(cfg.GetExecutionImage()) > 512 {
+	// existing_path has no end-to-end support: issue sync and workflow delivery
+	// both talk to GitHub by repository URL, and a local_repository_path gives
+	// them no GitHub coordinates to work with. Accepting the mode here would
+	// let a project run an entire (expensive) workflow before failing at
+	// delivery. Reject it up front instead, at configuration time.
+	if cfg.GetRepositoryMode() == "existing_path" {
+		return nil, nil, status.Error(codes.InvalidArgument, "repository_mode 'existing_path' is not supported: existing_path projects cannot sync issues or deliver workflows without a repository_url, since neither operation has any other way to learn the project's GitHub coordinates; use repository_mode 'managed_clone' with a repository_url instead")
+	}
+	if (cfg.GetRepositoryMode() == "managed_clone" && (cfg.GetRepositoryUrl() == "" || cfg.GetLocalRepositoryPath() != "")) || len(cfg.GetExecutionImage()) > 512 {
 		return nil, nil, status.Error(codes.InvalidArgument, "project configuration is invalid")
 	}
 	labels, err := normalizeLabels(cfg.GetRequiredRunnerLabels())
