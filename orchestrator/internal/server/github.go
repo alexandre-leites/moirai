@@ -91,19 +91,25 @@ func redactSecrets(value string) string {
 	return secretPattern.ReplaceAllString(value, "[redacted]")
 }
 
-type GitHub interface {
-	ListIssues(ctx context.Context, projectID, repository string) ([]githubIssue, error)
-	FindOrCreatePR(ctx context.Context, projectID, repository, branch, base, title, body string) (githubPR, error)
-	Checks(ctx context.Context, projectID, repository, number string) (checkState, error)
-	MergeSquash(ctx context.Context, projectID, repository, number string) error
-	Merged(ctx context.Context, projectID, repository, number string) (bool, error)
-}
-
+// githubCLI is the MVP's only shipped TaskSource/CodeHost implementation. It
+// satisfies both interfaces (see tasksource.go) via the `gh` CLI: ListTasks is
+// its TaskSource half, and FindOrCreatePR/Checks/Merge/Merged are its
+// CodeHost half. ref, on every method, is the project's configured
+// repository_url exactly as stored -- githubCLI (and only githubCLI) parses
+// it into an owner/name slug via repositoryRef; the generic delivery code in
+// delivery.go and the sync code in server.go never do that parsing
+// themselves any more, which is what keeps a github.com URL shape from
+// leaking into code that has to stay provider-neutral.
 type githubCLI struct {
 	command Command
 	token   func(context.Context, string) (string, error)
 }
 
+// githubIssue is gh's own issue shape, decoded straight off `gh issue list
+// --json`. It never crosses the TaskSource interface -- ListTasks reduces it
+// to a neutral Task (see tasksource.go) before returning, deriving
+// Priority/Eligible from Labels itself, so nothing outside this file ever
+// sees a GitHub label list.
 type githubIssue struct {
 	ExternalID string
 	Title      string
@@ -121,19 +127,36 @@ type githubIssue struct {
 	State string
 }
 
-type githubPR struct {
-	Number  string
-	URL     string
-	State   string
-	HeadSHA string
+// asTask reduces a decoded GitHub issue to the neutral shape ListTasks
+// returns. Raw is the githubIssue itself, JSON-encoded -- the only place the
+// original label list survives, since it is stored purely for audit
+// (app.issues.raw_snapshot) and never read back by application code.
+func (issue githubIssue) asTask() Task {
+	raw, err := json.Marshal(issue)
+	if err != nil {
+		// json.Marshal on this struct (plain strings/slices/times) cannot
+		// fail in practice; falling back to null keeps a decode error here
+		// from ever blocking the task itself from syncing.
+		raw = []byte("null")
+	}
+	return Task{
+		ExternalID: issue.ExternalID,
+		Title:      issue.Title,
+		Body:       issue.Body,
+		URL:        issue.URL,
+		Priority:   issue.Priority,
+		Eligible:   issue.Eligible,
+		State:      issue.State,
+		CreatedAt:  issue.CreatedAt,
+		UpdatedAt:  issue.UpdatedAt,
+		Raw:        raw,
+	}
 }
 
-type checkState int
-
 const (
-	checksPending checkState = iota
-	checksGreen
-	checksFailed
+	checksPending CheckState = ChecksPending
+	checksGreen   CheckState = ChecksGreen
+	checksFailed  CheckState = ChecksFailed
 )
 
 // checkRun is one entry of GitHub's statusCheckRollup. The array is
@@ -150,7 +173,7 @@ type checkRun struct {
 // result reduces one entry to an outcome. The two shapes are disjoint, so the
 // populated field identifies which one this is, and anything unrecognised falls
 // to pending — including a shape GitHub has not introduced yet.
-func (check checkRun) result() checkState {
+func (check checkRun) result() CheckState {
 	outcome := strings.ToUpper(strings.TrimSpace(check.State))
 	if outcome == "" {
 		if !strings.EqualFold(strings.TrimSpace(check.Status), "COMPLETED") {
@@ -167,7 +190,9 @@ func (check checkRun) result() checkState {
 	return checksPending
 }
 
-func NewGitHubCLI(command Command, token func(context.Context, string) (string, error)) GitHub {
+// NewGitHubCLI builds the single adapter instance that satisfies both
+// TaskSource and CodeHost for a GitHub-tracked, GitHub-hosted project.
+func NewGitHubCLI(command Command, token func(context.Context, string) (string, error)) githubCLI {
 	if command == nil {
 		command = execCommand{}
 	}
@@ -213,7 +238,14 @@ func resolveGitHubToken(ctx context.Context, queries *db.Queries, projectID stri
 // exactly the whole list".
 const githubIssueListLimit = 5000
 
-func (client githubCLI) ListIssues(ctx context.Context, projectID, repository string) ([]githubIssue, error) {
+// ListTasks implements TaskSource. ref is the project's configured
+// repository_url exactly as stored; it is parsed into an owner/name slug here
+// (via repositoryRef), not by the generic sync code that calls this.
+func (client githubCLI) ListTasks(ctx context.Context, projectID, ref string) ([]Task, error) {
+	repository, err := repositoryRef(ref)
+	if err != nil {
+		return nil, err
+	}
 	token, err := client.token(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -243,7 +275,7 @@ func (client githubCLI) ListIssues(ctx context.Context, projectID, repository st
 	if len(values) >= githubIssueListLimit {
 		slog.Warn("GitHub issue list may be truncated", "project_id", projectID, "repository", repository, "limit", githubIssueListLimit)
 	}
-	issues := make([]githubIssue, 0, len(values))
+	tasks := make([]Task, 0, len(values))
 	for _, value := range values {
 		if value.Number < 1 || strings.TrimSpace(value.Title) == "" || value.URL == "" {
 			return nil, errors.New("GitHub returned an invalid issue")
@@ -260,45 +292,58 @@ func (client githubCLI) ListIssues(ctx context.Context, projectID, repository st
 		// suspenders), but IssueSyncStatusEntries' eligible_count and any
 		// other eligible-only reader must not overcount a closed issue too.
 		eligible = eligible && state == "open"
-		issues = append(issues, githubIssue{ExternalID: strconv.Itoa(value.Number), Title: value.Title, Body: value.Body, URL: value.URL, Labels: labels, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, Priority: priority, Eligible: eligible, State: state})
+		issue := githubIssue{ExternalID: strconv.Itoa(value.Number), Title: value.Title, Body: value.Body, URL: value.URL, Labels: labels, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt, Priority: priority, Eligible: eligible, State: state}
+		tasks = append(tasks, issue.asTask())
 	}
-	return issues, nil
+	return tasks, nil
 }
 
-func (client githubCLI) FindOrCreatePR(ctx context.Context, projectID, repository, branch, base, title, body string) (githubPR, error) {
+// FindOrCreatePR implements CodeHost. ref is the project's configured
+// repository_url exactly as stored; see ListTasks's doc comment.
+func (client githubCLI) FindOrCreatePR(ctx context.Context, projectID, ref, branch, base, title, body string) (PullRequest, error) {
+	repository, err := repositoryRef(ref)
+	if err != nil {
+		return PullRequest{}, err
+	}
 	token, err := client.token(ctx, projectID)
 	if err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	output, err := client.command.Run(ctx, token, "pr", "list", "--repo", repository, "--head", branch, "--state", "open", "--json", "number,url,state,headRefOid")
 	if err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	pr, found, err := decodePRs(output)
 	if err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	if found {
 		return pr, nil
 	}
 	if _, err := client.command.Run(ctx, token, "pr", "create", "--repo", repository, "--head", branch, "--base", base, "--title", title, "--body", body); err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	output, err = client.command.Run(ctx, token, "pr", "list", "--repo", repository, "--head", branch, "--state", "open", "--json", "number,url,state,headRefOid")
 	if err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	pr, found, err = decodePRs(output)
 	if err != nil {
-		return githubPR{}, err
+		return PullRequest{}, err
 	}
 	if !found {
-		return githubPR{}, errors.New("created pull request was not found")
+		return PullRequest{}, errors.New("created pull request was not found")
 	}
 	return pr, nil
 }
 
-func (client githubCLI) Checks(ctx context.Context, projectID, repository, number string) (checkState, error) {
+// Checks implements CodeHost. ref is the project's configured repository_url
+// exactly as stored; see ListTasks's doc comment.
+func (client githubCLI) Checks(ctx context.Context, projectID, ref, number string) (CheckState, error) {
+	repository, err := repositoryRef(ref)
+	if err != nil {
+		return checksPending, err
+	}
 	token, err := client.token(ctx, projectID)
 	if err != nil {
 		return checksPending, err
@@ -316,7 +361,13 @@ func (client githubCLI) Checks(ctx context.Context, projectID, repository, numbe
 	return checksResult(value.StatusCheckRollup), nil
 }
 
-func (client githubCLI) MergeSquash(ctx context.Context, projectID, repository, number string) error {
+// Merge implements CodeHost's squash-merge. ref is the project's configured
+// repository_url exactly as stored; see ListTasks's doc comment.
+func (client githubCLI) Merge(ctx context.Context, projectID, ref, number string) error {
+	repository, err := repositoryRef(ref)
+	if err != nil {
+		return err
+	}
 	token, err := client.token(ctx, projectID)
 	if err != nil {
 		return err
@@ -325,7 +376,13 @@ func (client githubCLI) MergeSquash(ctx context.Context, projectID, repository, 
 	return err
 }
 
-func (client githubCLI) Merged(ctx context.Context, projectID, repository, number string) (bool, error) {
+// Merged implements CodeHost. ref is the project's configured repository_url
+// exactly as stored; see ListTasks's doc comment.
+func (client githubCLI) Merged(ctx context.Context, projectID, ref, number string) (bool, error) {
+	repository, err := repositoryRef(ref)
+	if err != nil {
+		return false, err
+	}
 	token, err := client.token(ctx, projectID)
 	if err != nil {
 		return false, err
@@ -379,7 +436,7 @@ func issuePriority(labels []string) (int, bool) {
 	return priority, eligible && !excluded
 }
 
-func decodePRs(contents []byte) (githubPR, bool, error) {
+func decodePRs(contents []byte) (PullRequest, bool, error) {
 	var values []struct {
 		Number     int    `json:"number"`
 		URL        string `json:"url"`
@@ -387,22 +444,22 @@ func decodePRs(contents []byte) (githubPR, bool, error) {
 		HeadRefOID string `json:"headRefOid"`
 	}
 	if err := json.Unmarshal(contents, &values); err != nil {
-		return githubPR{}, false, fmt.Errorf("decode GitHub pull requests: %w", err)
+		return PullRequest{}, false, fmt.Errorf("decode GitHub pull requests: %w", err)
 	}
 	if len(values) == 0 {
-		return githubPR{}, false, nil
+		return PullRequest{}, false, nil
 	}
 	if values[0].Number < 1 || values[0].URL == "" || values[0].HeadRefOID == "" {
-		return githubPR{}, false, errors.New("GitHub returned an invalid pull request")
+		return PullRequest{}, false, errors.New("GitHub returned an invalid pull request")
 	}
-	return githubPR{Number: strconv.Itoa(values[0].Number), URL: values[0].URL, State: strings.ToLower(values[0].State), HeadSHA: values[0].HeadRefOID}, true, nil
+	return PullRequest{Number: strconv.Itoa(values[0].Number), URL: values[0].URL, State: strings.ToLower(values[0].State), HeadSHA: values[0].HeadRefOID}, true, nil
 }
 
 // checksResult reduces a pull request's check rollup to a merge decision. An
 // empty rollup is pending, never green: GitHub reports no checks for the first
 // seconds of a pull request's life and none at all for a repository with no CI
 // configured, and reading either as success squash-merges unverified code.
-func checksResult(checks []checkRun) checkState {
+func checksResult(checks []checkRun) CheckState {
 	if len(checks) == 0 {
 		return checksPending
 	}

@@ -51,7 +51,7 @@ func (q *Queries) ForceWorkflowCompleted(ctx context.Context, id string) (string
 const getDeliveryWorkflow = `-- name: GetDeliveryWorkflow :one
 SELECT wr.project_id::text AS project_id, wr.issue_id::text AS issue_id, i.external_id, i.title, i.body,
        COALESCE(p.repository_url, '') AS repository_url, p.default_branch, p.configuration,
-       COALESCE(wr.branch_name, '') AS branch_name, pr.external_id AS pr_external_id
+       COALESCE(wr.branch_name, '') AS branch_name, pr.external_id AS pr_external_id, p.code_host_type
 FROM app.workflow_runs wr
 JOIN app.issues i ON i.id = wr.issue_id
 JOIN app.projects p ON p.id = wr.project_id
@@ -70,6 +70,7 @@ type GetDeliveryWorkflowRow struct {
 	Configuration []byte
 	BranchName    string
 	PrExternalID  pgtype.Text
+	CodeHostType  string
 }
 
 // p.configuration travels along so observeWorkflow can decode
@@ -90,6 +91,7 @@ func (q *Queries) GetDeliveryWorkflow(ctx context.Context, id string) (GetDelive
 		&i.Configuration,
 		&i.BranchName,
 		&i.PrExternalID,
+		&i.CodeHostType,
 	)
 	return i, err
 }
@@ -313,7 +315,7 @@ func (q *Queries) TerminateWorkflowRun(ctx context.Context, arg TerminateWorkflo
 
 const upsertPullRequest = `-- name: UpsertPullRequest :exec
 INSERT INTO app.pull_requests(id, workflow_run_id, provider, external_id, url, head_commit, state)
-VALUES ($1, $2, 'github', $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (workflow_run_id) DO UPDATE SET
   external_id = EXCLUDED.external_id,
   url = EXCLUDED.url,
@@ -324,6 +326,7 @@ ON CONFLICT (workflow_run_id) DO UPDATE SET
 type UpsertPullRequestParams struct {
 	ID            string
 	WorkflowRunID string
+	Provider      string
 	ExternalID    string
 	Url           string
 	HeadCommit    string
@@ -334,6 +337,7 @@ func (q *Queries) UpsertPullRequest(ctx context.Context, arg UpsertPullRequestPa
 	_, err := q.db.Exec(ctx, upsertPullRequest,
 		arg.ID,
 		arg.WorkflowRunID,
+		arg.Provider,
 		arg.ExternalID,
 		arg.Url,
 		arg.HeadCommit,

@@ -86,7 +86,7 @@ func (q *Queries) DeleteProjectPipelineSteps(ctx context.Context, projectID stri
 }
 
 const getProject = `-- name: GetProject :one
-SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration
+SELECT id::text AS id, name, enabled, repository_mode, repository_url, local_repository_path, default_branch, configuration::text AS configuration, issue_tracker_type, code_host_type
 FROM app.projects
 WHERE id = $1
 `
@@ -100,6 +100,8 @@ type GetProjectRow struct {
 	LocalRepositoryPath pgtype.Text
 	DefaultBranch       string
 	Configuration       string
+	IssueTrackerType    string
+	CodeHostType        string
 }
 
 func (q *Queries) GetProject(ctx context.Context, id string) (GetProjectRow, error) {
@@ -114,6 +116,8 @@ func (q *Queries) GetProject(ctx context.Context, id string) (GetProjectRow, err
 		&i.LocalRepositoryPath,
 		&i.DefaultBranch,
 		&i.Configuration,
+		&i.IssueTrackerType,
+		&i.CodeHostType,
 	)
 	return i, err
 }
@@ -243,15 +247,16 @@ func (q *Queries) ListProjectPipelineSteps(ctx context.Context, projectID string
 }
 
 const listProjectsDueForSync = `-- name: ListProjectsDueForSync :many
-SELECT p.id::text AS id, p.repository_url
+SELECT p.id::text AS id, p.repository_url, p.issue_tracker_type
 FROM app.projects p
 LEFT JOIN app.issue_sync_state s ON s.project_id = p.id
 WHERE p.enabled AND (s.next_retry_at IS NULL OR s.next_retry_at <= now())
 `
 
 type ListProjectsDueForSyncRow struct {
-	ID            string
-	RepositoryUrl pgtype.Text
+	ID               string
+	RepositoryUrl    pgtype.Text
+	IssueTrackerType string
 }
 
 // Used by the unattended sync loop only (SyncProjects): a project whose last
@@ -271,7 +276,7 @@ func (q *Queries) ListProjectsDueForSync(ctx context.Context) ([]ListProjectsDue
 	var items []ListProjectsDueForSyncRow
 	for rows.Next() {
 		var i ListProjectsDueForSyncRow
-		if err := rows.Scan(&i.ID, &i.RepositoryUrl); err != nil {
+		if err := rows.Scan(&i.ID, &i.RepositoryUrl, &i.IssueTrackerType); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -283,14 +288,15 @@ func (q *Queries) ListProjectsDueForSync(ctx context.Context) ([]ListProjectsDue
 }
 
 const listSyncableProjectByID = `-- name: ListSyncableProjectByID :many
-SELECT id::text AS id, repository_url
+SELECT id::text AS id, repository_url, issue_tracker_type
 FROM app.projects
 WHERE enabled AND id = $1
 `
 
 type ListSyncableProjectByIDRow struct {
-	ID            string
-	RepositoryUrl pgtype.Text
+	ID               string
+	RepositoryUrl    pgtype.Text
+	IssueTrackerType string
 }
 
 func (q *Queries) ListSyncableProjectByID(ctx context.Context, id string) ([]ListSyncableProjectByIDRow, error) {
@@ -302,7 +308,7 @@ func (q *Queries) ListSyncableProjectByID(ctx context.Context, id string) ([]Lis
 	var items []ListSyncableProjectByIDRow
 	for rows.Next() {
 		var i ListSyncableProjectByIDRow
-		if err := rows.Scan(&i.ID, &i.RepositoryUrl); err != nil {
+		if err := rows.Scan(&i.ID, &i.RepositoryUrl, &i.IssueTrackerType); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -314,14 +320,15 @@ func (q *Queries) ListSyncableProjectByID(ctx context.Context, id string) ([]Lis
 }
 
 const listSyncableProjects = `-- name: ListSyncableProjects :many
-SELECT id::text AS id, repository_url
+SELECT id::text AS id, repository_url, issue_tracker_type
 FROM app.projects
 WHERE enabled
 `
 
 type ListSyncableProjectsRow struct {
-	ID            string
-	RepositoryUrl pgtype.Text
+	ID               string
+	RepositoryUrl    pgtype.Text
+	IssueTrackerType string
 }
 
 func (q *Queries) ListSyncableProjects(ctx context.Context) ([]ListSyncableProjectsRow, error) {
@@ -333,7 +340,7 @@ func (q *Queries) ListSyncableProjects(ctx context.Context) ([]ListSyncableProje
 	var items []ListSyncableProjectsRow
 	for rows.Next() {
 		var i ListSyncableProjectsRow
-		if err := rows.Scan(&i.ID, &i.RepositoryUrl); err != nil {
+		if err := rows.Scan(&i.ID, &i.RepositoryUrl, &i.IssueTrackerType); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -396,7 +403,7 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (i
 
 const upsertIssue = `-- name: UpsertIssue :exec
 INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
-VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, now(), $13::jsonb)
+VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12, $13, now(), $14::jsonb)
 ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   display_number = EXCLUDED.display_number,
   title = EXCLUDED.title,
@@ -427,17 +434,18 @@ WHERE
 type UpsertIssueParams struct {
 	ID                string
 	ProjectID         string
+	Provider          string
 	ExternalID        string
 	Title             string
 	Body              string
 	Url               string
 	State             string
-	Column8           []byte
+	Column9           []byte
 	Priority          int32
 	Eligible          bool
 	ExternalCreatedAt pgtype.Timestamptz
 	ExternalUpdatedAt pgtype.Timestamptz
-	Column13          []byte
+	Column14          []byte
 }
 
 // eligible is written unconditionally from the tracker's labels (see
@@ -469,17 +477,18 @@ func (q *Queries) UpsertIssue(ctx context.Context, arg UpsertIssueParams) error 
 	_, err := q.db.Exec(ctx, upsertIssue,
 		arg.ID,
 		arg.ProjectID,
+		arg.Provider,
 		arg.ExternalID,
 		arg.Title,
 		arg.Body,
 		arg.Url,
 		arg.State,
-		arg.Column8,
+		arg.Column9,
 		arg.Priority,
 		arg.Eligible,
 		arg.ExternalCreatedAt,
 		arg.ExternalUpdatedAt,
-		arg.Column13,
+		arg.Column14,
 	)
 	return err
 }
