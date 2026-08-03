@@ -233,10 +233,15 @@ func configuredCipher() (cipher.AEAD, error) {
 	if err != nil || !configured {
 		return nil, errors.New("LOOP_SECRET_KEY is required for project credentials")
 	}
+	// Try both encodings rather than first-parse-wins: a hex-encoded 32-byte
+	// key is 64 characters, a multiple of 4, and so also parses as valid
+	// (but wrong-length) base64. Accept whichever decoding yields exactly 32
+	// bytes; if a value happens to decode to 32 bytes under both encodings,
+	// prefer base64 since it was the historically accepted encoding.
 	var key []byte
-	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil {
+	if decoded, err := base64.StdEncoding.DecodeString(value); err == nil && len(decoded) == 32 {
 		key = decoded
-	} else if decoded, err := hex.DecodeString(value); err == nil {
+	} else if decoded, err := hex.DecodeString(value); err == nil && len(decoded) == 32 {
 		key = decoded
 	}
 	if len(key) != 32 {

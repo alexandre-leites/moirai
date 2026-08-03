@@ -115,6 +115,51 @@ func TestProjectCredentialCipherAndValidation(t *testing.T) {
 	}
 }
 
+// A hex-encoded 32-byte key is 64 characters, a multiple of 4, and so also
+// parses as valid (but wrong-length, 48-byte) base64. configuredCipher must
+// try both encodings and accept whichever actually yields 32 bytes rather
+// than stopping at the first successful-but-wrong-length parse.
+func TestConfiguredCipherAcceptsBase64OrHex(t *testing.T) {
+	t.Setenv("LOOP_SECRET_KEY_FILE", "")
+
+	base64Key := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	hexKey := strings.Repeat("ab", 32) // 64 hex chars decoding to 32 bytes
+
+	t.Run("base64", func(t *testing.T) {
+		t.Setenv("LOOP_SECRET_KEY", base64Key)
+		aead, err := configuredCipher()
+		if err != nil {
+			t.Fatalf("configuredCipher() error = %v", err)
+		}
+		if aead.NonceSize() <= 0 {
+			t.Fatal("expected a usable AEAD")
+		}
+	})
+
+	t.Run("hex", func(t *testing.T) {
+		t.Setenv("LOOP_SECRET_KEY", hexKey)
+		aead, err := configuredCipher()
+		if err != nil {
+			t.Fatalf("configuredCipher() error = %v; a valid 64-char hex key must be accepted", err)
+		}
+		if aead.NonceSize() <= 0 {
+			t.Fatal("expected a usable AEAD")
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		t.Setenv("LOOP_SECRET_KEY", "not-a-valid-key")
+		_, err := configuredCipher()
+		if err == nil {
+			t.Fatal("expected an error for a key that decodes to neither 32 bytes of base64 nor hex")
+		}
+		const want = "secret key must decode to 32 bytes from base64 or hex"
+		if err.Error() != want {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+	})
+}
+
 // The API gateway reports the orchestrator build on its public health endpoint
 // and has no session to present, so this call must succeed without one.
 func TestGetSystemVersionNeedsNoSession(t *testing.T) {
