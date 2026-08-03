@@ -359,21 +359,29 @@ func (s *Server) SetProjectEnabled(ctx context.Context, request *controlv1.SetPr
 	return &controlv1.SetProjectEnabledResponse{Project: project}, nil
 }
 
+// listWorkflowsLimit caps ListWorkflows to the most recently created runs.
+// The endpoint had no LIMIT at all, so it grew with every workflow ever run,
+// running one join query per row (see workflowFromDetailRow). The console
+// only ever renders this list unpaginated (web/src/console-data.tsx polls it
+// whole, web/src/workflows.tsx filters/searches client-side over whatever
+// comes back) so a fixed cap -- rather than cursor pagination, which would
+// need a new proto field plus client changes to be useful -- is the
+// low-risk fix: 500 comfortably covers what an operator would actually
+// filter or search through in one sitting, matching the existing 500-row
+// ceiling ListWorkflowEvents already uses for the same reason.
+const listWorkflowsLimit = 500
+
 func (s *Server) ListWorkflows(ctx context.Context, _ *controlv1.ListWorkflowsRequest) (*controlv1.ListWorkflowsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	ids, err := s.queries.ListWorkflowIDs(ctx)
+	rows, err := s.queries.ListWorkflowsPage(ctx, listWorkflowsLimit)
 	if err != nil {
 		return nil, databaseError(err)
 	}
 	response := &controlv1.ListWorkflowsResponse{}
-	for _, id := range ids {
-		workflow, err := s.workflow(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		response.Workflows = append(response.Workflows, workflow)
+	for _, row := range rows {
+		response.Workflows = append(response.Workflows, workflowFromDetailRow(db.GetWorkflowDetailRow(row)))
 	}
 	return response, nil
 }
@@ -1404,6 +1412,15 @@ func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, 
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	return workflowFromDetailRow(row), nil
+}
+
+// workflowFromDetailRow maps the GetWorkflowDetail/ListWorkflowsPage join
+// shape (identical columns, kept as separate sqlc queries since one is
+// keyed by id and the other paginated) to the wire type. ListWorkflowsPageRow
+// converts to GetWorkflowDetailRow with a plain type conversion: sqlc
+// generates them as structurally identical structs.
+func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 	workflow := &controlv1.Workflow{
 		Id: row.ID, ProjectId: row.ProjectID, Status: row.Status, Phase: row.CurrentPhase,
 		IssueExternalId:        row.ExternalID,
@@ -1421,7 +1438,7 @@ func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, 
 		TotalAgentExecutions:   row.TotalAgentExecutions,
 	}
 	workflow.CreatedAt, workflow.UpdatedAt = timestamp(row.CreatedAt.Time), timestamp(row.UpdatedAt.Time)
-	return workflow, nil
+	return workflow
 }
 
 func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string) (*controlv1.Workflow, error) {

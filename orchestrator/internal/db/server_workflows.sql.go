@@ -202,23 +202,85 @@ func (q *Queries) ListWorkflowEvents(ctx context.Context, arg ListWorkflowEvents
 	return items, nil
 }
 
-const listWorkflowIDs = `-- name: ListWorkflowIDs :many
-SELECT wr.id::text AS id FROM app.workflow_runs wr ORDER BY wr.created_at DESC, wr.id
+const listWorkflowsPage = `-- name: ListWorkflowsPage :many
+SELECT wr.id::text AS id, wr.project_id::text AS project_id, wr.status, wr.current_phase,
+       i.external_id, i.title, wr.branch_name,
+       pr.external_id AS pr_external_id, wr.pull_request_external_id AS run_pull_request_external_id,
+       pr.url AS pr_url, wr.pull_request_url AS run_pull_request_url,
+       pr.state AS pull_request_state, wr.blocking_reason,
+       wr.planning_attempts, wr.implementation_attempts, wr.pipeline_repair_attempts, wr.ci_repair_attempts,
+       wr.review_cycles, wr.total_agent_executions, wr.created_at, wr.updated_at
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+LEFT JOIN app.pull_requests pr ON pr.workflow_run_id = wr.id
+ORDER BY wr.created_at DESC, wr.id
+LIMIT $1
 `
 
-func (q *Queries) ListWorkflowIDs(ctx context.Context) ([]string, error) {
-	rows, err := q.db.Query(ctx, listWorkflowIDs)
+type ListWorkflowsPageRow struct {
+	ID                       string
+	ProjectID                string
+	Status                   string
+	CurrentPhase             string
+	ExternalID               string
+	Title                    string
+	BranchName               pgtype.Text
+	PrExternalID             pgtype.Text
+	RunPullRequestExternalID pgtype.Text
+	PrUrl                    pgtype.Text
+	RunPullRequestUrl        pgtype.Text
+	PullRequestState         pgtype.Text
+	BlockingReason           pgtype.Text
+	PlanningAttempts         int32
+	ImplementationAttempts   int32
+	PipelineRepairAttempts   int32
+	CiRepairAttempts         int32
+	ReviewCycles             int32
+	TotalAgentExecutions     int32
+	CreatedAt                pgtype.Timestamptz
+	UpdatedAt                pgtype.Timestamptz
+}
+
+// Replaces the old ListWorkflowIDs + one GetWorkflowDetail per row: that shape
+// was O(all workflow runs) in both rows and queries, and app.workflow_runs
+// only grows. This does the same join GetWorkflowDetail does, once, for the
+// most recent $1 rows -- see the pr.external_id/wr.pull_request_external_id
+// comment on GetWorkflowDetail below for why those aren't COALESCEd in SQL.
+func (q *Queries) ListWorkflowsPage(ctx context.Context, limit int32) ([]ListWorkflowsPageRow, error) {
+	rows, err := q.db.Query(ctx, listWorkflowsPage, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []string
+	var items []ListWorkflowsPageRow
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var i ListWorkflowsPageRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Status,
+			&i.CurrentPhase,
+			&i.ExternalID,
+			&i.Title,
+			&i.BranchName,
+			&i.PrExternalID,
+			&i.RunPullRequestExternalID,
+			&i.PrUrl,
+			&i.RunPullRequestUrl,
+			&i.PullRequestState,
+			&i.BlockingReason,
+			&i.PlanningAttempts,
+			&i.ImplementationAttempts,
+			&i.PipelineRepairAttempts,
+			&i.CiRepairAttempts,
+			&i.ReviewCycles,
+			&i.TotalAgentExecutions,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
-		items = append(items, id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

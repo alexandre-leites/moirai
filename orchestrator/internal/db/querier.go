@@ -90,7 +90,12 @@ type Querier interface {
 	ListSyncableProjectByID(ctx context.Context, id string) ([]ListSyncableProjectByIDRow, error)
 	ListSyncableProjects(ctx context.Context) ([]ListSyncableProjectsRow, error)
 	ListWorkflowEvents(ctx context.Context, arg ListWorkflowEventsParams) ([]ListWorkflowEventsRow, error)
-	ListWorkflowIDs(ctx context.Context) ([]string, error)
+	// Replaces the old ListWorkflowIDs + one GetWorkflowDetail per row: that shape
+	// was O(all workflow runs) in both rows and queries, and app.workflow_runs
+	// only grows. This does the same join GetWorkflowDetail does, once, for the
+	// most recent $1 rows -- see the pr.external_id/wr.pull_request_external_id
+	// comment on GetWorkflowDetail below for why those aren't COALESCEd in SQL.
+	ListWorkflowsPage(ctx context.Context, limit int32) ([]ListWorkflowsPageRow, error)
 	MarkIssueIneligible(ctx context.Context, id string) error
 	MarkPullRequestMerged(ctx context.Context, workflowRunID string) error
 	MarkRegistrationTokenUsed(ctx context.Context, id string) error
