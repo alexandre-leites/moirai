@@ -74,6 +74,25 @@ const (
 	// failed deterministic pipeline check would use, and the signal #354's
 	// repair loop is meant to consume.
 	StatusWaitingAiReview Status = "waiting_ai_review"
+	// StatusRepairing marks a run whose independent AI review rejected the
+	// developer's own attempt and whose project opted into the repair loop
+	// (projectConfig's EnableRepairLoop): repairOrBlock (repair.go) sets it, via
+	// dispatchRepairJob, in place of terminating the run at StatusBlocked --
+	// the same run.ci_repair_attempts-bounded escape hatch #354 adds so a
+	// rejection is not always the end of the run. The run holds its project
+	// lock across this status exactly like StatusWaitingAiReview: it is still
+	// doing work, a second (or third) developer attempt informed by the
+	// reviewer's own findings instead of a blind re-run.
+	//
+	// A repaired attempt's own "completed" event is not read any differently
+	// than the original developer attempt's: persistExecutionEvent's switch on
+	// job role and event type does not consult the run's current status, so the
+	// repaired attempt flows back through the exact same
+	// StatusDelivering/StatusWaitingAiReview branch the first attempt did --
+	// re-entering AI review, and from there either delivery or another bounded
+	// repair attempt, until ci_repair_attempts exhausts the bound and
+	// repairOrBlock falls through to StatusBlocked for good.
+	StatusRepairing Status = "repairing"
 	// StatusCompleted marks a run whose pull request GitHub has confirmed
 	// merged (observeWorkflow) -- the true terminal "done" state. See
 	// StatusDelivering for the status this run passed through on the way
@@ -126,6 +145,7 @@ var knownStatuses = map[Status]bool{
 	StatusWaitingGithubChecks: true,
 	StatusWaitingHuman:        true,
 	StatusWaitingAiReview:     true,
+	StatusRepairing:           true,
 	StatusDelivering:          true,
 	StatusCompleted:           true,
 	StatusFailed:              true,
@@ -153,9 +173,10 @@ func ParseStatus(value string) (Status, bool) {
 //
 // StatusDelivering is deliberately absent: a run holding it is still doing
 // active work (opening a pull request), the same reason 'offered', 'preparing',
-// 'waiting_github_checks' and 'waiting_human' are absent -- a run waiting on a
-// person to decide is exactly as active as one waiting on GitHub's checks, and
-// must keep its project lock and count toward moirai_active_workflows the same
+// 'waiting_github_checks', 'waiting_human' and 'repairing' are absent -- a run
+// waiting on a person to decide, or dispatching a bounded repair attempt, is
+// exactly as active as one waiting on GitHub's checks, and must keep its
+// project lock and count toward moirai_active_workflows the same
 // way. See genuinelyTerminalStatuses for the narrower set terminateWorkflow's
 // own guard uses, and StatusDelivering's doc comment above for why 'completed'
 // and 'delivering' no longer share one meaning the way this list's single
