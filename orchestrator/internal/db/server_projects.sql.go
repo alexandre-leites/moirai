@@ -356,13 +356,13 @@ func (q *Queries) UpdateProject(ctx context.Context, arg UpdateProjectParams) (i
 
 const upsertIssue = `-- name: UpsertIssue :exec
 INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
-VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, 'open', $7::jsonb, $8, $9, $10, $11, now(), $12::jsonb)
+VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, now(), $13::jsonb)
 ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   display_number = EXCLUDED.display_number,
   title = EXCLUDED.title,
   body = EXCLUDED.body,
   url = EXCLUDED.url,
-  state = 'open',
+  state = EXCLUDED.state,
   labels = EXCLUDED.labels,
   priority = EXCLUDED.priority,
   eligible = EXCLUDED.eligible,
@@ -379,12 +379,13 @@ type UpsertIssueParams struct {
 	Title             string
 	Body              string
 	Url               string
-	Column7           []byte
+	State             string
+	Column8           []byte
 	Priority          int32
 	Eligible          bool
 	ExternalCreatedAt pgtype.Timestamptz
 	ExternalUpdatedAt pgtype.Timestamptz
-	Column12          []byte
+	Column13          []byte
 }
 
 // eligible is written unconditionally from the tracker's labels (see
@@ -393,6 +394,15 @@ type UpsertIssueParams struct {
 // ClaimSchedulableIssue's app.workflow_runs.superseded_at join for that), so
 // there is no lifecycle state left here for a sync to clobber. See #268 and
 // migration 023 for why a CASE guarding this used to live here.
+//
+// state is now written from what GitHub itself reports (ListIssues fetches
+// --state all, not just open) rather than being hardcoded to 'open': every
+// scheduling query (ListQueueEntries, GetSchedulerSnapshot,
+// ClaimSchedulableIssue) already filters on i.state = 'open', so an issue
+// closed on the tracker stops being schedulable the moment this reconciles
+// it, with no separate lifecycle write required. The caller also ANDs
+// eligible with "still open on the tracker", so a closed issue is reported
+// ineligible too, not just excluded via state.
 func (q *Queries) UpsertIssue(ctx context.Context, arg UpsertIssueParams) error {
 	_, err := q.db.Exec(ctx, upsertIssue,
 		arg.ID,
@@ -401,12 +411,13 @@ func (q *Queries) UpsertIssue(ctx context.Context, arg UpsertIssueParams) error 
 		arg.Title,
 		arg.Body,
 		arg.Url,
-		arg.Column7,
+		arg.State,
+		arg.Column8,
 		arg.Priority,
 		arg.Eligible,
 		arg.ExternalCreatedAt,
 		arg.ExternalUpdatedAt,
-		arg.Column12,
+		arg.Column13,
 	)
 	return err
 }

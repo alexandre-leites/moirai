@@ -70,14 +70,23 @@ ORDER BY p.name, p.id;
 -- ClaimSchedulableIssue's app.workflow_runs.superseded_at join for that), so
 -- there is no lifecycle state left here for a sync to clobber. See #268 and
 -- migration 023 for why a CASE guarding this used to live here.
+--
+-- state is now written from what GitHub itself reports (ListIssues fetches
+-- --state all, not just open) rather than being hardcoded to 'open': every
+-- scheduling query (ListQueueEntries, GetSchedulerSnapshot,
+-- ClaimSchedulableIssue) already filters on i.state = 'open', so an issue
+-- closed on the tracker stops being schedulable the moment this reconciles
+-- it, with no separate lifecycle write required. The caller also ANDs
+-- eligible with "still open on the tracker", so a closed issue is reported
+-- ineligible too, not just excluded via state.
 INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
-VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, 'open', $7::jsonb, $8, $9, $10, $11, now(), $12::jsonb)
+VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, now(), $13::jsonb)
 ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   display_number = EXCLUDED.display_number,
   title = EXCLUDED.title,
   body = EXCLUDED.body,
   url = EXCLUDED.url,
-  state = 'open',
+  state = EXCLUDED.state,
   labels = EXCLUDED.labels,
   priority = EXCLUDED.priority,
   eligible = EXCLUDED.eligible,
