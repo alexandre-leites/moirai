@@ -1,15 +1,33 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/jackc/pgx/v5/pgtype"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
+
+// captureLogs swaps the default slog logger for one that writes to the
+// returned buffer, restoring the previous logger on test cleanup.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
+}
 
 func TestValidateProject(t *testing.T) {
 	project, steps, err := validateProject(&controlv1.ProjectConfiguration{
@@ -479,5 +497,112 @@ func TestBlockedIsATerminalStatusTheActiveGaugeExcludes(t *testing.T) {
 	}
 	if excluded := strings.Count(predicate, "'"); excluded != 2*len(terminalStatuses) {
 		t.Fatalf("workflow_runs_active_idx excludes %s, which is not the %d statuses terminalStatuses lists", predicate, len(terminalStatuses))
+	}
+}
+
+func TestDatabaseErrorKeepsWireMessageOpaqueButLogsCause(t *testing.T) {
+	logs := captureLogs(t)
+
+	cause := errors.New("pq: duplicate key value violates unique constraint \"projects_name_key\"")
+	err := databaseError(cause)
+
+	if err == nil {
+		t.Fatal("expected a non-nil error")
+	}
+	if got, want := status.Code(err), codes.Internal; got != want {
+		t.Fatalf("code = %v, want %v", got, want)
+	}
+	// The client-facing message must stay exactly this constant: an operator
+	// or console must never learn the underlying cause from the wire.
+	const wantMessage = "database operation failed"
+	if got := status.Convert(err).Message(); got != wantMessage {
+		t.Fatalf("message = %q, want %q", got, wantMessage)
+	}
+	if strings.Contains(status.Convert(err).Message(), "constraint") {
+		t.Fatal("the real cause leaked onto the wire")
+	}
+	// But the real cause must have been logged server-side.
+	if !strings.Contains(logs.String(), "duplicate key value violates unique constraint") {
+		t.Fatalf("expected the underlying cause to be logged, got: %s", logs.String())
+	}
+}
+
+func TestDatabaseErrorPassesThroughExistingStatusErrors(t *testing.T) {
+	logs := captureLogs(t)
+
+	notFound := status.Error(codes.NotFound, "project is unknown")
+	if got := databaseError(notFound); got != notFound {
+		t.Fatalf("expected an existing status error to pass through unchanged, got %v", got)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no log for an error that already carries a gRPC status, got: %s", logs.String())
+	}
+}
+
+func TestDatabaseErrorNilIsNil(t *testing.T) {
+	if err := databaseError(nil); err != nil {
+		t.Fatalf("databaseError(nil) = %v, want nil", err)
+	}
+}
+
+func TestConfigurationErrorIsDistinctFromDatabaseError(t *testing.T) {
+	logs := captureLogs(t)
+
+	cause := errors.New("unexpected end of JSON input")
+	err := configurationError(cause)
+
+	if got := status.Convert(err).Message(); got == "database operation failed" {
+		t.Fatal("a malformed JSON column must not report \"database operation failed\"")
+	}
+	if !strings.Contains(logs.String(), "unexpected end of JSON input") {
+		t.Fatalf("expected the underlying cause to be logged, got: %s", logs.String())
+	}
+}
+
+func TestScanRunnerRowValuesRoutesMalformedLabelsThroughConfigurationError(t *testing.T) {
+	logs := captureLogs(t)
+
+	_, err := scanRunnerRowValues("runner-1", "demo", true, false, "online", "{not valid json", pgtype.Timestamptz{}, "1.0.0")
+	if err == nil {
+		t.Fatal("expected an error for malformed labels JSON")
+	}
+	if got := status.Convert(err).Message(); got == "database operation failed" {
+		t.Fatal("malformed runner labels must not report \"database operation failed\"")
+	}
+	if logs.Len() == 0 {
+		t.Fatal("expected the malformed-labels cause to be logged")
+	}
+}
+
+func TestConfiguredCipherDistinguishesMisconfiguredFromUnset(t *testing.T) {
+	logs := captureLogs(t)
+
+	t.Setenv("LOOP_SECRET_KEY", "value")
+	t.Setenv("LOOP_SECRET_KEY_FILE", "also-set")
+	_, err := configuredCipher()
+	if err == nil {
+		t.Fatal("expected an error when both LOOP_SECRET_KEY and _FILE are set")
+	}
+	const want = "LOOP_SECRET_KEY is misconfigured"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+	if logs.Len() == 0 {
+		t.Fatal("expected the misconfiguration cause to be logged")
+	}
+}
+
+func TestPasswordMatchesLogsUnparseableHashWithoutChangingItsResult(t *testing.T) {
+	logs := captureLogs(t)
+
+	matches, err := passwordMatches("any-password", "not-a-valid-scrypt-hash")
+	if err != nil {
+		t.Fatalf("passwordMatches error = %v, want nil (must stay indistinguishable from a wrong password)", err)
+	}
+	if matches {
+		t.Fatal("expected no match for an unparseable hash")
+	}
+	if logs.Len() == 0 {
+		t.Fatal("expected the unparseable-hash cause to be logged for an operator")
 	}
 }

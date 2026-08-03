@@ -184,7 +184,7 @@ func (s *Server) requireUserMutation(ctx context.Context) (actor, error) {
 func scanRegistrationToken(id, labels string, created, expires, used, revoked pgtype.Timestamptz) (*controlv1.RunnerRegistrationToken, error) {
 	token := &controlv1.RunnerRegistrationToken{Id: id}
 	if err := json.Unmarshal([]byte(labels), &token.AllowedLabels); err != nil {
-		return nil, databaseError(err)
+		return nil, configurationError(err)
 	}
 	token.CreatedAt, token.ExpiresAt = timestamp(created.Time), timestamp(expires.Time)
 	if used.Valid {
