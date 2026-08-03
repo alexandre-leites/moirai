@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -33,6 +34,22 @@ const unansweredOfferReason = "runner never answered the job offer"
 // going to finish on its own.
 const strandedDelivery = 5 * time.Minute
 
+// strandedReviewDispatch bounds resumeStrandedReviewDispatches: how long a run
+// may sit at 'waiting_ai_review' with no reviewer job yet offered before the
+// sweep retries the dispatch itself. Short, because dispatchReviewerJob's own
+// inline attempt (persistExecutionEvent's post-commit call) only ever fails to
+// offer a job for the mundane reason that no runner was connected yet, not
+// because anything external is slow.
+const strandedReviewDispatch = 2 * time.Minute
+
+// strandedReviewVerdict bounds resumeStrandedReviewVerdicts: how long a
+// completed reviewer execution's verdict may go unapplied -- persistExecutionEvent
+// committed the terminal event but the process died before
+// handleReviewCompletion's follow-on delivery/block decision landed -- before
+// the sweep applies it itself. Matches strandedDelivery: an approving verdict
+// re-enters deliverWorkflow, the same external-GitHub-call path.
+const strandedReviewVerdict = strandedDelivery
+
 // abandonedChecks bounds the wait for GitHub checks. Nothing else ends that
 // wait: a repository whose checks never report — no CI configured, a workflow
 // that never queues — would otherwise hold its project lock forever, which is
@@ -56,6 +73,8 @@ func (s *Core) RecoverOnce(ctx context.Context) error {
 	return errors.Join(
 		s.ReconcileDatabaseOnce(ctx),
 		s.resumeStrandedDeliveries(ctx),
+		s.resumeStrandedReviewDispatches(ctx),
+		s.resumeStrandedReviewVerdicts(ctx),
 	)
 }
 
@@ -69,8 +88,40 @@ func (s *Core) ReconcileDatabaseOnce(ctx context.Context) error {
 		s.markStaleRunnersOffline(ctx),
 		s.reclaimExpiredLeases(ctx),
 		s.reclaimUnansweredOffers(ctx),
+		s.reclaimExpiredReviewLeases(ctx),
+		s.reclaimUnansweredReviewOffers(ctx),
 		s.blockAbandonedChecks(ctx),
 	)
+}
+
+// reclaimUnansweredReviewOffers and reclaimExpiredReviewLeases are the
+// reviewer-scoped counterparts of reclaimUnansweredOffers/reclaimExpiredLeases:
+// see ReclaimUnansweredReviewOffers/ReclaimExpiredReviewLeases (review.sql)
+// for why they reset the job for a redrive instead of cancelling or failing
+// the run outright. Both are folded into ReconcileDatabaseOnce so they run on
+// the same 30-second cadence, database-only, no GitHub call.
+func (s *Core) reclaimUnansweredReviewOffers(ctx context.Context) error {
+	workflowIDs, err := s.queries.ReclaimUnansweredReviewOffers(ctx, db.ReclaimUnansweredReviewOffersParams{
+		Reason: pgText(unansweredOfferReason), UnansweredOffer: pgInterval(unansweredOffer),
+	})
+	if err != nil {
+		return databaseError(err)
+	}
+	for _, workflowID := range workflowIDs {
+		slog.Info("reviewer offer went unanswered; the job was reset for redispatch", "workflow_run_id", workflowID)
+	}
+	return nil
+}
+
+func (s *Core) reclaimExpiredReviewLeases(ctx context.Context) error {
+	workflowIDs, err := s.queries.ReclaimExpiredReviewLeases(ctx, pgText(abandonedLease))
+	if err != nil {
+		return databaseError(err)
+	}
+	for _, workflowID := range workflowIDs {
+		slog.Info("reviewer lease expired; the job was reset for redispatch", "workflow_run_id", workflowID)
+	}
+	return nil
 }
 
 // pgInterval converts a Go duration into the pgtype.Interval sqlc-generated
@@ -177,6 +228,33 @@ func (s *Core) resumeStrandedDeliveries(ctx context.Context) error {
 		return databaseError(err)
 	}
 	return s.eachWorkflowID(ctx, workflowIDs, s.deliverWorkflow)
+}
+
+// resumeStrandedReviewDispatches re-drives a run stuck at 'waiting_ai_review'
+// whose reviewer job was never actually offered -- the inline
+// dispatchReviewerJob call persistExecutionEvent already made (or a previous
+// sweep pass) found no connected runner, or lost a race to another attempt.
+// See SelectStrandedReviewDispatchWorkflows (review.sql) for the exact guard.
+func (s *Core) resumeStrandedReviewDispatches(ctx context.Context) error {
+	workflowIDs, err := s.queries.SelectStrandedReviewDispatchWorkflows(ctx, pgInterval(strandedReviewDispatch))
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, s.dispatchReviewerJob)
+}
+
+// resumeStrandedReviewVerdicts re-drives a run stuck at 'waiting_ai_review'
+// whose reviewer execution already finished (the job is 'completed' with role
+// 'reviewer') but whose verdict was never applied -- the process died between
+// persistExecutionEvent committing the terminal event and
+// handleReviewCompletion's follow-on delivery/block decision. See
+// SelectStrandedReviewVerdictWorkflows (review.sql) for the exact guard.
+func (s *Core) resumeStrandedReviewVerdicts(ctx context.Context) error {
+	workflowIDs, err := s.queries.SelectStrandedReviewVerdictWorkflows(ctx, pgInterval(strandedReviewVerdict))
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, s.applyRecordedReviewVerdict)
 }
 
 // eachWorkflowID runs `do` against every already-fetched workflow identifier,

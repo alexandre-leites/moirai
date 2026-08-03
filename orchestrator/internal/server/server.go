@@ -123,6 +123,14 @@ type projectConfig struct {
 	// missing JSON key decodes to false, not an error. See
 	// observeWorkflow/deliveryWorkflow (delivery.go) for where it is read.
 	RequireHumanApproval bool `json:"require_human_approval"`
+	// EnableAiReview opts a project into dispatching an independent reviewer
+	// execution after a developer execution reports success and before
+	// delivery (review.go's dispatchReviewerJob). Absent (the zero value,
+	// false) on every project created before this field existed, for the same
+	// reason RequireHumanApproval is: a missing JSON key decodes to false, not
+	// an error, so an existing project's behaviour is unchanged until it opts
+	// in. See persistExecutionEvent (server.go) for where it is read.
+	EnableAiReview bool `json:"enable_ai_review"`
 }
 
 // defaultExecutionTimeoutSeconds bounds a dispatched developer execution's
@@ -1410,8 +1418,16 @@ func (s *Core) acceptOffer(ctx context.Context, runnerID, jobID string) (int64, 
 		return 0, time.Time{}, databaseError(err)
 	}
 	generation, expiresAt := accepted.LeaseGeneration, accepted.LeaseExpiresAt.Time
-	if err := queries.SetWorkflowPreparing(ctx, jobID); err != nil {
-		return 0, time.Time{}, databaseError(err)
+	// A reviewer's own job offer being accepted must not move the run off
+	// StatusWaitingAiReview: unlike a developer's job, there is no separate
+	// "preparing" status for a review in flight -- StatusWaitingAiReview
+	// itself covers the whole of dispatch, offer, acceptance and execution,
+	// the same way StatusPreparing alone covers a developer's without a
+	// distinct "running" status of its own (see status.go).
+	if accepted.Role == jobRoleDeveloper {
+		if err := queries.SetWorkflowPreparing(ctx, jobID); err != nil {
+			return 0, time.Time{}, databaseError(err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, time.Time{}, databaseError(err)
@@ -1496,7 +1512,7 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	workflowID, err := queries.RecordJobExecutionEvent(ctx, db.RecordJobExecutionEventParams{
+	recorded, err := queries.RecordJobExecutionEvent(ctx, db.RecordJobExecutionEventParams{
 		ID: event.GetJobId(), RunnerID: runnerID, LeaseGeneration: event.GetLeaseGeneration(),
 		EventSequence: event.GetEventSequence(), EventType: event.GetType(),
 	})
@@ -1506,6 +1522,13 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	if err != nil {
 		return databaseError(err)
 	}
+	workflowID, jobRole := recorded.WorkflowRunID, recorded.Role
+	// A reviewer's own "completed" event is not an ordinary developer success:
+	// its verdict, not its mere existence, decides what happens next, and that
+	// decision (handleReviewCompletion, review.go) needs the payload this
+	// transaction is about to commit, so it runs after commit, the same
+	// after-commit shape deliverWorkflow already runs in below.
+	reviewerCompleted := jobRole == jobRoleReviewer && event.GetType() == "completed"
 	// The event type is stored unprefixed because it is a vocabulary shared with
 	// the console, which switches on bare "log", "started", "failed" and friends
 	// to build the timeline and the agent log pane. Writing "runner.log" here
@@ -1515,6 +1538,11 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	}); err != nil {
 		return databaseError(err)
 	}
+	// enteringReview is set inside the terminalEvent branch below, for a
+	// developer's "completed" event on a project with EnableAiReview set, and
+	// read again after commit to decide dispatchReviewerJob vs deliverWorkflow
+	// -- one aiReviewEnabled read inside the transaction, not two.
+	var enteringReview bool
 	if terminalEvent(event.GetType()) {
 		// The event type is the shared vocabulary and is stored as it arrived;
 		// the run's own terminal status is derived from it. An agent that
@@ -1543,39 +1571,88 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 		// fixed. The event row above still records the runner's own
 		// "completed", since that is the separate, shared vocabulary the
 		// console's event timeline switches on.
-		runStatus, blockingReason := Status(event.GetType()), ""
-		switch event.GetType() {
-		case "completed":
-			runStatus = StatusDelivering
-		case "failed":
-			if reason, blocked := agentBlockReason(payloadJSON); blocked {
-				runStatus, blockingReason = StatusBlocked, reason
-			}
-		}
-		if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
-			ID: workflowID, Status: runStatus.String(), Column3: blockingReason,
-		}); err != nil {
-			return databaseError(err)
-		}
-		if event.GetType() != "completed" {
-			if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
+		//
+		// A reviewer's own "completed" event is handled entirely separately,
+		// below and after commit (handleReviewCompletion): its status
+		// transition depends on a verdict this switch has no business parsing
+		// mid-transaction, and the run must stay at StatusWaitingAiReview,
+		// untouched, until that decision lands -- exactly the reasoning
+		// StatusDelivering's own doc comment already gives for why a run
+		// holding an in-progress status must not be mistaken for one at rest.
+		switch {
+		case reviewerCompleted:
+			// Touches nothing but updated_at (same status in, same status
+			// out), so resumeStrandedReviewVerdicts' age bound (recovery.go's
+			// strandedReviewVerdict) starts counting from this commit rather
+			// than from whenever the review was first dispatched -- a review
+			// execution can run for as long as its own timeout allows, and
+			// without this the sweep would race handleReviewCompletion's own
+			// inline call below on every single review.
+			if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
+				ID: workflowID, Status: StatusWaitingAiReview.String(), Column3: "",
+			}); err != nil {
 				return databaseError(err)
 			}
-			// V1 has no automatic retry: a run that lands on 'failed' or
-			// 'blocked' here is excluded from the scheduler's candidate set
-			// (ListQueueEntries, ClaimSchedulableIssue) by its own status,
-			// via the app.workflow_runs join those queries run, until
-			// RetryWorkflow supersedes it. Nothing needs writing to the issue
-			// itself any more -- see #268. A 'cancelled' event lands on a
-			// status that join does not exclude, so it is picked up again
-			// with no operator action, the same as an operator-cancelled or
-			// unanswered-offer run.
+		default:
+			runStatus, blockingReason := Status(event.GetType()), ""
+			switch event.GetType() {
+			case "completed":
+				runStatus = StatusDelivering
+				enabled, cfgErr := aiReviewEnabled(ctx, queries, workflowID)
+				if cfgErr != nil {
+					return cfgErr
+				}
+				if enabled {
+					runStatus = StatusWaitingAiReview
+					enteringReview = true
+				}
+			case "failed":
+				if jobRole == jobRoleReviewer {
+					// A reviewer execution that crashed or was cancelled
+					// without producing a verdict is not an ordinary agent
+					// failure to fold into agentBlockReason's developer-shaped
+					// account: block outright with a reason distinct from it,
+					// since #354's repair loop is meant to treat this the same
+					// as a rejecting verdict, not as a developer mistake.
+					runStatus, blockingReason = StatusBlocked, "independent AI review execution failed"
+				} else if reason, blocked := agentBlockReason(payloadJSON); blocked {
+					runStatus, blockingReason = StatusBlocked, reason
+				}
+			case "cancelled":
+				if jobRole == jobRoleReviewer {
+					runStatus, blockingReason = StatusBlocked, "independent AI review execution was cancelled"
+				}
+			}
+			if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
+				ID: workflowID, Status: runStatus.String(), Column3: blockingReason,
+			}); err != nil {
+				return databaseError(err)
+			}
+			if runStatus != StatusDelivering && runStatus != StatusWaitingAiReview {
+				if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
+					return databaseError(err)
+				}
+				// V1 has no automatic retry: a run that lands on 'failed' or
+				// 'blocked' here is excluded from the scheduler's candidate set
+				// (ListQueueEntries, ClaimSchedulableIssue) by its own status,
+				// via the app.workflow_runs join those queries run, until
+				// RetryWorkflow supersedes it. Nothing needs writing to the issue
+				// itself any more -- see #268. A 'cancelled' event lands on a
+				// status that join does not exclude, so it is picked up again
+				// with no operator action, the same as an operator-cancelled or
+				// unanswered-offer run.
+			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return databaseError(err)
 	}
-	if event.GetType() == "completed" {
+	switch {
+	case reviewerCompleted:
+		return s.handleReviewCompletion(ctx, workflowID, payloadJSON)
+	case enteringReview:
+		return s.dispatchReviewerJob(ctx, workflowID)
+	case event.GetType() == "completed":
 		return s.deliverWorkflow(ctx, workflowID)
 	}
 	return nil

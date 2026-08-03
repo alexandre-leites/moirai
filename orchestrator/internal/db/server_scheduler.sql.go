@@ -14,7 +14,7 @@ import (
 const acceptJob = `-- name: AcceptJob :one
 UPDATE app.jobs SET status = 'preparing', accepted_at = now(), lease_expires_at = now() + $1::interval
 WHERE id = $2 AND runner_id = $3::uuid AND status = 'offered'
-RETURNING lease_generation, lease_expires_at
+RETURNING lease_generation, lease_expires_at, role
 `
 
 type AcceptJobParams struct {
@@ -26,12 +26,17 @@ type AcceptJobParams struct {
 type AcceptJobRow struct {
 	LeaseGeneration int64
 	LeaseExpiresAt  pgtype.Timestamptz
+	Role            string
 }
 
+// role travels back to acceptOffer (server.go) so it can decide whether to
+// call SetWorkflowPreparing at all: a reviewer's job offer being accepted
+// must not move the run off StatusWaitingAiReview the way a developer's
+// always has (see acceptOffer's own comment for why).
 func (q *Queries) AcceptJob(ctx context.Context, arg AcceptJobParams) (AcceptJobRow, error) {
 	row := q.db.QueryRow(ctx, acceptJob, arg.LeaseDuration, arg.ID, arg.RunnerID)
 	var i AcceptJobRow
-	err := row.Scan(&i.LeaseGeneration, &i.LeaseExpiresAt)
+	err := row.Scan(&i.LeaseGeneration, &i.LeaseExpiresAt, &i.Role)
 	return i, err
 }
 
@@ -445,7 +450,7 @@ UPDATE app.jobs SET
   started_at = CASE WHEN $2 = 'started' THEN COALESCE(started_at, now()) ELSE started_at END,
   finished_at = CASE WHEN $2 IN ('completed','failed','cancelled') THEN now() ELSE finished_at END
 WHERE id = $3 AND runner_id = $4::uuid AND lease_generation = $5 AND status IN ('preparing','running') AND lease_expires_at > now() AND last_event_sequence < $1
-RETURNING workflow_run_id::text AS workflow_run_id
+RETURNING workflow_run_id::text AS workflow_run_id, role
 `
 
 type RecordJobExecutionEventParams struct {
@@ -456,7 +461,12 @@ type RecordJobExecutionEventParams struct {
 	LeaseGeneration int64
 }
 
-func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error) {
+type RecordJobExecutionEventRow struct {
+	WorkflowRunID string
+	Role          string
+}
+
+func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (RecordJobExecutionEventRow, error) {
 	row := q.db.QueryRow(ctx, recordJobExecutionEvent,
 		arg.EventSequence,
 		arg.EventType,
@@ -464,9 +474,9 @@ func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExec
 		arg.RunnerID,
 		arg.LeaseGeneration,
 	)
-	var workflow_run_id string
-	err := row.Scan(&workflow_run_id)
-	return workflow_run_id, err
+	var i RecordJobExecutionEventRow
+	err := row.Scan(&i.WorkflowRunID, &i.Role)
+	return i, err
 }
 
 const renewJobLease = `-- name: RenewJobLease :one

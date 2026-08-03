@@ -86,7 +86,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, `TRUNCATE app.workflow_events,app.job_offers,app.jobs,app.project_locks,app.workflow_runs,app.issues,app.projects,app.runners,app.user_sessions,app.users,app.audit_events RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE app.workflow_events,app.job_offers,app.jobs,app.project_locks,app.ai_reviews,app.workflow_runs,app.issues,app.projects,app.runners,app.user_sessions,app.users,app.audit_events RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	core, err := NewWithGitHub(pool, "test", stubGitHub{})
@@ -641,6 +641,15 @@ func (h *harness) seedWaitingChecks(projectID, issueID string) (workflowID strin
 func (h *harness) requireApproval(projectID string) {
 	h.t.Helper()
 	h.exec(`UPDATE app.projects SET configuration = configuration || '{"require_human_approval":true}'::jsonb WHERE id=$1`, projectID)
+}
+
+// enableAiReview flips a seeded project's configuration to opt into the
+// independent-AI-review gate (projectConfig.EnableAiReview), read fresh by
+// aiReviewEnabled on every developer "completed" event, so this can run any
+// time before the persistExecutionEvent call under test.
+func (h *harness) enableAiReview(projectID string) {
+	h.t.Helper()
+	h.exec(`UPDATE app.projects SET configuration = configuration || '{"enable_ai_review":true}'::jsonb WHERE id=$1`, projectID)
 }
 
 // Before StatusWaitingHuman existed, observeWorkflow merged a pull request

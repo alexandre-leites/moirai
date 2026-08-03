@@ -106,9 +106,13 @@ WHERE job_id = $1 AND runner_id = $2 AND status = 'offered' AND expires_at > now
 RETURNING id::text AS id;
 
 -- name: AcceptJob :one
+-- role travels back to acceptOffer (server.go) so it can decide whether to
+-- call SetWorkflowPreparing at all: a reviewer's job offer being accepted
+-- must not move the run off StatusWaitingAiReview the way a developer's
+-- always has (see acceptOffer's own comment for why).
 UPDATE app.jobs SET status = 'preparing', accepted_at = now(), lease_expires_at = now() + sqlc.arg(lease_duration)::interval
 WHERE id = sqlc.arg(id) AND runner_id = sqlc.arg(runner_id)::uuid AND status = 'offered'
-RETURNING lease_generation, lease_expires_at;
+RETURNING lease_generation, lease_expires_at, role;
 
 -- name: SetWorkflowPreparing :exec
 UPDATE app.workflow_runs SET status = 'preparing', updated_at = now()
@@ -146,7 +150,7 @@ UPDATE app.jobs SET
   started_at = CASE WHEN sqlc.arg(event_type) = 'started' THEN COALESCE(started_at, now()) ELSE started_at END,
   finished_at = CASE WHEN sqlc.arg(event_type) IN ('completed','failed','cancelled') THEN now() ELSE finished_at END
 WHERE id = sqlc.arg(id) AND runner_id = sqlc.arg(runner_id)::uuid AND lease_generation = sqlc.arg(lease_generation) AND status IN ('preparing','running') AND lease_expires_at > now() AND last_event_sequence < sqlc.arg(event_sequence)
-RETURNING workflow_run_id::text AS workflow_run_id;
+RETURNING workflow_run_id::text AS workflow_run_id, role;
 
 -- name: CreateWorkflowEvent :exec
 INSERT INTO app.workflow_events (workflow_run_id, event_type, severity, payload)
