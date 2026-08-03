@@ -40,6 +40,15 @@ LEFT JOIN LATERAL (
 ) hb ON true;
 
 -- name: ClaimSchedulableIssue :one
+-- A runner's in-flight job count is compared against its own registered
+-- capacity (app.runners.capacity, see migration 003) rather than excluding it
+-- the instant it holds any job at all: that used to hard-cap every runner at
+-- one concurrent execution regardless of what it advertised at registration.
+-- The count is still scoped to this runner (j.runner_id = r.id) so it says
+-- nothing about any other runner's load, and FOR UPDATE OF i, r still locks
+-- exactly the issue and runner rows a concurrent ClaimSchedulableIssue would
+-- also need, so SKIP LOCKED continues to hand a racing caller a different
+-- issue/runner pair instead of double-booking this one.
 SELECT i.id::text AS issue_id, i.external_id, i.title, i.body,
        p.id::text AS project_id, p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch, p.configuration::text AS configuration,
        r.id::text AS runner_id
@@ -50,7 +59,7 @@ WHERE i.eligible AND i.state = 'open' AND p.enabled
   AND r.id::text = ANY(sqlc.arg(runner_ids)::text[])
   AND r.labels @> COALESCE(p.configuration->'required_runner_labels', '[]'::jsonb)
   AND NOT EXISTS (SELECT 1 FROM app.project_locks l WHERE l.project_id = p.id)
-  AND NOT EXISTS (SELECT 1 FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered','preparing','running'))
+  AND (SELECT COUNT(*) FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered','preparing','running')) < r.capacity
   AND NOT EXISTS (
     SELECT 1 FROM app.workflow_runs w
     WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed', 'blocked', 'completed')

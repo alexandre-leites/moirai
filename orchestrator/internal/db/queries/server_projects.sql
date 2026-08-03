@@ -42,6 +42,20 @@ SELECT id::text AS id, repository_url
 FROM app.projects
 WHERE enabled AND id = $1;
 
+-- name: ListProjectsDueForSync :many
+-- Used by the unattended sync loop only (SyncProjects): a project whose last
+-- failure set app.issue_sync_state.next_retry_at in the future (see
+-- UpsertIssueSyncStateFailure's exponential backoff) is skipped so a
+-- repository with a revoked token or a deleted remote is not hammered on
+-- every tick forever. The operator-triggered "Sync now" path (SyncNow) goes
+-- through ListSyncableProjects/ListSyncableProjectByID instead and always
+-- bypasses backoff, since a human explicitly asking for a sync right now is
+-- exactly the case backoff should not stand in front of.
+SELECT p.id::text AS id, p.repository_url
+FROM app.projects p
+LEFT JOIN app.issue_sync_state s ON s.project_id = p.id
+WHERE p.enabled AND (s.next_retry_at IS NULL OR s.next_retry_at <= now());
+
 -- name: CountProjectIssues :one
 SELECT COUNT(*) FROM app.issues WHERE project_id = $1;
 
@@ -96,18 +110,30 @@ ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   raw_snapshot = EXCLUDED.raw_snapshot;
 
 -- name: UpsertIssueSyncStateSuccess :exec
-INSERT INTO app.issue_sync_state(project_id, consecutive_failures, last_error, last_synced_at, updated_at)
-VALUES ($1, 0, NULL, now(), now())
+-- next_retry_at is reset to NULL on success: leaving a stale future timestamp
+-- around after a project recovers would keep ListProjectsDueForSync skipping
+-- it long after there is anything to back off from.
+INSERT INTO app.issue_sync_state(project_id, consecutive_failures, next_retry_at, last_error, last_synced_at, updated_at)
+VALUES ($1, 0, NULL, NULL, now(), now())
 ON CONFLICT(project_id) DO UPDATE SET
   consecutive_failures = 0,
+  next_retry_at = NULL,
   last_error = NULL,
   last_synced_at = now(),
   updated_at = now();
 
 -- name: UpsertIssueSyncStateFailure :exec
-INSERT INTO app.issue_sync_state(project_id, consecutive_failures, last_error, updated_at)
-VALUES ($1, 1, $2, now())
+-- next_retry_at backs off exponentially with consecutive_failures (1 minute,
+-- 2, 4, 8, ...), capped at 1 hour. The exponent itself is capped (via the
+-- inner LEAST) before POWER ever sees it, rather than relying on the outer
+-- LEAST against '1 hour' alone: POWER(2, n) is evaluated first, and an
+-- uncapped n for a project that has been failing for days would overflow
+-- double precision (and then interval multiplication) before that outer
+-- LEAST ever got a chance to clamp the result.
+INSERT INTO app.issue_sync_state(project_id, consecutive_failures, next_retry_at, last_error, updated_at)
+VALUES ($1, 1, now() + LEAST(INTERVAL '1 minute' * POWER(2, LEAST(1, 10)), INTERVAL '1 hour'), $2, now())
 ON CONFLICT(project_id) DO UPDATE SET
   consecutive_failures = app.issue_sync_state.consecutive_failures + 1,
+  next_retry_at = now() + LEAST(INTERVAL '1 minute' * POWER(2, LEAST(app.issue_sync_state.consecutive_failures + 1, 10)), INTERVAL '1 hour'),
   last_error = EXCLUDED.last_error,
   updated_at = now();
