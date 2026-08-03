@@ -185,6 +185,11 @@ func run() error {
 	every(ctx, cfg.IssueSyncInterval, "issue sync", observed(recorder, metrics.LoopIssueSync, service.SyncProjects))
 	go func() {
 		<-ctx.Done()
+		// Must run before GracefulStop: GracefulStop blocks until every
+		// in-flight RPC returns, and Connect/StreamEvents only return early
+		// because they observe this signal. Calling it after GracefulStop
+		// has already started blocking this same goroutine would deadlock.
+		service.Shutdown()
 		grpcServer.GracefulStop()
 	}()
 	if err := grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

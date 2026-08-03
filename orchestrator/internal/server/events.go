@@ -45,7 +45,11 @@ func (s *Server) StreamEvents(request *controlv1.StreamEventsRequest, stream grp
 	if _, err := s.requireActor(stream.Context(), false); err != nil {
 		return err
 	}
-	ctx := stream.Context()
+	// Also cancelled when the server starts shutting down, so a WaitForNotification
+	// call below that would otherwise sit until this dashboard client disconnects
+	// returns promptly and lets GracefulStop finish. See Server.Shutdown.
+	ctx, cancel := s.withShutdown(stream.Context())
+	defer cancel()
 
 	// Acquire a dedicated connection and start listening before computing
 	// the starting cursor. If LISTEN happened after the cursor read, any
