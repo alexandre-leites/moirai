@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
@@ -78,8 +78,8 @@ func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Server, 
 }
 
 func (s *Server) Bootstrap(ctx context.Context) error {
-	var userCount int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM app.users`).Scan(&userCount); err != nil {
+	userCount, err := s.queries.CountUsers(ctx)
+	if err != nil {
 		return databaseError(err)
 	}
 	if userCount == 0 {
@@ -99,7 +99,7 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if _, err := s.pool.Exec(ctx, `INSERT INTO app.users(id,username,password_hash,role) VALUES($1,$2,$3,'admin') ON CONFLICT(username) DO NOTHING`, newID(), username, hash); err != nil {
+			if err := s.queries.CreateAdminUser(ctx, db.CreateAdminUserParams{ID: newID(), Username: username, PasswordHash: hash}); err != nil {
 				return databaseError(err)
 			}
 		}
@@ -132,7 +132,7 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 	// second boot leaves an expired row in place and every runner registration
 	// is refused with a message that suggests a wrong token. A token that has
 	// already been redeemed keeps its used_at and stays redeemed.
-	_, err = s.pool.Exec(ctx, `INSERT INTO app.runner_registration_tokens(id,token_hash,allowed_labels,expires_at) VALUES($1,$2,$3::jsonb,now()+interval '15 minutes') ON CONFLICT(token_hash) DO UPDATE SET allowed_labels=EXCLUDED.allowed_labels,expires_at=EXCLUDED.expires_at WHERE app.runner_registration_tokens.used_at IS NULL`, newID(), hashSecret(token), jsonLabels(labels))
+	err = s.queries.UpsertSeedRunnerRegistrationToken(ctx, db.UpsertSeedRunnerRegistrationTokenParams{ID: newID(), TokenHash: hashSecret(token), Column3: []byte(jsonLabels(labels))})
 	return databaseError(err)
 }
 
@@ -141,9 +141,7 @@ func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*c
 	if username == "" || len(username) > 128 || request.GetPassword() == "" {
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
 	}
-	var userID, encoded string
-	var enabled bool
-	err := s.pool.QueryRow(ctx, `SELECT id::text,password_hash,enabled FROM app.users WHERE username=$1`, username).Scan(&userID, &encoded, &enabled)
+	row, err := s.queries.GetUserByUsername(ctx, username)
 	if errors.Is(err, pgx.ErrNoRows) {
 		_, _ = passwordMatches(request.GetPassword(), "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
@@ -151,13 +149,14 @@ func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*c
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	userID, encoded, enabled := row.ID, row.PasswordHash, row.Enabled
 	matches, err := passwordMatches(request.GetPassword(), encoded)
 	if err != nil || !enabled || !matches {
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
 	}
 	sessionToken, csrfToken := randomSecret(), randomSecret()
 	expiresAt := time.Now().UTC().Add(7 * 24 * time.Hour)
-	if _, err := s.pool.Exec(ctx, `INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,$5,now())`, newID(), userID, hashSecret(sessionToken), hashSecret(csrfToken), expiresAt); err != nil {
+	if err := s.queries.CreateUserSession(ctx, db.CreateUserSessionParams{ID: newID(), UserID: userID, TokenHash: hashSecret(sessionToken), CsrfTokenHash: hashSecret(csrfToken), ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}}); err != nil {
 		return nil, databaseError(err)
 	}
 	return &controlv1.LoginResponse{SessionToken: sessionToken, UserId: userID, CsrfToken: csrfToken}, nil
@@ -169,10 +168,11 @@ func (s *Server) WhoAmI(ctx context.Context, _ *controlv1.WhoAmIRequest) (*contr
 		return nil, err
 	}
 	response := &controlv1.WhoAmIResponse{UserId: current.id, Role: current.role}
-	err = s.pool.QueryRow(ctx, `SELECT username,email,display_name FROM app.users WHERE id=$1`, current.id).Scan(&response.Username, &response.Email, &response.DisplayName)
+	row, err := s.queries.GetUserProfile(ctx, current.id)
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	response.Username, response.Email, response.DisplayName = row.Username, row.Email, row.DisplayName
 	return response, nil
 }
 
@@ -181,11 +181,11 @@ func (s *Server) Logout(ctx context.Context, _ *controlv1.LogoutRequest) (*contr
 	if !ok || len(md.Get(sessionHeader)) != 1 || len(md.Get(csrfHeader)) != 1 {
 		return nil, status.Error(codes.Unauthenticated, "session is required")
 	}
-	command, err := s.pool.Exec(ctx, `UPDATE app.user_sessions SET revoked_at=now() WHERE token_hash=$1 AND csrf_token_hash=$2 AND revoked_at IS NULL AND expires_at>now()`, hashSecret(md.Get(sessionHeader)[0]), hashSecret(md.Get(csrfHeader)[0]))
+	affected, err := s.queries.RevokeSessionByTokens(ctx, db.RevokeSessionByTokensParams{TokenHash: hashSecret(md.Get(sessionHeader)[0]), CsrfTokenHash: hashSecret(md.Get(csrfHeader)[0])})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if affected != 1 {
 		return nil, status.Error(codes.Unauthenticated, "session is invalid")
 	}
 	return &controlv1.LogoutResponse{}, nil
@@ -195,25 +195,17 @@ func (s *Server) ListProjects(ctx context.Context, _ *controlv1.ListProjectsRequ
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text FROM app.projects ORDER BY name, id`)
+	ids, err := s.queries.ListProjectIDs(ctx)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.ListProjectsResponse{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, databaseError(err)
-		}
-		project, err := s.project(ctx, s.pool, id)
+	for _, id := range ids {
+		project, err := s.project(ctx, s.queries, id)
 		if err != nil {
 			return nil, err
 		}
 		response.Projects = append(response.Projects, project)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	return response, nil
 }
@@ -234,20 +226,24 @@ func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreatePro
 		return nil, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `INSERT INTO app.projects (id, name, repository_mode, repository_url, local_repository_path, default_branch, configuration) VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, $7::jsonb)`, id, cfg.GetName(), cfg.GetRepositoryMode(), cfg.GetRepositoryUrl(), cfg.GetLocalRepositoryPath(), cfg.GetDefaultBranch(), encoded)
-	if err != nil {
+	queries := s.queries.WithTx(tx)
+	if err := queries.CreateProject(ctx, db.CreateProjectParams{
+		ID: id, Name: cfg.GetName(), RepositoryMode: cfg.GetRepositoryMode(),
+		Column4: cfg.GetRepositoryUrl(), Column5: cfg.GetLocalRepositoryPath(),
+		DefaultBranch: cfg.GetDefaultBranch(), Column7: encoded,
+	}); err != nil {
 		return nil, databaseError(err)
 	}
-	if err := replacePipelineSteps(ctx, tx, id, steps); err != nil {
+	if err := replacePipelineSteps(ctx, queries, id, steps); err != nil {
 		return nil, err
 	}
-	if err := audit(ctx, tx, actor.id, "project.create", "project", id); err != nil {
+	if err := audit(ctx, queries, actor.id, "project.create", "project", id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, databaseError(err)
 	}
-	project, err := s.project(ctx, s.pool, id)
+	project, err := s.project(ctx, s.queries, id)
 	if err != nil {
 		return nil, err
 	}
@@ -272,23 +268,28 @@ func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdatePro
 		return nil, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE app.projects SET name=$2, repository_mode=$3, repository_url=NULLIF($4, ''), local_repository_path=NULLIF($5, ''), default_branch=$6, configuration=$7::jsonb, updated_at=now() WHERE id=$1`, request.GetProjectId(), cfg.GetName(), cfg.GetRepositoryMode(), cfg.GetRepositoryUrl(), cfg.GetLocalRepositoryPath(), cfg.GetDefaultBranch(), encoded)
+	queries := s.queries.WithTx(tx)
+	affected, err := queries.UpdateProject(ctx, db.UpdateProjectParams{
+		ID: request.GetProjectId(), Name: cfg.GetName(), RepositoryMode: cfg.GetRepositoryMode(),
+		Column4: cfg.GetRepositoryUrl(), Column5: cfg.GetLocalRepositoryPath(),
+		DefaultBranch: cfg.GetDefaultBranch(), Column7: encoded,
+	})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if affected != 1 {
 		return nil, status.Error(codes.NotFound, "project is unknown")
 	}
-	if err := replacePipelineSteps(ctx, tx, request.GetProjectId(), steps); err != nil {
+	if err := replacePipelineSteps(ctx, queries, request.GetProjectId(), steps); err != nil {
 		return nil, err
 	}
-	if err := audit(ctx, tx, actor.id, "project.update", "project", request.GetProjectId()); err != nil {
+	if err := audit(ctx, queries, actor.id, "project.update", "project", request.GetProjectId()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, databaseError(err)
 	}
-	project, err := s.project(ctx, s.pool, request.GetProjectId())
+	project, err := s.project(ctx, s.queries, request.GetProjectId())
 	if err != nil {
 		return nil, err
 	}
@@ -303,17 +304,17 @@ func (s *Server) SetProjectEnabled(ctx context.Context, request *controlv1.SetPr
 	if !validID(request.GetProjectId()) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
-	command, err := s.pool.Exec(ctx, `UPDATE app.projects SET enabled=$2, updated_at=now() WHERE id=$1`, request.GetProjectId(), request.GetEnabled())
+	affected, err := s.queries.SetProjectEnabled(ctx, db.SetProjectEnabledParams{ID: request.GetProjectId(), Enabled: request.GetEnabled()})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if affected != 1 {
 		return nil, status.Error(codes.NotFound, "project is unknown")
 	}
-	if err := audit(ctx, s.pool, actor.id, "project.enabled", "project", request.GetProjectId()); err != nil {
+	if err := audit(ctx, s.queries, actor.id, "project.enabled", "project", request.GetProjectId()); err != nil {
 		return nil, err
 	}
-	project, err := s.project(ctx, s.pool, request.GetProjectId())
+	project, err := s.project(ctx, s.queries, request.GetProjectId())
 	if err != nil {
 		return nil, err
 	}
@@ -324,25 +325,17 @@ func (s *Server) ListWorkflows(ctx context.Context, _ *controlv1.ListWorkflowsRe
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT wr.id::text FROM app.workflow_runs wr ORDER BY wr.created_at DESC, wr.id`)
+	ids, err := s.queries.ListWorkflowIDs(ctx)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.ListWorkflowsResponse{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, databaseError(err)
-		}
+	for _, id := range ids {
 		workflow, err := s.workflow(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		response.Workflows = append(response.Workflows, workflow)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	return response, nil
 }
@@ -372,25 +365,21 @@ func (s *Server) ListWorkflowEvents(ctx context.Context, request *controlv1.List
 	if limit < 1 || limit > 500 {
 		return nil, status.Error(codes.InvalidArgument, "event limit must be between 1 and 500")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id, event_type, created_at, payload::text FROM app.workflow_events WHERE workflow_run_id=$1 AND id>$2 ORDER BY id LIMIT $3`, request.GetWorkflowRunId(), request.GetAfterId(), limit)
+	rows, err := s.queries.ListWorkflowEvents(ctx, db.ListWorkflowEventsParams{WorkflowRunID: request.GetWorkflowRunId(), ID: request.GetAfterId(), Limit: limit})
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.ListWorkflowEventsResponse{}
 	var last int64
-	for rows.Next() {
-		var event controlv1.WorkflowEvent
-		var created time.Time
-		if err := rows.Scan(&event.Id, &event.EventType, &created, &event.PayloadJson); err != nil {
-			return nil, databaseError(err)
+	for _, row := range rows {
+		event := controlv1.WorkflowEvent{
+			Id:          row.ID,
+			EventType:   row.EventType,
+			PayloadJson: row.Payload,
+			CreatedAt:   timestamp(row.CreatedAt.Time),
 		}
-		event.CreatedAt = timestamp(created)
 		response.Events = append(response.Events, &event)
 		last, _ = parseInt(event.Id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	if len(response.Events) == int(limit) {
 		response.NextCursor = fmt.Sprintf("%d", last)
@@ -430,38 +419,35 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 	if projectID != "" && !validID(projectID) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
-	query := `SELECT id::text,repository_url FROM app.projects WHERE enabled`
-	args := []any{}
+	var candidates []db.ListSyncableProjectsRow
 	if projectID != "" {
-		query += ` AND id=$1`
-		args = append(args, projectID)
-	}
-	rows, err := s.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, databaseError(err)
-	}
-	defer rows.Close()
-	response := &controlv1.SyncNowResponse{}
-	for rows.Next() {
-		var id string
-		var repositoryURL *string
-		if err := rows.Scan(&id, &repositoryURL); err != nil {
+		byID, err := s.queries.ListSyncableProjectByID(ctx, projectID)
+		if err != nil {
 			return nil, databaseError(err)
 		}
-		result := &controlv1.ProjectSyncResult{ProjectId: id}
-		if err := s.syncProject(ctx, id, stringValue(repositoryURL)); err != nil {
+		for _, row := range byID {
+			candidates = append(candidates, db.ListSyncableProjectsRow(row))
+		}
+	} else {
+		all, err := s.queries.ListSyncableProjects(ctx)
+		if err != nil {
+			return nil, databaseError(err)
+		}
+		candidates = all
+	}
+	response := &controlv1.SyncNowResponse{}
+	for _, candidate := range candidates {
+		result := &controlv1.ProjectSyncResult{ProjectId: candidate.ID}
+		if err := s.syncProject(ctx, candidate.ID, textValue(candidate.RepositoryUrl)); err != nil {
 			result.Error = err.Error()
 		} else {
-			var count int32
-			if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM app.issues WHERE project_id=$1`, id).Scan(&count); err != nil {
+			count, err := s.queries.CountProjectIssues(ctx, candidate.ID)
+			if err != nil {
 				return nil, databaseError(err)
 			}
-			result.SyncedIssues = count
+			result.SyncedIssues = int32(count)
 		}
 		response.Results = append(response.Results, result)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	if projectID != "" && len(response.Results) == 0 {
 		return nil, status.Error(codes.NotFound, "enabled project is unknown")
@@ -478,29 +464,14 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 // are recorded per project (which is what drives the console's sync health) and
 // reported together.
 func (s *Server) SyncProjects(ctx context.Context) error {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,repository_url FROM app.projects WHERE enabled`)
+	projects, err := s.queries.ListSyncableProjects(ctx)
 	if err != nil {
-		return databaseError(err)
-	}
-	type project struct{ id, repositoryURL string }
-	var projects []project
-	for rows.Next() {
-		var id string
-		var repositoryURL *string
-		if err := rows.Scan(&id, &repositoryURL); err != nil {
-			rows.Close()
-			return databaseError(err)
-		}
-		projects = append(projects, project{id: id, repositoryURL: stringValue(repositoryURL)})
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		return databaseError(err)
 	}
 	var failures []error
 	for _, candidate := range projects {
-		if err := s.syncProject(ctx, candidate.id, candidate.repositoryURL); err != nil {
-			failures = append(failures, fmt.Errorf("project %s: %w", candidate.id, err))
+		if err := s.syncProject(ctx, candidate.ID, textValue(candidate.RepositoryUrl)); err != nil {
+			failures = append(failures, fmt.Errorf("project %s: %w", candidate.ID, err))
 		}
 	}
 	return errors.Join(failures...)
@@ -510,36 +481,32 @@ func (s *Server) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueSyncStat
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT p.id::text,p.name,p.enabled,COUNT(i.id),COUNT(i.id) FILTER(WHERE i.eligible),s.last_synced_at,s.consecutive_failures,s.next_retry_at,s.last_error FROM app.projects p LEFT JOIN app.issues i ON i.project_id=p.id LEFT JOIN app.issue_sync_state s ON s.project_id=p.id GROUP BY p.id,p.name,p.enabled,s.last_synced_at,s.consecutive_failures,s.next_retry_at,s.last_error ORDER BY p.name,p.id`)
+	rows, err := s.queries.IssueSyncStatusEntries(ctx)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.IssueSyncStatusResponse{}
-	for rows.Next() {
-		entry := &controlv1.IssueSyncStatusEntry{}
-		var syncedAt, retryAt *time.Time
-		var failures *int32
-		var lastError *string
-		if err := rows.Scan(&entry.ProjectId, &entry.ProjectName, &entry.Enabled, &entry.IssueCount, &entry.EligibleCount, &syncedAt, &failures, &retryAt, &lastError); err != nil {
-			return nil, databaseError(err)
+	for _, row := range rows {
+		entry := &controlv1.IssueSyncStatusEntry{
+			ProjectId:     row.ID,
+			ProjectName:   row.Name,
+			Enabled:       row.Enabled,
+			IssueCount:    int32(row.IssueCount),
+			EligibleCount: int32(row.EligibleCount),
 		}
-		if syncedAt != nil {
-			entry.LastSyncedAt = timestamp(*syncedAt)
+		if row.LastSyncedAt.Valid {
+			entry.LastSyncedAt = timestamp(row.LastSyncedAt.Time)
 		}
-		if failures != nil {
-			entry.ConsecutiveFailures = *failures
+		if row.ConsecutiveFailures.Valid {
+			entry.ConsecutiveFailures = row.ConsecutiveFailures.Int32
 		}
-		if retryAt != nil {
-			entry.NextRetryAt = timestamp(*retryAt)
+		if row.NextRetryAt.Valid {
+			entry.NextRetryAt = timestamp(row.NextRetryAt.Time)
 		}
-		if lastError != nil {
-			entry.LastError = *lastError
+		if row.LastError.Valid {
+			entry.LastError = row.LastError.String
 		}
 		response.Entries = append(response.Entries, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	return response, nil
 }
@@ -559,6 +526,7 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
 	// Eligibility is label-driven only until an issue has been worked on. From
 	// its first workflow run onwards the orchestrator owns the flag — a run that
 	// ends without delivering parks the issue, and only a manual retry reopens
@@ -567,19 +535,24 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 	for _, issue := range issues {
 		labels, _ := json.Marshal(issue.Labels)
 		raw, _ := json.Marshal(issue)
-		_, err := tx.Exec(ctx, `INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,body,url,state,labels,priority,eligible,external_created_at,external_updated_at,last_synced_at,raw_snapshot) VALUES($1,$2,'github',$3,$3,$4,$5,$6,'open',$7::jsonb,$8,$9,$10,$11,now(),$12::jsonb) ON CONFLICT(project_id,provider,external_id) DO UPDATE SET display_number=EXCLUDED.display_number,title=EXCLUDED.title,body=EXCLUDED.body,url=EXCLUDED.url,state='open',labels=EXCLUDED.labels,priority=EXCLUDED.priority,eligible=CASE WHEN EXISTS(SELECT 1 FROM app.workflow_runs w WHERE w.issue_id=app.issues.id) THEN app.issues.eligible ELSE EXCLUDED.eligible END,external_created_at=EXCLUDED.external_created_at,external_updated_at=EXCLUDED.external_updated_at,last_synced_at=now(),raw_snapshot=EXCLUDED.raw_snapshot`, newID(), projectID, issue.ExternalID, issue.Title, issue.Body, issue.URL, string(labels), issue.Priority, issue.Eligible, issue.CreatedAt, issue.UpdatedAt, string(raw))
-		if err != nil {
+		if err := queries.UpsertIssue(ctx, db.UpsertIssueParams{
+			ID: newID(), ProjectID: projectID, ExternalID: issue.ExternalID, Title: issue.Title, Body: issue.Body, Url: issue.URL,
+			Column7: labels, Priority: int32(issue.Priority), Eligible: issue.Eligible,
+			ExternalCreatedAt: pgtype.Timestamptz{Time: issue.CreatedAt, Valid: true},
+			ExternalUpdatedAt: pgtype.Timestamptz{Time: issue.UpdatedAt, Valid: true},
+			Column12:          raw,
+		}); err != nil {
 			return databaseError(err)
 		}
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.issue_sync_state(project_id,consecutive_failures,last_error,last_synced_at,updated_at) VALUES($1,0,NULL,now(),now()) ON CONFLICT(project_id) DO UPDATE SET consecutive_failures=0,last_error=NULL,last_synced_at=now(),updated_at=now()`, projectID); err != nil {
+	if err := queries.UpsertIssueSyncStateSuccess(ctx, projectID); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
 }
 
 func (s *Server) recordSyncFailure(ctx context.Context, projectID string, cause error) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO app.issue_sync_state(project_id,consecutive_failures,last_error,updated_at) VALUES($1,1,$2,now()) ON CONFLICT(project_id) DO UPDATE SET consecutive_failures=app.issue_sync_state.consecutive_failures+1,last_error=EXCLUDED.last_error,updated_at=now()`, projectID, truncate(cause.Error(), 1024))
+	err := s.queries.UpsertIssueSyncStateFailure(ctx, db.UpsertIssueSyncStateFailureParams{ProjectID: projectID, LastError: pgtype.Text{String: truncate(cause.Error(), 1024), Valid: true}})
 	return databaseError(err)
 }
 
@@ -587,21 +560,17 @@ func (s *Server) ListRunners(ctx context.Context, _ *controlv1.ListRunnersReques
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text, name, enabled, draining, status, labels::text, last_seen_at, version FROM app.runners ORDER BY name, id`)
+	rows, err := s.queries.ListRunners(ctx)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.ListRunnersResponse{}
-	for rows.Next() {
-		runner, err := scanRunner(rows)
+	for _, row := range rows {
+		runner, err := scanRunnerRowValues(row.ID, row.Name, row.Enabled, row.Draining, row.Status, row.Labels, row.LastSeenAt, row.Version)
 		if err != nil {
 			return nil, err
 		}
 		response.Runners = append(response.Runners, runner)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
 	}
 	return response, nil
 }
@@ -614,30 +583,29 @@ func (s *Server) SetRunnerState(ctx context.Context, request *controlv1.SetRunne
 	if !validID(request.GetRunnerId()) {
 		return nil, status.Error(codes.InvalidArgument, "runner ID is invalid")
 	}
-	var query string
+	var affected int64
 	switch request.GetState() {
 	case "drain":
-		query = `UPDATE app.runners SET draining=true WHERE id=$1 AND revoked_at IS NULL`
+		affected, err = s.queries.DrainRunner(ctx, request.GetRunnerId())
 	case "enable":
-		query = `UPDATE app.runners SET enabled=true, draining=false WHERE id=$1 AND revoked_at IS NULL`
+		affected, err = s.queries.EnableRunner(ctx, request.GetRunnerId())
 	case "revoke":
-		query = `UPDATE app.runners SET enabled=false, status='offline', revoked_at=now() WHERE id=$1 AND revoked_at IS NULL`
+		affected, err = s.queries.RevokeRunner(ctx, request.GetRunnerId())
 	default:
 		return nil, status.Error(codes.InvalidArgument, "runner state is invalid")
 	}
-	command, err := s.pool.Exec(ctx, query, request.GetRunnerId())
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if command.RowsAffected() != 1 {
+	if affected != 1 {
 		return nil, status.Error(codes.NotFound, "runner is unknown")
 	}
 	if request.GetState() == "revoke" {
-		if _, err := s.pool.Exec(ctx, `UPDATE app.runner_credentials SET revoked_at=now() WHERE runner_id=$1 AND revoked_at IS NULL`, request.GetRunnerId()); err != nil {
+		if err := s.queries.RevokeRunnerCredentials(ctx, request.GetRunnerId()); err != nil {
 			return nil, databaseError(err)
 		}
 	}
-	if err := audit(ctx, s.pool, actor.id, "runner."+request.GetState(), "runner", request.GetRunnerId()); err != nil {
+	if err := audit(ctx, s.queries, actor.id, "runner."+request.GetState(), "runner", request.GetRunnerId()); err != nil {
 		return nil, err
 	}
 	if request.GetState() == "drain" || request.GetState() == "revoke" {
@@ -647,12 +615,11 @@ func (s *Server) SetRunnerState(ctx context.Context, request *controlv1.SetRunne
 		// delivery here is not a correctness problem — just a slower stop.
 		s.enqueue(request.GetRunnerId(), &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Drain{Drain: &runnerv1.DrainRunner{}}})
 	}
-	var runner controlv1.Runner
-	row := s.pool.QueryRow(ctx, `SELECT id::text, name, enabled, draining, status, labels::text, last_seen_at, version FROM app.runners WHERE id=$1`, request.GetRunnerId())
-	if err := scanRunnerRow(row, &runner); err != nil {
+	runner, err := s.runner(ctx, request.GetRunnerId())
+	if err != nil {
 		return nil, err
 	}
-	return &controlv1.SetRunnerStateResponse{Runner: &runner}, nil
+	return &controlv1.SetRunnerStateResponse{Runner: runner}, nil
 }
 
 func (s *Server) ListQueue(ctx context.Context, request *controlv1.ListQueueRequest) (*controlv1.ListQueueResponse, error) {
@@ -666,21 +633,20 @@ func (s *Server) ListQueue(ctx context.Context, request *controlv1.ListQueueRequ
 	if limit < 1 || limit > 100 {
 		return nil, status.Error(codes.InvalidArgument, "queue limit must be between 1 and 100")
 	}
-	rows, err := s.pool.Query(ctx, `SELECT p.id::text, p.name, i.external_id, i.title, i.priority, CASE WHEN NOT p.enabled THEN 'project_disabled' WHEN EXISTS (SELECT 1 FROM app.project_locks l WHERE l.project_id=p.id) THEN 'project_locked' ELSE '' END FROM app.issues i JOIN app.projects p ON p.id=i.project_id WHERE i.eligible AND i.state='open' ORDER BY i.priority DESC, i.external_created_at, i.last_synced_at, i.project_id, i.external_id LIMIT $1`, limit)
+	rows, err := s.queries.ListQueueEntries(ctx, limit)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
 	response := &controlv1.ListQueueResponse{}
-	for rows.Next() {
-		entry := &controlv1.QueueEntry{}
-		if err := rows.Scan(&entry.ProjectId, &entry.ProjectName, &entry.ExternalId, &entry.Title, &entry.Priority, &entry.BlockedReason); err != nil {
-			return nil, databaseError(err)
-		}
-		response.Entries = append(response.Entries, entry)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
+	for _, row := range rows {
+		response.Entries = append(response.Entries, &controlv1.QueueEntry{
+			ProjectId:     row.ProjectID,
+			ProjectName:   row.ProjectName,
+			ExternalId:    row.ExternalID,
+			Title:         row.Title,
+			Priority:      row.Priority,
+			BlockedReason: row.BlockedReason,
+		})
 	}
 	return response, nil
 }
@@ -712,11 +678,19 @@ type schedulerSnapshot struct {
 // computed by the database from its own clock, so orchestrator clock skew
 // cannot make a heartbeat look fresher than it is.
 func (s *Server) readSchedulerSnapshot(ctx context.Context) (schedulerSnapshot, error) {
-	var snapshot schedulerSnapshot
-	err := s.pool.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM app.issues i JOIN app.projects p ON p.id=i.project_id WHERE p.enabled AND i.eligible AND i.state='open'), (SELECT COUNT(*) FROM app.workflow_runs WHERE status NOT IN (`+terminalStatusList+`)), (SELECT COUNT(*) FROM app.jobs WHERE status IN ('offered','preparing','running')), (SELECT COUNT(*) FROM app.runners WHERE enabled AND revoked_at IS NULL), (SELECT EXTRACT(EPOCH FROM now()-MIN(COALESCE(last_seen_at,registered_at)))::double precision FROM app.runners WHERE enabled AND revoked_at IS NULL)`).
-		Scan(&snapshot.queueDepth, &snapshot.activeWorkflows, &snapshot.scheduledJobs, &snapshot.enabledRunners, &snapshot.oldestHeartbeatAge)
+	row, err := s.queries.GetSchedulerSnapshot(ctx)
 	if err != nil {
 		return schedulerSnapshot{}, databaseError(err)
+	}
+	snapshot := schedulerSnapshot{
+		queueDepth:      row.QueueDepth,
+		activeWorkflows: row.ActiveWorkflows,
+		scheduledJobs:   row.ScheduledJobs,
+		enabledRunners:  row.EnabledRunners,
+	}
+	if row.OldestHeartbeat.Valid && row.DbNow.Valid {
+		seconds := row.DbNow.Time.Sub(row.OldestHeartbeat.Time).Seconds()
+		snapshot.oldestHeartbeatAge = &seconds
 	}
 	return snapshot, nil
 }
@@ -794,8 +768,8 @@ func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterR
 		return nil, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var tokenID string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM app.runner_registration_tokens WHERE token_hash=$1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at>now() AND allowed_labels @> $2::jsonb FOR UPDATE`, hashSecret(request.GetToken()), jsonLabels(labels)).Scan(&tokenID)
+	queries := s.queries.WithTx(tx)
+	tokenID, err := queries.SelectValidRegistrationToken(ctx, db.SelectValidRegistrationTokenParams{TokenHash: hashSecret(request.GetToken()), Column2: []byte(jsonLabels(labels))})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.PermissionDenied, "runner registration was rejected")
 	}
@@ -803,13 +777,13 @@ func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterR
 		return nil, databaseError(err)
 	}
 	runnerID, credential := newID(), randomSecret()
-	if _, err := tx.Exec(ctx, `INSERT INTO app.runners (id, name, status, version, labels, capacity, last_seen_at) VALUES ($1,$2,'offline','',$3::jsonb,$4,now())`, runnerID, strings.TrimSpace(request.GetName()), jsonLabels(labels), capacity); err != nil {
+	if err := queries.CreateRunner(ctx, db.CreateRunnerParams{ID: runnerID, Name: strings.TrimSpace(request.GetName()), Column3: []byte(jsonLabels(labels)), Capacity: capacity}); err != nil {
 		return nil, databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.runner_credentials (id, runner_id, credential_hash) VALUES ($1,$2,$3)`, newID(), runnerID, hashSecret(credential)); err != nil {
+	if err := queries.CreateRunnerCredential(ctx, db.CreateRunnerCredentialParams{ID: newID(), RunnerID: runnerID, CredentialHash: hashSecret(credential)}); err != nil {
 		return nil, databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.runner_registration_tokens SET used_at=now() WHERE id=$1`, tokenID); err != nil {
+	if err := queries.MarkRegistrationTokenUsed(ctx, tokenID); err != nil {
 		return nil, databaseError(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -887,7 +861,7 @@ func (s *Server) handleRunnerMessage(ctx context.Context, runnerID string, messa
 		if _, err := normalizeLabels(heartbeat.GetLabels()); err != nil {
 			return status.Error(codes.InvalidArgument, "runner heartbeat labels are invalid")
 		}
-		_, err := s.pool.Exec(ctx, `UPDATE app.runners SET status='online', last_seen_at=now(), version=COALESCE(NULLIF($2,''), version) WHERE id=$1 AND enabled AND revoked_at IS NULL`, runnerID, truncate(heartbeat.GetVersion(), 12))
+		err := s.queries.RecordRunnerHeartbeat(ctx, db.RecordRunnerHeartbeatParams{ID: runnerID, Column2: truncate(heartbeat.GetVersion(), 12)})
 		return databaseError(err)
 	case message.GetOfferAccepted() != nil:
 		generation, expiresAt, err := s.acceptOffer(ctx, runnerID, message.GetOfferAccepted().GetJobId())
@@ -913,7 +887,7 @@ func (s *Server) handleRunnerMessage(ctx context.Context, runnerID string, messa
 	case message.GetEvent() != nil:
 		return s.persistExecutionEvent(ctx, runnerID, message.GetEvent())
 	case message.GetRunnerDraining() != nil:
-		_, err := s.pool.Exec(ctx, `UPDATE app.runners SET draining=$2, last_seen_at=now() WHERE id=$1`, runnerID, message.GetRunnerDraining().GetDraining())
+		err := s.queries.SetRunnerDraining(ctx, db.SetRunnerDrainingParams{ID: runnerID, Draining: message.GetRunnerDraining().GetDraining()})
 		return databaseError(err)
 	default:
 		return status.Error(codes.InvalidArgument, "runner message is empty")
@@ -973,39 +947,41 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 		return false, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var issueID, externalID, title, body, projectID, mode, defaultBranch, runnerID string
-	var repositoryURL, localPath *string
-	var configuration []byte
-	err = tx.QueryRow(ctx, `SELECT i.id::text,i.external_id,i.title,i.body,p.id::text,p.repository_mode,p.repository_url,p.local_repository_path,p.default_branch,p.configuration::text,r.id::text FROM app.issues i JOIN app.projects p ON p.id=i.project_id JOIN app.runners r ON r.status='online' AND r.enabled AND NOT r.draining AND r.revoked_at IS NULL WHERE i.eligible AND i.state='open' AND p.enabled AND r.id::text=ANY($1) AND r.labels @> COALESCE(p.configuration->'required_runner_labels','[]'::jsonb) AND NOT EXISTS(SELECT 1 FROM app.project_locks l WHERE l.project_id=p.id) AND NOT EXISTS(SELECT 1 FROM app.jobs j WHERE j.runner_id=r.id AND j.status IN ('offered','preparing','running')) ORDER BY i.priority DESC,i.external_created_at,i.last_synced_at,i.project_id,i.external_id,r.id FOR UPDATE OF i,r SKIP LOCKED LIMIT 1`, runners).Scan(&issueID, &externalID, &title, &body, &projectID, &mode, &repositoryURL, &localPath, &defaultBranch, &configuration, &runnerID)
+	queries := s.queries.WithTx(tx)
+	claim, err := queries.ClaimSchedulableIssue(ctx, runners)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, databaseError(err)
 	}
+	issueID, externalID, title, body := claim.IssueID, claim.ExternalID, claim.Title, claim.Body
+	projectID, mode, defaultBranch, runnerID := claim.ProjectID, claim.RepositoryMode, claim.DefaultBranch, claim.RunnerID
+	repositoryURL, localPath := claim.RepositoryUrl, claim.LocalRepositoryPath
+	configuration := []byte(claim.Configuration)
 	workflowID, jobID, offerID := newID(), newID(), newID()
 	branch := "agent/" + workflowID
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,`+qOffered+`,`+qOffered+`,$5)`, workflowID, projectID, issueID, workflowID, branch); err != nil {
+	if err := queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{ID: workflowID, ProjectID: projectID, IssueID: issueID, ThreadID: workflowID, BranchName: pgtype.Text{String: branch, Valid: true}}); err != nil {
 		return false, databaseError(err)
 	}
-	lock, err := tx.Exec(ctx, `INSERT INTO app.project_locks(project_id,workflow_run_id) VALUES($1,$2) ON CONFLICT(project_id) DO NOTHING`, projectID, workflowID)
+	lockRows, err := queries.CreateProjectLock(ctx, db.CreateProjectLockParams{ProjectID: projectID, WorkflowRunID: workflowID})
 	if err != nil {
 		return false, databaseError(err)
 	}
-	if lock.RowsAffected() != 1 {
+	if lockRows != 1 {
 		return false, nil
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.jobs(id,workflow_run_id,project_id,runner_id,status,lease_generation,offered_at) VALUES($1,$2,$3,$4,'offered',1,now())`, jobID, workflowID, projectID, runnerID); err != nil {
+	if err := queries.CreateJob(ctx, db.CreateJobParams{ID: jobID, WorkflowRunID: workflowID, ProjectID: projectID, RunnerID: runnerID}); err != nil {
 		return false, databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO app.job_offers(id,job_id,runner_id,status,expires_at) VALUES($1,$2,$3,'offered','infinity')`, offerID, jobID, runnerID); err != nil {
+	if err := queries.CreateJobOffer(ctx, db.CreateJobOfferParams{ID: offerID, JobID: jobID, RunnerID: runnerID}); err != nil {
 		return false, databaseError(err)
 	}
 	var config projectConfig
 	if err := json.Unmarshal(configuration, &config); err != nil {
 		return false, databaseError(err)
 	}
-	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, stringValue(repositoryURL), stringValue(localPath), defaultBranch, branch, config.ExecutionImage)
+	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textValue(repositoryURL), textValue(localPath), defaultBranch, branch, config.ExecutionImage)
 	if err != nil {
 		return false, err
 	}
@@ -1037,19 +1013,20 @@ func (s *Server) releaseUndeliveredOffer(jobID, workflowID, projectID string) er
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
 	const reason = "runner disconnected before offer delivery"
-	if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),recovery_reason=$2 WHERE id=$1 AND status='offered'`, jobID, reason); err != nil {
+	if err := queries.CancelOfferedJob(ctx, db.CancelOfferedJobParams{ID: jobID, RecoveryReason: pgtype.Text{String: reason, Valid: true}}); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.job_offers SET status='cancelled',responded_at=now() WHERE job_id=$1 AND status='offered'`, jobID); err != nil {
+	if err := queries.CancelJobOfferByJob(ctx, jobID); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qCancelled+`,current_phase=`+qCancelled+`,completed_at=now(),terminal_reason=$2 WHERE id=$1`, workflowID, reason); err != nil {
+	if err := queries.CancelWorkflowRunUndelivered(ctx, db.CancelWorkflowRunUndeliveredParams{ID: workflowID, TerminalReason: pgtype.Text{String: reason, Valid: true}}); err != nil {
 		return databaseError(err)
 	}
 	// The issue stays eligible on purpose: no execution ran, so nothing was
 	// spent and the next scheduling pass should offer this work again.
-	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID); err != nil {
+	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
@@ -1097,30 +1074,33 @@ func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64
 		return 0, time.Time{}, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var offerID string
-	err = tx.QueryRow(ctx, `UPDATE app.job_offers SET status='accepted', responded_at=now() WHERE job_id=$1 AND runner_id=$2 AND status='offered' AND expires_at>now() RETURNING id::text`, jobID, runnerID).Scan(&offerID)
+	queries := s.queries.WithTx(tx)
+	_, err = queries.AcceptJobOffer(ctx, db.AcceptJobOfferParams{JobID: jobID, RunnerID: runnerID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, time.Time{}, status.Error(codes.FailedPrecondition, "job offer is no longer active")
 	}
 	if err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
-	var generation int64
-	var expiresAt time.Time
 	// `AND status='offered'` is load-bearing, not redundant with the offer row
 	// above. Cancelling or blocking a workflow cancels the job but leaves the
 	// offer row alone, so without this guard a late OfferAccepted drags an
 	// administratively cancelled job back to 'preparing' and hands the runner a
 	// fresh lease — which is the credential the runner presents to
 	// ResolveJobSecret to read the project's tokens.
-	err = tx.QueryRow(ctx, `UPDATE app.jobs SET status='preparing', accepted_at=now(), lease_expires_at=now()+$3::interval WHERE id=$1 AND runner_id=$2 AND status='offered' RETURNING lease_generation, lease_expires_at`, jobID, runnerID, durationInterval(leaseDuration)).Scan(&generation, &expiresAt)
+	accepted, err := queries.AcceptJob(ctx, db.AcceptJobParams{
+		LeaseDuration: pgtype.Interval{Microseconds: leaseDuration.Microseconds(), Valid: true},
+		ID:            jobID,
+		RunnerID:      runnerID,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, time.Time{}, status.Error(codes.FailedPrecondition, "job offer is no longer active")
 	}
 	if err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qPreparing+`, updated_at=now() WHERE id=(SELECT workflow_run_id FROM app.jobs WHERE id=$1) AND status NOT IN (`+terminalStatusList+`)`, jobID); err != nil {
+	generation, expiresAt := accepted.LeaseGeneration, accepted.LeaseExpiresAt.Time
+	if err := queries.SetWorkflowPreparing(ctx, jobID); err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1138,24 +1118,25 @@ func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var workflowID, projectID string
-	err = tx.QueryRow(ctx, `SELECT j.workflow_run_id::text, j.project_id::text FROM app.jobs j JOIN app.job_offers o ON o.job_id=j.id WHERE j.id=$1 AND o.runner_id=$2 AND o.status='offered' AND o.expires_at>now() FOR UPDATE`, jobID, runnerID).Scan(&workflowID, &projectID)
+	queries := s.queries.WithTx(tx)
+	job, err := queries.GetJobForOfferReject(ctx, db.GetJobForOfferRejectParams{ID: jobID, RunnerID: runnerID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return status.Error(codes.FailedPrecondition, "job offer is no longer active")
 	}
 	if err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.job_offers SET status='rejected', responded_at=now() WHERE job_id=$1 AND runner_id=$2`, jobID, runnerID); err != nil {
+	workflowID, projectID := job.WorkflowRunID, job.ProjectID
+	if err := queries.CancelJobOfferByRunner(ctx, db.CancelJobOfferByRunnerParams{JobID: jobID, RunnerID: runnerID}); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled', finished_at=now(), recovery_reason=NULLIF($2,'') WHERE id=$1`, jobID, truncate(reason, 1024)); err != nil {
+	if err := queries.CancelJob(ctx, db.CancelJobParams{ID: jobID, Column2: truncate(reason, 1024)}); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qCancelled+`, current_phase=`+qCancelled+`, terminal_reason='runner rejected offer', completed_at=now(), updated_at=now() WHERE id=$1`, workflowID); err != nil {
+	if err := queries.CancelWorkflowRunOfferRejected(ctx, workflowID); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID); err != nil {
+	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
@@ -1166,15 +1147,19 @@ func (s *Server) renewLease(ctx context.Context, runnerID string, renewal *runne
 		return time.Time{}, status.Error(codes.InvalidArgument, "lease renewal is invalid")
 	}
 	expiresAt := time.UnixMilli(renewal.GetRequestedExpiresAtUnixMs()).UTC()
-	var persisted time.Time
-	err := s.pool.QueryRow(ctx, `UPDATE app.jobs SET lease_expires_at=$4 WHERE id=$1 AND runner_id=$2 AND lease_generation=$3 AND status IN ('preparing','running') AND lease_expires_at>now() RETURNING lease_expires_at`, renewal.GetJobId(), runnerID, renewal.GetLeaseGeneration(), expiresAt).Scan(&persisted)
+	persisted, err := s.queries.RenewJobLease(ctx, db.RenewJobLeaseParams{
+		ID:              renewal.GetJobId(),
+		RunnerID:        runnerID,
+		LeaseGeneration: renewal.GetLeaseGeneration(),
+		LeaseExpiresAt:  pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, status.Error(codes.FailedPrecondition, "runner does not hold this job")
 	}
 	if err != nil {
 		return time.Time{}, databaseError(err)
 	}
-	return persisted, nil
+	return persisted.Time, nil
 }
 
 func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, event *runnerv1.ExecutionEvent) error {
@@ -1186,8 +1171,11 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var workflowID string
-	err = tx.QueryRow(ctx, `UPDATE app.jobs SET last_event_sequence=$4, status=CASE WHEN $5='started' THEN 'running' WHEN $5 IN ('completed','failed','cancelled') THEN $5 ELSE status END, started_at=CASE WHEN $5='started' THEN COALESCE(started_at,now()) ELSE started_at END, finished_at=CASE WHEN $5 IN ('completed','failed','cancelled') THEN now() ELSE finished_at END WHERE id=$1 AND runner_id=$2 AND lease_generation=$3 AND status IN ('preparing','running') AND lease_expires_at>now() AND last_event_sequence<$4 RETURNING workflow_run_id::text`, event.GetJobId(), runnerID, event.GetLeaseGeneration(), event.GetEventSequence(), event.GetType()).Scan(&workflowID)
+	queries := s.queries.WithTx(tx)
+	workflowID, err := queries.RecordJobExecutionEvent(ctx, db.RecordJobExecutionEventParams{
+		ID: event.GetJobId(), RunnerID: runnerID, LeaseGeneration: event.GetLeaseGeneration(),
+		EventSequence: event.GetEventSequence(), EventType: event.GetType(),
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return status.Error(codes.FailedPrecondition, "execution event is stale")
 	}
@@ -1198,7 +1186,9 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 	// the console, which switches on bare "log", "started", "failed" and friends
 	// to build the timeline and the agent log pane. Writing "runner.log" here
 	// left every one of those rows falling through to the default branch.
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events (workflow_run_id,event_type,severity,payload) VALUES ($1,$2,$3,$4::jsonb)`, workflowID, event.GetType(), eventSeverity(event.GetType()), event.GetPayloadJson()); err != nil {
+	if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID: workflowID, EventType: event.GetType(), Severity: eventSeverity(event.GetType()), Column4: []byte(event.GetPayloadJson()),
+	}); err != nil {
 		return databaseError(err)
 	}
 	if terminalEvent(event.GetType()) {
@@ -1238,19 +1228,21 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 				runStatus, blockingReason = StatusBlocked, reason
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=COALESCE(NULLIF($3,''),blocking_reason),terminal_reason=COALESCE(NULLIF($3,''),terminal_reason),updated_at=now(),completed_at=CASE WHEN $2 IN (`+terminalStatusList+`) THEN now() ELSE completed_at END WHERE id=$1`, workflowID, runStatus.String(), blockingReason); err != nil {
+		if err := queries.SetWorkflowTerminalStatus(ctx, db.SetWorkflowTerminalStatusParams{
+			ID: workflowID, Status: runStatus.String(), Column3: blockingReason,
+		}); err != nil {
 			return databaseError(err)
 		}
 		if event.GetType() != "completed" {
-			if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); err != nil {
+			if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
 				return databaseError(err)
 			}
 			// An execution that actually ran and did not succeed parks its
 			// issue. V1 has no automatic retry, so leaving the issue eligible
 			// would have the scheduler dispatch the same work again on the very
 			// next tick, forever. RetryWorkflow is what makes it eligible again.
-			if err := parkIssue(ctx, tx, workflowID); err != nil {
-				return err
+			if err := queries.ParkIssue(ctx, workflowID); err != nil {
+				return databaseError(err)
 			}
 		}
 	}
@@ -1278,14 +1270,14 @@ func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error)
 	if !ok || len(md.Get(sessionHeader)) != 1 || strings.TrimSpace(md.Get(sessionHeader)[0]) == "" {
 		return actor{}, status.Error(codes.Unauthenticated, "session is required")
 	}
-	var id, role, csrfHash string
-	err := s.pool.QueryRow(ctx, `SELECT u.id::text, u.role, us.csrf_token_hash FROM app.user_sessions us JOIN app.users u ON u.id=us.user_id WHERE us.token_hash=$1 AND us.revoked_at IS NULL AND us.expires_at>now() AND u.enabled`, hashSecret(md.Get(sessionHeader)[0])).Scan(&id, &role, &csrfHash)
+	row, err := s.queries.GetSessionActor(ctx, hashSecret(md.Get(sessionHeader)[0]))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return actor{}, status.Error(codes.Unauthenticated, "session is invalid")
 	}
 	if err != nil {
 		return actor{}, databaseError(err)
 	}
+	id, role, csrfHash := row.ID, row.Role, row.CsrfTokenHash
 	if mutation {
 		csrf := md.Get(csrfHeader)
 		if len(csrf) != 1 || subtle.ConstantTimeCompare([]byte(hashSecret(csrf[0])), []byte(csrfHash)) != 1 {
@@ -1306,51 +1298,52 @@ func (s *Server) authenticateRunner(ctx context.Context, runnerID, credential st
 	if !validID(runnerID) {
 		return status.Error(codes.Unauthenticated, "runner authentication was rejected")
 	}
-	var stored string
-	err := s.pool.QueryRow(ctx, `SELECT c.credential_hash FROM app.runners r JOIN app.runner_credentials c ON c.runner_id=r.id WHERE r.id=$1 AND r.enabled AND r.revoked_at IS NULL AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at>now()) ORDER BY c.created_at DESC LIMIT 1`, runnerID).Scan(&stored)
+	stored, err := s.queries.GetRunnerCredentialHash(ctx, runnerID)
 	if err != nil || subtle.ConstantTimeCompare([]byte(stored), []byte(hashSecret(credential))) != 1 {
 		return status.Error(codes.Unauthenticated, "runner authentication was rejected")
 	}
 	return nil
 }
 
-func (s *Server) project(ctx context.Context, db interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}, id string) (*controlv1.Project, error) {
+// projectQuerier is the subset of *db.Queries the project() helper needs. It
+// lets ListProjects/CreateProject/UpdateProject/SetProjectEnabled share this
+// helper whether they hold the pool-backed *db.Queries or one scoped to an
+// open transaction via WithTx.
+type projectQuerier interface {
+	GetProject(context.Context, string) (db.GetProjectRow, error)
+	ListProjectPipelineSteps(context.Context, string) ([]db.ListProjectPipelineStepsRow, error)
+}
+
+func (s *Server) project(ctx context.Context, queries projectQuerier, id string) (*controlv1.Project, error) {
 	if !validID(id) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
-	project := &controlv1.Project{}
-	var repositoryURL, localPath *string
-	var configJSON []byte
-	err := db.QueryRow(ctx, `SELECT id::text,name,enabled,repository_mode,repository_url,local_repository_path,default_branch,configuration::text FROM app.projects WHERE id=$1`, id).Scan(&project.Id, &project.Name, &project.Enabled, &project.RepositoryMode, &repositoryURL, &localPath, &project.DefaultBranch, &configJSON)
+	row, err := queries.GetProject(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.NotFound, "project is unknown")
 	}
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	project.RepositoryUrl, project.LocalRepositoryPath = stringValue(repositoryURL), stringValue(localPath)
+	project := &controlv1.Project{
+		Id: row.ID, Name: row.Name, Enabled: row.Enabled, RepositoryMode: row.RepositoryMode,
+		DefaultBranch:       row.DefaultBranch,
+		RepositoryUrl:       textValue(row.RepositoryUrl),
+		LocalRepositoryPath: textValue(row.LocalRepositoryPath),
+	}
 	var config projectConfig
-	if err := json.Unmarshal(configJSON, &config); err != nil {
+	if err := json.Unmarshal([]byte(row.Configuration), &config); err != nil {
 		return nil, databaseError(err)
 	}
 	project.RequiredRunnerLabels, project.ExecutionImage = config.Labels, config.ExecutionImage
-	rows, err := db.Query(ctx, `SELECT command,timeout_seconds,position,required FROM app.project_pipeline_steps WHERE project_id=$1 ORDER BY position,id`, id)
+	steps, err := queries.ListProjectPipelineSteps(ctx, id)
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		step := &controlv1.PipelineStep{}
-		if err := rows.Scan(&step.Command, &step.TimeoutSeconds, &step.Position, &step.Required); err != nil {
-			return nil, databaseError(err)
-		}
-		project.PipelineSteps = append(project.PipelineSteps, step)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, databaseError(err)
+	for _, step := range steps {
+		project.PipelineSteps = append(project.PipelineSteps, &controlv1.PipelineStep{
+			Command: step.Command, TimeoutSeconds: step.TimeoutSeconds, Position: step.Position, Required: step.Required,
+		})
 	}
 	return project, nil
 }
@@ -1359,18 +1352,30 @@ func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, 
 	if !validID(id) {
 		return nil, status.Error(codes.InvalidArgument, "workflow run ID is invalid")
 	}
-	workflow := &controlv1.Workflow{}
-	var branch, externalID, url, state, reason *string
-	var created, updated time.Time
-	err := s.pool.QueryRow(ctx, `SELECT wr.id::text,wr.project_id::text,wr.status,wr.current_phase,i.external_id,i.title,wr.branch_name,COALESCE(pr.external_id,wr.pull_request_external_id),COALESCE(pr.url,wr.pull_request_url),pr.state,wr.blocking_reason,wr.planning_attempts,wr.implementation_attempts,wr.pipeline_repair_attempts,wr.ci_repair_attempts,wr.review_cycles,wr.total_agent_executions,wr.created_at,wr.updated_at FROM app.workflow_runs wr JOIN app.issues i ON i.id=wr.issue_id LEFT JOIN app.pull_requests pr ON pr.workflow_run_id=wr.id WHERE wr.id=$1`, id).Scan(&workflow.Id, &workflow.ProjectId, &workflow.Status, &workflow.Phase, &workflow.IssueExternalId, &workflow.IssueTitle, &branch, &externalID, &url, &state, &reason, &workflow.PlanningAttempts, &workflow.ImplementationAttempts, &workflow.PipelineRepairAttempts, &workflow.CiRepairAttempts, &workflow.ReviewCycles, &workflow.TotalAgentExecutions, &created, &updated)
+	row, err := s.queries.GetWorkflowDetail(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.NotFound, "workflow run is unknown")
 	}
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	workflow.BranchName, workflow.PullRequestExternalId, workflow.PullRequestUrl, workflow.PullRequestState, workflow.BlockingReason = stringValue(branch), stringValue(externalID), stringValue(url), stringValue(state), stringValue(reason)
-	workflow.CreatedAt, workflow.UpdatedAt = timestamp(created), timestamp(updated)
+	workflow := &controlv1.Workflow{
+		Id: row.ID, ProjectId: row.ProjectID, Status: row.Status, Phase: row.CurrentPhase,
+		IssueExternalId:        row.ExternalID,
+		IssueTitle:             row.Title,
+		BranchName:             textValue(row.BranchName),
+		PullRequestExternalId:  coalesceText(row.PrExternalID, row.RunPullRequestExternalID),
+		PullRequestUrl:         coalesceText(row.PrUrl, row.RunPullRequestUrl),
+		PullRequestState:       textValue(row.PullRequestState),
+		BlockingReason:         textValue(row.BlockingReason),
+		PlanningAttempts:       row.PlanningAttempts,
+		ImplementationAttempts: row.ImplementationAttempts,
+		PipelineRepairAttempts: row.PipelineRepairAttempts,
+		CiRepairAttempts:       row.CiRepairAttempts,
+		ReviewCycles:           row.ReviewCycles,
+		TotalAgentExecutions:   row.TotalAgentExecutions,
+	}
+	workflow.CreatedAt, workflow.UpdatedAt = timestamp(row.CreatedAt.Time), timestamp(row.UpdatedAt.Time)
 	return workflow, nil
 }
 
@@ -1387,14 +1392,15 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 		return nil, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	var projectID, current string
-	err = tx.QueryRow(ctx, `SELECT project_id::text,status FROM app.workflow_runs WHERE id=$1 FOR UPDATE`, id).Scan(&projectID, &current)
+	queries := s.queries.WithTx(tx)
+	control, err := queries.GetWorkflowForControl(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.NotFound, "workflow run is unknown")
 	}
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	projectID, current := control.ProjectID, control.Status
 	// Populated only when cancelling/blocking finds a job still in flight,
 	// which is the case the runner needs to hear about: nothing to notify if
 	// the run never got past planning. lease_generation-1 is the generation
@@ -1419,13 +1425,13 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 		// history stands alongside this one. The previous implementation took
 		// the project lock and parked the run in a "recovering" status nothing
 		// reads, which left the project unable to schedule anything again.
-		if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, id); err != nil {
+		if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: id}); err != nil {
 			return nil, databaseError(err)
 		}
-		if _, err := tx.Exec(ctx, `UPDATE app.issues SET eligible=true WHERE id=(SELECT issue_id FROM app.workflow_runs WHERE id=$1) AND state='open'`, id); err != nil {
+		if err := queries.ReopenIssueForRetry(ctx, id); err != nil {
 			return nil, databaseError(err)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_events(workflow_run_id,event_type,severity,payload) VALUES($1,'workflow_transition','info','{"reason":"reopened by manual retry"}'::jsonb)`, id); err != nil {
+		if err := queries.CreateRetryEvent(ctx, id); err != nil {
 			return nil, databaseError(err)
 		}
 	case "cancel", "block":
@@ -1437,12 +1443,19 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 			if terminalStatus(current) {
 				return nil, status.Error(codes.FailedPrecondition, "workflow run is already terminal")
 			}
-			if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=CASE WHEN $2=`+qBlocked+` THEN $3 ELSE blocking_reason END,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1`, id, next.String(), defaultReason(action, reason)); err != nil {
+			if err := queries.SetWorkflowControlStatus(ctx, db.SetWorkflowControlStatusParams{
+				ID: id, Status: next.String(), TerminalReason: pgtype.Text{String: defaultReason(action, reason), Valid: true},
+			}); err != nil {
 				return nil, databaseError(err)
 			}
-			err = tx.QueryRow(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running') RETURNING id::text,runner_id::text,lease_generation-1`, id, defaultReason(action, reason)).Scan(&jobToCancel, &runnerHoldingLease, &leaseGenerationAtCancel)
+			cancelled, err := queries.CancelWorkflowJobs(ctx, db.CancelWorkflowJobsParams{
+				WorkflowRunID: id, RecoveryReason: pgtype.Text{String: defaultReason(action, reason), Valid: true},
+			})
 			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return nil, databaseError(err)
+			}
+			if err == nil {
+				jobToCancel, runnerHoldingLease, leaseGenerationAtCancel = cancelled.ID, cancelled.RunnerID, int64(cancelled.PreviousLeaseGeneration)
 			}
 			// Blocking parks the issue; cancelling does not. Blocking says "stop
 			// working on this until a human says otherwise", and without parking
@@ -1451,25 +1464,25 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 			// the very work it stopped. Cancelling returns the issue to the
 			// queue by design, so it stays eligible.
 			if action == "block" {
-				if err := parkIssue(ctx, tx, id); err != nil {
-					return nil, err
+				if err := queries.ParkIssue(ctx, id); err != nil {
+					return nil, databaseError(err)
 				}
 			}
 			// Withdraw any offer still outstanding. Offers do not age out on
 			// their own, so an offer left 'offered' is one a runner can still
 			// answer after the operator has cancelled the work.
-			if _, err := tx.Exec(ctx, `UPDATE app.job_offers SET status='cancelled',responded_at=now() WHERE status='offered' AND job_id IN (SELECT id FROM app.jobs WHERE workflow_run_id=$1)`, id); err != nil {
+			if err := queries.CancelWorkflowJobOffers(ctx, id); err != nil {
 				return nil, databaseError(err)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE app.workflow_execution_requests SET status='cancelled' WHERE workflow_run_id=$1 AND status IN ('queued','dispatched')`, id); err != nil {
+			if err := queries.CancelWorkflowExecutionRequests(ctx, id); err != nil {
 				return nil, databaseError(err)
 			}
-			if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, id); err != nil {
+			if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: id}); err != nil {
 				return nil, databaseError(err)
 			}
 		}
 	}
-	if err := audit(ctx, tx, actor.id, "workflow."+action, "workflow_run", id); err != nil {
+	if err := audit(ctx, queries, actor.id, "workflow."+action, "workflow_run", id); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1487,12 +1500,15 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 	return s.workflow(ctx, id)
 }
 
-func replacePipelineSteps(ctx context.Context, tx pgx.Tx, projectID string, steps []*controlv1.PipelineStep) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM app.project_pipeline_steps WHERE project_id=$1`, projectID); err != nil {
+func replacePipelineSteps(ctx context.Context, queries *db.Queries, projectID string, steps []*controlv1.PipelineStep) error {
+	if err := queries.DeleteProjectPipelineSteps(ctx, projectID); err != nil {
 		return databaseError(err)
 	}
 	for _, step := range steps {
-		if _, err := tx.Exec(ctx, `INSERT INTO app.project_pipeline_steps(id,project_id,position,name,command,timeout_seconds,required) VALUES($1,$2,$3,$4,$4,$5,$6)`, newID(), projectID, step.GetPosition(), step.GetCommand(), step.GetTimeoutSeconds(), step.GetRequired()); err != nil {
+		if err := queries.CreateProjectPipelineStep(ctx, db.CreateProjectPipelineStepParams{
+			ID: newID(), ProjectID: projectID, Position: step.GetPosition(), Name: step.GetCommand(),
+			TimeoutSeconds: step.GetTimeoutSeconds(), Required: step.GetRequired(),
+		}); err != nil {
 			return databaseError(err)
 		}
 	}
@@ -1554,41 +1570,37 @@ func (s *Server) runner(ctx context.Context, id string) (*controlv1.Runner, erro
 	if !validID(id) {
 		return nil, status.Error(codes.InvalidArgument, "runner ID is invalid")
 	}
-	runner := &controlv1.Runner{}
-	row := s.pool.QueryRow(ctx, `SELECT id::text, name, enabled, draining, status, labels::text, last_seen_at, version FROM app.runners WHERE id=$1`, id)
-	if err := scanRunnerRow(row, runner); err != nil {
-		return nil, err
-	}
-	return runner, nil
-}
-func scanRunner(rows pgx.Rows) (*controlv1.Runner, error) {
-	runner := &controlv1.Runner{}
-	if err := scanRunnerRow(rows, runner); err != nil {
-		return nil, err
-	}
-	return runner, nil
-}
-func scanRunnerRow(row pgx.Row, runner *controlv1.Runner) error {
-	var labels []byte
-	var seen *time.Time
-	if err := row.Scan(&runner.Id, &runner.Name, &runner.Enabled, &runner.Draining, &runner.Status, &labels, &seen, &runner.Version); err != nil {
+	row, err := s.queries.GetRunner(ctx, id)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return status.Error(codes.NotFound, "runner is unknown")
+			return nil, status.Error(codes.NotFound, "runner is unknown")
 		}
-		return databaseError(err)
+		return nil, databaseError(err)
 	}
-	if err := json.Unmarshal(labels, &runner.Labels); err != nil {
-		return databaseError(err)
-	}
-	if seen != nil {
-		runner.LastSeenAt = timestamp(*seen)
-	}
-	return nil
+	return scanRunnerRowValues(row.ID, row.Name, row.Enabled, row.Draining, row.Status, row.Labels, row.LastSeenAt, row.Version)
 }
-func audit(ctx context.Context, db interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}, actorID, action, targetType, targetID string) error {
-	_, err := db.Exec(ctx, `INSERT INTO app.audit_events(actor_type,actor_id,action,target_type,target_id) VALUES('user',$1,$2,$3,$4)`, actorID, action, targetType, targetID)
+func scanRunnerRowValues(id, name string, enabled, draining bool, status_ string, labels string, seen pgtype.Timestamptz, version string) (*controlv1.Runner, error) {
+	runner := &controlv1.Runner{Id: id, Name: name, Enabled: enabled, Draining: draining, Status: status_, Version: version}
+	if err := json.Unmarshal([]byte(labels), &runner.Labels); err != nil {
+		return nil, databaseError(err)
+	}
+	if seen.Valid {
+		runner.LastSeenAt = timestamp(seen.Time)
+	}
+	return runner, nil
+}
+
+// auditQuerier is the subset of *db.Queries the audit() helper needs, so
+// call sites can pass either the pool-backed s.queries or one scoped to an
+// open transaction via WithTx.
+type auditQuerier interface {
+	CreateAuditEvent(context.Context, db.CreateAuditEventParams) error
+}
+
+func audit(ctx context.Context, queries auditQuerier, actorID, action, targetType, targetID string) error {
+	err := queries.CreateAuditEvent(ctx, db.CreateAuditEventParams{
+		ActorID: pgtype.Text{String: actorID, Valid: true}, Action: action, TargetType: targetType, TargetID: targetID,
+	})
 	return databaseError(err)
 }
 func commit(tx pgx.Tx) error {
@@ -1894,9 +1906,15 @@ func boundedReason(value string, limit int) string {
 // offering it. It is the mechanism behind "no automatic retries": without it a
 // run that fails releases its project lock and is immediately re-created from
 // the same still-eligible issue.
+//
+// It still takes a bare pgx.Tx (rather than the *db.Queries every other
+// helper in this file now takes) because delivery.go -- out of scope for this
+// conversion, see issue #306's own scope note -- calls it against a
+// transaction it manages itself; db.New(tx).ParkIssue(...) scopes the
+// generated query to that same transaction without requiring delivery.go to
+// change.
 func parkIssue(ctx context.Context, tx pgx.Tx, workflowID string) error {
-	_, err := tx.Exec(ctx, `UPDATE app.issues SET eligible=false WHERE id=(SELECT issue_id FROM app.workflow_runs WHERE id=$1)`, workflowID)
-	return databaseError(err)
+	return databaseError(db.New(tx).ParkIssue(ctx, workflowID))
 }
 func defaultReason(action, reason string) string {
 	if strings.TrimSpace(reason) == "" {
@@ -1911,14 +1929,31 @@ func stringValue(value *string) string {
 	}
 	return *value
 }
+
+// textValue reads a nullable sqlc-generated pgtype.Text the same way
+// stringValue reads a *string: empty when NULL.
+func textValue(value pgtype.Text) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
+}
+
+// coalesceText mirrors SQL's COALESCE over two nullable columns read
+// separately (see GetWorkflowDetail's query comment for why they are no
+// longer combined with COALESCE in SQL): the first valid value wins, and
+// both absent yields "".
+func coalesceText(preferred, fallback pgtype.Text) string {
+	if preferred.Valid {
+		return preferred.String
+	}
+	return textValue(fallback)
+}
 func truncate(value string, length int) string {
 	if len(value) > length {
 		return value[:length]
 	}
 	return value
-}
-func durationInterval(value time.Duration) string {
-	return fmt.Sprintf("%d milliseconds", value.Milliseconds())
 }
 func parseInt(value string) (int64, error) {
 	var result int64

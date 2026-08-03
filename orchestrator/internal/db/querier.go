@@ -11,27 +11,110 @@ import (
 )
 
 type Querier interface {
+	AcceptJob(ctx context.Context, arg AcceptJobParams) (AcceptJobRow, error)
+	AcceptJobOffer(ctx context.Context, arg AcceptJobOfferParams) (string, error)
 	CancelExpiredLeaseJobs(ctx context.Context, reason pgtype.Text) ([]string, error)
+	CancelJob(ctx context.Context, arg CancelJobParams) error
+	CancelJobOfferByJob(ctx context.Context, jobID string) error
+	CancelJobOfferByRunner(ctx context.Context, arg CancelJobOfferByRunnerParams) error
+	CancelOfferedJob(ctx context.Context, arg CancelOfferedJobParams) error
 	CancelUnansweredOfferJobs(ctx context.Context, arg CancelUnansweredOfferJobsParams) ([]string, error)
+	CancelWorkflowExecutionRequests(ctx context.Context, workflowRunID string) error
+	CancelWorkflowJobOffers(ctx context.Context, workflowRunID string) error
+	CancelWorkflowJobs(ctx context.Context, arg CancelWorkflowJobsParams) (CancelWorkflowJobsRow, error)
+	CancelWorkflowRunOfferRejected(ctx context.Context, id string) error
+	CancelWorkflowRunUndelivered(ctx context.Context, arg CancelWorkflowRunUndeliveredParams) error
+	ClaimSchedulableIssue(ctx context.Context, runnerIds []string) (ClaimSchedulableIssueRow, error)
+	CountProjectIssues(ctx context.Context, projectID string) (int64, error)
+	CountUsers(ctx context.Context) (int64, error)
+	CreateAdminUser(ctx context.Context, arg CreateAdminUserParams) error
+	CreateAuditEvent(ctx context.Context, arg CreateAuditEventParams) error
+	CreateJob(ctx context.Context, arg CreateJobParams) error
+	CreateJobOffer(ctx context.Context, arg CreateJobOfferParams) error
+	CreateProject(ctx context.Context, arg CreateProjectParams) error
+	CreateProjectLock(ctx context.Context, arg CreateProjectLockParams) (int64, error)
+	CreateProjectPipelineStep(ctx context.Context, arg CreateProjectPipelineStepParams) error
+	CreateRetryEvent(ctx context.Context, workflowRunID string) error
+	CreateRunner(ctx context.Context, arg CreateRunnerParams) error
+	CreateRunnerCredential(ctx context.Context, arg CreateRunnerCredentialParams) error
 	CreateRunnerRegistrationToken(ctx context.Context, arg CreateRunnerRegistrationTokenParams) (pgtype.Timestamptz, error)
+	CreateUserSession(ctx context.Context, arg CreateUserSessionParams) error
+	CreateWorkflowEvent(ctx context.Context, arg CreateWorkflowEventParams) error
+	CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunParams) error
 	DeleteProjectCredential(ctx context.Context, arg DeleteProjectCredentialParams) (int64, error)
+	DeleteProjectLock(ctx context.Context, arg DeleteProjectLockParams) error
+	DeleteProjectLockByWorkflow(ctx context.Context, workflowRunID string) error
+	DeleteProjectPipelineSteps(ctx context.Context, projectID string) error
+	DrainRunner(ctx context.Context, id string) (int64, error)
+	EnableRunner(ctx context.Context, id string) (int64, error)
 	ExpireUnansweredOffers(ctx context.Context, unansweredOffer pgtype.Interval) error
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
+	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
+	GetProject(ctx context.Context, id string) (GetProjectRow, error)
 	GetProjectCredentialSecret(ctx context.Context, arg GetProjectCredentialSecretParams) (GetProjectCredentialSecretRow, error)
+	GetRunner(ctx context.Context, id string) (GetRunnerRow, error)
+	GetRunnerCredentialHash(ctx context.Context, id string) (string, error)
+	// The oldest heartbeat is returned as a raw timestamp (rather than an
+	// already-subtracted epoch age) plus the database's own now(), so the
+	// nullability of "no enabled runner" survives sqlc's type inference as a
+	// pgtype.Timestamptz.Valid flag instead of silently becoming a NOT NULL
+	// float64 that panics on a NULL scan -- see the Go call site for the
+	// subtraction, which still uses only values this same statement read from
+	// the database's clock.
+	GetSchedulerSnapshot(ctx context.Context) (GetSchedulerSnapshotRow, error)
+	GetSessionActor(ctx context.Context, tokenHash string) (GetSessionActorRow, error)
 	GetSessionCSRFHash(ctx context.Context, tokenHash string) (string, error)
+	GetUserByUsername(ctx context.Context, username string) (GetUserByUsernameRow, error)
 	GetUserForUpdate(ctx context.Context, id string) (GetUserForUpdateRow, error)
+	GetUserProfile(ctx context.Context, id string) (GetUserProfileRow, error)
+	// pr.external_id/pr.url and wr.pull_request_external_id/wr.pull_request_url are
+	// combined in Go rather than with SQL COALESCE: sqlc's nullability inference
+	// does not reliably propagate through COALESCE of two nullable columns (one
+	// from an outer join), and mistyping either side NOT NULL would panic the
+	// very first workflow scanned before a pull request exists.
+	GetWorkflowDetail(ctx context.Context, id string) (GetWorkflowDetailRow, error)
+	GetWorkflowForControl(ctx context.Context, id string) (GetWorkflowForControlRow, error)
+	IssueSyncStatusEntries(ctx context.Context) ([]IssueSyncStatusEntriesRow, error)
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
+	ListProjectIDs(ctx context.Context) ([]string, error)
+	ListProjectPipelineSteps(ctx context.Context, projectID string) ([]ListProjectPipelineStepsRow, error)
+	ListQueueEntries(ctx context.Context, limit int32) ([]ListQueueEntriesRow, error)
 	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
+	ListRunners(ctx context.Context) ([]ListRunnersRow, error)
+	ListSyncableProjectByID(ctx context.Context, id string) ([]ListSyncableProjectByIDRow, error)
+	ListSyncableProjects(ctx context.Context) ([]ListSyncableProjectsRow, error)
+	ListWorkflowEvents(ctx context.Context, arg ListWorkflowEventsParams) ([]ListWorkflowEventsRow, error)
+	ListWorkflowIDs(ctx context.Context) ([]string, error)
+	MarkRegistrationTokenUsed(ctx context.Context, id string) error
 	MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error
+	ParkIssue(ctx context.Context, id string) error
 	ProjectExists(ctx context.Context, id string) (bool, error)
+	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
+	RecordRunnerHeartbeat(ctx context.Context, arg RecordRunnerHeartbeatParams) error
+	RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (pgtype.Timestamptz, error)
+	ReopenIssueForRetry(ctx context.Context, id string) error
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
+	RevokeRunner(ctx context.Context, id string) (int64, error)
+	RevokeRunnerCredentials(ctx context.Context, runnerID string) error
 	RevokeRunnerRegistrationToken(ctx context.Context, id string) (RevokeRunnerRegistrationTokenRow, error)
+	RevokeSessionByTokens(ctx context.Context, arg RevokeSessionByTokensParams) (int64, error)
 	SelectAbandonedChecksWorkflows(ctx context.Context, abandonedChecks pgtype.Interval) ([]string, error)
 	SelectStrandedDeliveryWorkflows(ctx context.Context, strandedDelivery pgtype.Interval) ([]string, error)
+	SelectValidRegistrationToken(ctx context.Context, arg SelectValidRegistrationTokenParams) (string, error)
+	SetProjectEnabled(ctx context.Context, arg SetProjectEnabledParams) (int64, error)
+	SetRunnerDraining(ctx context.Context, arg SetRunnerDrainingParams) error
+	SetWorkflowControlStatus(ctx context.Context, arg SetWorkflowControlStatusParams) error
+	SetWorkflowPreparing(ctx context.Context, id string) error
+	SetWorkflowTerminalStatus(ctx context.Context, arg SetWorkflowTerminalStatusParams) error
+	UpdateProject(ctx context.Context, arg UpdateProjectParams) (int64, error)
 	UpdateProjectCredentialSecret(ctx context.Context, arg UpdateProjectCredentialSecretParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) error
+	UpsertIssue(ctx context.Context, arg UpsertIssueParams) error
+	UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error
+	UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error
 	UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error)
+	UpsertSeedRunnerRegistrationToken(ctx context.Context, arg UpsertSeedRunnerRegistrationTokenParams) error
 }
 
 var _ Querier = (*Queries)(nil)

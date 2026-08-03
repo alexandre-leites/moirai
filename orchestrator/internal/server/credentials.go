@@ -55,7 +55,7 @@ func (s *Server) SetProjectCredential(ctx context.Context, request *controlv1.Se
 	if rowsAffected != 1 {
 		return nil, status.Error(codes.NotFound, "project is unknown")
 	}
-	if err := audit(ctx, s.pool, actor.id, "project.credential.set", "project", request.GetProjectId()); err != nil {
+	if err := audit(ctx, s.queries, actor.id, "project.credential.set", "project", request.GetProjectId()); err != nil {
 		return nil, err
 	}
 	credentials, err := s.projectCredentials(ctx, request.GetProjectId())
@@ -82,7 +82,7 @@ func (s *Server) ClearProjectCredential(ctx context.Context, request *controlv1.
 		return nil, databaseError(err)
 	}
 	if rowsAffected > 0 {
-		if err := audit(ctx, s.pool, actor.id, "project.credential.clear", "project", request.GetProjectId()); err != nil {
+		if err := audit(ctx, s.queries, actor.id, "project.credential.clear", "project", request.GetProjectId()); err != nil {
 			return nil, err
 		}
 	}
