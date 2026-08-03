@@ -44,6 +44,43 @@ SET status = sqlc.arg(status), current_phase = sqlc.arg(status),
 WHERE id = sqlc.arg(id) AND status NOT IN ('failed', 'blocked', 'cancelled')
 RETURNING project_id::text AS project_id;
 
+-- name: MarkWorkflowAwaitingApproval :execrows
+-- observeWorkflow's guarded transition off 'waiting_github_checks' once GitHub
+-- checks are green but the project opted into the human-approval gate. The
+-- WHERE clause is what makes a second observer tick against the same run (it
+-- is no longer selected by SelectWaitingGithubChecksWorkflows once this
+-- lands) a no-op rather than a double transition.
+UPDATE app.workflow_runs
+SET status = 'waiting_human', current_phase = 'waiting_human', updated_at = now()
+WHERE id = sqlc.arg(id) AND status = 'waiting_github_checks';
+
+-- name: MarkWorkflowApproved :execrows
+-- SubmitHumanDecision's "approved" branch. Sends the run back to
+-- 'waiting_github_checks' rather than merging directly here: the checks are
+-- already green, so the next observer tick (or SubmitHumanDecision's own
+-- best-effort immediate call into observeWorkflow) drives the merge through
+-- the same tested path deliverWorkflow's non-gated runs already use, instead
+-- of duplicating it. Guarded on 'waiting_human' so approving a run that is no
+-- longer at the gate (already decided, retried, or cancelled out from under
+-- the operator) reports "not awaiting approval" instead of silently doing
+-- nothing or resurrecting a run that moved on.
+UPDATE app.workflow_runs
+SET status = 'waiting_github_checks', current_phase = 'waiting_github_checks', updated_at = now()
+WHERE id = sqlc.arg(id) AND status = 'waiting_human';
+
+-- name: RejectWorkflowApproval :one
+-- SubmitHumanDecision's "changes_requested" branch: the same terminal shape
+-- as any other rejection (blockExternal, an agent's own declared block), but
+-- guarded specifically on 'waiting_human' -- unlike TerminateWorkflowRun's
+-- broader "not already terminal" guard -- so this action only ever fires
+-- against a run genuinely sitting at the approval gate.
+UPDATE app.workflow_runs
+SET status = 'blocked', current_phase = 'blocked',
+    blocking_reason = sqlc.arg(reason), terminal_reason = sqlc.arg(reason),
+    completed_at = now(), updated_at = now()
+WHERE id = sqlc.arg(id) AND status = 'waiting_human'
+RETURNING project_id::text AS project_id;
+
 -- name: DeleteProjectLock :exec
 DELETE FROM app.project_locks WHERE project_id = sqlc.arg(project_id) AND workflow_run_id = sqlc.arg(workflow_run_id);
 
@@ -79,8 +116,12 @@ INSERT INTO app.workflow_events(workflow_run_id, event_type, severity, payload)
 VALUES (sqlc.arg(workflow_run_id), 'pull_request.merged', 'info', '{}'::jsonb);
 
 -- name: GetDeliveryWorkflow :one
+-- p.configuration travels along so observeWorkflow can decode
+-- RequireHumanApproval without a second round trip: deliveryWorkflow() is
+-- already the one place both deliverWorkflow and observeWorkflow fetch a
+-- run's project-scoped delivery facts from.
 SELECT wr.project_id::text AS project_id, wr.issue_id::text AS issue_id, i.external_id, i.title, i.body,
-       COALESCE(p.repository_url, '') AS repository_url, p.default_branch,
+       COALESCE(p.repository_url, '') AS repository_url, p.default_branch, p.configuration,
        COALESCE(wr.branch_name, '') AS branch_name, pr.external_id AS pr_external_id
 FROM app.workflow_runs wr
 JOIN app.issues i ON i.id = wr.issue_id

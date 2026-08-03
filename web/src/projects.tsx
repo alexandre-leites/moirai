@@ -145,6 +145,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   const [labels, setLabels] = useState((project?.requiredRunnerLabels ?? []).join(", "));
   const [pipelineSteps, setPipelineSteps] = useState(project?.pipelineSteps ?? []);
   const [executionImage, setExecutionImage] = useState(project?.executionImage ?? "");
+  const [requireHumanApproval, setRequireHumanApproval] = useState(project?.requireHumanApproval ?? false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -172,6 +173,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       requiredRunnerLabels: labels.split(",").map((label) => label.trim()).filter(Boolean),
       pipelineSteps: pipelineSteps.map((step, position) => ({ ...step, position })),
       executionImage: executionImage.trim() || undefined,
+      requireHumanApproval: requireHumanApproval || undefined,
     }).then(
       () => { onDone(); onClose(); },
       (reason: unknown) => {
@@ -252,6 +254,20 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
             </div>
           ))}
           <button type="button" className="btn sm" onClick={() => setPipelineSteps([...pipelineSteps, newPipelineStep(pipelineSteps.length)])}>Add command</button>
+        </fieldset>
+        <fieldset>
+          <legend>Delivery policy</legend>
+          <label>
+            <input
+              type="checkbox"
+              checked={requireHumanApproval}
+              onChange={(event) => setRequireHumanApproval(event.target.checked)}
+            /> Require human approval before merging
+          </label>
+          <p className="t2">
+            When checked, a run stops once every automated gate passes (implementation, GitHub checks)
+            and waits for an admin to approve or request changes on the workflow page, instead of merging automatically.
+          </p>
         </fieldset>
         <div className="btnrow">
           <button type="submit" className="btn primary" disabled={saving}>{saving ? "Saving…" : submitLabel}</button>

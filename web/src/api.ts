@@ -36,6 +36,14 @@ export type Project = {
   requiredRunnerLabels: string[];
   pipelineSteps: PipelineStep[];
   executionImage: string;
+  /**
+   * Opt-in human-approval gate: when true, a run stops at `waiting_human`
+   * once every automated gate (implementation, GitHub checks) passes, and
+   * only merges once an admin approves it through the decision panel
+   * (workflow-detail.tsx). Defaults to false, so a project that never set
+   * this behaves exactly as it always did.
+   */
+  requireHumanApproval: boolean;
 };
 
 type ProjectPayload = Omit<Project, "requiredRunnerLabels" | "pipelineSteps"> & {
@@ -243,6 +251,7 @@ export type ProjectConfiguration = {
   requiredRunnerLabels?: string[];
   pipelineSteps?: PipelineStep[];
   executionImage?: string;
+  requireHumanApproval?: boolean;
 };
 
 export class ApiError extends Error {
@@ -612,5 +621,6 @@ function normalizeProject(project: ProjectPayload): Project {
     requiredRunnerLabels: project.requiredRunnerLabels ?? [],
     pipelineSteps: project.pipelineSteps ?? [],
     executionImage: project.executionImage ?? "",
+    requireHumanApproval: project.requireHumanApproval ?? false,
   };
 }

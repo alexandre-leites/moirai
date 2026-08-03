@@ -151,11 +151,48 @@ func (s *Server) RevokeRunnerRegistrationToken(ctx context.Context, request *con
 	return &controlv1.RevokeRunnerRegistrationTokenResponse{Token: token}, nil
 }
 
-func (s *Server) SubmitHumanDecision(ctx context.Context, _ *controlv1.SubmitHumanDecisionRequest) (*controlv1.SubmitHumanDecisionResponse, error) {
-	if _, err := s.requireMutation(ctx); err != nil {
+// SubmitHumanDecision resolves a run sitting at StatusWaitingHuman: the
+// console's decision panel (web/src/workflow-detail.tsx) calls this with
+// decision "approved" or "changes_requested" once every automated gate
+// (implementation, GitHub checks) has passed and the project opted into the
+// human-approval gate (projectConfig.RequireHumanApproval). Any actor with a
+// mutating session may call it, the same requirement RetryWorkflow/
+// CancelWorkflow/BlockWorkflow use -- the decision panel itself is rendered
+// admin-only (useIsAdmin in the console), so this mirrors rather than
+// tightens that boundary.
+func (s *Server) SubmitHumanDecision(ctx context.Context, request *controlv1.SubmitHumanDecisionRequest) (*controlv1.SubmitHumanDecisionResponse, error) {
+	actor, err := s.requireMutation(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return nil, status.Error(codes.FailedPrecondition, "V1 has no approval phase")
+	id := request.GetWorkflowRunId()
+	comment := strings.TrimSpace(request.GetComment())
+	if !validID(id) || len(comment) > 1024 {
+		return nil, status.Error(codes.InvalidArgument, "human decision request is invalid")
+	}
+	var action string
+	switch request.GetDecision() {
+	case "approved":
+		action, err = "workflow.approve", s.approveWorkflow(ctx, id, comment)
+	case "changes_requested":
+		action, err = "workflow.reject", s.rejectWorkflow(ctx, id, comment)
+	default:
+		return nil, status.Error(codes.InvalidArgument, `decision must be "approved" or "changes_requested"`)
+	}
+	if errors.Is(err, errApprovalNotPending) {
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := audit(ctx, s.queries, actor.id, action, "workflow_run", id); err != nil {
+		return nil, err
+	}
+	workflow, err := s.workflow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &controlv1.SubmitHumanDecisionResponse{Workflow: workflow}, nil
 }
 
 func (s *Server) requireAdmin(ctx context.Context) (actor, error) {

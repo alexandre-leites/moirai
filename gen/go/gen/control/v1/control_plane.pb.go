@@ -509,8 +509,14 @@ type Project struct {
 	// continuations included. 0 means "unset" -- the orchestrator falls back to
 	// a sane fixed default rather than sending a packet with no deadline.
 	ExecutionTimeoutSeconds int32 `protobuf:"varint,11,opt,name=execution_timeout_seconds,json=executionTimeoutSeconds,proto3" json:"execution_timeout_seconds,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// Opt-in human-approval gate (see SubmitHumanDecision): when true, a run
+	// that reaches green GitHub checks stops at 'waiting_human' instead of
+	// merging automatically, and only proceeds once an admin approves it.
+	// Defaults to false, so an existing project's behavior is unchanged unless
+	// it explicitly turns this on.
+	RequireHumanApproval bool `protobuf:"varint,12,opt,name=require_human_approval,json=requireHumanApproval,proto3" json:"require_human_approval,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *Project) Reset() {
@@ -620,6 +626,13 @@ func (x *Project) GetExecutionTimeoutSeconds() int32 {
 	return 0
 }
 
+func (x *Project) GetRequireHumanApproval() bool {
+	if x != nil {
+		return x.RequireHumanApproval
+	}
+	return false
+}
+
 type ListProjectsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Projects      []*Project             `protobuf:"bytes,1,rep,name=projects,proto3" json:"projects,omitempty"`
@@ -675,6 +688,7 @@ type ProjectConfiguration struct {
 	PipelineSteps           []*PipelineStep        `protobuf:"bytes,7,rep,name=pipeline_steps,json=pipelineSteps,proto3" json:"pipeline_steps,omitempty"`
 	ExecutionImage          string                 `protobuf:"bytes,8,opt,name=execution_image,json=executionImage,proto3" json:"execution_image,omitempty"`
 	ExecutionTimeoutSeconds int32                  `protobuf:"varint,9,opt,name=execution_timeout_seconds,json=executionTimeoutSeconds,proto3" json:"execution_timeout_seconds,omitempty"`
+	RequireHumanApproval    bool                   `protobuf:"varint,10,opt,name=require_human_approval,json=requireHumanApproval,proto3" json:"require_human_approval,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -770,6 +784,13 @@ func (x *ProjectConfiguration) GetExecutionTimeoutSeconds() int32 {
 		return x.ExecutionTimeoutSeconds
 	}
 	return 0
+}
+
+func (x *ProjectConfiguration) GetRequireHumanApproval() bool {
+	if x != nil {
+		return x.RequireHumanApproval
+	}
+	return false
 }
 
 type CreateProjectRequest struct {
@@ -3991,7 +4012,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12'\n" +
 	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\x12\x1a\n" +
 	"\bposition\x18\x03 \x01(\x05R\bposition\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired\"\xd3\x03\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired\"\x89\x04\n" +
 	"\aProject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -4004,9 +4025,10 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x0epipeline_steps\x18\t \x03(\v2\x1d.loop.control.v1.PipelineStepR\rpipelineSteps\x12'\n" +
 	"\x0fexecution_image\x18\n" +
 	" \x01(\tR\x0eexecutionImage\x12:\n" +
-	"\x19execution_timeout_seconds\x18\v \x01(\x05R\x17executionTimeoutSeconds\"L\n" +
+	"\x19execution_timeout_seconds\x18\v \x01(\x05R\x17executionTimeoutSeconds\x124\n" +
+	"\x16require_human_approval\x18\f \x01(\bR\x14requireHumanApproval\"L\n" +
 	"\x14ListProjectsResponse\x124\n" +
-	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\xb6\x03\n" +
+	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\xec\x03\n" +
 	"\x14ProjectConfiguration\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12'\n" +
 	"\x0frepository_mode\x18\x02 \x01(\tR\x0erepositoryMode\x12%\n" +
@@ -4016,7 +4038,9 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x16required_runner_labels\x18\x06 \x03(\tR\x14requiredRunnerLabels\x12D\n" +
 	"\x0epipeline_steps\x18\a \x03(\v2\x1d.loop.control.v1.PipelineStepR\rpipelineSteps\x12'\n" +
 	"\x0fexecution_image\x18\b \x01(\tR\x0eexecutionImage\x12:\n" +
-	"\x19execution_timeout_seconds\x18\t \x01(\x05R\x17executionTimeoutSeconds\"W\n" +
+	"\x19execution_timeout_seconds\x18\t \x01(\x05R\x17executionTimeoutSeconds\x124\n" +
+	"\x16require_human_approval\x18\n" +
+	" \x01(\bR\x14requireHumanApproval\"W\n" +
 	"\x14CreateProjectRequest\x12?\n" +
 	"\aproject\x18\x01 \x01(\v2%.loop.control.v1.ProjectConfigurationR\aproject\"K\n" +
 	"\x15CreateProjectResponse\x122\n" +

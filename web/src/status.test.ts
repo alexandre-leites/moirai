@@ -131,6 +131,16 @@ describe("describeEvent", () => {
     expect(failed.warn).toBe(true);
   });
 
+  it("renders a rejection at the human-approval gate verbatim, not double-prefixed", () => {
+    const rejected = describeEvent({
+      id: "5b", type: "human.rejected", createdAt: "", payload: { reason: "changes requested: please add tests" },
+    });
+    expect(rejected.text).toBe("changes requested: please add tests");
+    expect(rejected.warn).toBe(true);
+    expect(describeEvent({ id: "5c", type: "human.rejected", createdAt: "", payload: {} }).text)
+      .toBe("Changes requested");
+  });
+
   it("reads a log line out of the flat payload EmitLog writes", () => {
     const described = describeEvent({
       id: "6", type: "log", createdAt: "",

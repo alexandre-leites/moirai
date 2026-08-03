@@ -50,7 +50,7 @@ func (q *Queries) ForceWorkflowCompleted(ctx context.Context, id string) (string
 
 const getDeliveryWorkflow = `-- name: GetDeliveryWorkflow :one
 SELECT wr.project_id::text AS project_id, wr.issue_id::text AS issue_id, i.external_id, i.title, i.body,
-       COALESCE(p.repository_url, '') AS repository_url, p.default_branch,
+       COALESCE(p.repository_url, '') AS repository_url, p.default_branch, p.configuration,
        COALESCE(wr.branch_name, '') AS branch_name, pr.external_id AS pr_external_id
 FROM app.workflow_runs wr
 JOIN app.issues i ON i.id = wr.issue_id
@@ -67,10 +67,15 @@ type GetDeliveryWorkflowRow struct {
 	Body          string
 	RepositoryUrl string
 	DefaultBranch string
+	Configuration []byte
 	BranchName    string
 	PrExternalID  pgtype.Text
 }
 
+// p.configuration travels along so observeWorkflow can decode
+// RequireHumanApproval without a second round trip: deliveryWorkflow() is
+// already the one place both deliverWorkflow and observeWorkflow fetch a
+// run's project-scoped delivery facts from.
 func (q *Queries) GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error) {
 	row := q.db.QueryRow(ctx, getDeliveryWorkflow, id)
 	var i GetDeliveryWorkflowRow
@@ -82,6 +87,7 @@ func (q *Queries) GetDeliveryWorkflow(ctx context.Context, id string) (GetDelive
 		&i.Body,
 		&i.RepositoryUrl,
 		&i.DefaultBranch,
+		&i.Configuration,
 		&i.BranchName,
 		&i.PrExternalID,
 	)
@@ -138,6 +144,48 @@ func (q *Queries) MarkPullRequestMerged(ctx context.Context, workflowRunID strin
 	return err
 }
 
+const markWorkflowApproved = `-- name: MarkWorkflowApproved :execrows
+UPDATE app.workflow_runs
+SET status = 'waiting_github_checks', current_phase = 'waiting_github_checks', updated_at = now()
+WHERE id = $1 AND status = 'waiting_human'
+`
+
+// SubmitHumanDecision's "approved" branch. Sends the run back to
+// 'waiting_github_checks' rather than merging directly here: the checks are
+// already green, so the next observer tick (or SubmitHumanDecision's own
+// best-effort immediate call into observeWorkflow) drives the merge through
+// the same tested path deliverWorkflow's non-gated runs already use, instead
+// of duplicating it. Guarded on 'waiting_human' so approving a run that is no
+// longer at the gate (already decided, retried, or cancelled out from under
+// the operator) reports "not awaiting approval" instead of silently doing
+// nothing or resurrecting a run that moved on.
+func (q *Queries) MarkWorkflowApproved(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowApproved, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markWorkflowAwaitingApproval = `-- name: MarkWorkflowAwaitingApproval :execrows
+UPDATE app.workflow_runs
+SET status = 'waiting_human', current_phase = 'waiting_human', updated_at = now()
+WHERE id = $1 AND status = 'waiting_github_checks'
+`
+
+// observeWorkflow's guarded transition off 'waiting_github_checks' once GitHub
+// checks are green but the project opted into the human-approval gate. The
+// WHERE clause is what makes a second observer tick against the same run (it
+// is no longer selected by SelectWaitingGithubChecksWorkflows once this
+// lands) a no-op rather than a double transition.
+func (q *Queries) MarkWorkflowAwaitingApproval(ctx context.Context, id string) (int64, error) {
+	result, err := q.db.Exec(ctx, markWorkflowAwaitingApproval, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const markWorkflowCompleted = `-- name: MarkWorkflowCompleted :execrows
 UPDATE app.workflow_runs
 SET status = 'completed', current_phase = 'completed', completed_at = now(), updated_at = now(), delivery_attempts = 0
@@ -185,6 +233,32 @@ func (q *Queries) RecordTransientDeliveryFailure(ctx context.Context, id string)
 	var delivery_attempts int32
 	err := row.Scan(&delivery_attempts)
 	return delivery_attempts, err
+}
+
+const rejectWorkflowApproval = `-- name: RejectWorkflowApproval :one
+UPDATE app.workflow_runs
+SET status = 'blocked', current_phase = 'blocked',
+    blocking_reason = $1, terminal_reason = $1,
+    completed_at = now(), updated_at = now()
+WHERE id = $2 AND status = 'waiting_human'
+RETURNING project_id::text AS project_id
+`
+
+type RejectWorkflowApprovalParams struct {
+	Reason pgtype.Text
+	ID     string
+}
+
+// SubmitHumanDecision's "changes_requested" branch: the same terminal shape
+// as any other rejection (blockExternal, an agent's own declared block), but
+// guarded specifically on 'waiting_human' -- unlike TerminateWorkflowRun's
+// broader "not already terminal" guard -- so this action only ever fires
+// against a run genuinely sitting at the approval gate.
+func (q *Queries) RejectWorkflowApproval(ctx context.Context, arg RejectWorkflowApprovalParams) (string, error) {
+	row := q.db.QueryRow(ctx, rejectWorkflowApproval, arg.Reason, arg.ID)
+	var project_id string
+	err := row.Scan(&project_id)
+	return project_id, err
 }
 
 const selectWaitingGithubChecksWorkflows = `-- name: SelectWaitingGithubChecksWorkflows :many

@@ -58,7 +58,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 - **Runner fleet.** Multiple runner containers, one job per runner at a time, outbound gRPC connections, capability/label advertisement, heartbeats, lease renewals, safe reconnection, drain/revoke support.
 - **Durable issue workflow.** A Go state machine whose every transition is persisted to PostgreSQL, so workflows survive orchestrator restart and workflow history is preserved. It is event-driven: the orchestrator dispatches an agent execution and advances the run only on the runner's terminal event. Retries are manual — there are no automatic workflow retries or execution deadlines.
 - **Portable integrations.** Generic issue-tracker interface, code-host interface, and agent-backend interface. GitHub CLI adapters for the MVP. OpenCode backend first, with local-process and Docker execution modes.
-- **Complete delivery flow.** Branch or worktree preparation, implementation, push, PR creation, GitHub check monitoring, automatic merge, issue completion. (Agent planning, deterministic local pipeline, independent AI review, repair cycles, and optional human approval are target scope not yet implemented in the Go V1 orchestrator.)
+- **Complete delivery flow.** Branch or worktree preparation, implementation, push, PR creation, GitHub check monitoring, an opt-in human-approval gate, automatic merge, issue completion. (Agent planning, deterministic local pipeline, independent AI review, and repair cycles are target scope not yet implemented in the Go V1 orchestrator -- see #250.)
 - **Web administration.** Local login, project registration/configuration, runner tokens and status, global queue, workflow dashboard with phase and attempt tracking, logs and events, retry/resume/cancel/block/approve controls.
 
 ### Design principles
@@ -66,7 +66,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 | Principle | Description |
 |---|---|
 | Orchestrator is authoritative | Runner memory, agent conversation state, and process output are not authoritative |
-| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the GitHub-check gate (a run merges only on green) and the runner's result-document evidence; the pipeline, AI review, and human-approval gates are not implemented in V1 |
+| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the GitHub-check gate (a run merges only on green), the runner's result-document evidence, and (for a project that opts in) a human-approval gate between green checks and merge; the pipeline and AI review gates are not implemented in V1 |
 | Portability through interfaces | Provider-specific behavior is translated at adapter boundaries |
 | Durable state outside conversations | An agent session can be replaced without losing the task |
 | Bounded loops | Every retry loop has explicit limits (attempts, duration, executions) |
@@ -82,12 +82,12 @@ Moirai solves these by treating the agent as one replaceable execution component
 - Global scheduler that selects the highest-priority eligible issue across all unlocked projects.
 - Single-project concurrency lock.
 - Runner registration via one-time tokens, outbound gRPC, heartbeats, lease renewals, reconnection, drain, and revocation.
-- Per-issue workflow state machine: prepare, implement, push, PR, GitHub checks, merge, issue completion. Planning, local pipeline, AI review, repair cycles, and human approval are specified above but are **not implemented in the Go V1 orchestrator**; their schema columns and RPCs remain reserved.
+- Per-issue workflow state machine: prepare, implement, push, PR, GitHub checks, an opt-in human-approval gate (`waiting_human`, resolved by `SubmitHumanDecision`), merge, issue completion. Planning, local pipeline, AI review, and repair cycles are specified above but are **not implemented in the Go V1 orchestrator** (see #250); their schema columns and RPCs remain reserved.
 - GitHub issue-tracker adapter (via `gh` CLI).
 - GitHub code-host adapter (via `gh` CLI).
 - OpenCode agent backend.
 - Local-process and Docker execution modes.
-- Web UI: login, project configuration, runner status, queue, workflow timeline, logs, retry/cancel/block controls. The approval control is part of the same surface, but it has nothing to act on until the approval phase exists: `SubmitHumanDecision` is refused with "V1 has no approval phase".
+- Web UI: login, project configuration (including the `requireHumanApproval` opt-in toggle), runner status, queue, workflow timeline, logs, retry/cancel/block controls, and the decision panel for the human-approval gate: `SubmitHumanDecision` resolves a `waiting_human` run to either merge (approved) or `blocked` (changes requested).
 - Docker Compose deployment with full network isolation.
 
 ---

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,10 @@ type deliveryWorkflow struct {
 	defaultBranch string
 	branch        string
 	prNumber      string
+	// requireApproval is the project's RequireHumanApproval configuration
+	// (server.go's projectConfig), decoded here rather than re-fetched: only
+	// observeWorkflow reads it, but deliverWorkflow shares this same struct.
+	requireApproval bool
 }
 
 func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
@@ -149,15 +154,49 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	if checks != checksGreen {
 		return nil // pending, or a state this code does not recognise: never merge
 	}
+	if workflow.requireApproval {
+		// Every automated gate passed; the project opted into a human looking
+		// before it merges. Stop here instead of merging -- SubmitHumanDecision
+		// is what moves this run on, either back to 'waiting_github_checks' (and
+		// through the same merge logic below, on approval) or to 'blocked' (on
+		// rejection). The guard is on the query, not here: a second observer
+		// tick never reaches this branch for the same run because
+		// SelectWaitingGithubChecksWorkflows stops selecting it the moment the
+		// transition lands.
+		affected, err := s.queries.MarkWorkflowAwaitingApproval(ctx, workflowID)
+		if err != nil {
+			return databaseError(err)
+		}
+		if affected != 1 {
+			return nil // raced away from 'waiting_github_checks'; nothing to do
+		}
+		if err := s.queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+			WorkflowRunID: workflowID, EventType: "workflow_transition", Severity: "info",
+			Column4: []byte(`{"reason":"every automated gate passed; waiting on human approval to merge"}`),
+		}); err != nil {
+			return databaseError(err)
+		}
+		return nil
+	}
+	return s.mergeWorkflow(ctx, workflow, repository)
+}
+
+// mergeWorkflow performs the actual squash-merge once every gate (GitHub
+// checks, and -- for an opted-in project -- human approval) has passed.
+// observeWorkflow calls it directly for a project that never opted into
+// human approval; approveWorkflow calls it directly too, once a human has
+// approved, deliberately bypassing observeWorkflow itself so the just-approved
+// run is not re-gated by the very requireApproval check that put it here.
+func (s *Server) mergeWorkflow(ctx context.Context, workflow deliveryWorkflow, repository string) error {
 	if err := s.github.MergeSquash(ctx, workflow.projectID, repository, workflow.prNumber); err != nil {
-		return s.blockOrRetryExternal(ctx, workflowID, err)
+		return s.blockOrRetryExternal(ctx, workflow.id, err)
 	}
 	merged, err := s.github.Merged(ctx, workflow.projectID, repository, workflow.prNumber)
 	if err != nil {
-		return s.blockOrRetryExternal(ctx, workflowID, err)
+		return s.blockOrRetryExternal(ctx, workflow.id, err)
 	}
 	if !merged {
-		return s.blockExternal(ctx, workflowID, errors.New("GitHub did not confirm pull request merge"))
+		return s.blockExternal(ctx, workflow.id, errors.New("GitHub did not confirm pull request merge"))
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -165,7 +204,7 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	rowsAffected, err := queries.MarkWorkflowCompleted(ctx, workflowID)
+	rowsAffected, err := queries.MarkWorkflowCompleted(ctx, workflow.id)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -179,14 +218,14 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 		// status it raced to and say so loudly: silently returning here is
 		// exactly what left app.pull_requests saying "open" and the issue
 		// schedulable for work whose pull request was already in main (#281).
-		previousStatus, forceErr := queries.ForceWorkflowCompleted(ctx, workflowID)
+		previousStatus, forceErr := queries.ForceWorkflowCompleted(ctx, workflow.id)
 		if forceErr != nil {
 			return databaseError(forceErr)
 		}
 		slog.Warn("pull request merge confirmed but the completing update raced; forcing the run to completed",
-			"workflow_run_id", workflowID, "previous_status", previousStatus)
+			"workflow_run_id", workflow.id, "previous_status", previousStatus)
 		if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
-			WorkflowRunID: workflowID,
+			WorkflowRunID: workflow.id,
 			EventType:     "delivery.completion_raced",
 			Severity:      "warning",
 			Column4:       []byte(fmt.Sprintf(`{"previous_status":%q}`, previousStatus)),
@@ -194,7 +233,7 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 			return databaseError(err)
 		}
 	}
-	if err := queries.MarkPullRequestMerged(ctx, workflowID); err != nil {
+	if err := queries.MarkPullRequestMerged(ctx, workflow.id); err != nil {
 		return databaseError(err)
 	}
 	// Nothing needs writing to the issue itself: MarkWorkflowCompleted (or,
@@ -207,10 +246,10 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	// DeleteProjectLock below is safe to run unconditionally even when the
 	// raced path already released the lock (e.g. an operator's cancel):
 	// deleting a lock row that is already gone is a no-op.
-	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: workflow.projectID, WorkflowRunID: workflowID}); err != nil {
+	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: workflow.projectID, WorkflowRunID: workflow.id}); err != nil {
 		return databaseError(err)
 	}
-	if err := queries.InsertPullRequestMergedEvent(ctx, workflowID); err != nil {
+	if err := queries.InsertPullRequestMergedEvent(ctx, workflow.id); err != nil {
 		return databaseError(err)
 	}
 	return commit(tx)
@@ -224,16 +263,21 @@ func (s *Server) deliveryWorkflow(ctx context.Context, workflowID string, requir
 	if err != nil {
 		return deliveryWorkflow{}, databaseError(err)
 	}
+	var config projectConfig
+	if err := json.Unmarshal(row.Configuration, &config); err != nil {
+		return deliveryWorkflow{}, configurationError(err)
+	}
 	workflow := deliveryWorkflow{
-		id:            workflowID,
-		projectID:     row.ProjectID,
-		issueID:       row.IssueID,
-		externalID:    row.ExternalID,
-		issueTitle:    row.Title,
-		issueBody:     row.Body,
-		repositoryURL: row.RepositoryUrl,
-		defaultBranch: row.DefaultBranch,
-		branch:        row.BranchName,
+		id:              workflowID,
+		projectID:       row.ProjectID,
+		issueID:         row.IssueID,
+		externalID:      row.ExternalID,
+		issueTitle:      row.Title,
+		issueBody:       row.Body,
+		repositoryURL:   row.RepositoryUrl,
+		defaultBranch:   row.DefaultBranch,
+		branch:          row.BranchName,
+		requireApproval: config.RequireHumanApproval,
 	}
 	if requirePR && !row.PrExternalID.Valid {
 		return deliveryWorkflow{}, errors.New("workflow pull request is missing")
@@ -245,6 +289,116 @@ func (s *Server) deliveryWorkflow(ctx context.Context, workflowID string, requir
 		return deliveryWorkflow{}, errors.New("workflow delivery configuration is invalid")
 	}
 	return workflow, nil
+}
+
+// errApprovalNotPending is returned by approveWorkflow/rejectWorkflow when the
+// named run is not currently sitting at the human-approval gate: it already
+// received a decision, was retried, or was cancelled out from under the
+// operator in the meantime.
+var errApprovalNotPending = errors.New("workflow run is not awaiting approval")
+
+// approveWorkflow is SubmitHumanDecision's "approved" branch. It sends the run
+// back to 'waiting_github_checks' (see MarkWorkflowApproved's doc comment for
+// why) and then makes a best-effort attempt to merge immediately, rather than
+// waiting for the next 15-second observer tick, since the console's decision
+// panel promises the approval merges the pull request. It calls mergeWorkflow
+// directly instead of observeWorkflow: observeWorkflow would re-read this same
+// project's requireApproval configuration and, finding it still true, simply
+// gate the run right back into 'waiting_human' -- the very loop this call is
+// meant to break out of, since a human has already decided. A failure of the
+// immediate merge attempt is logged, not returned: the status transition
+// already committed correctly, and the next observer tick (which reaches
+// mergeWorkflow too, once checks read green again, since 'waiting_github_checks'
+// gates on requireApproval only via this same already-passed branch) retries
+// it on its own.
+func (s *Server) approveWorkflow(ctx context.Context, workflowID, comment string) error {
+	affected, err := s.queries.MarkWorkflowApproved(ctx, workflowID)
+	if err != nil {
+		return databaseError(err)
+	}
+	if affected != 1 {
+		return errApprovalNotPending
+	}
+	reason := "approved; merging the pull request"
+	if comment != "" {
+		reason += ": " + comment
+	}
+	if err := s.queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID: workflowID, EventType: "workflow_transition", Severity: "info",
+		Column4: []byte(fmt.Sprintf(`{"reason":%q}`, reason)),
+	}); err != nil {
+		return databaseError(err)
+	}
+	if err := s.mergeApprovedWorkflow(ctx, workflowID); err != nil {
+		slog.Warn("post-approval merge attempt failed; the next observer tick will retry",
+			"workflow_run_id", workflowID, "error", err)
+	}
+	return nil
+}
+
+// mergeApprovedWorkflow re-fetches a just-approved run's delivery facts and
+// hands them to mergeWorkflow, bypassing observeWorkflow's own requireApproval
+// gate entirely (see approveWorkflow's doc comment for why that matters). Any
+// error here is the caller's to log-and-move-on with: the approval itself
+// already committed, so a failure to merge immediately is not this run's only
+// chance -- the next observer tick tries again from 'waiting_github_checks'.
+func (s *Server) mergeApprovedWorkflow(ctx context.Context, workflowID string) error {
+	workflow, err := s.deliveryWorkflow(ctx, workflowID, true)
+	if err != nil {
+		return err
+	}
+	repository, err := repositoryRef(workflow.repositoryURL)
+	if err != nil {
+		return err
+	}
+	checks, err := s.github.Checks(ctx, workflow.projectID, repository, workflow.prNumber)
+	if err != nil {
+		return err
+	}
+	if checks != checksGreen {
+		// Checks were green when this run was gated into 'waiting_human'; a
+		// regression between then and now is unusual but not impossible (a
+		// re-run, a force-push). Leave it at 'waiting_github_checks' rather
+		// than merging or blocking here -- the ordinary observeWorkflow path
+		// (checksFailed -> blockExternal, still pending -> wait) handles it
+		// correctly on the next tick.
+		return nil
+	}
+	return s.mergeWorkflow(ctx, workflow, repository)
+}
+
+// rejectWorkflow is SubmitHumanDecision's "changes_requested" branch: it ends
+// the run the same terminal way blockExternal does, releasing the project
+// lock so the issue is excluded from scheduling until an operator retries it.
+func (s *Server) rejectWorkflow(ctx context.Context, workflowID, comment string) error {
+	reason := "changes requested"
+	if comment != "" {
+		reason += ": " + comment
+	}
+	reason = truncate(reason, 1024)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return databaseError(err)
+	}
+	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
+	projectID, err := queries.RejectWorkflowApproval(ctx, db.RejectWorkflowApprovalParams{Reason: pgText(reason), ID: workflowID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errApprovalNotPending
+	}
+	if err != nil {
+		return databaseError(err)
+	}
+	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: workflowID}); err != nil {
+		return databaseError(err)
+	}
+	if err := queries.InsertWorkflowTerminationEvent(ctx, db.InsertWorkflowTerminationEventParams{
+		WorkflowRunID: workflowID, EventType: "human.rejected",
+		Payload: []byte(fmt.Sprintf(`{"reason":%q}`, reason)),
+	}); err != nil {
+		return databaseError(err)
+	}
+	return commit(tx)
 }
 
 func (s *Server) blockExternal(ctx context.Context, workflowID string, cause error) error {

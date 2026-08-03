@@ -67,6 +67,12 @@ message Project {
   // continuations included. 0 means "unset" -- the orchestrator falls back to
   // a sane fixed default rather than sending a packet with no deadline.
   int32 execution_timeout_seconds = 11;
+  // Opt-in human-approval gate (see SubmitHumanDecision): when true, a run
+  // that reaches green GitHub checks stops at 'waiting_human' instead of
+  // merging automatically, and only proceeds once an admin approves it.
+  // Defaults to false, so an existing project's behavior is unchanged unless
+  // it explicitly turns this on.
+  bool require_human_approval = 12;
 }
 message ListProjectsResponse { repeated Project projects = 1; }
 message ProjectConfiguration {
@@ -79,6 +85,7 @@ message ProjectConfiguration {
   repeated PipelineStep pipeline_steps = 7;
   string execution_image = 8;
   int32 execution_timeout_seconds = 9;
+  bool require_human_approval = 10;
 }
 message CreateProjectRequest { ProjectConfiguration project = 1; }
 message CreateProjectResponse { Project project = 1; }

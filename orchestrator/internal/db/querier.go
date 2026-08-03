@@ -68,6 +68,10 @@ type Querier interface {
 	// must land no matter which status it finds. previous_status lets the caller
 	// log what the race actually was.
 	ForceWorkflowCompleted(ctx context.Context, id string) (string, error)
+	// p.configuration travels along so observeWorkflow can decode
+	// RequireHumanApproval without a second round trip: deliveryWorkflow() is
+	// already the one place both deliverWorkflow and observeWorkflow fetch a
+	// run's project-scoped delivery facts from.
 	GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error)
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
@@ -131,6 +135,22 @@ type Querier interface {
 	MarkPullRequestMerged(ctx context.Context, workflowRunID string) error
 	MarkRegistrationTokenUsed(ctx context.Context, id string) error
 	MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error
+	// SubmitHumanDecision's "approved" branch. Sends the run back to
+	// 'waiting_github_checks' rather than merging directly here: the checks are
+	// already green, so the next observer tick (or SubmitHumanDecision's own
+	// best-effort immediate call into observeWorkflow) drives the merge through
+	// the same tested path deliverWorkflow's non-gated runs already use, instead
+	// of duplicating it. Guarded on 'waiting_human' so approving a run that is no
+	// longer at the gate (already decided, retried, or cancelled out from under
+	// the operator) reports "not awaiting approval" instead of silently doing
+	// nothing or resurrecting a run that moved on.
+	MarkWorkflowApproved(ctx context.Context, id string) (int64, error)
+	// observeWorkflow's guarded transition off 'waiting_github_checks' once GitHub
+	// checks are green but the project opted into the human-approval gate. The
+	// WHERE clause is what makes a second observer tick against the same run (it
+	// is no longer selected by SelectWaitingGithubChecksWorkflows once this
+	// lands) a no-op rather than a double transition.
+	MarkWorkflowAwaitingApproval(ctx context.Context, id string) (int64, error)
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
 	ProjectExists(ctx context.Context, id string) (bool, error)
@@ -144,6 +164,12 @@ type Querier interface {
 	// re-drive window (recovery.go's strandedDelivery), which is what turns
 	// these retries into spaced-out attempts instead of a tight loop.
 	RecordTransientDeliveryFailure(ctx context.Context, id string) (int32, error)
+	// SubmitHumanDecision's "changes_requested" branch: the same terminal shape
+	// as any other rejection (blockExternal, an agent's own declared block), but
+	// guarded specifically on 'waiting_human' -- unlike TerminateWorkflowRun's
+	// broader "not already terminal" guard -- so this action only ever fires
+	// against a run genuinely sitting at the approval gate.
+	RejectWorkflowApproval(ctx context.Context, arg RejectWorkflowApprovalParams) (string, error)
 	RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (pgtype.Timestamptz, error)
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
 	RevokeRunner(ctx context.Context, id string) (int64, error)

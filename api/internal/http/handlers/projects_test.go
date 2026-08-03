@@ -164,6 +164,7 @@ func (f *fakeControlPlane) CreateProject(ctx context.Context, req *controlv1.Cre
 		DefaultBranch:        req.Project.DefaultBranch,
 		RequiredRunnerLabels: req.Project.RequiredRunnerLabels,
 		PipelineSteps:        req.Project.PipelineSteps,
+		RequireHumanApproval: req.Project.RequireHumanApproval,
 	}
 	f.projects[project.Id] = project
 	return &controlv1.CreateProjectResponse{Project: project}, nil
@@ -189,6 +190,7 @@ func (f *fakeControlPlane) UpdateProject(ctx context.Context, req *controlv1.Upd
 	project.DefaultBranch = req.Project.DefaultBranch
 	project.RequiredRunnerLabels = req.Project.RequiredRunnerLabels
 	project.PipelineSteps = req.Project.PipelineSteps
+	project.RequireHumanApproval = req.Project.RequireHumanApproval
 	return &controlv1.UpdateProjectResponse{Project: project}, nil
 }
 
@@ -365,6 +367,33 @@ func TestCreateProjectSuccessReturnsConfiguration(t *testing.T) {
 	steps, ok := project["pipelineSteps"].([]any)
 	if !ok || len(steps) != 2 {
 		t.Errorf("pipelineSteps = %#v, want two returned steps", project["pipelineSteps"])
+	}
+}
+
+// requireHumanApproval defaults to false (see server.go's projectConfig doc
+// comment) and must round-trip through the API layer unchanged, the same way
+// every other configuration field does -- this is what lets an operator
+// actually turn the human-approval gate on for a project through the console.
+func TestCreateProjectPersistsRequireHumanApproval(t *testing.T) {
+	mux, fake := startProjectServer(t)
+	req := mutateRequest(t, http.MethodPost, "/api/v1/projects",
+		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","requireHumanApproval":true}`,
+		"admin-session")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d, want %d: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	project := decodeProject(t, rec)
+	if project["requireHumanApproval"] != true {
+		t.Errorf("requireHumanApproval = %v, want true in the response", project["requireHumanApproval"])
+	}
+	fake.mu.Lock()
+	stored, ok := fake.projects["p-new"]
+	fake.mu.Unlock()
+	if !ok || !stored.RequireHumanApproval {
+		t.Errorf("stored project = %#v, want RequireHumanApproval true", stored)
 	}
 }
 

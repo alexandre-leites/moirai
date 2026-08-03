@@ -41,6 +41,19 @@ const (
 	// 'waiting_github_checks' once deliverWorkflow opens the pull request, or
 	// sideways to 'blocked' if opening it fails (blockExternal).
 	StatusDelivering Status = "delivering"
+	// StatusWaitingHuman marks a run whose GitHub checks are already green and
+	// whose project opted into the human-approval gate (projectConfig's
+	// RequireHumanApproval): observeWorkflow stops here instead of merging
+	// automatically, and the run holds its project lock exactly like
+	// StatusWaitingGithubChecks -- it is still doing work, just waiting on a
+	// person instead of on GitHub. SubmitHumanDecision is what moves a run away
+	// from this status: "approved" sends it back to StatusWaitingGithubChecks
+	// so the same tested merge path runs again (checks are already green, so
+	// the next observer tick, or SubmitHumanDecision's own best-effort
+	// immediate call, merges it straight away); "changes_requested" sends it to
+	// StatusBlocked with the reviewer's comment as the reason, the same
+	// terminal shape an agent's own declared block uses.
+	StatusWaitingHuman Status = "waiting_human"
 	// StatusCompleted marks a run whose pull request GitHub has confirmed
 	// merged (observeWorkflow) -- the true terminal "done" state. See
 	// StatusDelivering for the status this run passed through on the way
@@ -91,6 +104,7 @@ var knownStatuses = map[Status]bool{
 	StatusOffered:             true,
 	StatusPreparing:           true,
 	StatusWaitingGithubChecks: true,
+	StatusWaitingHuman:        true,
 	StatusDelivering:          true,
 	StatusCompleted:           true,
 	StatusFailed:              true,
@@ -117,11 +131,14 @@ func ParseStatus(value string) (Status, bool) {
 // nothing to catch it.
 //
 // StatusDelivering is deliberately absent: a run holding it is still doing
-// active work (opening a pull request), the same reason 'offered', 'preparing'
-// and 'waiting_github_checks' are absent. See genuinelyTerminalStatuses for
-// the narrower set terminateWorkflow's own guard uses, and StatusDelivering's
-// doc comment above for why 'completed' and 'delivering' no longer share one
-// meaning the way this list's single StatusCompleted entry once had to cover.
+// active work (opening a pull request), the same reason 'offered', 'preparing',
+// 'waiting_github_checks' and 'waiting_human' are absent -- a run waiting on a
+// person to decide is exactly as active as one waiting on GitHub's checks, and
+// must keep its project lock and count toward moirai_active_workflows the same
+// way. See genuinelyTerminalStatuses for the narrower set terminateWorkflow's
+// own guard uses, and StatusDelivering's doc comment above for why 'completed'
+// and 'delivering' no longer share one meaning the way this list's single
+// StatusCompleted entry once had to cover.
 var terminalStatuses = []Status{StatusCompleted, StatusFailed, StatusBlocked, StatusCancelled}
 
 // terminalStatusList renders them as the SQL literal list `'a','b'`. Built
