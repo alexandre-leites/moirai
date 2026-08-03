@@ -29,6 +29,10 @@ const (
 	ControlPlane_SetProjectCredential_FullMethodName          = "/loop.control.v1.ControlPlane/SetProjectCredential"
 	ControlPlane_ClearProjectCredential_FullMethodName        = "/loop.control.v1.ControlPlane/ClearProjectCredential"
 	ControlPlane_ListProjectCredentials_FullMethodName        = "/loop.control.v1.ControlPlane/ListProjectCredentials"
+	ControlPlane_ListTaskSourceTypes_FullMethodName           = "/loop.control.v1.ControlPlane/ListTaskSourceTypes"
+	ControlPlane_CreateTaskSource_FullMethodName              = "/loop.control.v1.ControlPlane/CreateTaskSource"
+	ControlPlane_UpdateTaskSource_FullMethodName              = "/loop.control.v1.ControlPlane/UpdateTaskSource"
+	ControlPlane_DeleteTaskSource_FullMethodName              = "/loop.control.v1.ControlPlane/DeleteTaskSource"
 	ControlPlane_CreateRunnerRegistrationToken_FullMethodName = "/loop.control.v1.ControlPlane/CreateRunnerRegistrationToken"
 	ControlPlane_ListRunnerRegistrationTokens_FullMethodName  = "/loop.control.v1.ControlPlane/ListRunnerRegistrationTokens"
 	ControlPlane_RevokeRunnerRegistrationToken_FullMethodName = "/loop.control.v1.ControlPlane/RevokeRunnerRegistrationToken"
@@ -64,6 +68,14 @@ type ControlPlaneClient interface {
 	SetProjectCredential(ctx context.Context, in *SetProjectCredentialRequest, opts ...grpc.CallOption) (*SetProjectCredentialResponse, error)
 	ClearProjectCredential(ctx context.Context, in *ClearProjectCredentialRequest, opts ...grpc.CallOption) (*ClearProjectCredentialResponse, error)
 	ListProjectCredentials(ctx context.Context, in *ListProjectCredentialsRequest, opts ...grpc.CallOption) (*ListProjectCredentialsResponse, error)
+	// ListTaskSourceTypes is the discovery RPC #294 introduces: every
+	// TaskSourceType this orchestrator has a descriptor for, field by field.
+	// It is what lets the console render a create/edit form generically
+	// instead of hardcoding one per provider.
+	ListTaskSourceTypes(ctx context.Context, in *ListTaskSourceTypesRequest, opts ...grpc.CallOption) (*ListTaskSourceTypesResponse, error)
+	CreateTaskSource(ctx context.Context, in *CreateTaskSourceRequest, opts ...grpc.CallOption) (*CreateTaskSourceResponse, error)
+	UpdateTaskSource(ctx context.Context, in *UpdateTaskSourceRequest, opts ...grpc.CallOption) (*UpdateTaskSourceResponse, error)
+	DeleteTaskSource(ctx context.Context, in *DeleteTaskSourceRequest, opts ...grpc.CallOption) (*DeleteTaskSourceResponse, error)
 	CreateRunnerRegistrationToken(ctx context.Context, in *CreateRunnerRegistrationTokenRequest, opts ...grpc.CallOption) (*CreateRunnerRegistrationTokenResponse, error)
 	ListRunnerRegistrationTokens(ctx context.Context, in *ListRunnerRegistrationTokensRequest, opts ...grpc.CallOption) (*ListRunnerRegistrationTokensResponse, error)
 	RevokeRunnerRegistrationToken(ctx context.Context, in *RevokeRunnerRegistrationTokenRequest, opts ...grpc.CallOption) (*RevokeRunnerRegistrationTokenResponse, error)
@@ -187,6 +199,46 @@ func (c *controlPlaneClient) ListProjectCredentials(ctx context.Context, in *Lis
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListProjectCredentialsResponse)
 	err := c.cc.Invoke(ctx, ControlPlane_ListProjectCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) ListTaskSourceTypes(ctx context.Context, in *ListTaskSourceTypesRequest, opts ...grpc.CallOption) (*ListTaskSourceTypesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTaskSourceTypesResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_ListTaskSourceTypes_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) CreateTaskSource(ctx context.Context, in *CreateTaskSourceRequest, opts ...grpc.CallOption) (*CreateTaskSourceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateTaskSourceResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_CreateTaskSource_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) UpdateTaskSource(ctx context.Context, in *UpdateTaskSourceRequest, opts ...grpc.CallOption) (*UpdateTaskSourceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateTaskSourceResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_UpdateTaskSource_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *controlPlaneClient) DeleteTaskSource(ctx context.Context, in *DeleteTaskSourceRequest, opts ...grpc.CallOption) (*DeleteTaskSourceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteTaskSourceResponse)
+	err := c.cc.Invoke(ctx, ControlPlane_DeleteTaskSource_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -406,6 +458,14 @@ type ControlPlaneServer interface {
 	SetProjectCredential(context.Context, *SetProjectCredentialRequest) (*SetProjectCredentialResponse, error)
 	ClearProjectCredential(context.Context, *ClearProjectCredentialRequest) (*ClearProjectCredentialResponse, error)
 	ListProjectCredentials(context.Context, *ListProjectCredentialsRequest) (*ListProjectCredentialsResponse, error)
+	// ListTaskSourceTypes is the discovery RPC #294 introduces: every
+	// TaskSourceType this orchestrator has a descriptor for, field by field.
+	// It is what lets the console render a create/edit form generically
+	// instead of hardcoding one per provider.
+	ListTaskSourceTypes(context.Context, *ListTaskSourceTypesRequest) (*ListTaskSourceTypesResponse, error)
+	CreateTaskSource(context.Context, *CreateTaskSourceRequest) (*CreateTaskSourceResponse, error)
+	UpdateTaskSource(context.Context, *UpdateTaskSourceRequest) (*UpdateTaskSourceResponse, error)
+	DeleteTaskSource(context.Context, *DeleteTaskSourceRequest) (*DeleteTaskSourceResponse, error)
 	CreateRunnerRegistrationToken(context.Context, *CreateRunnerRegistrationTokenRequest) (*CreateRunnerRegistrationTokenResponse, error)
 	ListRunnerRegistrationTokens(context.Context, *ListRunnerRegistrationTokensRequest) (*ListRunnerRegistrationTokensResponse, error)
 	RevokeRunnerRegistrationToken(context.Context, *RevokeRunnerRegistrationTokenRequest) (*RevokeRunnerRegistrationTokenResponse, error)
@@ -464,6 +524,18 @@ func (UnimplementedControlPlaneServer) ClearProjectCredential(context.Context, *
 }
 func (UnimplementedControlPlaneServer) ListProjectCredentials(context.Context, *ListProjectCredentialsRequest) (*ListProjectCredentialsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListProjectCredentials not implemented")
+}
+func (UnimplementedControlPlaneServer) ListTaskSourceTypes(context.Context, *ListTaskSourceTypesRequest) (*ListTaskSourceTypesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListTaskSourceTypes not implemented")
+}
+func (UnimplementedControlPlaneServer) CreateTaskSource(context.Context, *CreateTaskSourceRequest) (*CreateTaskSourceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateTaskSource not implemented")
+}
+func (UnimplementedControlPlaneServer) UpdateTaskSource(context.Context, *UpdateTaskSourceRequest) (*UpdateTaskSourceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateTaskSource not implemented")
+}
+func (UnimplementedControlPlaneServer) DeleteTaskSource(context.Context, *DeleteTaskSourceRequest) (*DeleteTaskSourceResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteTaskSource not implemented")
 }
 func (UnimplementedControlPlaneServer) CreateRunnerRegistrationToken(context.Context, *CreateRunnerRegistrationTokenRequest) (*CreateRunnerRegistrationTokenResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CreateRunnerRegistrationToken not implemented")
@@ -719,6 +791,78 @@ func _ControlPlane_ListProjectCredentials_Handler(srv interface{}, ctx context.C
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ControlPlaneServer).ListProjectCredentials(ctx, req.(*ListProjectCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_ListTaskSourceTypes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTaskSourceTypesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).ListTaskSourceTypes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_ListTaskSourceTypes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).ListTaskSourceTypes(ctx, req.(*ListTaskSourceTypesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_CreateTaskSource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTaskSourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).CreateTaskSource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_CreateTaskSource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).CreateTaskSource(ctx, req.(*CreateTaskSourceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_UpdateTaskSource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateTaskSourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).UpdateTaskSource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_UpdateTaskSource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).UpdateTaskSource(ctx, req.(*UpdateTaskSourceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ControlPlane_DeleteTaskSource_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteTaskSourceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControlPlaneServer).DeleteTaskSource(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControlPlane_DeleteTaskSource_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControlPlaneServer).DeleteTaskSource(ctx, req.(*DeleteTaskSourceRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1104,6 +1248,22 @@ var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListProjectCredentials",
 			Handler:    _ControlPlane_ListProjectCredentials_Handler,
+		},
+		{
+			MethodName: "ListTaskSourceTypes",
+			Handler:    _ControlPlane_ListTaskSourceTypes_Handler,
+		},
+		{
+			MethodName: "CreateTaskSource",
+			Handler:    _ControlPlane_CreateTaskSource_Handler,
+		},
+		{
+			MethodName: "UpdateTaskSource",
+			Handler:    _ControlPlane_UpdateTaskSource_Handler,
+		},
+		{
+			MethodName: "DeleteTaskSource",
+			Handler:    _ControlPlane_DeleteTaskSource_Handler,
 		},
 		{
 			MethodName: "CreateRunnerRegistrationToken",

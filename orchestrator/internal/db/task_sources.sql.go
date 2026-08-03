@@ -11,6 +11,127 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createProjectTaskSource = `-- name: CreateProjectTaskSource :exec
+INSERT INTO app.project_task_sources (id, project_id, provider, name, enabled, configuration)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+`
+
+type CreateProjectTaskSourceParams struct {
+	ID        string
+	ProjectID string
+	Provider  string
+	Name      string
+	Enabled   bool
+	Column6   []byte
+}
+
+func (q *Queries) CreateProjectTaskSource(ctx context.Context, arg CreateProjectTaskSourceParams) error {
+	_, err := q.db.Exec(ctx, createProjectTaskSource,
+		arg.ID,
+		arg.ProjectID,
+		arg.Provider,
+		arg.Name,
+		arg.Enabled,
+		arg.Column6,
+	)
+	return err
+}
+
+const deleteProjectTaskSource = `-- name: DeleteProjectTaskSource :execrows
+DELETE FROM app.project_task_sources WHERE id = $1 AND project_id = $2
+`
+
+type DeleteProjectTaskSourceParams struct {
+	ID        string
+	ProjectID string
+}
+
+func (q *Queries) DeleteProjectTaskSource(ctx context.Context, arg DeleteProjectTaskSourceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteProjectTaskSource, arg.ID, arg.ProjectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getProjectTaskSource = `-- name: GetProjectTaskSource :one
+SELECT id::text AS id, project_id::text AS project_id, provider, name, enabled, configuration::text AS configuration, created_at, updated_at
+FROM app.project_task_sources
+WHERE id = $1 AND project_id = $2
+`
+
+type GetProjectTaskSourceParams struct {
+	ID        string
+	ProjectID string
+}
+
+type GetProjectTaskSourceRow struct {
+	ID            string
+	ProjectID     string
+	Provider      string
+	Name          string
+	Enabled       bool
+	Configuration string
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
+// Scoped by project_id as well as id so an UpdateProjectTaskSource/
+// DeleteProjectTaskSource caller cannot act on a source belonging to a
+// different project by guessing its id.
+func (q *Queries) GetProjectTaskSource(ctx context.Context, arg GetProjectTaskSourceParams) (GetProjectTaskSourceRow, error) {
+	row := q.db.QueryRow(ctx, getProjectTaskSource, arg.ID, arg.ProjectID)
+	var i GetProjectTaskSourceRow
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Provider,
+		&i.Name,
+		&i.Enabled,
+		&i.Configuration,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getProjectTaskSourceByID = `-- name: GetProjectTaskSourceByID :one
+SELECT id::text AS id, project_id::text AS project_id, provider, name, enabled, configuration::text AS configuration, created_at, updated_at
+FROM app.project_task_sources
+WHERE id = $1
+`
+
+type GetProjectTaskSourceByIDRow struct {
+	ID            string
+	ProjectID     string
+	Provider      string
+	Name          string
+	Enabled       bool
+	Configuration string
+	CreatedAt     pgtype.Timestamptz
+	UpdatedAt     pgtype.Timestamptz
+}
+
+// Used by Update/DeleteTaskSource, which only receive a task_source_id (its
+// project isn't known to the caller yet); app.project_task_sources.id is a
+// global primary key so this is unambiguous, and every write those handlers
+// go on to make still scopes by the project_id this returns.
+func (q *Queries) GetProjectTaskSourceByID(ctx context.Context, id string) (GetProjectTaskSourceByIDRow, error) {
+	row := q.db.QueryRow(ctx, getProjectTaskSourceByID, id)
+	var i GetProjectTaskSourceByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Provider,
+		&i.Name,
+		&i.Enabled,
+		&i.Configuration,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listProjectTaskSources = `-- name: ListProjectTaskSources :many
 
 SELECT id::text AS id, project_id::text AS project_id, provider, name, enabled, configuration::text AS configuration, created_at, updated_at
@@ -35,13 +156,15 @@ type ListProjectTaskSourcesRow struct {
 // scalar, dropped by migration 026) onto app.project_task_sources (1..N per
 // project, 0 valid).
 //
-// Only a read query is defined here for now. Creating, editing, enabling and
-// deleting a source needs the field-level descriptor #294 introduces (which
-// kind of source needs which configuration fields, and which of them are
-// secrets) to have a real write API rather than a hand-rolled one #294 would
-// have to redesign around anyway -- see the PR description for #293. Every
-// project already has at least its migrated default source from 026, so a
-// read-only surface is enough to make what is configured visible.
+// #294 adds the field-level descriptor (which configuration fields a
+// provider needs, and which of them are secrets) that makes a real write API
+// possible: CreateProjectTaskSource/UpdateProjectTaskSource/
+// DeleteProjectTaskSource below, each validated server-side against that
+// descriptor before ever reaching this file (see descriptor.go and
+// tasksources_rpc.go). Every project already has at least its migrated
+// default source from 026, so a project can never end up with a task source
+// whose provider this orchestrator has no descriptor for -- except that one
+// migrated row, which predates #294 and is left alone.
 func (q *Queries) ListProjectTaskSources(ctx context.Context, projectID string) ([]ListProjectTaskSourcesRow, error) {
 	rows, err := q.db.Query(ctx, listProjectTaskSources, projectID)
 	if err != nil {
@@ -69,4 +192,32 @@ func (q *Queries) ListProjectTaskSources(ctx context.Context, projectID string) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateProjectTaskSource = `-- name: UpdateProjectTaskSource :execrows
+UPDATE app.project_task_sources
+SET name = $3, enabled = $4, configuration = $5::jsonb, updated_at = now()
+WHERE id = $1 AND project_id = $2
+`
+
+type UpdateProjectTaskSourceParams struct {
+	ID        string
+	ProjectID string
+	Name      string
+	Enabled   bool
+	Column5   []byte
+}
+
+func (q *Queries) UpdateProjectTaskSource(ctx context.Context, arg UpdateProjectTaskSourceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateProjectTaskSource,
+		arg.ID,
+		arg.ProjectID,
+		arg.Name,
+		arg.Enabled,
+		arg.Column5,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

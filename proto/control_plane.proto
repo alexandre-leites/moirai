@@ -13,6 +13,14 @@ service ControlPlane {
   rpc SetProjectCredential(SetProjectCredentialRequest) returns (SetProjectCredentialResponse);
   rpc ClearProjectCredential(ClearProjectCredentialRequest) returns (ClearProjectCredentialResponse);
   rpc ListProjectCredentials(ListProjectCredentialsRequest) returns (ListProjectCredentialsResponse);
+  // ListTaskSourceTypes is the discovery RPC #294 introduces: every
+  // TaskSourceType this orchestrator has a descriptor for, field by field.
+  // It is what lets the console render a create/edit form generically
+  // instead of hardcoding one per provider.
+  rpc ListTaskSourceTypes(ListTaskSourceTypesRequest) returns (ListTaskSourceTypesResponse);
+  rpc CreateTaskSource(CreateTaskSourceRequest) returns (CreateTaskSourceResponse);
+  rpc UpdateTaskSource(UpdateTaskSourceRequest) returns (UpdateTaskSourceResponse);
+  rpc DeleteTaskSource(DeleteTaskSourceRequest) returns (DeleteTaskSourceResponse);
   rpc CreateRunnerRegistrationToken(CreateRunnerRegistrationTokenRequest) returns (CreateRunnerRegistrationTokenResponse);
   rpc ListRunnerRegistrationTokens(ListRunnerRegistrationTokensRequest) returns (ListRunnerRegistrationTokensResponse);
   rpc RevokeRunnerRegistrationToken(RevokeRunnerRegistrationTokenRequest) returns (RevokeRunnerRegistrationTokenResponse);
@@ -94,11 +102,91 @@ message TaskSource {
   // (e.g. two GitHub repositories feeding one project).
   string name = 3;
   bool enabled = 4;
-  // Provider-specific connection details (repo slug, JQL, team id, local
-  // path, ...) as a JSON object. Opaque until #294's descriptor gives each
-  // provider's configuration a documented shape; read-only here.
+  // Non-secret provider-specific connection details (repo slug, JQL, team
+  // id, local path, ...) as a JSON object, shaped by this provider's
+  // TaskSourceType descriptor (see ListTaskSourceTypes). Never contains a
+  // field the descriptor marks Secret -- those live only in `secrets` below,
+  // as configured/not-configured, never a value.
   string configuration = 5;
+  // One entry per Secret field this provider's descriptor declares, in
+  // declaration order, reporting only whether a value is configured for
+  // this source -- never the value itself. Mirrors ProjectCredential's own
+  // convention ("what is configured, never a value") extended to
+  // task-source-scoped secrets.
+  repeated TaskSourceSecretField secrets = 6;
 }
+
+message TaskSourceSecretField {
+  string key = 1;
+  bool configured = 2;
+}
+
+// TaskSourceField is one Field a TaskSourceType declares (see descriptor.go):
+// what the console needs to render an input for it, and what the server
+// needs to validate a submitted value against it.
+message TaskSourceField {
+  string key = 1;
+  string label = 2;
+  string help = 3;
+  // "text", "number", "bool", "enum", "string_list", or "secret".
+  string kind = 4;
+  bool required = 5;
+  // JSON-encoded default value (e.g. `"false"`, `"\"origin\""`), empty when
+  // the field has none. Always empty for a "secret" field.
+  string default_value = 6;
+  // Valid values for an "enum" field; empty for every other kind.
+  repeated string options = 7;
+  // A regexp a "text" field's value must match; empty when unconstrained.
+  string pattern = 8;
+}
+
+// TaskSourceTypeDescriptor is one provider's own declaration of what it
+// needs, as ListTaskSourceTypes reports it: an id (app.project_task_sources.
+// provider), a display name, and its fields.
+message TaskSourceTypeDescriptor {
+  string id = 1;
+  string display_name = 2;
+  repeated TaskSourceField fields = 3;
+}
+
+message ListTaskSourceTypesRequest {}
+message ListTaskSourceTypesResponse { repeated TaskSourceTypeDescriptor types = 1; }
+
+// CreateTaskSource/UpdateTaskSource validate `configuration` and `secrets`
+// against the named provider's TaskSourceTypeDescriptor server-side, using
+// the same descriptor ListTaskSourceTypes exposes, so the console's
+// generated form and the server's acceptance of it cannot disagree.
+message CreateTaskSourceRequest {
+  string project_id = 1;
+  string provider = 2;
+  string name = 3;
+  bool enabled = 4;
+  // Non-secret fields only, as a JSON object; a Secret-kind key here is
+  // rejected, not silently accepted.
+  string configuration = 5;
+  // Secret field key -> value, write-only. Every Required secret field must
+  // have an entry.
+  map<string, string> secrets = 6;
+}
+message CreateTaskSourceResponse { TaskSource task_source = 1; }
+
+message UpdateTaskSourceRequest {
+  string task_source_id = 1;
+  string name = 2;
+  bool enabled = 3;
+  string configuration = 4;
+  // Only the secret fields present here are replaced; a field this map
+  // omits keeps whatever was previously configured for it -- an edit that
+  // touches only an unrelated field must never blank a configured secret.
+  map<string, string> secrets = 5;
+  // Secret field keys to explicitly clear, mirroring ClearProjectCredential:
+  // clearing is deliberate and separate from "omitted means unchanged".
+  repeated string clear_secrets = 6;
+}
+message UpdateTaskSourceResponse { TaskSource task_source = 1; }
+
+message DeleteTaskSourceRequest { string task_source_id = 1; }
+message DeleteTaskSourceResponse {}
 message ListProjectsResponse { repeated Project projects = 1; }
 message ProjectConfiguration {
   string name = 1;

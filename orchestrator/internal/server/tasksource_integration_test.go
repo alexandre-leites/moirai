@@ -152,16 +152,25 @@ func TestSyncProjectWithZeroSourcesIsANoOp(t *testing.T) {
 	}
 }
 
-// excludeMigrationFS wraps the real migrations tree but hides one file from
-// directory listings, so migrate.Apply run against it stops one migration
-// short of the real schema -- what lets
-// TestMigration026BackfillsExistingProjects recreate a genuinely pre-#293
-// database (issue_tracker_type column, no app.project_task_sources) to
-// migrate forward from, rather than only ever exercising 026 against a
-// database that already has it applied.
+// excludeMigrationFS wraps the real migrations tree but hides every file
+// from excludeFrom onward (by filename, which sorts the same as by version
+// thanks to the fixed-width zero-padded numeric prefix) from directory
+// listings, so migrate.Apply run against it stops short of the real schema
+// -- what lets TestMigration026BackfillsExistingProjects recreate a
+// genuinely pre-#293 database (issue_tracker_type column, no
+// app.project_task_sources) to migrate forward from, rather than only ever
+// exercising 026 against a database that already has it applied.
+//
+// Excluding everything from excludeFrom onward, not just that one file, is
+// what keeps this test correct as later migrations are added: golang-migrate
+// tracks a single current version, so if a migration *after* 026 (027, say)
+// were still visible here, applying this filtered tree would advance the
+// tracked version straight past 026 without ever running it -- leaving 026
+// permanently skipped once the "apply the rest" step below sees nothing
+// pending.
 type excludeMigrationFS struct {
 	fs.FS
-	exclude string
+	excludeFrom string
 }
 
 func (e excludeMigrationFS) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -171,7 +180,7 @@ func (e excludeMigrationFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	kept := entries[:0]
 	for _, entry := range entries {
-		if entry.Name() != e.exclude {
+		if entry.Name() < e.excludeFrom {
 			kept = append(kept, entry)
 		}
 	}
@@ -239,7 +248,7 @@ func TestMigration026BackfillsExistingProjects(t *testing.T) {
 	dbURL := scratchDatabaseURL(t, "loop_migration_test_293")
 	ctx := context.Background()
 
-	preSchema := excludeMigrationFS{FS: os.DirFS("../.."), exclude: "026_project_task_sources.sql"}
+	preSchema := excludeMigrationFS{FS: os.DirFS("../.."), excludeFrom: "026_project_task_sources.sql"}
 	if err := migrate.Apply(ctx, dbURL, preSchema); err != nil {
 		t.Fatalf("apply pre-#293 migrations: %v", err)
 	}
