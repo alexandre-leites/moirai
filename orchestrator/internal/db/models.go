@@ -99,6 +99,7 @@ type AppJob struct {
 	StartedAt         pgtype.Timestamptz
 	FinishedAt        pgtype.Timestamptz
 	RecoveryReason    pgtype.Text
+	Role              string
 }
 
 type AppJobOffer struct {
