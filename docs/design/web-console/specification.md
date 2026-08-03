@@ -249,8 +249,8 @@ List endpoints take `limit` (default 50, max 200) and opaque `cursor` pagination
 ### 4.2 Endpoints to widen (existing route, richer payload)
 
 - **`GET /api/v1/workflows`** — today returns `{id, projectId, status, phase}`. The orchestrator's
-  `list_workflows()` already computes more (`persistence/control_plane.py`); widen the proto
-  `Workflow` message and response to:
+  `ListWorkflows` RPC (`orchestrator/internal/server/server.go`) already computes more; widen the
+  proto `Workflow` message and response to:
   `id, projectId, projectName, issueNumber, issueTitle, status, phase, runnerId, branchName,
   pullRequest {number, url, checksState}, attempts {planning, implementation, pipelineRepair,
   reviewCycles, ciRepair, totalExecutions — each as {used, budget}}, blockingReason,
@@ -270,8 +270,8 @@ List endpoints take `limit` (default 50, max 200) and opaque `cursor` pagination
 
 - **`GET /api/v1/workflows/{id}`** — single workflow, same shape as the widened list item plus
   `gates {planValid, pipelinePassed, reviewApproved, checksPassed, humanApproval}` where each gate
-  is `passed|failed|pending|not_reached` (derived from checkpoint state / result tables), and
-  `baseCommit, currentCommit, threadId`.
+  is `passed|failed|pending|not_reached` (derived from `workflow_runs` status/phase and the
+  attempt/result columns), and `baseCommit, currentCommit, threadId`.
 - **`GET /api/v1/workflows/{id}/events?after=<id>&limit=`** — from `app.workflow_events`:
   `{id, eventType, phase, severity, message, payload, createdAt}`. `message` is a human-readable
   one-liner rendered server-side (orchestrator) from `event_type` + payload so the web layer never
@@ -281,7 +281,8 @@ List endpoints take `limit` (default 50, max 200) and opaque `cursor` pagination
   events for the workflow's current/last execution (already redacted and size-capped by the
   runner). Plain text response.
 - **`GET /api/v1/queue`** — the scheduler's eligible-issue view, in true global priority order
-  (reuse the ordering in `domain/scheduling.py` — priority desc, then external created-at, queued
+  (reuse the ordering the scheduler's claim query and `ListQueue` already agree on, both in
+  `orchestrator/internal/server/server.go` — priority desc, then external created-at, queued
   time, project id, external id). Item: `{position, projectId, projectName, issueNumber, title,
   url, labels, priority, waitingSince, holdReason}`. `holdReason` is computed server-side, one of:
   `project_busy {activeWorkflowId}`, `circuit_open {probeEtaSeconds}`, `no_compatible_runner`,
@@ -291,8 +292,9 @@ List endpoints take `limit` (default 50, max 200) and opaque `cursor` pagination
 - **`GET /api/v1/circuits`** — union of project and provider circuit tables:
   `{scope: "project"|"provider", id, name, state, consecutiveFailures, lastFailureReason,
   openedAt, probeWorkflowRunId, probeEtaSeconds}`.
-- **`GET /api/v1/system/health`** — the orchestrator health snapshot (`health.py`) over gRPC
-  instead of the file: `{healthy, checkpointerEnabled, dbOk, dbCheckedSecondsAgo,
+- **`GET /api/v1/system/health`** — an orchestrator health snapshot over gRPC. There is no health
+  file any more: the Go orchestrator persists state straight to Postgres and writes none.
+  `{healthy, durablePersistenceEnabled, dbOk, dbCheckedSecondsAgo,
   schedulerLastTickSecondsAgo, issueSyncLastRunSecondsAgo, deadLoops, updatedAt}` plus counters
   the System view needs: `{outboxPending, outboxProcessing, openExecutionRequests,
   oldestDispatchedExecutionRequestAgeSeconds}`.
