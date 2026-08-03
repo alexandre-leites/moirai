@@ -1,5 +1,5 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
-SQLC_IMAGE ?= sqlc/sqlc:1.29.0
+SQLC_VERSION ?= v1.29.0
 GO ?= go
 
 .PHONY: help test lint typecheck validate compose compose-overlays \
@@ -88,8 +88,16 @@ proto-check: proto-lint proto-generate
 # orchestrator/README.md): queries live in orchestrator/internal/db/queries as
 # .sql files, and this is how the Go bindings in orchestrator/internal/db are
 # produced from them.
+#
+# Installed as a native binary (not run via Docker): a Docker bind mount only
+# works when the path visible to the invoking process is also the path the
+# Docker daemon can see, which fails whenever the two are separated by a
+# container boundary of their own -- exactly the layout some self-hosted
+# runners use. `go install` sidesteps the mismatch entirely and produces the
+# same pinned output.
 sqlc-generate:
-	docker run --rm -v "$(CURDIR)/orchestrator:/src" -w /src --user "$$(id -u):$$(id -g)" $(SQLC_IMAGE) generate
+	GOBIN="$$($(GO) env GOPATH)/bin" $(GO) install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
+	cd orchestrator && "$$($(GO) env GOPATH)/bin/sqlc" generate
 
 sqlc-check: sqlc-generate
 	git diff --exit-code -- orchestrator/internal/db

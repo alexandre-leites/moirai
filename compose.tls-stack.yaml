@@ -119,6 +119,7 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    stop_grace_period: 20s
     volumes:
       - read_only: true
         source: tls

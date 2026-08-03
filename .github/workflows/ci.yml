@@ -71,6 +71,18 @@ jobs:
   test-postgres-integration:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    # Runs in a container with the service's published port reached over
+    # --network host, not directly on the runner: a job that runs directly on
+    # the runner depends on the *runner machine's* own network stack seeing
+    # the service's host-published port, which breaks for any self-hosted
+    # runner that itself executes inside a container without a network
+    # namespace shared with the Docker host -- the "connection refused to
+    # localhost:5432" failure mode this replaced. --network host attaches this
+    # container to the same host network the service's port is actually
+    # published on, regardless of the runner process's own namespace.
+    container:
+      image: golang:1.25.12
+      options: --network host
     env:
       LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
     services:
@@ -186,6 +198,19 @@ jobs:
       - run: npm i -g "npm@${NPM_VERSION}"
       - run: make build-web
 
+  # `compose-smoke` below only proves each overlay parses; it does not catch
+  # a generated file drifting from the sources it's rendered from. That gap is
+  # how compose.tls-stack.yaml shipped missing the stop_grace_period #323 added
+  # to compose.yaml -- `make compose-overlays` (which includes the
+  # render-tls-stack.sh --check that would have caught it) was wired into
+  # `make validate` but never into a CI job, so it never actually ran.
+  compose-overlays:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: make compose-overlays
+
   compose-smoke:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
@@ -299,7 +324,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true
