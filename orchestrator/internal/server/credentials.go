@@ -184,6 +184,15 @@ func (s *Server) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobS
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	if rowsAffected == 1 {
+		// Unlike SetProjectCredential/ClearProjectCredential, this mutation is
+		// initiated by a runner rotating its own agent credential rather than
+		// by an admin, so the runner (not a user) is recorded as the actor --
+		// it is otherwise the one credential write that leaves no audit trail.
+		if err := audit(ctx, s.queries, request.GetRunnerId(), "project.credential.rotated", "project", projectID); err != nil {
+			return nil, err
+		}
+	}
 	return &runnerv1.StoreJobSecretResponse{Stored: rowsAffected == 1}, nil
 }
 

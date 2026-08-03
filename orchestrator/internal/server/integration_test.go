@@ -34,7 +34,9 @@ import (
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 )
 
 type harness struct {
@@ -1703,6 +1705,105 @@ func TestListWorkflowsIsBoundedAndBatched(t *testing.T) {
 	// constant ceiling still catches a regression back to per-row queries.
 	if issued > 5 {
 		t.Fatalf("ListWorkflows issued %d queries for %d workflow runs, want a small constant regardless of row count", issued, total)
+	}
+}
+
+// tlsPeerContext attaches credentials.TLSInfo to the context the way a real
+// TLS-terminated gRPC connection would, which is what secureContext checks
+// before StoreJobSecret/ResolveJobSecret will run at all.
+func tlsPeerContext(ctx context.Context) context.Context {
+	return peer.NewContext(ctx, &peer.Peer{AuthInfo: credentials.TLSInfo{}})
+}
+
+// TestStoreJobSecretWritesAnAuditEntry pins #286: StoreJobSecret is the one
+// credential mutation initiated by a runner rather than an admin, and it used
+// to leave no trail at all in app.audit_events. The runner id is recorded as
+// the actor, distinguishing this rotation from the admin-driven
+// project.credential.set/clear entries credentials.go already writes.
+func TestStoreJobSecretWritesAnAuditEntry(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
+
+	projectID, _ := h.project()
+	runnerID := h.runner()
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret("runner-credential"))
+	// StoreJobSecret only ever rotates an existing credential (its query is an
+	// UPDATE, not an upsert), so a row must already exist for the kind.
+	h.exec(`INSERT INTO app.project_credentials(project_id,kind,ciphertext,nonce) VALUES($1,'agent:OPENROUTER_API_KEY','\x00'::bytea,'\x00'::bytea)`, projectID)
+	jobID, _ := h.runJob(runnerID)
+	var generation int64
+	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+		RunnerId:        runnerID,
+		JobId:           jobID,
+		Credential:      "runner-credential",
+		LeaseGeneration: generation,
+		Name:            "OPENROUTER_API_KEY",
+		Value:           "rotated-secret-value",
+	})
+	if err != nil {
+		t.Fatalf("StoreJobSecret: %v", err)
+	}
+	if !resp.GetStored() {
+		t.Fatal("StoreJobSecret reported the credential was not stored")
+	}
+
+	var actorID, action, targetType, targetID string
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT actor_id, action, target_type, target_id FROM app.audit_events WHERE action = 'project.credential.rotated'`,
+	).Scan(&actorID, &action, &targetType, &targetID); err != nil {
+		t.Fatalf("no audit entry was recorded for StoreJobSecret: %v", err)
+	}
+	if actorID != runnerID {
+		t.Fatalf("audit actor_id = %q, want the rotating runner %q", actorID, runnerID)
+	}
+	if targetType != "project" || targetID != projectID {
+		t.Fatalf("audit target = (%q,%q), want (project,%q)", targetType, targetID, projectID)
+	}
+}
+
+// TestStoreJobSecretRecordsNoAuditEntryWhenNothingWasStored guards the audit
+// entry against the same false-positive it would otherwise inherit from
+// rowsAffected==0: rotating a credential kind the project never configured is
+// still accepted by the RPC (Stored=false) but must not claim a rotation that
+// did not happen.
+func TestStoreJobSecretRecordsNoAuditEntryWhenNothingWasStored(t *testing.T) {
+	h := newHarness(t)
+	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
+
+	_, _ = h.project()
+	runnerID := h.runner()
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret("runner-credential"))
+	jobID, _ := h.runJob(runnerID)
+	var generation int64
+	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+		RunnerId:        runnerID,
+		JobId:           jobID,
+		Credential:      "runner-credential",
+		LeaseGeneration: generation,
+		Name:            "OPENROUTER_API_KEY",
+		Value:           "rotated-secret-value",
+	})
+	if err != nil {
+		t.Fatalf("StoreJobSecret: %v", err)
+	}
+	if resp.GetStored() {
+		t.Fatal("StoreJobSecret reported the credential was stored, but no row existed to rotate")
+	}
+
+	var count int
+	if err := h.pool.QueryRow(context.Background(), `SELECT count(*) FROM app.audit_events WHERE action = 'project.credential.rotated'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("audit_events has %d project.credential.rotated entries, want 0 when nothing was stored", count)
 	}
 }
 

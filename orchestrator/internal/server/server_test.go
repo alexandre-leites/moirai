@@ -637,3 +637,32 @@ func TestPasswordMatchesLogsUnparseableHashWithoutChangingItsResult(t *testing.T
 		t.Fatal("expected the unparseable-hash cause to be logged for an operator")
 	}
 }
+
+// TestJsonLabelsPropagatesItsMarshalError pins #286: jsonLabels used to
+// discard json.Marshal's error and hand the caller an empty string, which is
+// not valid JSON but was still fed into the jsonb containment check that
+// authorizes runner registration and into the labels stored on the runner
+// row itself. []string cannot actually fail to marshal (every element is a
+// valid, already-in-memory Go string), so the failure path here is
+// correct-by-construction rather than reachable from production input; this
+// test instead pins the two properties that make it safe to keep infallible:
+// the happy path still produces the exact JSON encoding callers persist, and
+// the function's shape is (string, error) so a hypothetical future failure
+// cannot be silently reintroduced by a caller that stops checking it.
+func TestJsonLabelsPropagatesItsMarshalError(t *testing.T) {
+	encoded, err := jsonLabels([]string{"linux", "docker"})
+	if err != nil {
+		t.Fatalf("jsonLabels error = %v, want nil for a valid label set", err)
+	}
+	if encoded != `["linux","docker"]` {
+		t.Fatalf("jsonLabels = %q, want the exact json.Marshal encoding", encoded)
+	}
+
+	empty, err := jsonLabels(nil)
+	if err != nil {
+		t.Fatalf("jsonLabels(nil) error = %v, want nil", err)
+	}
+	if empty != "null" {
+		t.Fatalf("jsonLabels(nil) = %q, want the literal JSON null json.Marshal(nil) produces", empty)
+	}
+}

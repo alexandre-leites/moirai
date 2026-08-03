@@ -193,7 +193,11 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 	// second boot leaves an expired row in place and every runner registration
 	// is refused with a message that suggests a wrong token. A token that has
 	// already been redeemed keeps its used_at and stays redeemed.
-	err = s.queries.UpsertSeedRunnerRegistrationToken(ctx, db.UpsertSeedRunnerRegistrationTokenParams{ID: newID(), TokenHash: hashSecret(token), Column3: []byte(jsonLabels(labels))})
+	encodedLabels, err := jsonLabels(labels)
+	if err != nil {
+		return err
+	}
+	err = s.queries.UpsertSeedRunnerRegistrationToken(ctx, db.UpsertSeedRunnerRegistrationTokenParams{ID: newID(), TokenHash: hashSecret(token), Column3: []byte(encodedLabels)})
 	return databaseError(err)
 }
 
@@ -286,7 +290,10 @@ func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreatePro
 		return nil, err
 	}
 	id := newID()
-	encoded, _ := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
+	if err != nil {
+		return nil, status.Error(codes.Internal, "encode project configuration")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, databaseError(err)
@@ -328,7 +335,10 @@ func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdatePro
 	if err != nil {
 		return nil, err
 	}
-	encoded, _ := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds()})
+	if err != nil {
+		return nil, status.Error(codes.Internal, "encode project configuration")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, databaseError(err)
@@ -624,8 +634,14 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 	// 'open' -- and therefore schedulable -- forever just because a sync that
 	// only ever asked for open issues could never observe the close.
 	for _, issue := range issues {
-		labels, _ := json.Marshal(issue.Labels)
-		raw, _ := json.Marshal(issue)
+		labels, err := json.Marshal(issue.Labels)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(issue)
+		if err != nil {
+			return err
+		}
 		if err := queries.UpsertIssue(ctx, db.UpsertIssueParams{
 			ID: newID(), ProjectID: projectID, ExternalID: issue.ExternalID, Title: issue.Title, Body: issue.Body, Url: issue.URL,
 			State: issue.State, Column8: labels, Priority: int32(issue.Priority), Eligible: issue.Eligible,
@@ -854,13 +870,17 @@ func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterR
 	if capacity > 1024 || request.GetToken() == "" {
 		return nil, status.Error(codes.InvalidArgument, "runner registration request is invalid")
 	}
+	encodedLabels, err := jsonLabels(labels)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "encode runner labels")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, databaseError(err)
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	tokenID, err := queries.SelectValidRegistrationToken(ctx, db.SelectValidRegistrationTokenParams{TokenHash: hashSecret(request.GetToken()), Column2: []byte(jsonLabels(labels))})
+	tokenID, err := queries.SelectValidRegistrationToken(ctx, db.SelectValidRegistrationTokenParams{TokenHash: hashSecret(request.GetToken()), Column2: []byte(encodedLabels)})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.PermissionDenied, "runner registration was rejected")
 	}
@@ -868,7 +888,7 @@ func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterR
 		return nil, databaseError(err)
 	}
 	runnerID, credential := newID(), randomSecret()
-	if err := queries.CreateRunner(ctx, db.CreateRunnerParams{ID: runnerID, Name: strings.TrimSpace(request.GetName()), Column3: []byte(jsonLabels(labels)), Capacity: capacity}); err != nil {
+	if err := queries.CreateRunner(ctx, db.CreateRunnerParams{ID: runnerID, Name: strings.TrimSpace(request.GetName()), Column3: []byte(encodedLabels), Capacity: capacity}); err != nil {
 		return nil, databaseError(err)
 	}
 	if err := queries.CreateRunnerCredential(ctx, db.CreateRunnerCredentialParams{ID: newID(), RunnerID: runnerID, CredentialHash: hashSecret(credential)}); err != nil {
@@ -1881,7 +1901,19 @@ func hashSecret(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
 }
-func jsonLabels(labels []string) string { encoded, _ := json.Marshal(labels); return string(encoded) }
+
+// jsonLabels marshals a runner/token label set for a jsonb column. The input
+// is always a caller-controlled []string, so marshaling is infallible in
+// practice -- but a discarded error here used to turn a marshal failure into
+// an empty string silently fed to a jsonb containment check deciding runner
+// registration authorization, so the error is surfaced rather than swallowed.
+func jsonLabels(labels []string) (string, error) {
+	encoded, err := json.Marshal(labels)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
 
 func terminalEvent(event string) bool {
 	return event == "completed" || event == "failed" || event == "cancelled"
