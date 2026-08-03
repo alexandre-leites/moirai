@@ -64,11 +64,11 @@ func redactSecrets(value string) string {
 }
 
 type GitHub interface {
-	ListIssues(context.Context, string) ([]githubIssue, error)
-	FindOrCreatePR(context.Context, string, string, string, string, string) (githubPR, error)
-	Checks(context.Context, string, string) (checkState, error)
-	MergeSquash(context.Context, string, string) error
-	Merged(context.Context, string, string) (bool, error)
+	ListIssues(ctx context.Context, repository string) ([]githubIssue, error)
+	FindOrCreatePR(ctx context.Context, repository, branch, base, title, body string) (githubPR, error)
+	Checks(ctx context.Context, repository, number string) (checkState, error)
+	MergeSquash(ctx context.Context, repository, number string) error
+	Merged(ctx context.Context, repository, number string) (bool, error)
 }
 
 type githubCLI struct{ command Command }
