@@ -45,6 +45,7 @@ type Querier interface {
 	CreateProject(ctx context.Context, arg CreateProjectParams) error
 	CreateProjectLock(ctx context.Context, arg CreateProjectLockParams) (int64, error)
 	CreateProjectPipelineStep(ctx context.Context, arg CreateProjectPipelineStepParams) error
+	CreateProjectTaskSource(ctx context.Context, arg CreateProjectTaskSourceParams) error
 	CreateRetryEvent(ctx context.Context, workflowRunID string) error
 	CreateRunner(ctx context.Context, arg CreateRunnerParams) error
 	CreateRunnerCredential(ctx context.Context, arg CreateRunnerCredentialParams) error
@@ -57,6 +58,7 @@ type Querier interface {
 	DeleteProjectLock(ctx context.Context, arg DeleteProjectLockParams) error
 	DeleteProjectLockByWorkflow(ctx context.Context, workflowRunID string) error
 	DeleteProjectPipelineSteps(ctx context.Context, projectID string) error
+	DeleteProjectTaskSource(ctx context.Context, arg DeleteProjectTaskSourceParams) (int64, error)
 	DrainRunner(ctx context.Context, id string) (int64, error)
 	EnableRunner(ctx context.Context, id string) (int64, error)
 	ExpireUnansweredOffers(ctx context.Context, unansweredOffer pgtype.Interval) error
@@ -89,6 +91,15 @@ type Querier interface {
 	// single-source project's credential (set before this migration,
 	// necessarily project-level) working unchanged after 026.
 	GetProjectCredentialSecret(ctx context.Context, arg GetProjectCredentialSecretParams) (GetProjectCredentialSecretRow, error)
+	// Scoped by project_id as well as id so an UpdateProjectTaskSource/
+	// DeleteProjectTaskSource caller cannot act on a source belonging to a
+	// different project by guessing its id.
+	GetProjectTaskSource(ctx context.Context, arg GetProjectTaskSourceParams) (GetProjectTaskSourceRow, error)
+	// Used by Update/DeleteTaskSource, which only receive a task_source_id (its
+	// project isn't known to the caller yet); app.project_task_sources.id is a
+	// global primary key so this is unambiguous, and every write those handlers
+	// go on to make still scopes by the project_id this returns.
+	GetProjectTaskSourceByID(ctx context.Context, id string) (GetProjectTaskSourceByIDRow, error)
 	GetRunner(ctx context.Context, id string) (GetRunnerRow, error)
 	GetRunnerCredentialHash(ctx context.Context, id string) (string, error)
 	// The oldest heartbeat is returned as a raw timestamp (rather than an
@@ -146,13 +157,15 @@ type Querier interface {
 	// scalar, dropped by migration 026) onto app.project_task_sources (1..N per
 	// project, 0 valid).
 	//
-	// Only a read query is defined here for now. Creating, editing, enabling and
-	// deleting a source needs the field-level descriptor #294 introduces (which
-	// kind of source needs which configuration fields, and which of them are
-	// secrets) to have a real write API rather than a hand-rolled one #294 would
-	// have to redesign around anyway -- see the PR description for #293. Every
-	// project already has at least its migrated default source from 026, so a
-	// read-only surface is enough to make what is configured visible.
+	// #294 adds the field-level descriptor (which configuration fields a
+	// provider needs, and which of them are secrets) that makes a real write API
+	// possible: CreateProjectTaskSource/UpdateProjectTaskSource/
+	// DeleteProjectTaskSource below, each validated server-side against that
+	// descriptor before ever reaching this file (see descriptor.go and
+	// tasksources_rpc.go). Every project already has at least its migrated
+	// default source from 026, so a project can never end up with a task source
+	// whose provider this orchestrator has no descriptor for -- except that one
+	// migrated row, which predates #294 and is left alone.
 	ListProjectTaskSources(ctx context.Context, projectID string) ([]ListProjectTaskSourcesRow, error)
 	ListQueueEntries(ctx context.Context, limit int32) ([]ListQueueEntriesRow, error)
 	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
@@ -249,6 +262,7 @@ type Querier interface {
 	TerminateWorkflowRun(ctx context.Context, arg TerminateWorkflowRunParams) (string, error)
 	UpdateProject(ctx context.Context, arg UpdateProjectParams) (int64, error)
 	UpdateProjectCredentialSecret(ctx context.Context, arg UpdateProjectCredentialSecretParams) (int64, error)
+	UpdateProjectTaskSource(ctx context.Context, arg UpdateProjectTaskSourceParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) error
 	// eligible is written unconditionally from the tracker's labels (see

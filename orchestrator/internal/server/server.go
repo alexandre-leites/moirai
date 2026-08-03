@@ -1777,6 +1777,7 @@ type projectQuerier interface {
 	GetProject(context.Context, string) (db.GetProjectRow, error)
 	ListProjectPipelineSteps(context.Context, string) ([]db.ListProjectPipelineStepsRow, error)
 	ListProjectTaskSources(context.Context, string) ([]db.ListProjectTaskSourcesRow, error)
+	ListProjectCredentials(context.Context, string) ([]db.ListProjectCredentialsRow, error)
 }
 
 func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (*controlv1.Project, error) {
@@ -1824,9 +1825,15 @@ func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (
 		return nil, databaseError(err)
 	}
 	for _, source := range sources {
-		project.TaskSources = append(project.TaskSources, &controlv1.TaskSource{
-			Id: source.ID, Provider: source.Provider, Name: source.Name, Enabled: source.Enabled, Configuration: source.Configuration,
-		})
+		// taskSourceProto (tasksources_rpc.go) is the one place that decides
+		// what a TaskSource's `secrets` field reports: every read of a
+		// project's sources, not just the CRUD RPCs #294 adds, must show
+		// "configured/not configured" rather than ever a value.
+		taskSource, err := taskSourceProto(ctx, queries, source.ID, source.ProjectID, source.Provider, source.Name, source.Enabled, source.Configuration)
+		if err != nil {
+			return nil, err
+		}
+		project.TaskSources = append(project.TaskSources, taskSource)
 	}
 	return project, nil
 }
