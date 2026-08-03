@@ -332,6 +332,7 @@ type AppWorkflowRun struct {
 	HumanResumePhase        pgtype.Text
 	HumanGuidance           pgtype.Text
 	GithubCheckPollAttempts int32
+	SupersededAt            pgtype.Timestamptz
 	DeliveryAttempts        int32
 }
 

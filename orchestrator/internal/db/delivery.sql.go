@@ -106,15 +106,6 @@ func (q *Queries) InsertWorkflowTerminationEvent(ctx context.Context, arg Insert
 	return err
 }
 
-const markIssueIneligible = `-- name: MarkIssueIneligible :exec
-UPDATE app.issues SET eligible = false WHERE id = $1
-`
-
-func (q *Queries) MarkIssueIneligible(ctx context.Context, id string) error {
-	_, err := q.db.Exec(ctx, markIssueIneligible, id)
-	return err
-}
-
 const markPullRequestMerged = `-- name: MarkPullRequestMerged :exec
 UPDATE app.pull_requests SET state = 'merged', merged_at = now() WHERE workflow_run_id = $1
 `

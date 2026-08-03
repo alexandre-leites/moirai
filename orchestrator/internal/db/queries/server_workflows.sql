@@ -48,9 +48,13 @@ FROM app.workflow_runs
 WHERE id = $1
 FOR UPDATE;
 
--- name: ReopenIssueForRetry :exec
-UPDATE app.issues SET eligible = true
-WHERE app.issues.id = (SELECT wr.issue_id FROM app.workflow_runs wr WHERE wr.id = $1) AND state = 'open';
+-- name: SupersedeWorkflowRun :exec
+-- Retry no longer writes app.issues.eligible directly (see #268 and migration
+-- 023): the issue's eligible bit stays purely label-driven, and marking this
+-- run superseded is what lets the scheduler's app.workflow_runs join stop
+-- excluding its issue on this run's account. A fresh run is what actually
+-- reopens the work; this only clears the way for one.
+UPDATE app.workflow_runs SET superseded_at = now() WHERE id = $1 AND superseded_at IS NULL;
 
 -- name: CreateRetryEvent :exec
 INSERT INTO app.workflow_events(workflow_run_id, event_type, severity, payload)

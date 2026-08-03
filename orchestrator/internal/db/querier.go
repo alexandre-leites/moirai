@@ -80,6 +80,11 @@ type Querier interface {
 	InsertPullRequestCreatedEvent(ctx context.Context, arg InsertPullRequestCreatedEventParams) error
 	InsertPullRequestMergedEvent(ctx context.Context, workflowRunID string) error
 	InsertWorkflowTerminationEvent(ctx context.Context, arg InsertWorkflowTerminationEventParams) error
+	// eligible_count matches the scheduler's own candidate set (ListQueueEntries,
+	// ClaimSchedulableIssue), not the bare label bit: an issue opted in by label
+	// but sitting on a failed, blocked or delivered run that has not been
+	// superseded by a retry is not actually schedulable, and the sidebar badge
+	// would otherwise overcount it.
 	IssueSyncStatusEntries(ctx context.Context) ([]IssueSyncStatusEntriesRow, error)
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
 	ListProjectIDs(ctx context.Context) ([]string, error)
@@ -96,13 +101,11 @@ type Querier interface {
 	// most recent $1 rows -- see the pr.external_id/wr.pull_request_external_id
 	// comment on GetWorkflowDetail below for why those aren't COALESCEd in SQL.
 	ListWorkflowsPage(ctx context.Context, limit int32) ([]ListWorkflowsPageRow, error)
-	MarkIssueIneligible(ctx context.Context, id string) error
 	MarkPullRequestMerged(ctx context.Context, workflowRunID string) error
 	MarkRegistrationTokenUsed(ctx context.Context, id string) error
 	MarkStaleRunnersOffline(ctx context.Context, staleRunner pgtype.Interval) error
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
-	ParkIssue(ctx context.Context, id string) error
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
 	RecordRunnerHeartbeat(ctx context.Context, arg RecordRunnerHeartbeatParams) error
@@ -115,7 +118,6 @@ type Querier interface {
 	// these retries into spaced-out attempts instead of a tight loop.
 	RecordTransientDeliveryFailure(ctx context.Context, id string) (int32, error)
 	RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (pgtype.Timestamptz, error)
-	ReopenIssueForRetry(ctx context.Context, id string) error
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
 	RevokeRunner(ctx context.Context, id string) (int64, error)
 	RevokeRunnerCredentials(ctx context.Context, runnerID string) error
@@ -130,11 +132,23 @@ type Querier interface {
 	SetWorkflowControlStatus(ctx context.Context, arg SetWorkflowControlStatusParams) error
 	SetWorkflowPreparing(ctx context.Context, id string) error
 	SetWorkflowTerminalStatus(ctx context.Context, arg SetWorkflowTerminalStatusParams) error
+	// Retry no longer writes app.issues.eligible directly (see #268 and migration
+	// 023): the issue's eligible bit stays purely label-driven, and marking this
+	// run superseded is what lets the scheduler's app.workflow_runs join stop
+	// excluding its issue on this run's account. A fresh run is what actually
+	// reopens the work; this only clears the way for one.
+	SupersedeWorkflowRun(ctx context.Context, id string) error
 	TerminateWorkflowRun(ctx context.Context, arg TerminateWorkflowRunParams) (string, error)
 	UpdateProject(ctx context.Context, arg UpdateProjectParams) (int64, error)
 	UpdateProjectCredentialSecret(ctx context.Context, arg UpdateProjectCredentialSecretParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) error
+	// eligible is written unconditionally from the tracker's labels (see
+	// issuePriority) on every sync, full stop -- it is not the scheduler's
+	// candidate signal by itself any more (see ListQueueEntries and
+	// ClaimSchedulableIssue's app.workflow_runs.superseded_at join for that), so
+	// there is no lifecycle state left here for a sync to clobber. See #268 and
+	// migration 023 for why a CASE guarding this used to live here.
 	UpsertIssue(ctx context.Context, arg UpsertIssueParams) error
 	UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error
 	UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error
