@@ -273,6 +273,41 @@ func (c *Client) ListProjectCredentials(ctx context.Context, projectID string) (
 	return resp, nil
 }
 
+// ListTaskSourceTypes is the discovery RPC (#294/#345): every TaskSourceType
+// descriptor the orchestrator knows, field by field, which is what lets the
+// console render a create/edit form with zero provider-specific code.
+func (c *Client) ListTaskSourceTypes(ctx context.Context) (*controlv1.ListTaskSourceTypesResponse, error) {
+	resp, err := c.client.ListTaskSourceTypes(ctx, &controlv1.ListTaskSourceTypesRequest{})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) CreateTaskSource(ctx context.Context, req *controlv1.CreateTaskSourceRequest) (*controlv1.CreateTaskSourceResponse, error) {
+	resp, err := c.client.CreateTaskSource(ctx, req)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) UpdateTaskSource(ctx context.Context, req *controlv1.UpdateTaskSourceRequest) (*controlv1.UpdateTaskSourceResponse, error) {
+	resp, err := c.client.UpdateTaskSource(ctx, req)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
+func (c *Client) DeleteTaskSource(ctx context.Context, taskSourceID string) (*controlv1.DeleteTaskSourceResponse, error) {
+	resp, err := c.client.DeleteTaskSource(ctx, &controlv1.DeleteTaskSourceRequest{TaskSourceId: taskSourceID})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return resp, nil
+}
+
 func (c *Client) CreateRunnerRegistrationToken(ctx context.Context, allowedLabels []string) (*controlv1.CreateRunnerRegistrationTokenResponse, error) {
 	resp, err := c.client.CreateRunnerRegistrationToken(ctx, &controlv1.CreateRunnerRegistrationTokenRequest{
 		AllowedLabels: allowedLabels,

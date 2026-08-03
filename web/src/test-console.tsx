@@ -7,7 +7,7 @@ import type { ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import type {
   ApiClient, CurrentUser, Project, ProjectCredential, QueueEntry, Runner, RunnerToken,
-  Workflow, WorkflowEvent,
+  TaskSource, TaskSourceTypeDescriptor, Workflow, WorkflowEvent,
 } from "./api";
 import { AuthProvider } from "./auth";
 import { ConsoleDataProvider } from "./console-data";
@@ -54,8 +54,46 @@ export function project(overrides: Partial<Project> = {}): Project {
     pipelineSteps: [],
     executionImage: "",
     requireHumanApproval: false,
+    taskSources: [],
     ...overrides,
   };
+}
+
+export function taskSource(overrides: Partial<TaskSource> = {}): TaskSource {
+  return {
+    id: "ts-1",
+    provider: "github",
+    name: "primary",
+    enabled: true,
+    configuration: { ref: "acme/moirai" },
+    secrets: [{ key: "token", configured: false }],
+    ...overrides,
+  };
+}
+
+/**
+ * Mirrors orchestrator/internal/server/descriptor.go's registered types
+ * closely enough for a generic-rendering test: a required text field and a
+ * secret field for github, one required text field for local_file. Any test
+ * that wants a third provider (proving the form needs no frontend change)
+ * passes its own override list instead of this fixture.
+ */
+export function taskSourceTypes(overrides?: TaskSourceTypeDescriptor[]): TaskSourceTypeDescriptor[] {
+  return overrides ?? [
+    {
+      id: "github", displayName: "GitHub",
+      fields: [
+        { key: "ref", label: "Repository", help: "owner/name, or a github.com URL", kind: "text", required: true, options: [], pattern: "" },
+        { key: "token", label: "Personal access token", help: "Falls back to the orchestrator's global GitHub token when not set.", kind: "secret", required: false, options: [], pattern: "" },
+      ],
+    },
+    {
+      id: "local_file", displayName: "Local file directory",
+      fields: [
+        { key: "ref", label: "Directory path", help: "Directory containing one *.json file per task.", kind: "text", required: true, options: [], pattern: "" },
+      ],
+    },
+  ];
 }
 
 export function runner(overrides: Partial<Runner> = {}): Runner {
@@ -133,6 +171,10 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     listProjectCredentials: async () => [],
     setProjectCredential: async () => [],
     clearProjectCredential: async () => [],
+    listTaskSourceTypes: async () => taskSourceTypes(),
+    createTaskSource: async () => taskSource(),
+    updateTaskSource: async () => taskSource(),
+    deleteTaskSource: async () => undefined,
     listRunners: async () => [],
     setRunnerState: async () => runner(),
     listTokens: async () => [],

@@ -13,6 +13,7 @@ import { activeWorkflowFor, useConsoleData } from "./console-data";
 import { useIsAdmin } from "./auth";
 import { ageAgo } from "./format";
 import { usePolled } from "./poll";
+import { TaskSources } from "./task-sources";
 import {
   Card, Empty, ErrorBlock, KV, KVRow, Modal, Pill, Skeleton, useConfirm, useToast,
 } from "./ui";
@@ -24,6 +25,11 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
   const [editing, setEditing] = useState<Project | null>(null);
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // The task source type descriptor is not project-specific, so it is loaded
+  // once for the whole page rather than once per project card.
+  const loadTaskSourceTypes = useCallback((signal: AbortSignal) => api.listTaskSourceTypes(signal), [api]);
+  const taskSourceTypes = usePolled(loadTaskSourceTypes, "Task source types are unavailable.", { poll: false });
 
   const toggle = (project: Project) => {
     setBusyId(project.id);
@@ -90,6 +96,12 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
                     </KVRow>
                   </KV>
                   <Credentials api={api} projectId={project.id} />
+                  <TaskSources
+                    api={api}
+                    project={project}
+                    types={taskSourceTypes.data ?? []}
+                    typesError={taskSourceTypes.error}
+                  />
                   {isAdmin && (
                     <div className="btnrow">
                       <button type="button" className="btn sm" onClick={() => setEditing(project)}>Configure</button>

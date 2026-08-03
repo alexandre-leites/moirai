@@ -369,7 +369,7 @@ describe("createApiClient request shapes", () => {
   });
 
   it("unwraps the collection envelopes the API returns", async () => {
-    const projects = [{ id: "p1", name: "svc", enabled: true, requiredRunnerLabels: ["go"], pipelineSteps: [], executionImage: "", requireHumanApproval: false }];
+    const projects = [{ id: "p1", name: "svc", enabled: true, requiredRunnerLabels: ["go"], pipelineSteps: [], executionImage: "", requireHumanApproval: false, taskSources: [] }];
     const workflows = [{ id: "w1", projectId: "p1", status: "running", phase: "implement" }];
     const tokens = [{ id: "t1", allowedLabels: [], expiresAt: "2026-07-30T00:00:00Z" }];
     const api = createApiClient(async (url) => {

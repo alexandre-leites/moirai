@@ -252,6 +252,115 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/task-source-types:
+    get:
+      summary: Discover every task source provider and its configuration fields
+      description: |
+        The generic, provider-agnostic console form (#294/#345) is rendered
+        entirely from this response: no field name or provider id is
+        hardcoded client-side. Any signed-in session may read it.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Task source types
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [types]
+                properties:
+                  types:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskSourceTypeDescriptor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/projects/{project_id}/task-sources:
+    post:
+      summary: Configure a new task source for a project
+      description: |
+        `configuration` and `secrets` are validated server-side against the
+        named provider's descriptor (see GET /api/v1/task-source-types). A
+        secret field's value is write-only and never appears in any response.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskSourceCreate'
+      responses:
+        '201':
+          description: Task source created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /api/v1/task-sources/{task_source_id}:
+    put:
+      summary: Update a task source
+      description: |
+        A secret field this request's `secrets` map omits keeps whatever
+        value was previously configured for it -- editing name, enabled, or
+        an unrelated configuration field never blanks a configured secret.
+        Clearing a secret is explicit, via `clearSecrets`.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/TaskSourceID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskSourceUpdate'
+      responses:
+        '200':
+          description: Updated task source
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      summary: Remove a task source
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/TaskSourceID'
+      responses:
+        '204':
+          description: Task source removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/projects/{project_id}/credentials:
     get:
       summary: Report which credentials a project has configured
@@ -698,6 +807,11 @@ components:
       in: path
       required: true
       schema: { type: string }
+    TaskSourceID:
+      name: task_source_id
+      in: path
+      required: true
+      schema: { type: string }
     TokenID:
       name: token_id
       in: path
@@ -830,6 +944,10 @@ components:
             'waiting_human' status once every automated gate (implementation,
             GitHub checks) passes, and only merges once an admin approves it
             via the decision panel. Defaults to false.
+        taskSources:
+          type: array
+          items: { $ref: '#/components/schemas/TaskSource' }
+          description: This project's configured task sources (see /api/v1/task-source-types).
     PipelineStep:
       type: object
       required: [command, timeoutSeconds, position, required]
@@ -884,6 +1002,98 @@ components:
             relative, with no `..` segment. Required for a subscription harness
             that reads its credentials from `~/...`, because the runner
             overrides HOME to a throwaway directory.
+    TaskSourceField:
+      type: object
+      required: [key, label, kind, required, options]
+      description: >-
+        One configuration input a TaskSourceTypeDescriptor declares. `kind`
+        determines the form control the console renders: `text`, `number`,
+        `bool`, `enum`, `string_list`, or `secret`.
+      properties:
+        key: { type: string }
+        label: { type: string }
+        help: { type: string }
+        kind:
+          type: string
+          enum: [text, number, bool, enum, string_list, secret]
+        required: { type: boolean }
+        defaultValue:
+          description: >-
+            The field's default, JSON-decoded (a string, number, boolean, or
+            array depending on `kind`). Absent when the field has none, and
+            always absent for a `secret` field.
+        options:
+          type: array
+          items: { type: string }
+          description: Valid values for an `enum` field; empty for every other kind.
+        pattern:
+          type: string
+          description: A regexp a `text` field's value must match; empty when unconstrained.
+    TaskSourceTypeDescriptor:
+      type: object
+      required: [id, displayName, fields]
+      properties:
+        id: { type: string }
+        displayName: { type: string }
+        fields:
+          type: array
+          items: { $ref: '#/components/schemas/TaskSourceField' }
+    TaskSourceSecretField:
+      type: object
+      required: [key, configured]
+      description: Whether a secret field has a value configured -- never the value itself.
+      properties:
+        key: { type: string }
+        configured: { type: boolean }
+    TaskSource:
+      type: object
+      required: [id, provider, name, enabled, configuration, secrets]
+      properties:
+        id: { type: string }
+        provider: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        configuration:
+          type: object
+          description: Non-secret configuration fields, shaped by this provider's descriptor. Never contains a secret field's value.
+        secrets:
+          type: array
+          items: { $ref: '#/components/schemas/TaskSourceSecretField' }
+    TaskSourceCreate:
+      type: object
+      required: [provider, name, enabled, configuration]
+      properties:
+        provider: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        configuration:
+          type: object
+          description: Non-secret fields only, as declared by the provider's descriptor.
+        secrets:
+          type: object
+          additionalProperties: { type: string }
+          description: >-
+            Secret field key -> value, write-only. Every required secret
+            field needs an entry.
+    TaskSourceUpdate:
+      type: object
+      required: [name, enabled, configuration]
+      properties:
+        name: { type: string }
+        enabled: { type: boolean }
+        configuration:
+          type: object
+        secrets:
+          type: object
+          additionalProperties: { type: string }
+          description: >-
+            Only the secret fields present here are replaced. A field this
+            object omits keeps whatever was previously configured for it --
+            leave it out entirely, do not send an empty string.
+        clearSecrets:
+          type: array
+          items: { type: string }
+          description: Secret field keys to explicitly clear.
     RunnerToken:
       type: object
       required: [id, allowedLabels, expiresAt]
