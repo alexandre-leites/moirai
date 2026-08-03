@@ -149,6 +149,49 @@ func every(ctx context.Context, interval time.Duration, name string, fn func(con
 	}()
 }
 
+// maxScheduledPerTick bounds how many jobs a single scheduler tick may place
+// via drainSchedule before yielding back to the ticker. Without a bound, a
+// queue that keeps ScheduleOnce returning true (the fifty-eligible-issues
+// case #290 was filed about) would let one tick run indefinitely, starving
+// every other loop `every` drives on this same process and its shared
+// database pool -- the workflow observer, the recovery sweep, issue sync --
+// for as long as the queue stayed non-empty. 500 is chosen well above any
+// realistic single-tick fleet size while still bounding the worst case: at
+// roughly one round trip to Postgres per claim, a few hundred claims cost low
+// tens of milliseconds, comfortably inside the 1-second tick this loop
+// shares with everything else. A queue deeper than that drains over
+// successive ticks instead of one, which is a far better failure mode than a
+// scheduler tick that never yields.
+const maxScheduledPerTick = 500
+
+// drainSchedule repeatedly calls scheduleOnce -- ScheduleOnce in production --
+// until it reports nothing left to place (false, nil) or maxScheduledPerTick
+// placements have happened in this tick, instead of the fixed one-job-per-tick
+// rate that discarding ScheduleOnce's bool return produced (#290): a queue
+// with fifty eligible issues and ten idle runners used to fill at one job per
+// second rather than draining in a single pass.
+//
+// Runner capacity (#272) is enforced inside ClaimSchedulableIssue's own WHERE
+// clause, re-evaluated fresh on every call within its own committed
+// transaction, so calling scheduleOnce in a tight loop does not schedule past
+// what a runner's registered capacity allows -- the loop just reaches the
+// same "nothing left to claim" (false) sooner once every idle runner is full.
+func drainSchedule(ctx context.Context, scheduleOnce func(context.Context) (bool, error)) error {
+	for i := 0; i < maxScheduledPerTick; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		scheduled, err := scheduleOnce(ctx)
+		if err != nil {
+			return err
+		}
+		if !scheduled {
+			return nil
+		}
+	}
+	return nil
+}
+
 func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -241,8 +284,7 @@ func run() error {
 	controlv1.RegisterControlPlaneServer(grpcServer, service)
 	runnerv1.RegisterRunnerControlServer(grpcServer, service)
 	every(ctx, time.Second, "scheduler tick", observed(recorder, metrics.LoopScheduler, func(ctx context.Context) error {
-		_, err := service.ScheduleOnce(ctx)
-		return err
+		return drainSchedule(ctx, service.ScheduleOnce)
 	}))
 	every(ctx, 15*time.Second, "workflow observer", observed(recorder, metrics.LoopWorkflowObserver, service.ObserveWorkflows))
 	every(ctx, 30*time.Second, "recovery sweep", observed(recorder, metrics.LoopRecoverySweep, service.RecoverOnce))

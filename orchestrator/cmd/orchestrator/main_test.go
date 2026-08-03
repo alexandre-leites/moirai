@@ -119,6 +119,93 @@ func TestHealthcheckFallsBackToLivenessWhenMetricsDisabled(t *testing.T) {
 	}
 }
 
+// TestDrainScheduleStopsOnFalse pins the #290 fix: draining must place every
+// job a tick has ready rather than the fixed one-per-tick rate discarding
+// ScheduleOnce's bool used to produce, but it must also stop the moment
+// nothing is left to claim instead of always spinning to the per-tick bound.
+func TestDrainScheduleStopsOnFalse(t *testing.T) {
+	calls := 0
+	remaining := 7
+	scheduleOnce := func(context.Context) (bool, error) {
+		calls++
+		if remaining == 0 {
+			return false, nil
+		}
+		remaining--
+		return true, nil
+	}
+
+	if err := drainSchedule(context.Background(), scheduleOnce); err != nil {
+		t.Fatalf("drainSchedule: %v", err)
+	}
+	if calls != 8 {
+		t.Fatalf("scheduleOnce was called %d times draining 7 eligible placements, want 8 (7 successes + the false that ends the drain)", calls)
+	}
+}
+
+// TestDrainScheduleBoundsAVeryLargeQueue is the adversarial case: a queue deep
+// enough that scheduleOnce would report true forever must not let one tick
+// run unbounded and starve every other loop sharing this process. This drives
+// a scheduleOnce that always succeeds and confirms drainSchedule still
+// returns after exactly maxScheduledPerTick calls.
+func TestDrainScheduleBoundsAVeryLargeQueue(t *testing.T) {
+	calls := 0
+	scheduleOnce := func(context.Context) (bool, error) {
+		calls++
+		return true, nil
+	}
+
+	if err := drainSchedule(context.Background(), scheduleOnce); err != nil {
+		t.Fatalf("drainSchedule: %v", err)
+	}
+	if calls != maxScheduledPerTick {
+		t.Fatalf("scheduleOnce was called %d times against a queue that never runs out, want exactly the per-tick bound %d", calls, maxScheduledPerTick)
+	}
+}
+
+// TestDrainScheduleStopsOnError confirms a failure mid-drain is surfaced
+// immediately rather than being swallowed while the loop keeps spinning.
+func TestDrainScheduleStopsOnError(t *testing.T) {
+	wantErr := errors.New("database says no")
+	calls := 0
+	scheduleOnce := func(context.Context) (bool, error) {
+		calls++
+		if calls == 3 {
+			return false, wantErr
+		}
+		return true, nil
+	}
+
+	err := drainSchedule(context.Background(), scheduleOnce)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("drainSchedule: got %v, want %v", err, wantErr)
+	}
+	if calls != 3 {
+		t.Fatalf("scheduleOnce was called %d times, want exactly 3 (the loop must stop at the first error)", calls)
+	}
+}
+
+// TestDrainScheduleStopsOnCancelledContext confirms a drain in progress does
+// not keep hammering the database once shutdown has already been signalled.
+func TestDrainScheduleStopsOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	scheduleOnce := func(context.Context) (bool, error) {
+		calls++
+		if calls == 2 {
+			cancel()
+		}
+		return true, nil
+	}
+
+	if err := drainSchedule(ctx, scheduleOnce); err == nil {
+		t.Fatal("drainSchedule: want the context's cancellation error once shutdown is signalled mid-drain")
+	}
+	if calls != 2 {
+		t.Fatalf("scheduleOnce was called %d times after cancellation, want exactly 2 (the loop must not call it again once ctx is done)", calls)
+	}
+}
+
 // readinessAddress must derive the port from LOOP_METRICS_BIND like the
 // server itself does, and correctly tell "unset" (use the default, metrics
 // on) apart from "set to empty" (metrics deliberately off).
