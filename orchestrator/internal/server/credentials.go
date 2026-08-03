@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"path"
 	"regexp"
 	"strings"
@@ -230,7 +231,16 @@ func (s *Server) projectCredentials(ctx context.Context, projectID string) ([]*c
 
 func configuredCipher() (cipher.AEAD, error) {
 	value, configured, err := optionalSecret("LOOP_SECRET_KEY")
-	if err != nil || !configured {
+	if err != nil {
+		// Distinct from the "not configured" case below: this means the
+		// operator did set LOOP_SECRET_KEY (or _FILE), but it's unusable
+		// (both set, unreadable file, wrong file mode, oversized). Collapsing
+		// this into "is required" tells an operator who mounted the secret
+		// with the wrong ownership that the variable is unset, when it isn't.
+		slog.Error("LOOP_SECRET_KEY is misconfigured", "error", err)
+		return nil, errors.New("LOOP_SECRET_KEY is misconfigured")
+	}
+	if !configured {
 		return nil, errors.New("LOOP_SECRET_KEY is required for project credentials")
 	}
 	// Try both encodings rather than first-parse-wins: a hex-encoded 32-byte

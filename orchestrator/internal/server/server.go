@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -189,6 +190,11 @@ func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*c
 	}
 	userID, encoded, enabled := row.ID, row.PasswordHash, row.Enabled
 	matches, err := passwordMatches(request.GetPassword(), encoded)
+	if err != nil {
+		// A genuine scrypt failure, not a wrong password: log it so it isn't
+		// silently indistinguishable from bad credentials.
+		slog.Error("password verification failed", "error", err, "user_id", userID)
+	}
 	if err != nil || !enabled || !matches {
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
 	}
@@ -359,21 +365,29 @@ func (s *Server) SetProjectEnabled(ctx context.Context, request *controlv1.SetPr
 	return &controlv1.SetProjectEnabledResponse{Project: project}, nil
 }
 
+// listWorkflowsLimit caps ListWorkflows to the most recently created runs.
+// The endpoint had no LIMIT at all, so it grew with every workflow ever run,
+// running one join query per row (see workflowFromDetailRow). The console
+// only ever renders this list unpaginated (web/src/console-data.tsx polls it
+// whole, web/src/workflows.tsx filters/searches client-side over whatever
+// comes back) so a fixed cap -- rather than cursor pagination, which would
+// need a new proto field plus client changes to be useful -- is the
+// low-risk fix: 500 comfortably covers what an operator would actually
+// filter or search through in one sitting, matching the existing 500-row
+// ceiling ListWorkflowEvents already uses for the same reason.
+const listWorkflowsLimit = 500
+
 func (s *Server) ListWorkflows(ctx context.Context, _ *controlv1.ListWorkflowsRequest) (*controlv1.ListWorkflowsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	ids, err := s.queries.ListWorkflowIDs(ctx)
+	rows, err := s.queries.ListWorkflowsPage(ctx, listWorkflowsLimit)
 	if err != nil {
 		return nil, databaseError(err)
 	}
 	response := &controlv1.ListWorkflowsResponse{}
-	for _, id := range ids {
-		workflow, err := s.workflow(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-		response.Workflows = append(response.Workflows, workflow)
+	for _, row := range rows {
+		response.Workflows = append(response.Workflows, workflowFromDetailRow(db.GetWorkflowDetailRow(row)))
 	}
 	return response, nil
 }
@@ -1031,7 +1045,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	}
 	var config projectConfig
 	if err := json.Unmarshal(configuration, &config); err != nil {
-		return false, databaseError(err)
+		return false, configurationError(err)
 	}
 	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textValue(repositoryURL), textValue(localPath), defaultBranch, branch, config.ExecutionImage)
 	if err != nil {
@@ -1309,6 +1323,11 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 	return nil
 }
 
+// databaseError maps an error from a database call to the opaque, constant
+// status the client sees. The real cause — PG error code, constraint name,
+// failing column, pool exhaustion — is logged here so it isn't lost: this is
+// the only place any of the ~140+ call sites need to change to get that
+// visibility, rather than annotating every call site individually.
 func databaseError(err error) error {
 	if err == nil {
 		return nil
@@ -1316,7 +1335,24 @@ func databaseError(err error) error {
 	if status.Code(err) != codes.Unknown {
 		return err
 	}
+	slog.Error("database operation failed", "error", err)
 	return status.Error(codes.Internal, "database operation failed")
+}
+
+// configurationError reports a stored-configuration value (project
+// configuration, runner labels, registration-token labels) that failed to
+// decode. Unlike databaseError, the cause here has nothing to do with the
+// database call that fetched the row — it's malformed JSON in a column — so
+// it must not be reported as "database operation failed", which would send
+// an operator to investigate Postgres instead of the corrupted data. The
+// real cause is logged server-side; the client sees a distinct, opaque
+// message.
+func configurationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	slog.Error("stored configuration is invalid", "error", err)
+	return status.Error(codes.Internal, "stored configuration is invalid")
 }
 
 func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error) {
@@ -1387,7 +1423,7 @@ func (s *Server) project(ctx context.Context, queries projectQuerier, id string)
 	}
 	var config projectConfig
 	if err := json.Unmarshal([]byte(row.Configuration), &config); err != nil {
-		return nil, databaseError(err)
+		return nil, configurationError(err)
 	}
 	project.RequiredRunnerLabels, project.ExecutionImage = config.Labels, config.ExecutionImage
 	steps, err := queries.ListProjectPipelineSteps(ctx, id)
@@ -1413,6 +1449,15 @@ func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, 
 	if err != nil {
 		return nil, databaseError(err)
 	}
+	return workflowFromDetailRow(row), nil
+}
+
+// workflowFromDetailRow maps the GetWorkflowDetail/ListWorkflowsPage join
+// shape (identical columns, kept as separate sqlc queries since one is
+// keyed by id and the other paginated) to the wire type. ListWorkflowsPageRow
+// converts to GetWorkflowDetailRow with a plain type conversion: sqlc
+// generates them as structurally identical structs.
+func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 	workflow := &controlv1.Workflow{
 		Id: row.ID, ProjectId: row.ProjectID, Status: row.Status, Phase: row.CurrentPhase,
 		IssueExternalId:        row.ExternalID,
@@ -1430,7 +1475,7 @@ func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, 
 		TotalAgentExecutions:   row.TotalAgentExecutions,
 	}
 	workflow.CreatedAt, workflow.UpdatedAt = timestamp(row.CreatedAt.Time), timestamp(row.UpdatedAt.Time)
-	return workflow, nil
+	return workflow
 }
 
 func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string) (*controlv1.Workflow, error) {
@@ -1641,7 +1686,7 @@ func (s *Server) runner(ctx context.Context, id string) (*controlv1.Runner, erro
 func scanRunnerRowValues(id, name string, enabled, draining bool, status_ string, labels string, seen pgtype.Timestamptz, version string) (*controlv1.Runner, error) {
 	runner := &controlv1.Runner{Id: id, Name: name, Enabled: enabled, Draining: draining, Status: status_, Version: version}
 	if err := json.Unmarshal([]byte(labels), &runner.Labels); err != nil {
-		return nil, databaseError(err)
+		return nil, configurationError(err)
 	}
 	if seen.Valid {
 		runner.LastSeenAt = timestamp(seen.Time)
@@ -1759,17 +1804,29 @@ func passwordHash(password string) (string, error) {
 	return strings.Join([]string{"scrypt", "16384", "8", "1", base64.RawURLEncoding.EncodeToString(salt), base64.RawURLEncoding.EncodeToString(digest)}, "$"), nil
 }
 
+// passwordMatches reports whether password matches the stored, encoded
+// scrypt hash. It intentionally always returns (false, nil) — never an
+// error — for a hash that doesn't parse as the expected format: to the
+// caller this must be indistinguishable from a wrong password, since
+// otherwise the error return would give a timing/behavior oracle for which
+// accounts have a corrupted password_hash row. That indistinguishability is
+// exactly what makes a corrupted row silently unrecoverable, so the
+// unparseable cases are logged here — for an operator reading logs, not for
+// the caller — before returning.
 func passwordMatches(password, encoded string) (bool, error) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "scrypt" || parts[1] != "16384" || parts[2] != "8" || parts[3] != "1" {
+		slog.Error("password hash has an unrecognized format", "encoding", parts[0])
 		return false, nil
 	}
 	salt, err := base64.RawURLEncoding.DecodeString(parts[4])
 	if err != nil {
+		slog.Error("password hash has an invalid salt encoding", "error", err)
 		return false, nil
 	}
 	expected, err := base64.RawURLEncoding.DecodeString(parts[5])
 	if err != nil || len(expected) != 32 {
+		slog.Error("password hash has an invalid digest encoding", "error", err)
 		return false, nil
 	}
 	actual, err := scrypt.Key([]byte(password), salt, 1<<14, 8, 1, len(expected))
