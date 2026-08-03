@@ -47,6 +47,15 @@ type Server struct {
 	github   GitHub
 	sessions map[string]chan *runnerv1.OrchestratorToRunner
 	mu       sync.Mutex
+	// shutdown is closed exactly once, by Shutdown, to tell every long-lived
+	// stream handler (Connect, StreamEvents) to return promptly instead of
+	// blocking on its own stream context forever. gRPC's GracefulStop waits
+	// for in-flight RPCs to finish and never cancels a server-stream's
+	// context itself, so without this signal a connected runner — which
+	// holds Connect open indefinitely by design — would keep GracefulStop
+	// from ever returning.
+	shutdown     chan struct{}
+	shutdownOnce sync.Once
 }
 
 type actor struct {
@@ -74,7 +83,36 @@ func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Server, 
 	if pool == nil || github == nil {
 		return nil, errors.New("server dependencies are required")
 	}
-	return &Server{pool: pool, queries: db.New(pool), version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner)}, nil
+	return &Server{pool: pool, queries: db.New(pool), version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner), shutdown: make(chan struct{})}, nil
+}
+
+// Shutdown tells every stream handler currently blocked on Connect or
+// StreamEvents to return. Safe to call more than once and from any
+// goroutine; only the first call has an effect. It must run before (or
+// concurrently with, never after) grpc.Server.GracefulStop — GracefulStop
+// blocks until in-flight RPCs finish, and both stream handlers only finish
+// early because they observe this signal, so calling it after GracefulStop
+// has already started blocking would deadlock the very shutdown it exists to
+// unblock.
+func (s *Server) Shutdown() {
+	s.shutdownOnce.Do(func() { close(s.shutdown) })
+}
+
+// withShutdown returns a context derived from parent that is also cancelled
+// when the server starts shutting down, plus its cancel func. Callers must
+// still call parent's own cancellation/Done handling as before; this only
+// adds the extra trigger. The goroutine it starts exits as soon as either
+// signal fires, so it never outlives the returned context.
+func (s *Server) withShutdown(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-s.shutdown:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func (s *Server) Bootstrap(ctx context.Context) error {
@@ -858,6 +896,13 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[runnerv1.RunnerToOrches
 			return err
 		case <-stream.Context().Done():
 			return stream.Context().Err()
+		case <-s.shutdown:
+			// Returning here (rather than blocking until the runner
+			// disconnects on its own) is what lets GracefulStop finish
+			// promptly. Unavailable is one of the codes the runner's
+			// supervisor treats as transient, so it reconnects immediately
+			// instead of waiting out its normal backoff.
+			return status.Error(codes.Unavailable, "server is shutting down")
 		}
 	}
 }

@@ -59,6 +59,18 @@ services:
   orchestrator:
     image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/orchestrator:${MOIRAI_IMAGE_TAG:-latest}
     restart: unless-stopped
+    # On SIGTERM the process signals Connect/StreamEvents to return (so a
+    # connected runner's stream, which it would otherwise hold open
+    # indefinitely, no longer blocks GracefulStop) and only then starts the
+    # gRPC graceful drain, so shutdown normally completes in well under a
+    # second. This is slack for a slow moment, not a deadline the process is
+    # expected to use: 20s comfortably covers the deferred metrics-server
+    # shutdown's own 5s timeout plus a batch of in-flight workflow-event
+    # sends, while still being far short of anything an operator would
+    # notice as a hung deploy. Without it Compose's default 10s grace period
+    # would SIGKILL the process before that drain (previously unbounded)
+    # ever finished, which is the stranded-state bug this change fixes.
+    stop_grace_period: 20s
     environment:
       LOOP_GRPC_BIND: 0.0.0.0:50051
       # The entrypoint writes each secret into a tmpfs file the unprivileged
