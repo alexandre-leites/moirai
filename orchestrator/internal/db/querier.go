@@ -26,6 +26,15 @@ type Querier interface {
 	CancelWorkflowJobs(ctx context.Context, arg CancelWorkflowJobsParams) (CancelWorkflowJobsRow, error)
 	CancelWorkflowRunOfferRejected(ctx context.Context, id string) error
 	CancelWorkflowRunUndelivered(ctx context.Context, arg CancelWorkflowRunUndeliveredParams) error
+	// A runner's in-flight job count is compared against its own registered
+	// capacity (app.runners.capacity, see migration 003) rather than excluding it
+	// the instant it holds any job at all: that used to hard-cap every runner at
+	// one concurrent execution regardless of what it advertised at registration.
+	// The count is still scoped to this runner (j.runner_id = r.id) so it says
+	// nothing about any other runner's load, and FOR UPDATE OF i, r still locks
+	// exactly the issue and runner rows a concurrent ClaimSchedulableIssue would
+	// also need, so SKIP LOCKED continues to hand a racing caller a different
+	// issue/runner pair instead of double-booking this one.
 	ClaimSchedulableIssue(ctx context.Context, runnerIds []string) (ClaimSchedulableIssueRow, error)
 	CountProjectIssues(ctx context.Context, projectID string) (int64, error)
 	CountUsers(ctx context.Context) (int64, error)
@@ -98,6 +107,15 @@ type Querier interface {
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
 	ListProjectIDs(ctx context.Context) ([]string, error)
 	ListProjectPipelineSteps(ctx context.Context, projectID string) ([]ListProjectPipelineStepsRow, error)
+	// Used by the unattended sync loop only (SyncProjects): a project whose last
+	// failure set app.issue_sync_state.next_retry_at in the future (see
+	// UpsertIssueSyncStateFailure's exponential backoff) is skipped so a
+	// repository with a revoked token or a deleted remote is not hammered on
+	// every tick forever. The operator-triggered "Sync now" path (SyncNow) goes
+	// through ListSyncableProjects/ListSyncableProjectByID instead and always
+	// bypasses backoff, since a human explicitly asking for a sync right now is
+	// exactly the case backoff should not stand in front of.
+	ListProjectsDueForSync(ctx context.Context) ([]ListProjectsDueForSyncRow, error)
 	ListQueueEntries(ctx context.Context, limit int32) ([]ListQueueEntriesRow, error)
 	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
 	ListRunners(ctx context.Context) ([]ListRunnersRow, error)
@@ -168,7 +186,17 @@ type Querier interface {
 	// eligible with "still open on the tracker", so a closed issue is reported
 	// ineligible too, not just excluded via state.
 	UpsertIssue(ctx context.Context, arg UpsertIssueParams) error
+	// next_retry_at backs off exponentially with consecutive_failures (1 minute,
+	// 2, 4, 8, ...), capped at 1 hour. The exponent itself is capped (via the
+	// inner LEAST) before POWER ever sees it, rather than relying on the outer
+	// LEAST against '1 hour' alone: POWER(2, n) is evaluated first, and an
+	// uncapped n for a project that has been failing for days would overflow
+	// double precision (and then interval multiplication) before that outer
+	// LEAST ever got a chance to clamp the result.
 	UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error
+	// next_retry_at is reset to NULL on success: leaving a stale future timestamp
+	// around after a project recovers would keep ListProjectsDueForSync skipping
+	// it long after there is anything to back off from.
 	UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error
 	UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error)
 	UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) error
