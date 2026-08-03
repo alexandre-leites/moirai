@@ -46,8 +46,16 @@ WHERE enabled AND id = $1;
 SELECT COUNT(*) FROM app.issues WHERE project_id = $1;
 
 -- name: IssueSyncStatusEntries :many
+-- eligible_count matches the scheduler's own candidate set (ListQueueEntries,
+-- ClaimSchedulableIssue), not the bare label bit: an issue opted in by label
+-- but sitting on a failed, blocked or delivered run that has not been
+-- superseded by a retry is not actually schedulable, and the sidebar badge
+-- would otherwise overcount it.
 SELECT p.id::text AS id, p.name, p.enabled, COUNT(i.id) AS issue_count,
-       COUNT(i.id) FILTER(WHERE i.eligible) AS eligible_count,
+       COUNT(i.id) FILTER(WHERE i.eligible AND i.state = 'open' AND NOT EXISTS (
+         SELECT 1 FROM app.workflow_runs w
+         WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed', 'blocked', 'completed')
+       )) AS eligible_count,
        s.last_synced_at, s.consecutive_failures, s.next_retry_at, s.last_error
 FROM app.projects p
 LEFT JOIN app.issues i ON i.project_id = p.id
@@ -56,6 +64,12 @@ GROUP BY p.id, p.name, p.enabled, s.last_synced_at, s.consecutive_failures, s.ne
 ORDER BY p.name, p.id;
 
 -- name: UpsertIssue :exec
+-- eligible is written unconditionally from the tracker's labels (see
+-- issuePriority) on every sync, full stop -- it is not the scheduler's
+-- candidate signal by itself any more (see ListQueueEntries and
+-- ClaimSchedulableIssue's app.workflow_runs.superseded_at join for that), so
+-- there is no lifecycle state left here for a sync to clobber. See #268 and
+-- migration 023 for why a CASE guarding this used to live here.
 INSERT INTO app.issues(id, project_id, provider, external_id, display_number, title, body, url, state, labels, priority, eligible, external_created_at, external_updated_at, last_synced_at, raw_snapshot)
 VALUES ($1, $2, 'github', $3, $3, $4, $5, $6, 'open', $7::jsonb, $8, $9, $10, $11, now(), $12::jsonb)
 ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
@@ -66,7 +80,7 @@ ON CONFLICT(project_id, provider, external_id) DO UPDATE SET
   state = 'open',
   labels = EXCLUDED.labels,
   priority = EXCLUDED.priority,
-  eligible = CASE WHEN EXISTS(SELECT 1 FROM app.workflow_runs w WHERE w.issue_id = app.issues.id) THEN app.issues.eligible ELSE EXCLUDED.eligible END,
+  eligible = EXCLUDED.eligible,
   external_created_at = EXCLUDED.external_created_at,
   external_updated_at = EXCLUDED.external_updated_at,
   last_synced_at = now(),

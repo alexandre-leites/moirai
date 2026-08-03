@@ -565,11 +565,18 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	// Eligibility is label-driven only until an issue has been worked on. From
-	// its first workflow run onwards the orchestrator owns the flag — a run that
-	// ends without delivering parks the issue, and only a manual retry reopens
-	// it — so a sync pass must not hand eligibility back to the label and
-	// restart work the operator has not asked for again.
+	// Eligible is written unconditionally from the tracker's labels on every
+	// sync (issuePriority: agent:ready opts in, agent:blocked/agent:delivered
+	// opt back out) — it is not, by itself, the scheduler's candidate signal
+	// any more. A run that ends without delivering excludes its issue from
+	// scheduling via app.workflow_runs.status/superseded_at instead (see
+	// ListQueueEntries and ClaimSchedulableIssue), so removing agent:ready or
+	// adding agent:blocked here always takes effect, and only RetryWorkflow
+	// (which supersedes the run) reopens work the scheduler had parked. See
+	// #268: this used to be a single label-driven bit the orchestrator's own
+	// lifecycle also wrote, which meant a sync pass had to stop recomputing
+	// it from labels entirely once any run existed, silently breaking
+	// operator label edits from that point on.
 	for _, issue := range issues {
 		labels, _ := json.Marshal(issue.Labels)
 		raw, _ := json.Marshal(issue)
@@ -1282,13 +1289,15 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 			if err := queries.DeleteProjectLockByWorkflow(ctx, workflowID); err != nil {
 				return databaseError(err)
 			}
-			// An execution that actually ran and did not succeed parks its
-			// issue. V1 has no automatic retry, so leaving the issue eligible
-			// would have the scheduler dispatch the same work again on the very
-			// next tick, forever. RetryWorkflow is what makes it eligible again.
-			if err := queries.ParkIssue(ctx, workflowID); err != nil {
-				return databaseError(err)
-			}
+			// V1 has no automatic retry: a run that lands on 'failed' or
+			// 'blocked' here is excluded from the scheduler's candidate set
+			// (ListQueueEntries, ClaimSchedulableIssue) by its own status,
+			// via the app.workflow_runs join those queries run, until
+			// RetryWorkflow supersedes it. Nothing needs writing to the issue
+			// itself any more -- see #268. A 'cancelled' event lands on a
+			// status that join does not exclude, so it is picked up again
+			// with no operator action, the same as an operator-cancelled or
+			// unanswered-offer run.
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1463,17 +1472,22 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 		if !genuinelyTerminalStatus(current) {
 			return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
 		}
-		// Retry reopens the issue rather than reviving this run. A job is
-		// unique per workflow run (app.jobs.workflow_run_id is UNIQUE), so the
-		// run that already had its execution cannot be given another one; the
-		// scheduler picks the reopened issue up and creates a fresh run whose
-		// history stands alongside this one. The previous implementation took
-		// the project lock and parked the run in a "recovering" status nothing
-		// reads, which left the project unable to schedule anything again.
+		// Retry supersedes this run rather than reviving it. A job is unique
+		// per workflow run (app.jobs.workflow_run_id is UNIQUE), so the run
+		// that already had its execution cannot be given another one; the
+		// scheduler picks the issue up again -- its own eligible bit is
+		// untouched, see #268 -- and creates a fresh run whose history
+		// stands alongside this one. Superseding is what stops this run's
+		// own failed/blocked/completed status from continuing to exclude
+		// the issue via the app.workflow_runs join ListQueueEntries and
+		// ClaimSchedulableIssue both run. The previous implementation took
+		// the project lock and parked the run in a "recovering" status
+		// nothing reads, which left the project unable to schedule anything
+		// again.
 		if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: id}); err != nil {
 			return nil, databaseError(err)
 		}
-		if err := queries.ReopenIssueForRetry(ctx, id); err != nil {
+		if err := queries.SupersedeWorkflowRun(ctx, id); err != nil {
 			return nil, databaseError(err)
 		}
 		if err := queries.CreateRetryEvent(ctx, id); err != nil {
@@ -1502,17 +1516,17 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 			if err == nil {
 				jobToCancel, runnerHoldingLease, leaseGenerationAtCancel = cancelled.ID, cancelled.RunnerID, int64(cancelled.PreviousLeaseGeneration)
 			}
-			// Blocking parks the issue; cancelling does not. Blocking says "stop
-			// working on this until a human says otherwise", and without parking
-			// the scheduler re-created the run from the still-eligible issue on
-			// the next one-second tick — the operator's stop button restarting
-			// the very work it stopped. Cancelling returns the issue to the
-			// queue by design, so it stays eligible.
-			if action == "block" {
-				if err := queries.ParkIssue(ctx, id); err != nil {
-					return nil, databaseError(err)
-				}
-			}
+			// Blocking excludes the issue from scheduling; cancelling does not.
+			// Blocking says "stop working on this until a human says
+			// otherwise", and this run's own 'blocked' status is what the
+			// scheduler's app.workflow_runs join (ListQueueEntries,
+			// ClaimSchedulableIssue) excludes on -- without it the scheduler
+			// re-created the run from the still-eligible issue on the next
+			// one-second tick, the operator's stop button restarting the very
+			// work it stopped. Cancelling lands on 'cancelled' instead, which
+			// that join does not exclude, so the issue returns to the queue by
+			// design with no operator action needed. See #268.
+			//
 			// Withdraw any offer still outstanding. Offers do not age out on
 			// their own, so an offer left 'offered' is one a runner can still
 			// answer after the operator has cancelled the work.
@@ -1947,20 +1961,6 @@ func boundedReason(value string, limit int) string {
 	return value[:end] + reasonTruncationMarker
 }
 
-// parkIssue makes a workflow run's issue ineligible so the scheduler stops
-// offering it. It is the mechanism behind "no automatic retries": without it a
-// run that fails releases its project lock and is immediately re-created from
-// the same still-eligible issue.
-//
-// It still takes a bare pgx.Tx (rather than the *db.Queries every other
-// helper in this file now takes) because delivery.go -- out of scope for this
-// conversion, see issue #306's own scope note -- calls it against a
-// transaction it manages itself; db.New(tx).ParkIssue(...) scopes the
-// generated query to that same transaction without requiring delivery.go to
-// change.
-func parkIssue(ctx context.Context, tx pgx.Tx, workflowID string) error {
-	return databaseError(db.New(tx).ParkIssue(ctx, workflowID))
-}
 func defaultReason(action, reason string) string {
 	if strings.TrimSpace(reason) == "" {
 		return "operator " + action

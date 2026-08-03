@@ -104,7 +104,7 @@ func (s *Server) reclaimUnansweredOffers(ctx context.Context) error {
 	return s.eachWorkflowID(ctx, workflowIDs, func(ctx context.Context, workflowID string) error {
 		// The issue is left eligible: nothing ran, so nothing was spent and
 		// this work should simply be offered again.
-		return s.terminateWorkflow(ctx, workflowID, StatusCancelled, "cancelled", unansweredOfferReason, false)
+		return s.terminateWorkflow(ctx, workflowID, StatusCancelled, "cancelled", unansweredOfferReason)
 	})
 }
 
@@ -116,7 +116,7 @@ func (s *Server) blockAbandonedChecks(ctx context.Context) error {
 		return databaseError(err)
 	}
 	return s.eachWorkflowID(ctx, workflowIDs, func(ctx context.Context, workflowID string) error {
-		return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "delivery.failed", "GitHub checks did not report a result within "+abandonedChecks.String(), true)
+		return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "delivery.failed", "GitHub checks did not report a result within "+abandonedChecks.String())
 	})
 }
 
@@ -142,7 +142,7 @@ func (s *Server) reclaimExpiredLeases(ctx context.Context) error {
 		return databaseError(err)
 	}
 	return s.eachWorkflowID(ctx, workflowIDs, func(ctx context.Context, workflowID string) error {
-		return s.terminateWorkflow(ctx, workflowID, StatusFailed, "failed", abandonedLease, true)
+		return s.terminateWorkflow(ctx, workflowID, StatusFailed, "failed", abandonedLease)
 	})
 }
 

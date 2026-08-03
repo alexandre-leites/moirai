@@ -76,20 +76,25 @@ func (s *Server) ObserveWorkflows(ctx context.Context) error {
 	return s.eachWorkflowID(ctx, workflowIDs, s.observeWorkflow)
 }
 
-// terminateWorkflow moves a run to a terminal state, releases the project lock
-// it was holding and parks its issue, recording the cause in the same
-// transaction. Delivery failures and abandoned leases are the same event as far
-// as the run is concerned — the work stopped and the project has to be freed —
-// and writing them separately had already produced two different sets of
-// columns for the same outcome.
+// terminateWorkflow moves a run to a terminal state and releases the project
+// lock it was holding, recording the cause in the same transaction. Delivery
+// failures and abandoned leases are the same event as far as the run is
+// concerned — the work stopped and the project has to be freed — and writing
+// them separately had already produced two different sets of columns for the
+// same outcome.
 //
 // A run that is already terminal is left alone and reported as success: it has
 // nothing left to release.
 //
-// park says whether the issue should stop being scheduled. It is false only
-// when nothing was spent — an offer nobody answered ran no execution, so that
-// work should simply be offered again rather than waiting for a human.
-func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state Status, eventType, cause string, park bool) error {
+// Nothing here writes to the issue any more (see #268): whether its work
+// stays excluded from scheduling is entirely a function of the state this run
+// itself lands on, via the app.workflow_runs join ListQueueEntries and
+// ClaimSchedulableIssue both run. StatusFailed and StatusBlocked exclude it
+// until RetryWorkflow supersedes this run; StatusCancelled does not exclude
+// it at all, which is why reclaimUnansweredOffers uses that state for an
+// offer nobody answered — nothing was spent, so that work should simply be
+// offered again rather than waiting for a human.
+func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state Status, eventType, cause string) error {
 	reason := truncate(cause, 1024)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -110,14 +115,6 @@ func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state
 	}
 	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
-	}
-	// Without this the scheduler re-creates the run from the still-eligible
-	// issue on the next tick and it fails again, in a loop. A manual retry is
-	// what reopens it.
-	if park {
-		if err := parkIssue(ctx, tx, workflowID); err != nil {
-			return err
-		}
 	}
 	if err := queries.InsertWorkflowTerminationEvent(ctx, db.InsertWorkflowTerminationEventParams{
 		WorkflowRunID: workflowID,
@@ -174,9 +171,11 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	if err := queries.MarkPullRequestMerged(ctx, workflowID); err != nil {
 		return databaseError(err)
 	}
-	if err := queries.MarkIssueIneligible(ctx, workflow.issueID); err != nil {
-		return databaseError(err)
-	}
+	// Nothing needs writing to the issue itself: MarkWorkflowCompleted above
+	// already landed this run on 'completed', which the scheduler's
+	// app.workflow_runs join (ListQueueEntries, ClaimSchedulableIssue)
+	// excludes permanently — there is no retry path off StatusCompleted (see
+	// genuinelyTerminalStatuses), so nothing ever supersedes it. See #268.
 	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: workflow.projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
 	}
@@ -218,5 +217,5 @@ func (s *Server) deliveryWorkflow(ctx context.Context, workflowID string, requir
 }
 
 func (s *Server) blockExternal(ctx context.Context, workflowID string, cause error) error {
-	return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "delivery.failed", "external delivery failed: "+cause.Error(), true)
+	return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "delivery.failed", "external delivery failed: "+cause.Error())
 }

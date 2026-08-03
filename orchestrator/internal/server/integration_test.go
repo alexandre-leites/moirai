@@ -99,6 +99,24 @@ func (h *harness) scalar(query string, args ...any) int {
 	return count
 }
 
+// schedulable reports whether the scheduler's own candidate-set predicate
+// (ListQueueEntries, ClaimSchedulableIssue) would offer this issue: opted in
+// by the tracker's label (app.issues.eligible) AND not excluded by a
+// failed/blocked/completed workflow run that has not been superseded by a
+// retry. This is deliberately not "app.issues.eligible alone" (see #268):
+// that column is purely label-driven now, so a parked or delivered issue can
+// still read eligible=true while being permanently excluded from scheduling
+// by its run's own state.
+func (h *harness) schedulable(issueID string) bool {
+	h.t.Helper()
+	return h.scalar(`
+		SELECT COUNT(*) FROM app.issues i
+		WHERE i.id=$1 AND i.eligible AND i.state='open' AND NOT EXISTS (
+			SELECT 1 FROM app.workflow_runs w
+			WHERE w.issue_id = i.id AND w.superseded_at IS NULL AND w.status IN ('failed','blocked','completed')
+		)`, issueID) == 1
+}
+
 // project seeds an enabled project with one eligible open issue.
 func (h *harness) project() (projectID, issueID string) {
 	h.t.Helper()
@@ -203,8 +221,8 @@ func TestFailedExecutionParksItsIssueInsteadOfRespawning(t *testing.T) {
 	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
 		t.Fatal("a failed run kept its project lock, which stops the project scheduling anything again")
 	}
-	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
-		t.Fatal("a failed run left its issue eligible, so the scheduler re-dispatches it forever")
+	if h.schedulable(issueID) {
+		t.Fatal("a failed run left its issue schedulable, so the scheduler re-dispatches it forever")
 	}
 	scheduled, err := h.ScheduleOnce(context.Background())
 	if err != nil {
@@ -248,7 +266,7 @@ func TestRetryReopensTheIssueAndFreesTheProject(t *testing.T) {
 	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks`); locks != 0 {
 		t.Fatal("retry held the project lock, so nothing can ever be scheduled for that project again")
 	}
-	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
+	if !h.schedulable(issueID) {
 		t.Fatal("retry did not reopen the issue, so there is nothing for the scheduler to pick up")
 	}
 	scheduled, err := h.ScheduleOnce(context.Background())
@@ -285,8 +303,8 @@ func TestRecoverySweepReclaimsAnExpiredLease(t *testing.T) {
 	if failed := h.scalar(`SELECT COUNT(*) FROM app.workflow_runs WHERE id=$1 AND status='failed'`, workflowID); failed != 1 {
 		t.Fatal("the workflow run was left non-terminal, so the console shows it as active forever")
 	}
-	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
-		t.Fatal("the abandoned run left its issue eligible, which respawns the work automatically")
+	if h.schedulable(issueID) {
+		t.Fatal("the abandoned run left its issue schedulable, which respawns the work automatically")
 	}
 }
 
@@ -338,7 +356,7 @@ func TestRecoverySweepReclaimsAnUnansweredOffer(t *testing.T) {
 	}
 	// Nothing ran, so nothing was spent: this work should be offered again
 	// rather than waiting for an operator to retry it.
-	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
+	if !h.schedulable(issueID) {
 		t.Fatal("an unanswered offer parked the issue even though no execution ran")
 	}
 }
@@ -481,11 +499,17 @@ func TestBlockingParksTheIssueAndCancellingDoesNot(t *testing.T) {
 			if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks`); locks != 0 {
 				t.Fatalf("%s did not release the project lock", action)
 			}
-			eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID)
-			if action == "block" && eligible != 0 {
-				t.Fatal("blocking left the issue eligible, so the scheduler restarts the work the operator stopped")
+			// The label-driven bit itself is untouched by either action (#268:
+			// eligible is not a lifecycle flag any more) -- only whether the
+			// issue is actually schedulable changes.
+			if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
+				t.Fatalf("%s changed the issue's label-driven eligible bit, which the tracker alone should own", action)
 			}
-			if action == "cancel" && eligible != 1 {
+			schedulable := h.schedulable(issueID)
+			if action == "block" && schedulable {
+				t.Fatal("blocking left the issue schedulable, so the scheduler restarts the work the operator stopped")
+			}
+			if action == "cancel" && !schedulable {
 				t.Fatal("cancelling parked the issue; cancelling returns the work to the queue by design")
 			}
 		})
@@ -606,13 +630,17 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	h.exec(`UPDATE app.issues SET state='open' WHERE project_id=$1 AND external_id IN ('42','43')`, queuedProject)
 
 	// One active workflow run and one that finished; only the first is active.
+	// Both hang off a dedicated, already-opted-out issue rather than either of
+	// the two counted above: ActiveWorkflows and ScheduledJobs read
+	// app.workflow_runs/app.jobs directly with no issue join, but QueueDepth
+	// now excludes an issue with a completed run of its own (#268) -- reusing
+	// one of the counted issues here would make this fixture's "done" run
+	// silently subtract from a count it is not testing.
+	runsIssueID := newID()
+	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','44','44','Run host','https://example.test/issues/44','open',false,now(),now())`, runsIssueID, queuedProject)
 	activeRun, doneRun := newID(), newID()
-	var issueID string
-	if err := h.pool.QueryRow(ctx, `SELECT id::text FROM app.issues WHERE project_id=$1 LIMIT 1`, queuedProject).Scan(&issueID); err != nil {
-		t.Fatal(err)
-	}
-	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, activeRun, queuedProject, issueID, "thread-"+activeRun)
-	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'completed','done')`, doneRun, queuedProject, issueID, "thread-"+doneRun)
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, activeRun, queuedProject, runsIssueID, "thread-"+activeRun)
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'completed','done')`, doneRun, queuedProject, runsIssueID, "thread-"+doneRun)
 	// One scheduled job, and one that has finished.
 	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'running')`, newID(), activeRun, queuedProject)
 	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'completed')`, newID(), doneRun, queuedProject)
@@ -872,8 +900,8 @@ func TestAgentDeclaredBlockEndsTheRunBlockedWithItsReason(t *testing.T) {
 	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
 		t.Fatal("a blocked run kept its project lock, so the project can never schedule again")
 	}
-	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
-		t.Fatal("a blocked run left its issue eligible, so the scheduler re-dispatches the same block forever")
+	if h.schedulable(issueID) {
+		t.Fatal("a blocked run left its issue schedulable, so the scheduler re-dispatches the same block forever")
 	}
 	scheduled, err := h.ScheduleOnce(context.Background())
 	if err != nil {
@@ -897,7 +925,7 @@ func TestAgentDeclaredBlockEndsTheRunBlockedWithItsReason(t *testing.T) {
 	if _, err := h.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
 		t.Fatalf("RetryWorkflow on an agent-blocked run: %v", err)
 	}
-	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
+	if !h.schedulable(issueID) {
 		t.Fatal("retry did not reopen the issue of an agent-blocked run")
 	}
 }
@@ -1205,5 +1233,96 @@ func TestWorkflowRunStatusCheckConstraintMatchesKnownStatuses(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "workflow_runs_status_is_known") {
 		t.Fatalf("insert of an unknown status failed with %v, want the workflow_runs_status_is_known constraint", err)
+	}
+}
+
+// labelStub is a GitHub whose ListIssues result is driven by a mutable label
+// set, so a test can simulate an operator editing the tracker between sync
+// passes the same way TestSyncHonoursTrackerLabelEditsAfterARunExists does.
+type labelStub struct {
+	stubGitHub
+	labels []string
+}
+
+func (s *labelStub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
+	priority, eligible := issuePriority(s.labels)
+	return []githubIssue{{
+		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
+		Labels: s.labels, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Priority: priority, Eligible: eligible,
+	}}, nil
+}
+
+// #268: app.issues.eligible used to be recomputed from the tracker's labels
+// only until an issue had its first workflow run -- from then on the sync
+// upsert's ON CONFLICT preserved whatever the orchestrator's own lifecycle
+// had last written, so removing agent:ready or adding agent:blocked on the
+// tracker silently stopped doing anything. This pins the fix: eligible is
+// once again written unconditionally from the labels on every sync, and it
+// is the scheduler's own app.workflow_runs join (not a frozen label
+// snapshot) that keeps a failed run's issue from being immediately
+// redispatched until RetryWorkflow supersedes it.
+func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	stub := &labelStub{labels: []string{"agent:ready"}}
+	h.github = stub
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	var generation int64
+	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: generation, EventSequence: 1, Type: "failed", PayloadJson: "{}",
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("test setup: the failed run should already exclude the issue")
+	}
+
+	// Scenario 1: removing agent:ready after a run exists must actually take
+	// effect on the tracker's own bit, not be silently swallowed.
+	stub.labels = nil
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject: %v", err)
+	}
+	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
+		t.Fatal("removing agent:ready after a run exists did not clear the label-driven eligible bit")
+	}
+
+	// Scenario 2: adding agent:blocked after a run exists must also take
+	// effect.
+	stub.labels = []string{"agent:ready", "agent:blocked"}
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject: %v", err)
+	}
+	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
+		t.Fatal("adding agent:blocked after a run exists did not clear the label-driven eligible bit")
+	}
+
+	// Restoring agent:ready brings the label bit back, but must not by
+	// itself reopen a failed run's issue: only RetryWorkflow does that.
+	stub.labels = []string{"agent:ready"}
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject: %v", err)
+	}
+	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
+		t.Fatal("sync did not restore the label-driven eligible bit once agent:ready came back")
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("restoring agent:ready alone reopened a failed run's issue; only RetryWorkflow should")
+	}
+
+	// Scenario 3: retry is what actually reopens it, and the issue's own
+	// eligible bit (already true from the label) needs nothing further
+	// written to it.
+	if _, err := h.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
+		t.Fatalf("RetryWorkflow: %v", err)
+	}
+	if !h.schedulable(issueID) {
+		t.Fatal("retry did not make the issue schedulable again")
 	}
 }
