@@ -43,7 +43,7 @@ const runnerEventIDPrefix = "runner:"
 // (populated by the trigger in 017_dashboard_events.sql) rather than polling
 // the whole table, so a cold connect only pays for a single MAX(id) lookup
 // plus whatever a client explicitly asks to replay via Last-Event-ID.
-func (s *Server) StreamEvents(request *controlv1.StreamEventsRequest, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent]) error {
+func (s *ControlServer) StreamEvents(request *controlv1.StreamEventsRequest, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent]) error {
 	if _, err := s.requireActor(stream.Context(), false); err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (s *Server) StreamEvents(request *controlv1.StreamEventsRequest, stream grp
 // maximum event id, so a client never pays for a full-table replay — history
 // beyond that remains available through ListWorkflowEvents. Any other
 // unparsable value is treated as caller error.
-func (s *Server) startingCursor(ctx context.Context, lastEventID string) (int64, error) {
+func (s *Core) startingCursor(ctx context.Context, lastEventID string) (int64, error) {
 	if lastEventID != "" && !strings.HasPrefix(lastEventID, runnerEventIDPrefix) {
 		value, err := strconv.ParseInt(lastEventID, 10, 64)
 		if err != nil || value < 0 {
@@ -130,7 +130,7 @@ func (s *Server) startingCursor(ctx context.Context, lastEventID string) (int64,
 // emitWorkflowEvents sends every app.workflow_events row after *cursor, in
 // batches of 100, advancing *cursor as it goes. The workflow lookups for a
 // batch are done with a single ANY($1) query instead of one query per row.
-func (s *Server) emitWorkflowEvents(ctx context.Context, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent], cursor *int64) error {
+func (s *Core) emitWorkflowEvents(ctx context.Context, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent], cursor *int64) error {
 	for {
 		type eventRow struct {
 			id         int64
@@ -192,7 +192,7 @@ func (s *Server) emitWorkflowEvents(ctx context.Context, stream grpc.ServerStrea
 // snapshot of the row) guarantees the event reflects the runner's current
 // state even if several updates coalesced before this notification was
 // processed, and picks up fields the trigger doesn't emit (e.g. version).
-func (s *Server) emitRunnerEvent(ctx context.Context, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent], payload dashboardNotification) error {
+func (s *Core) emitRunnerEvent(ctx context.Context, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent], payload dashboardNotification) error {
 	if !idgen.ValidID(payload.Runner.ID) {
 		return nil
 	}
@@ -215,7 +215,7 @@ func (s *Server) emitRunnerEvent(ctx context.Context, stream grpc.ServerStreamin
 
 // workflowsByIDs batch-loads workflows for a StreamEvents page, keyed by id,
 // replacing the per-row s.workflow() lookup StreamEvents used to make.
-func (s *Server) workflowsByIDs(ctx context.Context, ids []string) (map[string]*controlv1.Workflow, error) {
+func (s *Core) workflowsByIDs(ctx context.Context, ids []string) (map[string]*controlv1.Workflow, error) {
 	rows, err := s.pool.Query(ctx, `SELECT wr.id::text,wr.project_id::text,wr.status,wr.current_phase,i.external_id,i.title,wr.branch_name,COALESCE(pr.external_id,wr.pull_request_external_id),COALESCE(pr.url,wr.pull_request_url),pr.state,wr.blocking_reason,wr.planning_attempts,wr.implementation_attempts,wr.pipeline_repair_attempts,wr.ci_repair_attempts,wr.review_cycles,wr.total_agent_executions,wr.created_at,wr.updated_at FROM app.workflow_runs wr JOIN app.issues i ON i.id=wr.issue_id LEFT JOIN app.pull_requests pr ON pr.workflow_run_id=wr.id WHERE wr.id=ANY($1)`, ids)
 	if err != nil {
 		return nil, databaseError(err)

@@ -4,7 +4,7 @@
 // a runner's Connect stream (or a dashboard's StreamEvents stream) was open:
 // both handlers only selected on their own stream context, which GracefulStop
 // never cancels, so a connected runner — which holds Connect open
-// indefinitely by design — blocked shutdown forever. Server.Shutdown gives
+// indefinitely by design — blocked shutdown forever. Core.Shutdown gives
 // both handlers a second signal to return on.
 package server
 
@@ -69,7 +69,7 @@ func (h *harness) runnerWithCredential() (runnerID, credential string) {
 
 // TestConnectReturnsOnShutdown pins that a runner control stream — held open
 // indefinitely by design, since that is how a runner receives job offers —
-// returns as soon as Server.Shutdown is called, instead of blocking until the
+// returns as soon as Core.Shutdown is called, instead of blocking until the
 // runner disconnects on its own. That block is exactly what left
 // grpc.Server.GracefulStop waiting forever in production, since GracefulStop
 // itself never cancels an active stream's context.
@@ -83,7 +83,7 @@ func TestConnectReturnsOnShutdown(t *testing.T) {
 	stream.recv <- &runnerv1.RunnerToOrchestrator{RunnerId: runnerID, Credential: credential, Message: &runnerv1.RunnerToOrchestrator_Heartbeat{Heartbeat: &runnerv1.Heartbeat{Version: "1"}}}
 
 	returned := make(chan error, 1)
-	go func() { returned <- h.Connect(stream) }()
+	go func() { returned <- h.Runner.Connect(stream) }()
 
 	// Give Connect a moment to authenticate and register the session, proving
 	// it is genuinely parked in its select loop (the state a real runner
@@ -103,7 +103,7 @@ func TestConnectReturnsOnShutdown(t *testing.T) {
 			t.Fatal("Connect returned nil, want an Unavailable error telling the runner to reconnect")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Connect did not return within 2s of Server.Shutdown; GracefulStop would hang here in production")
+		t.Fatal("Connect did not return within 2s of Core.Shutdown; GracefulStop would hang here in production")
 	}
 }
 
@@ -120,7 +120,7 @@ func TestStreamEventsReturnsOnShutdown(t *testing.T) {
 	stream := &fakeEventStream{ctx: ctx}
 
 	returned := make(chan error, 1)
-	go func() { returned <- h.StreamEvents(&controlv1.StreamEventsRequest{}, stream) }()
+	go func() { returned <- h.Control.StreamEvents(&controlv1.StreamEventsRequest{}, stream) }()
 
 	// Give StreamEvents time to finish its cold-connect catch-up and reach
 	// the WaitForNotification call it would otherwise sit in until this
@@ -135,6 +135,6 @@ func TestStreamEventsReturnsOnShutdown(t *testing.T) {
 			t.Fatal("StreamEvents returned nil, want a context-cancellation error")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("StreamEvents did not return within 2s of Server.Shutdown; GracefulStop would hang here in production")
+		t.Fatal("StreamEvents did not return within 2s of Core.Shutdown; GracefulStop would hang here in production")
 	}
 }

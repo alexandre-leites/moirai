@@ -37,9 +37,27 @@ const (
 	leaseDuration = 10 * time.Minute
 )
 
-type Server struct {
-	controlv1.UnimplementedControlPlaneServer
-	runnerv1.UnimplementedRunnerControlServer
+// Core holds everything ControlServer (the human/console-facing
+// controlv1.ControlPlaneServer) and RunnerServer (the machine-facing
+// runnerv1.RunnerControlServer) need in common: the database handle, the
+// runner control-stream session map, the shutdown signal and the
+// background-loop recorder. Neither gRPC interface is implemented on Core
+// itself -- main.go constructs one Core and hands `&ControlServer{Core}` /
+// `&RunnerServer{Core}` to the two Register*Server calls, and also calls
+// Core's own lifecycle/background-loop methods (Bootstrap, ScheduleOnce,
+// ObserveWorkflows, RecoverOnce, SyncProjects, Shutdown) directly, since none
+// of those are part of either gRPC service.
+//
+// Splitting the type this way keeps the human/machine trust boundary
+// structural: a ControlServer value has no method that satisfies
+// runnerv1.RunnerControlServer, and a RunnerServer value has no method that
+// satisfies controlv1.ControlPlaneServer, so the two surfaces cannot be
+// confused at the call site the way two interfaces implemented by one type
+// can be. Every helper both sides (or a background loop) need --
+// requireActor, the delivery/observation chain, the session map primitives,
+// project/workflow/runner lookups -- lives here rather than being forced onto
+// one side with the other reaching across a back-reference.
+type Core struct {
 	pool     *pgxpool.Pool
 	queries  *db.Queries
 	version  string
@@ -57,17 +75,36 @@ type Server struct {
 	shutdownOnce sync.Once
 	// loopRecorder reports background-loop liveness through GetSchedulerMetrics.
 	// It is wired in by main.go once the metrics recorder exists (SetLoopRecorder),
-	// after this Server is already constructed; nil until then, and in most unit
+	// after this Core is already constructed; nil until then, and in most unit
 	// tests, which is why every read of it goes through the recorder's own
 	// nil-safe methods rather than a nil check here.
 	loopRecorder *metrics.Recorder
+}
+
+// ControlServer implements controlv1.ControlPlaneServer: every RPC a human
+// operator's console session (or the API gateway on its behalf) calls,
+// gated by session/CSRF/admin checks rather than a runner credential. It
+// holds no state of its own -- every field it needs lives on the shared
+// *Core.
+type ControlServer struct {
+	controlv1.UnimplementedControlPlaneServer
+	*Core
+}
+
+// RunnerServer implements runnerv1.RunnerControlServer: every RPC a runner
+// process calls, authenticated by its own credential/lease rather than a
+// human session. It holds no state of its own -- every field it needs lives
+// on the shared *Core.
+type RunnerServer struct {
+	runnerv1.UnimplementedRunnerControlServer
+	*Core
 }
 
 // SetLoopRecorder wires the background-loop liveness recorder into the server
 // so GetSchedulerMetrics can expose it over gRPC, in addition to the recorder's
 // own Prometheus surface and readiness endpoint. Optional: a Server this is
 // never called on (most unit tests) simply reports no loop statuses.
-func (s *Server) SetLoopRecorder(recorder *metrics.Recorder) {
+func (s *Core) SetLoopRecorder(recorder *metrics.Recorder) {
 	s.loopRecorder = recorder
 }
 
@@ -109,7 +146,7 @@ func executionTimeoutSeconds(configured int32) int {
 	return defaultExecutionTimeoutSeconds
 }
 
-func New(pool *pgxpool.Pool, version string) (*Server, error) {
+func New(pool *pgxpool.Pool, version string) (*Core, error) {
 	if pool == nil {
 		return nil, errors.New("database pool is required")
 	}
@@ -120,11 +157,11 @@ func New(pool *pgxpool.Pool, version string) (*Server, error) {
 	return NewWithGitHub(pool, version, github)
 }
 
-func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Server, error) {
+func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Core, error) {
 	if pool == nil || github == nil {
 		return nil, errors.New("server dependencies are required")
 	}
-	return &Server{pool: pool, queries: db.New(pool), version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner), shutdown: make(chan struct{})}, nil
+	return &Core{pool: pool, queries: db.New(pool), version: version, github: github, sessions: make(map[string]chan *runnerv1.OrchestratorToRunner), shutdown: make(chan struct{})}, nil
 }
 
 // Shutdown tells every stream handler currently blocked on Connect or
@@ -135,7 +172,7 @@ func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Server, 
 // early because they observe this signal, so calling it after GracefulStop
 // has already started blocking would deadlock the very shutdown it exists to
 // unblock.
-func (s *Server) Shutdown() {
+func (s *Core) Shutdown() {
 	s.shutdownOnce.Do(func() { close(s.shutdown) })
 }
 
@@ -144,7 +181,7 @@ func (s *Server) Shutdown() {
 // still call parent's own cancellation/Done handling as before; this only
 // adds the extra trigger. The goroutine it starts exits as soon as either
 // signal fires, so it never outlives the returned context.
-func (s *Server) withShutdown(parent context.Context) (context.Context, context.CancelFunc) {
+func (s *Core) withShutdown(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 	go func() {
 		select {
@@ -156,7 +193,7 @@ func (s *Server) withShutdown(parent context.Context) (context.Context, context.
 	return ctx, cancel
 }
 
-func (s *Server) Bootstrap(ctx context.Context) error {
+func (s *Core) Bootstrap(ctx context.Context) error {
 	userCount, err := s.queries.CountUsers(ctx)
 	if err != nil {
 		return databaseError(err)
@@ -219,7 +256,7 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 	return databaseError(err)
 }
 
-func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*controlv1.LoginResponse, error) {
+func (s *ControlServer) Login(ctx context.Context, request *controlv1.LoginRequest) (*controlv1.LoginResponse, error) {
 	username := strings.TrimSpace(request.GetUsername())
 	if username == "" || len(username) > 128 || request.GetPassword() == "" {
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
@@ -250,7 +287,7 @@ func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*c
 	return &controlv1.LoginResponse{SessionToken: sessionToken, UserId: userID, CsrfToken: csrfToken}, nil
 }
 
-func (s *Server) WhoAmI(ctx context.Context, _ *controlv1.WhoAmIRequest) (*controlv1.WhoAmIResponse, error) {
+func (s *ControlServer) WhoAmI(ctx context.Context, _ *controlv1.WhoAmIRequest) (*controlv1.WhoAmIResponse, error) {
 	current, err := s.requireActor(ctx, false)
 	if err != nil {
 		return nil, err
@@ -264,7 +301,7 @@ func (s *Server) WhoAmI(ctx context.Context, _ *controlv1.WhoAmIRequest) (*contr
 	return response, nil
 }
 
-func (s *Server) Logout(ctx context.Context, _ *controlv1.LogoutRequest) (*controlv1.LogoutResponse, error) {
+func (s *ControlServer) Logout(ctx context.Context, _ *controlv1.LogoutRequest) (*controlv1.LogoutResponse, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok || len(md.Get(sessionHeader)) != 1 || len(md.Get(csrfHeader)) != 1 {
 		return nil, status.Error(codes.Unauthenticated, "session is required")
@@ -279,7 +316,7 @@ func (s *Server) Logout(ctx context.Context, _ *controlv1.LogoutRequest) (*contr
 	return &controlv1.LogoutResponse{}, nil
 }
 
-func (s *Server) ListProjects(ctx context.Context, _ *controlv1.ListProjectsRequest) (*controlv1.ListProjectsResponse, error) {
+func (s *ControlServer) ListProjects(ctx context.Context, _ *controlv1.ListProjectsRequest) (*controlv1.ListProjectsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -298,7 +335,7 @@ func (s *Server) ListProjects(ctx context.Context, _ *controlv1.ListProjectsRequ
 	return response, nil
 }
 
-func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreateProjectRequest) (*controlv1.CreateProjectResponse, error) {
+func (s *ControlServer) CreateProject(ctx context.Context, request *controlv1.CreateProjectRequest) (*controlv1.CreateProjectResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -341,7 +378,7 @@ func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreatePro
 	return &controlv1.CreateProjectResponse{Project: project}, nil
 }
 
-func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdateProjectRequest) (*controlv1.UpdateProjectResponse, error) {
+func (s *ControlServer) UpdateProject(ctx context.Context, request *controlv1.UpdateProjectRequest) (*controlv1.UpdateProjectResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -390,7 +427,7 @@ func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdatePro
 	return &controlv1.UpdateProjectResponse{Project: project}, nil
 }
 
-func (s *Server) SetProjectEnabled(ctx context.Context, request *controlv1.SetProjectEnabledRequest) (*controlv1.SetProjectEnabledResponse, error) {
+func (s *ControlServer) SetProjectEnabled(ctx context.Context, request *controlv1.SetProjectEnabledRequest) (*controlv1.SetProjectEnabledResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -427,7 +464,7 @@ func (s *Server) SetProjectEnabled(ctx context.Context, request *controlv1.SetPr
 // ceiling ListWorkflowEvents already uses for the same reason.
 const listWorkflowsLimit = 500
 
-func (s *Server) ListWorkflows(ctx context.Context, _ *controlv1.ListWorkflowsRequest) (*controlv1.ListWorkflowsResponse, error) {
+func (s *ControlServer) ListWorkflows(ctx context.Context, _ *controlv1.ListWorkflowsRequest) (*controlv1.ListWorkflowsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -442,7 +479,7 @@ func (s *Server) ListWorkflows(ctx context.Context, _ *controlv1.ListWorkflowsRe
 	return response, nil
 }
 
-func (s *Server) GetWorkflow(ctx context.Context, request *controlv1.GetWorkflowRequest) (*controlv1.GetWorkflowResponse, error) {
+func (s *ControlServer) GetWorkflow(ctx context.Context, request *controlv1.GetWorkflowRequest) (*controlv1.GetWorkflowResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -453,7 +490,7 @@ func (s *Server) GetWorkflow(ctx context.Context, request *controlv1.GetWorkflow
 	return &controlv1.GetWorkflowResponse{Workflow: workflow}, nil
 }
 
-func (s *Server) ListWorkflowEvents(ctx context.Context, request *controlv1.ListWorkflowEventsRequest) (*controlv1.ListWorkflowEventsResponse, error) {
+func (s *ControlServer) ListWorkflowEvents(ctx context.Context, request *controlv1.ListWorkflowEventsRequest) (*controlv1.ListWorkflowEventsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -493,7 +530,7 @@ func (s *Server) ListWorkflowEvents(ctx context.Context, request *controlv1.List
 	return response, nil
 }
 
-func (s *Server) RetryWorkflow(ctx context.Context, request *controlv1.RetryWorkflowRequest) (*controlv1.RetryWorkflowResponse, error) {
+func (s *ControlServer) RetryWorkflow(ctx context.Context, request *controlv1.RetryWorkflowRequest) (*controlv1.RetryWorkflowResponse, error) {
 	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "retry")
 	if err != nil {
 		return nil, err
@@ -501,7 +538,7 @@ func (s *Server) RetryWorkflow(ctx context.Context, request *controlv1.RetryWork
 	return &controlv1.RetryWorkflowResponse{Workflow: workflow}, nil
 }
 
-func (s *Server) CancelWorkflow(ctx context.Context, request *controlv1.CancelWorkflowRequest) (*controlv1.CancelWorkflowResponse, error) {
+func (s *ControlServer) CancelWorkflow(ctx context.Context, request *controlv1.CancelWorkflowRequest) (*controlv1.CancelWorkflowResponse, error) {
 	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "cancel")
 	if err != nil {
 		return nil, err
@@ -509,7 +546,7 @@ func (s *Server) CancelWorkflow(ctx context.Context, request *controlv1.CancelWo
 	return &controlv1.CancelWorkflowResponse{Workflow: workflow}, nil
 }
 
-func (s *Server) BlockWorkflow(ctx context.Context, request *controlv1.BlockWorkflowRequest) (*controlv1.BlockWorkflowResponse, error) {
+func (s *ControlServer) BlockWorkflow(ctx context.Context, request *controlv1.BlockWorkflowRequest) (*controlv1.BlockWorkflowResponse, error) {
 	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "block")
 	if err != nil {
 		return nil, err
@@ -517,7 +554,7 @@ func (s *Server) BlockWorkflow(ctx context.Context, request *controlv1.BlockWork
 	return &controlv1.BlockWorkflowResponse{Workflow: workflow}, nil
 }
 
-func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest) (*controlv1.SyncNowResponse, error) {
+func (s *ControlServer) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest) (*controlv1.SyncNowResponse, error) {
 	if _, err := s.requireMutation(ctx); err != nil {
 		return nil, err
 	}
@@ -569,7 +606,7 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 // token would otherwise stop every other project discovering work — so failures
 // are recorded per project (which is what drives the console's sync health) and
 // reported together.
-func (s *Server) SyncProjects(ctx context.Context) error {
+func (s *Core) SyncProjects(ctx context.Context) error {
 	// ListProjectsDueForSync (unlike ListSyncableProjects, which SyncNow uses)
 	// excludes a project still inside the backoff window recordSyncFailure set
 	// on it, so a repository with a revoked token or a deleted remote is not
@@ -587,7 +624,7 @@ func (s *Server) SyncProjects(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (s *Server) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueSyncStatusRequest) (*controlv1.IssueSyncStatusResponse, error) {
+func (s *ControlServer) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueSyncStatusRequest) (*controlv1.IssueSyncStatusResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -621,7 +658,7 @@ func (s *Server) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueSyncStat
 	return response, nil
 }
 
-func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL string) error {
+func (s *Core) syncProject(ctx context.Context, projectID, repositoryURL string) error {
 	repository, err := repositoryRef(repositoryURL)
 	if err != nil {
 		return err
@@ -680,12 +717,12 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 	return commit(tx)
 }
 
-func (s *Server) recordSyncFailure(ctx context.Context, projectID string, cause error) error {
+func (s *Core) recordSyncFailure(ctx context.Context, projectID string, cause error) error {
 	err := s.queries.UpsertIssueSyncStateFailure(ctx, db.UpsertIssueSyncStateFailureParams{ProjectID: projectID, LastError: pgtype.Text{String: textutil.Truncate(cause.Error(), 1024), Valid: true}})
 	return databaseError(err)
 }
 
-func (s *Server) ListRunners(ctx context.Context, _ *controlv1.ListRunnersRequest) (*controlv1.ListRunnersResponse, error) {
+func (s *ControlServer) ListRunners(ctx context.Context, _ *controlv1.ListRunnersRequest) (*controlv1.ListRunnersResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -704,7 +741,7 @@ func (s *Server) ListRunners(ctx context.Context, _ *controlv1.ListRunnersReques
 	return response, nil
 }
 
-func (s *Server) SetRunnerState(ctx context.Context, request *controlv1.SetRunnerStateRequest) (*controlv1.SetRunnerStateResponse, error) {
+func (s *ControlServer) SetRunnerState(ctx context.Context, request *controlv1.SetRunnerStateRequest) (*controlv1.SetRunnerStateResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -751,7 +788,7 @@ func (s *Server) SetRunnerState(ctx context.Context, request *controlv1.SetRunne
 	return &controlv1.SetRunnerStateResponse{Runner: runner}, nil
 }
 
-func (s *Server) ListQueue(ctx context.Context, request *controlv1.ListQueueRequest) (*controlv1.ListQueueResponse, error) {
+func (s *ControlServer) ListQueue(ctx context.Context, request *controlv1.ListQueueRequest) (*controlv1.ListQueueResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -806,7 +843,7 @@ type schedulerSnapshot struct {
 // permanently and correctly alarming, which is the same as useless. The age is
 // computed by the database from its own clock, so orchestrator clock skew
 // cannot make a heartbeat look fresher than it is.
-func (s *Server) readSchedulerSnapshot(ctx context.Context) (schedulerSnapshot, error) {
+func (s *Core) readSchedulerSnapshot(ctx context.Context) (schedulerSnapshot, error) {
 	row, err := s.queries.GetSchedulerSnapshot(ctx)
 	if err != nil {
 		return schedulerSnapshot{}, databaseError(err)
@@ -824,7 +861,7 @@ func (s *Server) readSchedulerSnapshot(ctx context.Context) (schedulerSnapshot, 
 	return snapshot, nil
 }
 
-func (s *Server) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedulerMetricsRequest) (*controlv1.GetSchedulerMetricsResponse, error) {
+func (s *ControlServer) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedulerMetricsRequest) (*controlv1.GetSchedulerMetricsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -860,7 +897,7 @@ func (s *Server) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedu
 // own — and returns an error rather than a zeroed snapshot when the database
 // cannot answer, so the exporter can omit the series instead of publishing a
 // zero nothing measured.
-func (s *Server) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
+func (s *Core) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) {
 	snapshot, err := s.readSchedulerSnapshot(ctx)
 	if err != nil {
 		return metrics.Snapshot{}, err
@@ -891,11 +928,11 @@ func (s *Server) MetricsSnapshot(ctx context.Context) (metrics.Snapshot, error) 
 // call fails; requiring an actor here therefore does not protect anything, it
 // just blanks the version operators use to tell deployments apart. The response
 // carries only the build identifier, already published next to it as apiVersion.
-func (s *Server) GetSystemVersion(_ context.Context, _ *controlv1.GetSystemVersionRequest) (*controlv1.GetSystemVersionResponse, error) {
+func (s *ControlServer) GetSystemVersion(_ context.Context, _ *controlv1.GetSystemVersionRequest) (*controlv1.GetSystemVersionResponse, error) {
 	return &controlv1.GetSystemVersionResponse{Version: s.version}, nil
 }
 
-func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterRunnerRequest) (*runnerv1.RegisterRunnerResponse, error) {
+func (s *RunnerServer) RegisterRunner(ctx context.Context, request *runnerv1.RegisterRunnerRequest) (*runnerv1.RegisterRunnerResponse, error) {
 	labels, err := normalizeLabels(request.GetLabels())
 	if err != nil || strings.TrimSpace(request.GetName()) == "" || request.GetProtocolVersion() != "1.0" {
 		return nil, status.Error(codes.InvalidArgument, "runner registration request is invalid")
@@ -940,7 +977,7 @@ func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterR
 	return &runnerv1.RegisterRunnerResponse{RunnerId: runnerID, Credential: credential}, nil
 }
 
-func (s *Server) Connect(stream grpc.BidiStreamingServer[runnerv1.RunnerToOrchestrator, runnerv1.OrchestratorToRunner]) error {
+func (s *RunnerServer) Connect(stream grpc.BidiStreamingServer[runnerv1.RunnerToOrchestrator, runnerv1.OrchestratorToRunner]) error {
 	first, err := stream.Recv()
 	if errors.Is(err, io.EOF) {
 		return nil
@@ -1009,7 +1046,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[runnerv1.RunnerToOrches
 	}
 }
 
-func (s *Server) handleRunnerMessage(ctx context.Context, runnerID string, message *runnerv1.RunnerToOrchestrator) error {
+func (s *Core) handleRunnerMessage(ctx context.Context, runnerID string, message *runnerv1.RunnerToOrchestrator) error {
 	switch {
 	case message.GetHeartbeat() != nil:
 		heartbeat := message.GetHeartbeat()
@@ -1049,7 +1086,7 @@ func (s *Server) handleRunnerMessage(ctx context.Context, runnerID string, messa
 	}
 }
 
-func (s *Server) addSession(runnerID string, outbound chan *runnerv1.OrchestratorToRunner) bool {
+func (s *Core) addSession(runnerID string, outbound chan *runnerv1.OrchestratorToRunner) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.sessions[runnerID]; exists {
@@ -1059,7 +1096,7 @@ func (s *Server) addSession(runnerID string, outbound chan *runnerv1.Orchestrato
 	return true
 }
 
-func (s *Server) removeSession(runnerID string, outbound chan *runnerv1.OrchestratorToRunner) {
+func (s *Core) removeSession(runnerID string, outbound chan *runnerv1.OrchestratorToRunner) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions[runnerID] == outbound {
@@ -1067,7 +1104,7 @@ func (s *Server) removeSession(runnerID string, outbound chan *runnerv1.Orchestr
 	}
 }
 
-func (s *Server) enqueue(runnerID string, message *runnerv1.OrchestratorToRunner) bool {
+func (s *Core) enqueue(runnerID string, message *runnerv1.OrchestratorToRunner) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	outbound := s.sessions[runnerID]
@@ -1082,7 +1119,7 @@ func (s *Server) enqueue(runnerID string, message *runnerv1.OrchestratorToRunner
 	}
 }
 
-func (s *Server) connectedRunners() []string {
+func (s *Core) connectedRunners() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	runners := make([]string, 0, len(s.sessions))
@@ -1092,7 +1129,7 @@ func (s *Server) connectedRunners() []string {
 	return runners
 }
 
-func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
+func (s *Core) ScheduleOnce(ctx context.Context) (bool, error) {
 	runners := s.connectedRunners()
 	if len(runners) == 0 {
 		return false, nil
@@ -1160,7 +1197,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	return false, s.releaseUndeliveredOffer(jobID, workflowID, projectID)
 }
 
-func (s *Server) releaseUndeliveredOffer(jobID, workflowID, projectID string) error {
+func (s *Core) releaseUndeliveredOffer(jobID, workflowID, projectID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
@@ -1220,7 +1257,7 @@ func developerPacket(jobID, projectID, externalID, title, body, mode, repository
 	}, nil
 }
 
-func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64, time.Time, error) {
+func (s *Core) acceptOffer(ctx context.Context, runnerID, jobID string) (int64, time.Time, error) {
 	if !idgen.ValidID(jobID) {
 		return 0, time.Time{}, status.Error(codes.InvalidArgument, "job ID is invalid")
 	}
@@ -1264,7 +1301,7 @@ func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64
 	return generation, expiresAt, nil
 }
 
-func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string) error {
+func (s *Core) rejectOffer(ctx context.Context, runnerID, jobID, reason string) error {
 	if !idgen.ValidID(jobID) {
 		return status.Error(codes.InvalidArgument, "job ID is invalid")
 	}
@@ -1297,7 +1334,7 @@ func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string
 	return commit(tx)
 }
 
-func (s *Server) renewLease(ctx context.Context, runnerID string, renewal *runnerv1.LeaseRenewal) (time.Time, error) {
+func (s *Core) renewLease(ctx context.Context, runnerID string, renewal *runnerv1.LeaseRenewal) (time.Time, error) {
 	if !idgen.ValidID(renewal.GetJobId()) || renewal.GetLeaseGeneration() < 1 || renewal.GetRequestedExpiresAtUnixMs() <= time.Now().UnixMilli() {
 		return time.Time{}, status.Error(codes.InvalidArgument, "lease renewal is invalid")
 	}
@@ -1317,7 +1354,7 @@ func (s *Server) renewLease(ctx context.Context, runnerID string, renewal *runne
 	return persisted.Time, nil
 }
 
-func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, event *runnerv1.ExecutionEvent) error {
+func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event *runnerv1.ExecutionEvent) error {
 	if !idgen.ValidID(event.GetJobId()) || event.GetLeaseGeneration() < 1 || event.GetEventSequence() < 1 || !validEventType(event.GetType()) || !json.Valid([]byte(event.GetPayloadJson())) {
 		return status.Error(codes.InvalidArgument, "execution event is invalid")
 	}
@@ -1574,7 +1611,7 @@ func eventIDError(id string, err error) error {
 	return status.Error(codes.Internal, "workflow event id is invalid")
 }
 
-func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error) {
+func (s *Core) requireActor(ctx context.Context, mutation bool) (actor, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok || len(md.Get(sessionHeader)) != 1 || strings.TrimSpace(md.Get(sessionHeader)[0]) == "" {
 		return actor{}, status.Error(codes.Unauthenticated, "session is required")
@@ -1599,11 +1636,11 @@ func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error)
 	return actor{id: id, role: role}, nil
 }
 
-func (s *Server) requireMutation(ctx context.Context) (actor, error) {
+func (s *Core) requireMutation(ctx context.Context) (actor, error) {
 	return s.requireActor(ctx, true)
 }
 
-func (s *Server) authenticateRunner(ctx context.Context, runnerID, credential string) error {
+func (s *Core) authenticateRunner(ctx context.Context, runnerID, credential string) error {
 	if !idgen.ValidID(runnerID) {
 		return status.Error(codes.Unauthenticated, "runner authentication was rejected")
 	}
@@ -1623,7 +1660,7 @@ type projectQuerier interface {
 	ListProjectPipelineSteps(context.Context, string) ([]db.ListProjectPipelineStepsRow, error)
 }
 
-func (s *Server) project(ctx context.Context, queries projectQuerier, id string) (*controlv1.Project, error) {
+func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (*controlv1.Project, error) {
 	if !idgen.ValidID(id) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
@@ -1659,7 +1696,7 @@ func (s *Server) project(ctx context.Context, queries projectQuerier, id string)
 	return project, nil
 }
 
-func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, error) {
+func (s *Core) workflow(ctx context.Context, id string) (*controlv1.Workflow, error) {
 	if !idgen.ValidID(id) {
 		return nil, status.Error(codes.InvalidArgument, "workflow run ID is invalid")
 	}
@@ -1699,7 +1736,7 @@ func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 	return workflow
 }
 
-func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string) (*controlv1.Workflow, error) {
+func (s *Core) controlWorkflow(ctx context.Context, id, reason, action string) (*controlv1.Workflow, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -1900,7 +1937,7 @@ func normalizeLabels(labels []string) ([]string, error) {
 	}
 	return result, nil
 }
-func (s *Server) runner(ctx context.Context, id string) (*controlv1.Runner, error) {
+func (s *Core) runner(ctx context.Context, id string) (*controlv1.Runner, error) {
 	if !idgen.ValidID(id) {
 		return nil, status.Error(codes.InvalidArgument, "runner ID is invalid")
 	}

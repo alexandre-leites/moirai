@@ -52,7 +52,7 @@ const abandonedChecks = 6 * time.Hour
 // The three sweeps are independent, so all three run even if one fails: the two
 // that release project locks must not be skipped because a console flag could
 // not be written. Running it twice changes nothing the first pass settled.
-func (s *Server) RecoverOnce(ctx context.Context) error {
+func (s *Core) RecoverOnce(ctx context.Context) error {
 	return errors.Join(
 		s.ReconcileDatabaseOnce(ctx),
 		s.resumeStrandedDeliveries(ctx),
@@ -64,7 +64,7 @@ func (s *Server) RecoverOnce(ctx context.Context) error {
 // GitHub once per stranded workflow and the gRPC listener is already open by
 // then — a slow GitHub would leave callers queued against a process the
 // healthcheck reports as ready.
-func (s *Server) ReconcileDatabaseOnce(ctx context.Context) error {
+func (s *Core) ReconcileDatabaseOnce(ctx context.Context) error {
 	return errors.Join(
 		s.markStaleRunnersOffline(ctx),
 		s.reclaimExpiredLeases(ctx),
@@ -90,7 +90,7 @@ func pgText(value string) pgtype.Text {
 // project lock is held from the moment the offer is written — a runner that
 // takes an offer and dies before accepting would otherwise wedge that project
 // with nothing to reclaim it.
-func (s *Server) reclaimUnansweredOffers(ctx context.Context) error {
+func (s *Core) reclaimUnansweredOffers(ctx context.Context) error {
 	if err := s.queries.ExpireUnansweredOffers(ctx, pgInterval(unansweredOffer)); err != nil {
 		return databaseError(err)
 	}
@@ -110,7 +110,7 @@ func (s *Server) reclaimUnansweredOffers(ctx context.Context) error {
 
 // blockAbandonedChecks ends a wait for GitHub checks that is never going to
 // resolve, so the project can schedule again.
-func (s *Server) blockAbandonedChecks(ctx context.Context) error {
+func (s *Core) blockAbandonedChecks(ctx context.Context) error {
 	workflowIDs, err := s.queries.SelectAbandonedChecksWorkflows(ctx, pgInterval(abandonedChecks))
 	if err != nil {
 		return databaseError(err)
@@ -128,7 +128,7 @@ func (s *Server) blockAbandonedChecks(ctx context.Context) error {
 // The predicate is last_seen_at rather than "does this process hold a stream",
 // so that a second orchestrator replica does not continually mark the runners
 // attached to the first one offline.
-func (s *Server) markStaleRunnersOffline(ctx context.Context) error {
+func (s *Core) markStaleRunnersOffline(ctx context.Context) error {
 	return databaseError(s.queries.MarkStaleRunnersOffline(ctx, pgInterval(staleRunner)))
 }
 
@@ -136,7 +136,7 @@ func (s *Server) markStaleRunnersOffline(ctx context.Context) error {
 // cannot rescue them itself: every write path it has is fenced on an unexpired
 // lease, so once the lease lapses a reconnecting runner can neither renew it
 // nor report the outcome, and the job would stay 'running' forever.
-func (s *Server) reclaimExpiredLeases(ctx context.Context) error {
+func (s *Core) reclaimExpiredLeases(ctx context.Context) error {
 	workflowIDs, err := s.queries.CancelExpiredLeaseJobs(ctx, pgText(abandonedLease))
 	if err != nil {
 		return databaseError(err)
@@ -171,7 +171,7 @@ func (s *Server) reclaimExpiredLeases(ctx context.Context) error {
 // is talking to GitHub, and two concurrent deliveries would leave the loser's
 // status update matching no row — reported as a delivery failure, which would
 // block a run whose pull request had just been opened successfully.
-func (s *Server) resumeStrandedDeliveries(ctx context.Context) error {
+func (s *Core) resumeStrandedDeliveries(ctx context.Context) error {
 	workflowIDs, err := s.queries.SelectStrandedDeliveryWorkflows(ctx, pgInterval(strandedDelivery))
 	if err != nil {
 		return databaseError(err)
@@ -185,7 +185,7 @@ func (s *Server) resumeStrandedDeliveries(ctx context.Context) error {
 // persistently failing workflow sit at the head and starve the rest — and in
 // the recovery sweep that head-of-line row is one holding a project lock, so a
 // single bad row would block lock release for every other project.
-func (s *Server) eachWorkflowID(ctx context.Context, workflowIDs []string, do func(context.Context, string) error) error {
+func (s *Core) eachWorkflowID(ctx context.Context, workflowIDs []string, do func(context.Context, string) error) error {
 	var failures []error
 	for _, workflowID := range workflowIDs {
 		if err := do(ctx, workflowID); err != nil {

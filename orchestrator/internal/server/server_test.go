@@ -253,7 +253,7 @@ func TestConfiguredCipherAcceptsBase64OrHex(t *testing.T) {
 // The API gateway reports the orchestrator build on its public health endpoint
 // and has no session to present, so this call must succeed without one.
 func TestGetSystemVersionNeedsNoSession(t *testing.T) {
-	response, err := (&Server{version: "922d6e6f0a6c"}).GetSystemVersion(context.Background(), &controlv1.GetSystemVersionRequest{})
+	response, err := (&ControlServer{Core: &Core{version: "922d6e6f0a6c"}}).GetSystemVersion(context.Background(), &controlv1.GetSystemVersionRequest{})
 	if err != nil {
 		t.Fatalf("GetSystemVersion() error = %v; the public health endpoint reports an empty version", err)
 	}
