@@ -139,6 +139,17 @@ type projectConfig struct {
 	// an error, so an existing project's behaviour is unchanged until it opts
 	// in. See persistExecutionEvent (server.go) for where it is read.
 	EnableAiReview bool `json:"enable_ai_review"`
+	// EnableRepairLoop opts a project into a bounded, AI-review-informed repair
+	// attempt (repair.go's dispatchRepairJob) instead of terminating a run at
+	// StatusBlocked the moment an independent review rejects it. Absent (the
+	// zero value, false) on every project for the same reason EnableAiReview
+	// is, and only ever consulted for a run that already has a review verdict
+	// to repair against -- a project with EnableAiReview off never reaches the
+	// code that reads this field at all. Like EnableAiReview, this is read
+	// directly from app.projects.configuration; it has no CreateProject/
+	// UpdateProject/proto field of its own yet (see EnableAiReview's own gap,
+	// #353), so today it can only be set by writing the JSON column directly.
+	EnableRepairLoop bool `json:"enable_repair_loop"`
 }
 
 // defaultExecutionTimeoutSeconds bounds a dispatched developer execution's
@@ -1699,9 +1710,14 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 					// A reviewer execution that crashed or was cancelled
 					// without producing a verdict is not an ordinary agent
 					// failure to fold into agentBlockReason's developer-shaped
-					// account: block outright with a reason distinct from it,
-					// since #354's repair loop is meant to treat this the same
-					// as a rejecting verdict, not as a developer mistake.
+					// account: block outright with a reason distinct from it.
+					// This is deliberately terminal rather than routed through
+					// repairOrBlock (#354, repair.go): the reviewer itself never
+					// reached a verdict, so there is no developer mistake to
+					// repair against, only an infrastructure-side failure of the
+					// review step -- distinct in kind from a review that ran to
+					// completion and rejected the change, which is what the
+					// repair loop consumes.
 					runStatus, blockingReason = StatusBlocked, "independent AI review execution failed"
 				} else if reason, blocked := agentBlockReason(payloadJSON); blocked {
 					runStatus, blockingReason = StatusBlocked, reason

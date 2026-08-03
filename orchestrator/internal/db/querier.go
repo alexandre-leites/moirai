@@ -135,6 +135,15 @@ type Querier interface {
 	// global primary key so this is unambiguous, and every write those handlers
 	// go on to make still scopes by the project_id this returns.
 	GetProjectTaskSourceByID(ctx context.Context, id string) (GetProjectTaskSourceByIDRow, error)
+	// Everything dispatchRepairJob (repair.go) needs to build and offer a repair
+	// developer execution against the one job a workflow run already has,
+	// informed by the most recent independent review's own findings. Guarded the
+	// same way GetReviewDispatchWorkflow is: only a run sitting at
+	// 'waiting_ai_review' whose job is still the completed reviewer job is ever
+	// repairable, and max_repair_attempts is enforced here too -- belt and
+	// suspenders alongside repairEligible's own check, the same redundancy
+	// GetReviewDispatchWorkflow accepts for its own guard.
+	GetRepairDispatchWorkflow(ctx context.Context, arg GetRepairDispatchWorkflowParams) (GetRepairDispatchWorkflowRow, error)
 	// Everything dispatchReviewerJob (review.go) needs to build and offer a
 	// fresh, independent reviewer execution against the one job a workflow run
 	// already has. Guarded on the run's own status and the job's own role and
@@ -166,6 +175,13 @@ type Querier interface {
 	// very first workflow scanned before a pull request exists.
 	GetWorkflowDetail(ctx context.Context, id string) (GetWorkflowDetailRow, error)
 	GetWorkflowForControl(ctx context.Context, id string) (GetWorkflowForControlRow, error)
+	// repairEligible's (repair.go) single read: whether the project opted into
+	// EnableRepairLoop (projectConfig) and how many repair attempts this run has
+	// already spent, so the decision to repair or block can be made without
+	// assuming dispatchRepairJob's own guarded query below will ever run --
+	// EnableRepairLoop off, or the bound already reached, must block immediately
+	// rather than silently doing nothing.
+	GetWorkflowRepairState(ctx context.Context, id string) (GetWorkflowRepairStateRow, error)
 	IncrementPlanningAttempts(ctx context.Context, id string) error
 	IncrementReviewCycles(ctx context.Context, id string) error
 	InsertAiReview(ctx context.Context, arg InsertAiReviewParams) error
@@ -263,6 +279,12 @@ type Querier interface {
 	MarkWorkflowAwaitingApproval(ctx context.Context, id string) (int64, error)
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
+	// Increments ci_repair_attempts and moves the run to 'repairing' in one
+	// guarded statement, so a caller that raced this one (the recovery sweep
+	// calling applyRecordedReviewVerdict against the same run dispatchRepairJob's
+	// inline call already claimed) affects 0 rows instead of double-spending an
+	// attempt.
+	MarkWorkflowRepairing(ctx context.Context, arg MarkWorkflowRepairingParams) (int64, error)
 	// An approving verdict's handoff to deliverWorkflow, which itself requires
 	// 'delivering' (MarkWorkflowDelivered's own guard) -- the same status a
 	// developer's own "completed" event moves a run through when AI review is
@@ -319,6 +341,14 @@ type Querier interface {
 	// incremented lease_generation is indistinguishable, to the runner, from any
 	// other new job -- no runner-side change was needed for this reopening.
 	ReopenJobForImplementation(ctx context.Context, id string) (ReopenJobForImplementationRow, error)
+	// Reuses the workflow run's single job row for a third role -- back to
+	// 'developer', but this time for a repair attempt rather than the original
+	// implementation -- instead of inserting a new one (app.jobs.workflow_run_id
+	// stays UNIQUE), the same reuse ReopenJobForReview already established for
+	// the reviewer role. Guarded on the job still being the completed reviewer
+	// job whose rejection triggered this repair; a second caller that raced this
+	// one finds 0 rows affected and does nothing further.
+	ReopenJobForRepair(ctx context.Context, arg ReopenJobForRepairParams) (int64, error)
 	// Reuses the workflow run's single job row for a second, independent
 	// execution instead of inserting a new one (app.jobs.workflow_run_id stays
 	// UNIQUE). Guarded on the job still being the completed developer job, the
