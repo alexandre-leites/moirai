@@ -19,7 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error) {
+func (s *ControlServer) UpdateAccount(ctx context.Context, request *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error) {
 	actor, err := s.requireUserMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -81,7 +81,7 @@ func (s *Server) UpdateAccount(ctx context.Context, request *controlv1.UpdateAcc
 	return response, nil
 }
 
-func (s *Server) CreateRunnerRegistrationToken(ctx context.Context, request *controlv1.CreateRunnerRegistrationTokenRequest) (*controlv1.CreateRunnerRegistrationTokenResponse, error) {
+func (s *ControlServer) CreateRunnerRegistrationToken(ctx context.Context, request *controlv1.CreateRunnerRegistrationTokenRequest) (*controlv1.CreateRunnerRegistrationTokenResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -110,7 +110,7 @@ func (s *Server) CreateRunnerRegistrationToken(ctx context.Context, request *con
 	return &controlv1.CreateRunnerRegistrationTokenResponse{Token: token, ExpiresAt: textutil.Timestamp(expiresAt.Time)}, nil
 }
 
-func (s *Server) ListRunnerRegistrationTokens(ctx context.Context, _ *controlv1.ListRunnerRegistrationTokensRequest) (*controlv1.ListRunnerRegistrationTokensResponse, error) {
+func (s *ControlServer) ListRunnerRegistrationTokens(ctx context.Context, _ *controlv1.ListRunnerRegistrationTokensRequest) (*controlv1.ListRunnerRegistrationTokensResponse, error) {
 	if _, err := s.requireAdmin(ctx); err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (s *Server) ListRunnerRegistrationTokens(ctx context.Context, _ *controlv1.
 	return response, nil
 }
 
-func (s *Server) RevokeRunnerRegistrationToken(ctx context.Context, request *controlv1.RevokeRunnerRegistrationTokenRequest) (*controlv1.RevokeRunnerRegistrationTokenResponse, error) {
+func (s *ControlServer) RevokeRunnerRegistrationToken(ctx context.Context, request *controlv1.RevokeRunnerRegistrationTokenRequest) (*controlv1.RevokeRunnerRegistrationTokenResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -163,7 +163,7 @@ func (s *Server) RevokeRunnerRegistrationToken(ctx context.Context, request *con
 // CancelWorkflow/BlockWorkflow use -- the decision panel itself is rendered
 // admin-only (useIsAdmin in the console), so this mirrors rather than
 // tightens that boundary.
-func (s *Server) SubmitHumanDecision(ctx context.Context, request *controlv1.SubmitHumanDecisionRequest) (*controlv1.SubmitHumanDecisionResponse, error) {
+func (s *ControlServer) SubmitHumanDecision(ctx context.Context, request *controlv1.SubmitHumanDecisionRequest) (*controlv1.SubmitHumanDecisionResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -198,7 +198,7 @@ func (s *Server) SubmitHumanDecision(ctx context.Context, request *controlv1.Sub
 	return &controlv1.SubmitHumanDecisionResponse{Workflow: workflow}, nil
 }
 
-func (s *Server) requireAdmin(ctx context.Context) (actor, error) {
+func (s *Core) requireAdmin(ctx context.Context) (actor, error) {
 	current, err := s.requireActor(ctx, false)
 	if err != nil {
 		return actor{}, err
@@ -209,7 +209,7 @@ func (s *Server) requireAdmin(ctx context.Context) (actor, error) {
 	return current, nil
 }
 
-func (s *Server) requireUserMutation(ctx context.Context) (actor, error) {
+func (s *Core) requireUserMutation(ctx context.Context) (actor, error) {
 	current, err := s.requireActor(ctx, false)
 	if err != nil {
 		return actor{}, err

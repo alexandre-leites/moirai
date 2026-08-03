@@ -281,8 +281,12 @@ func run() error {
 	// So GetSchedulerMetrics can report the same loop liveness the healthcheck's
 	// /readyz endpoint does -- one recorder, read two ways, never two answers.
 	service.SetLoopRecorder(recorder)
-	controlv1.RegisterControlPlaneServer(grpcServer, service)
-	runnerv1.RegisterRunnerControlServer(grpcServer, service)
+	// One Core, two gRPC services: ControlServer (human/console-facing) and
+	// RunnerServer (machine-facing) share every field on service, but each
+	// implements only its own interface, so the two trust boundaries cannot
+	// be confused at the call site.
+	controlv1.RegisterControlPlaneServer(grpcServer, &server.ControlServer{Core: service})
+	runnerv1.RegisterRunnerControlServer(grpcServer, &server.RunnerServer{Core: service})
 	every(ctx, time.Second, "scheduler tick", observed(recorder, metrics.LoopScheduler, func(ctx context.Context) error {
 		return drainSchedule(ctx, service.ScheduleOnce)
 	}))

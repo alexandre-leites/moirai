@@ -44,10 +44,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// harness embeds the shared *Core directly, so every helper method on Core
+// (ScheduleOnce, acceptOffer, addSession, the delivery/observation chain,
+// requireActor, ...) is reachable as h.Whatever(...) exactly as it was before
+// the split. Control and Runner are separate handles onto the same Core, one
+// per gRPC interface, for tests that call an actual RPC method -- since those
+// now live on ControlServer/RunnerServer rather than on Core itself.
 type harness struct {
-	*Server
-	pool *pgxpool.Pool
-	t    *testing.T
+	*Core
+	Control *ControlServer
+	Runner  *RunnerServer
+	pool    *pgxpool.Pool
+	t       *testing.T
 }
 
 func newHarness(t *testing.T) *harness {
@@ -70,11 +78,11 @@ func newHarness(t *testing.T) *harness {
 	if _, err := pool.Exec(ctx, `TRUNCATE app.workflow_events,app.job_offers,app.jobs,app.project_locks,app.workflow_runs,app.issues,app.projects,app.runners,app.user_sessions,app.users,app.audit_events RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
-	server, err := NewWithGitHub(pool, "test", stubGitHub{})
+	core, err := NewWithGitHub(pool, "test", stubGitHub{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{Server: server, pool: pool, t: t}
+	return &harness{Core: core, Control: &ControlServer{Core: core}, Runner: &RunnerServer{Core: core}, pool: pool, t: t}
 }
 
 // stubGitHub keeps delivery out of these tests: they are about the lifecycle
@@ -330,7 +338,7 @@ func TestRetryReopensTheIssueAndFreesTheProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := h.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
+	if _, err := h.Control.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
 		t.Fatalf("RetryWorkflow: %v", err)
 	}
 
@@ -671,7 +679,7 @@ func TestSubmitHumanDecisionApprovesAndMerges(t *testing.T) {
 		t.Fatalf("setup: status = %q, want waiting_human", state.status)
 	}
 
-	resp, err := h.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
+	resp, err := h.Control.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
 		WorkflowRunId: workflowID, Decision: "approved", Comment: "looks good",
 	})
 	if err != nil {
@@ -708,7 +716,7 @@ func TestSubmitHumanDecisionRejectsAndBlocks(t *testing.T) {
 		t.Fatalf("observeWorkflow: %v", err)
 	}
 
-	resp, err := h.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
+	resp, err := h.Control.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
 		WorkflowRunId: workflowID, Decision: "changes_requested", Comment: "please add tests",
 	})
 	if err != nil {
@@ -739,7 +747,7 @@ func TestSubmitHumanDecisionRejectsADecisionAgainstARunNotAwaitingApproval(t *te
 	projectID, issueID := h.project()
 	workflowID := h.seedWaitingChecks(projectID, issueID) // still waiting_github_checks, not waiting_human
 
-	if _, err := h.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
+	if _, err := h.Control.SubmitHumanDecision(h.adminContext(), &controlv1.SubmitHumanDecisionRequest{
 		WorkflowRunId: workflowID, Decision: "approved",
 	}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("err = %v, want FailedPrecondition", err)
@@ -917,9 +925,9 @@ func TestBlockingParksTheIssueAndCancellingDoesNot(t *testing.T) {
 			ctx := h.adminContext()
 			var err error
 			if action == "block" {
-				_, err = h.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+				_, err = h.Control.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
 			} else {
-				_, err = h.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+				_, err = h.Control.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
 			}
 			if err != nil {
 				t.Fatalf("%s: %v", action, err)
@@ -995,7 +1003,7 @@ func TestCancelledWorkCannotBeAcceptedLater(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
+	if _, err := h.Control.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
 		t.Fatalf("CancelWorkflow: %v", err)
 	}
 	if _, _, err := h.acceptOffer(ctx, runnerID, jobID); err == nil {
@@ -1106,7 +1114,7 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 
 	// The console RPC and the Prometheus surface run the same query, so they
 	// cannot disagree about what "queue depth" means.
-	rpc, err := h.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
+	rpc, err := h.Control.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
 	if err != nil {
 		t.Fatalf("GetSchedulerMetrics: %v", err)
 	}
@@ -1115,7 +1123,7 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	}
 
 	// End to end: a real listener, scraped over HTTP, serving those numbers.
-	exporter := metrics.New("127.0.0.1:0", h.Server)
+	exporter := metrics.New("127.0.0.1:0", h.Core)
 	if err := exporter.Start(); err != nil {
 		t.Fatalf("start metrics listener: %v", err)
 	}
@@ -1162,7 +1170,7 @@ func TestGetSchedulerMetricsReportsLoopLiveness(t *testing.T) {
 	h := newHarness(t)
 	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
 	recorder := metrics.NewWithClock("", nil, func() time.Time { return now }).Recorder()
-	h.Server.SetLoopRecorder(recorder)
+	h.SetLoopRecorder(recorder)
 
 	recorder.RecordLoopRun(metrics.LoopIssueSync, errors.New("gh: rate limited"))
 	now = now.Add(time.Second)
@@ -1171,7 +1179,7 @@ func TestGetSchedulerMetricsReportsLoopLiveness(t *testing.T) {
 	// gap, so it must come back unhealthy.
 	now = now.Add(10 * time.Minute)
 
-	resp, err := h.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
+	resp, err := h.Control.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
 	if err != nil {
 		t.Fatalf("GetSchedulerMetrics: %v", err)
 	}
@@ -1399,7 +1407,7 @@ func TestAgentDeclaredBlockEndsTheRunBlockedWithItsReason(t *testing.T) {
 	}
 
 	// Retry is still the way back, and it is gated on the terminal status.
-	if _, err := h.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
+	if _, err := h.Control.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
 		t.Fatalf("RetryWorkflow on an agent-blocked run: %v", err)
 	}
 	if !h.schedulable(issueID) {
@@ -1625,9 +1633,9 @@ func TestCancelAndBlockNotifyTheRunnersControlStream(t *testing.T) {
 			ctx := h.adminContext()
 			var err error
 			if action == "block" {
-				_, err = h.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+				_, err = h.Control.BlockWorkflow(ctx, &controlv1.BlockWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
 			} else {
-				_, err = h.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+				_, err = h.Control.CancelWorkflow(ctx, &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
 			}
 			if err != nil {
 				t.Fatalf("%s: %v", action, err)
@@ -1663,7 +1671,7 @@ func TestCancelWithoutAJobDoesNotErrorOrNotifyAnyone(t *testing.T) {
 	workflowID := idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'offered','offered','agent/'||$4)`, workflowID, projectID, issueID, workflowID)
 
-	if _, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
+	if _, err := h.Control.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
 		t.Fatalf("CancelWorkflow: %v", err)
 	}
 
@@ -1687,7 +1695,7 @@ func TestCancelWithADisconnectedRunnerStillSucceeds(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
+		_, err := h.Control.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"})
 		done <- err
 	}()
 	select {
@@ -1713,7 +1721,7 @@ func TestSetRunnerStateNotifiesTheRunnerOnDrainAndRevoke(t *testing.T) {
 			runnerID := h.runner()
 			outbound := h.outboundChannel(runnerID)
 
-			if _, err := h.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state}); err != nil {
+			if _, err := h.Control.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: state}); err != nil {
 				t.Fatalf("SetRunnerState(%s): %v", state, err)
 			}
 
@@ -1737,12 +1745,12 @@ func TestSetRunnerStateEnableDoesNotNotifyTheRunner(t *testing.T) {
 	h := newHarness(t)
 	runnerID := h.runner()
 	outbound := h.outboundChannel(runnerID)
-	if _, err := h.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: "drain"}); err != nil {
+	if _, err := h.Control.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: "drain"}); err != nil {
 		t.Fatalf("SetRunnerState(drain): %v", err)
 	}
 	<-outbound // discard the drain notification from setting up the precondition
 
-	if _, err := h.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: "enable"}); err != nil {
+	if _, err := h.Control.SetRunnerState(h.adminContext(), &controlv1.SetRunnerStateRequest{RunnerId: runnerID, State: "enable"}); err != nil {
 		t.Fatalf("SetRunnerState(enable): %v", err)
 	}
 
@@ -1877,7 +1885,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Scenario 3: retry is what actually reopens it, and the issue's own
 	// eligible bit (already true from the label) needs nothing further
 	// written to it.
-	if _, err := h.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
+	if _, err := h.Control.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID}); err != nil {
 		t.Fatalf("RetryWorkflow: %v", err)
 	}
 	if !h.schedulable(issueID) {
@@ -2054,10 +2062,11 @@ func TestListWorkflowsIsBoundedAndBatched(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tracedPool.Close()
-	traced, err := NewWithGitHub(tracedPool, "test", stubGitHub{})
+	tracedCore, err := NewWithGitHub(tracedPool, "test", stubGitHub{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	traced := &ControlServer{Core: tracedCore}
 
 	before := atomic.LoadInt64(&tracer.queries)
 	resp, err := traced.ListWorkflows(h.adminContext(), &controlv1.ListWorkflowsRequest{})
@@ -2105,7 +2114,7 @@ func TestStoreJobSecretWritesAnAuditEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+	resp, err := h.Runner.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
 		RunnerId:        runnerID,
 		JobId:           jobID,
 		Credential:      "runner-credential",
@@ -2152,7 +2161,7 @@ func TestStoreJobSecretRecordsNoAuditEntryWhenNothingWasStored(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+	resp, err := h.Runner.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
 		RunnerId:        runnerID,
 		JobId:           jobID,
 		Credential:      "runner-credential",
@@ -2413,7 +2422,7 @@ func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
 	h.project()
 	h.github = &failingGitHub{err: errors.New("revoked token")}
 
-	resp, err := h.SyncNow(h.adminContext(), &controlv1.SyncNowRequest{})
+	resp, err := h.Control.SyncNow(h.adminContext(), &controlv1.SyncNowRequest{})
 	if err != nil {
 		t.Fatalf("SyncNow: %v", err)
 	}
@@ -2620,7 +2629,7 @@ func (h *harness) runnerCredential() (runnerID, credential string) {
 // waitForConnectedRunner polls the server's live session set for runnerID, so
 // a test driving Connect in a background goroutine can synchronize on the
 // session actually being registered before acting as if it were.
-func waitForConnectedRunner(t *testing.T, s *Server, runnerID string) {
+func waitForConnectedRunner(t *testing.T, s *Core, runnerID string) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)
 	for {
@@ -2647,7 +2656,7 @@ func TestConnectRejectsAnInvalidCredential(t *testing.T) {
 	stream := newFakeRunnerStream(context.Background())
 	stream.send(heartbeatMessage(runnerID, "not-the-real-credential"))
 
-	if err := h.Connect(stream); status.Code(err) != codes.Unauthenticated {
+	if err := h.Runner.Connect(stream); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("Connect() with a bad credential = %v, want Unauthenticated", err)
 	}
 	for _, connected := range h.connectedRunners() {
@@ -2670,15 +2679,15 @@ func TestConnectRejectsADuplicateStreamForTheSameRunner(t *testing.T) {
 	stream1 := newFakeRunnerStream(ctx1)
 	stream1.send(heartbeatMessage(runnerID, credential))
 	done1 := make(chan error, 1)
-	go func() { done1 <- h.Connect(stream1) }()
-	waitForConnectedRunner(t, h.Server, runnerID)
+	go func() { done1 <- h.Runner.Connect(stream1) }()
+	waitForConnectedRunner(t, h.Core, runnerID)
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	stream2 := newFakeRunnerStream(ctx2)
 	stream2.send(heartbeatMessage(runnerID, credential))
 	done2 := make(chan error, 1)
-	go func() { done2 <- h.Connect(stream2) }()
+	go func() { done2 <- h.Runner.Connect(stream2) }()
 	select {
 	case err := <-done2:
 		if status.Code(err) != codes.AlreadyExists {
@@ -2724,7 +2733,7 @@ func TestConnectReAuthenticatesEveryMessageNotJustTheFirst(t *testing.T) {
 			stream.send(second)
 
 			done := make(chan error, 1)
-			go func() { done <- h.Connect(stream) }()
+			go func() { done <- h.Runner.Connect(stream) }()
 			var err error
 			select {
 			case err = <-done:
@@ -2759,19 +2768,19 @@ func TestEnqueueDropsOnceTheSixteenDeepBufferIsFull(t *testing.T) {
 	}
 
 	for i := range 16 {
-		if !boundedEnqueue(t, h.Server, runnerID) {
+		if !boundedEnqueue(t, h.Core, runnerID) {
 			t.Fatalf("enqueue #%d was dropped before the buffer was full", i+1)
 		}
 	}
-	if boundedEnqueue(t, h.Server, runnerID) {
+	if boundedEnqueue(t, h.Core, runnerID) {
 		t.Fatal("enqueue succeeded past the 16-deep buffer's capacity; the 17th message should be dropped, not queued or blocked on")
 	}
 
 	<-outbound // free exactly one slot
-	if !boundedEnqueue(t, h.Server, runnerID) {
+	if !boundedEnqueue(t, h.Core, runnerID) {
 		t.Fatal("enqueue was still dropped immediately after a slot was freed")
 	}
-	if boundedEnqueue(t, h.Server, runnerID) {
+	if boundedEnqueue(t, h.Core, runnerID) {
 		t.Fatal("enqueue succeeded twice after only one slot was freed")
 	}
 }
@@ -2781,7 +2790,7 @@ func TestEnqueueDropsOnceTheSixteenDeepBufferIsFull(t *testing.T) {
 // place, so a regression back to an unconditional `outbound <- message`
 // would otherwise hang this test for its full -timeout rather than fail
 // promptly with a clear cause.
-func boundedEnqueue(t *testing.T, s *Server, runnerID string) bool {
+func boundedEnqueue(t *testing.T, s *Core, runnerID string) bool {
 	t.Helper()
 	done := make(chan bool, 1)
 	go func() { done <- s.enqueue(runnerID, &runnerv1.OrchestratorToRunner{}) }()
@@ -2841,7 +2850,7 @@ func TestSetProjectCredentialStoresCiphertextWithAFreshNoncePerWrite(t *testing.
 	projectID, _ := h.project()
 	const plaintext = "super-secret-github-token-value"
 
-	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+	if _, err := h.Control.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
 		ProjectId: projectID, Kind: "github_token", Value: plaintext,
 	}); err != nil {
 		t.Fatalf("SetProjectCredential: %v", err)
@@ -2864,7 +2873,7 @@ func TestSetProjectCredentialStoresCiphertextWithAFreshNoncePerWrite(t *testing.
 
 	// Setting the exact same plaintext again must produce a different nonce
 	// and a different ciphertext, not reuse either.
-	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+	if _, err := h.Control.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
 		ProjectId: projectID, Kind: "github_token", Value: plaintext,
 	}); err != nil {
 		t.Fatalf("SetProjectCredential (second write): %v", err)
@@ -2889,14 +2898,14 @@ func TestResolveJobSecretRoundTripsTheEncryptedValue(t *testing.T) {
 	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
 	projectID, _ := h.project()
 	runnerID, credential := h.runnerCredential()
-	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+	if _, err := h.Control.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
 		ProjectId: projectID, Kind: "github_token", Value: "ghp_the-real-secret-value",
 	}); err != nil {
 		t.Fatalf("SetProjectCredential: %v", err)
 	}
 	jobID, generation := h.seedFencedJob(runnerID, projectID)
 
-	resp, err := h.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
+	resp, err := h.Runner.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
 		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation, Name: "GITHUB_TOKEN",
 	})
 	if err != nil {
@@ -2931,7 +2940,7 @@ func TestStoreJobSecretRejectsNonAgentCredentialKinds(t *testing.T) {
 	t.Setenv("LOOP_SECRET_KEY", "1Xy85zuZAOzRGEh/yyc4YmI64BOK8HY4pQHTjyqTa+E=")
 	projectID, _ := h.project()
 	runnerID, credential := h.runnerCredential()
-	if _, err := h.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
+	if _, err := h.Control.SetProjectCredential(h.adminContext(), &controlv1.SetProjectCredentialRequest{
 		ProjectId: projectID, Kind: "github_token", Value: "ghp_original-value",
 	}); err != nil {
 		t.Fatalf("SetProjectCredential: %v", err)
@@ -2940,7 +2949,7 @@ func TestStoreJobSecretRejectsNonAgentCredentialKinds(t *testing.T) {
 
 	for _, name := range []string{"GITHUB_TOKEN", "GIT_SSH_KEY"} {
 		t.Run(name, func(t *testing.T) {
-			_, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+			_, err := h.Runner.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
 				RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation,
 				Name: name, Value: "attacker-controlled-replacement",
 			})
@@ -2953,7 +2962,7 @@ func TestStoreJobSecretRejectsNonAgentCredentialKinds(t *testing.T) {
 	if err := h.pool.QueryRow(context.Background(), `SELECT ciphertext::text FROM app.project_credentials WHERE project_id=$1 AND kind='github_token'`, projectID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := h.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
+	resp, err := h.Runner.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
 		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation, Name: "GITHUB_TOKEN",
 	})
 	if err != nil || resp.GetValue() != "ghp_original-value" {
@@ -2971,7 +2980,7 @@ func TestStoreJobSecretAllowsAnAgentCredentialKind(t *testing.T) {
 	h.exec(`INSERT INTO app.project_credentials(project_id,kind,ciphertext,nonce) VALUES($1,'agent:OPENROUTER_API_KEY','\x00'::bytea,'\x00'::bytea)`, projectID)
 	jobID, generation := h.seedFencedJob(runnerID, projectID)
 
-	resp, err := h.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
+	resp, err := h.Runner.StoreJobSecret(tlsPeerContext(context.Background()), &runnerv1.StoreJobSecretRequest{
 		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation,
 		Name: "OPENROUTER_API_KEY", Value: "new-rotated-value",
 	})
@@ -2981,7 +2990,7 @@ func TestStoreJobSecretAllowsAnAgentCredentialKind(t *testing.T) {
 	if !resp.GetStored() {
 		t.Fatal("StoreJobSecret reported the agent credential was not stored")
 	}
-	fetched, err := h.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
+	fetched, err := h.Runner.ResolveJobSecret(tlsPeerContext(context.Background()), &runnerv1.ResolveJobSecretRequest{
 		RunnerId: runnerID, JobId: jobID, Credential: credential, LeaseGeneration: generation, Name: "OPENROUTER_API_KEY",
 	})
 	if err != nil || fetched.GetValue() != "new-rotated-value" {
@@ -3001,12 +3010,12 @@ func TestRegistrationTokenIsSingleUse(t *testing.T) {
 	h := newHarness(t)
 	token := h.createRegistrationToken(t, []string{"linux"})
 
-	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+	if _, err := h.Runner.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
 		Name: "runner-one", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},
 	}); err != nil {
 		t.Fatalf("first RegisterRunner: %v", err)
 	}
-	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+	if _, err := h.Runner.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
 		Name: "runner-two", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},
 	}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("second RegisterRunner with an already-used token = %v, want PermissionDenied", err)
@@ -3019,7 +3028,7 @@ func TestRegistrationTokenExpiryIsEnforced(t *testing.T) {
 	token := h.createRegistrationToken(t, []string{"linux"})
 	h.exec(`UPDATE app.runner_registration_tokens SET expires_at=now()-interval '1 minute' WHERE token_hash=$1`, secrethash.HashSecret(token))
 
-	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+	if _, err := h.Runner.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
 		Name: "runner-one", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},
 	}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("RegisterRunner with an expired token = %v, want PermissionDenied", err)
@@ -3035,14 +3044,14 @@ func TestRegistrationTokenLabelSubsetMatching(t *testing.T) {
 	h := newHarness(t)
 
 	subsetToken := h.createRegistrationToken(t, []string{"linux", "docker", "gpu"})
-	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+	if _, err := h.Runner.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
 		Name: "runner-subset", Token: subsetToken, ProtocolVersion: "1.0", Labels: []string{"linux", "docker"},
 	}); err != nil {
 		t.Fatalf("RegisterRunner requesting a subset of the token's allowed labels: %v", err)
 	}
 
 	supersetToken := h.createRegistrationToken(t, []string{"linux"})
-	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
+	if _, err := h.Runner.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
 		Name: "runner-superset", Token: supersetToken, ProtocolVersion: "1.0", Labels: []string{"linux", "windows"},
 	}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("RegisterRunner requesting a label (windows) outside the token's allowed set = %v, want PermissionDenied", err)
@@ -3055,7 +3064,7 @@ func TestRegistrationTokenLabelSubsetMatching(t *testing.T) {
 // insert also exercises that RPC as a side effect of every test above.
 func (h *harness) createRegistrationToken(t *testing.T, allowedLabels []string) string {
 	t.Helper()
-	resp, err := h.CreateRunnerRegistrationToken(h.adminContext(), &controlv1.CreateRunnerRegistrationTokenRequest{AllowedLabels: allowedLabels})
+	resp, err := h.Control.CreateRunnerRegistrationToken(h.adminContext(), &controlv1.CreateRunnerRegistrationTokenRequest{AllowedLabels: allowedLabels})
 	if err != nil {
 		t.Fatalf("CreateRunnerRegistrationToken: %v", err)
 	}

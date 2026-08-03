@@ -34,7 +34,7 @@ type deliveryWorkflow struct {
 	requireApproval bool
 }
 
-func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
+func (s *Core) deliverWorkflow(ctx context.Context, workflowID string) error {
 	workflow, err := s.deliveryWorkflow(ctx, workflowID, false)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
@@ -79,7 +79,7 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 	return commit(tx)
 }
 
-func (s *Server) ObserveWorkflows(ctx context.Context) error {
+func (s *Core) ObserveWorkflows(ctx context.Context) error {
 	workflowIDs, err := s.queries.SelectWaitingGithubChecksWorkflows(ctx)
 	if err != nil {
 		return databaseError(err)
@@ -105,7 +105,7 @@ func (s *Server) ObserveWorkflows(ctx context.Context) error {
 // it at all, which is why reclaimUnansweredOffers uses that state for an
 // offer nobody answered — nothing was spent, so that work should simply be
 // offered again rather than waiting for a human.
-func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state Status, eventType, cause string) error {
+func (s *Core) terminateWorkflow(ctx context.Context, workflowID string, state Status, eventType, cause string) error {
 	reason := textutil.Truncate(cause, 1024)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -137,7 +137,7 @@ func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state
 	return commit(tx)
 }
 
-func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
+func (s *Core) observeWorkflow(ctx context.Context, workflowID string) error {
 	workflow, err := s.deliveryWorkflow(ctx, workflowID, true)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
@@ -189,7 +189,7 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 // human approval; approveWorkflow calls it directly too, once a human has
 // approved, deliberately bypassing observeWorkflow itself so the just-approved
 // run is not re-gated by the very requireApproval check that put it here.
-func (s *Server) mergeWorkflow(ctx context.Context, workflow deliveryWorkflow, repository string) error {
+func (s *Core) mergeWorkflow(ctx context.Context, workflow deliveryWorkflow, repository string) error {
 	if err := s.github.MergeSquash(ctx, workflow.projectID, repository, workflow.prNumber); err != nil {
 		return s.blockOrRetryExternal(ctx, workflow.id, err)
 	}
@@ -257,7 +257,7 @@ func (s *Server) mergeWorkflow(ctx context.Context, workflow deliveryWorkflow, r
 	return commit(tx)
 }
 
-func (s *Server) deliveryWorkflow(ctx context.Context, workflowID string, requirePR bool) (deliveryWorkflow, error) {
+func (s *Core) deliveryWorkflow(ctx context.Context, workflowID string, requirePR bool) (deliveryWorkflow, error) {
 	row, err := s.queries.GetDeliveryWorkflow(ctx, workflowID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return deliveryWorkflow{}, errors.New("workflow is unknown")
@@ -313,7 +313,7 @@ var errApprovalNotPending = errors.New("workflow run is not awaiting approval")
 // mergeWorkflow too, once checks read green again, since 'waiting_github_checks'
 // gates on requireApproval only via this same already-passed branch) retries
 // it on its own.
-func (s *Server) approveWorkflow(ctx context.Context, workflowID, comment string) error {
+func (s *Core) approveWorkflow(ctx context.Context, workflowID, comment string) error {
 	affected, err := s.queries.MarkWorkflowApproved(ctx, workflowID)
 	if err != nil {
 		return databaseError(err)
@@ -344,7 +344,7 @@ func (s *Server) approveWorkflow(ctx context.Context, workflowID, comment string
 // error here is the caller's to log-and-move-on with: the approval itself
 // already committed, so a failure to merge immediately is not this run's only
 // chance -- the next observer tick tries again from 'waiting_github_checks'.
-func (s *Server) mergeApprovedWorkflow(ctx context.Context, workflowID string) error {
+func (s *Core) mergeApprovedWorkflow(ctx context.Context, workflowID string) error {
 	workflow, err := s.deliveryWorkflow(ctx, workflowID, true)
 	if err != nil {
 		return err
@@ -372,7 +372,7 @@ func (s *Server) mergeApprovedWorkflow(ctx context.Context, workflowID string) e
 // rejectWorkflow is SubmitHumanDecision's "changes_requested" branch: it ends
 // the run the same terminal way blockExternal does, releasing the project
 // lock so the issue is excluded from scheduling until an operator retries it.
-func (s *Server) rejectWorkflow(ctx context.Context, workflowID, comment string) error {
+func (s *Core) rejectWorkflow(ctx context.Context, workflowID, comment string) error {
 	reason := "changes requested"
 	if comment != "" {
 		reason += ": " + comment
@@ -403,7 +403,7 @@ func (s *Server) rejectWorkflow(ctx context.Context, workflowID, comment string)
 	return commit(tx)
 }
 
-func (s *Server) blockExternal(ctx context.Context, workflowID string, cause error) error {
+func (s *Core) blockExternal(ctx context.Context, workflowID string, cause error) error {
 	return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "delivery.failed", "external delivery failed: "+cause.Error())
 }
 
@@ -432,7 +432,7 @@ const maxDeliveryAttempts = 10
 // next observer tick (for observeWorkflow, still 'waiting_github_checks') or
 // recovery sweep (for deliverWorkflow, still 'delivering') calls back into the
 // same code path and simply retries the same GitHub call.
-func (s *Server) blockOrRetryExternal(ctx context.Context, workflowID string, cause error) error {
+func (s *Core) blockOrRetryExternal(ctx context.Context, workflowID string, cause error) error {
 	if !isTransientGitHubError(cause) {
 		return s.blockExternal(ctx, workflowID, cause)
 	}

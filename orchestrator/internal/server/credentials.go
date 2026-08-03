@@ -27,7 +27,7 @@ import (
 
 var agentCredentialName = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,127}$`)
 
-func (s *Server) SetProjectCredential(ctx context.Context, request *controlv1.SetProjectCredentialRequest) (*controlv1.SetProjectCredentialResponse, error) {
+func (s *ControlServer) SetProjectCredential(ctx context.Context, request *controlv1.SetProjectCredentialRequest) (*controlv1.SetProjectCredentialResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -68,7 +68,7 @@ func (s *Server) SetProjectCredential(ctx context.Context, request *controlv1.Se
 	return &controlv1.SetProjectCredentialResponse{Credentials: credentials}, nil
 }
 
-func (s *Server) ClearProjectCredential(ctx context.Context, request *controlv1.ClearProjectCredentialRequest) (*controlv1.ClearProjectCredentialResponse, error) {
+func (s *ControlServer) ClearProjectCredential(ctx context.Context, request *controlv1.ClearProjectCredentialRequest) (*controlv1.ClearProjectCredentialResponse, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func (s *Server) ClearProjectCredential(ctx context.Context, request *controlv1.
 	return &controlv1.ClearProjectCredentialResponse{Credentials: credentials}, nil
 }
 
-func (s *Server) ListProjectCredentials(ctx context.Context, request *controlv1.ListProjectCredentialsRequest) (*controlv1.ListProjectCredentialsResponse, error) {
+func (s *ControlServer) ListProjectCredentials(ctx context.Context, request *controlv1.ListProjectCredentialsRequest) (*controlv1.ListProjectCredentialsResponse, error) {
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (s *Server) ListProjectCredentials(ctx context.Context, request *controlv1.
 	return &controlv1.ListProjectCredentialsResponse{Credentials: credentials}, nil
 }
 
-func (s *Server) ResolveJobSecret(ctx context.Context, request *runnerv1.ResolveJobSecretRequest) (*runnerv1.ResolveJobSecretResponse, error) {
+func (s *RunnerServer) ResolveJobSecret(ctx context.Context, request *runnerv1.ResolveJobSecretRequest) (*runnerv1.ResolveJobSecretResponse, error) {
 	if !secureContext(ctx) {
 		return nil, status.Error(codes.FailedPrecondition, "the control plane will not serve a secret over an insecure channel")
 	}
@@ -150,7 +150,7 @@ func (s *Server) ResolveJobSecret(ctx context.Context, request *runnerv1.Resolve
 	return &runnerv1.ResolveJobSecretResponse{Value: string(plaintext), Delivery: delivery}, nil
 }
 
-func (s *Server) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobSecretRequest) (*runnerv1.StoreJobSecretResponse, error) {
+func (s *RunnerServer) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobSecretRequest) (*runnerv1.StoreJobSecretResponse, error) {
 	if !secureContext(ctx) {
 		return nil, status.Error(codes.FailedPrecondition, "the control plane will not accept a secret over an insecure channel")
 	}
@@ -198,7 +198,7 @@ func (s *Server) StoreJobSecret(ctx context.Context, request *runnerv1.StoreJobS
 	return &runnerv1.StoreJobSecretResponse{Stored: rowsAffected == 1}, nil
 }
 
-func (s *Server) fencedJobProject(ctx context.Context, jobID, runnerID string, generation int64) (string, error) {
+func (s *Core) fencedJobProject(ctx context.Context, jobID, runnerID string, generation int64) (string, error) {
 	projectID, err := s.queries.GetFencedJobProject(ctx, db.GetFencedJobProjectParams{
 		JobID:           jobID,
 		RunnerID:        runnerID,
@@ -213,7 +213,7 @@ func (s *Server) fencedJobProject(ctx context.Context, jobID, runnerID string, g
 	return projectID, nil
 }
 
-func (s *Server) projectCredentials(ctx context.Context, projectID string) ([]*controlv1.ProjectCredential, error) {
+func (s *Core) projectCredentials(ctx context.Context, projectID string) ([]*controlv1.ProjectCredential, error) {
 	if !idgen.ValidID(projectID) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}

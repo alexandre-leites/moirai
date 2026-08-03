@@ -75,7 +75,7 @@ func (h *harness) startStream(t *testing.T, lastEventID string) (*fakeEventStrea
 	})
 	go func() {
 		defer close(done)
-		_ = h.StreamEvents(&controlv1.StreamEventsRequest{LastEventId: lastEventID}, stream)
+		_ = h.Control.StreamEvents(&controlv1.StreamEventsRequest{LastEventId: lastEventID}, stream)
 	}()
 	return stream, cancel
 }
