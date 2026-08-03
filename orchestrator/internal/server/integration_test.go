@@ -481,6 +481,71 @@ func TestRecoverySweepResumesAStrandedDeliveryByStatusAlone(t *testing.T) {
 	}
 }
 
+// A merge GitHub has already confirmed is irreversible no matter what this
+// run's own status column raced to first. Before #281's fix, observeWorkflow's
+// confirming UPDATE guarded on `status='waiting_github_checks'`, and a miss --
+// an operator's cancel landing in the window between GitHub confirming the
+// merge and this function's own database write -- returned nil with nothing
+// recorded: app.pull_requests still said "open", nothing logged, and (because
+// StatusCancelled does not exclude an issue from scheduling, unlike
+// StatusBlocked/StatusFailed/StatusCompleted -- see schedulable's doc comment)
+// the issue went straight back into the queue for a pull request already
+// merged into main. This pins the fix: the run is forced to 'completed', the
+// race itself becomes its own workflow event, the merge is still recorded,
+// and the issue stays out of the queue.
+func TestObserveWorkflowRecordsAConfirmedMergeEvenIfItsOwnStatusRaced(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	workflowID := newID()
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'waiting_github_checks','waiting_github_checks',$5)`,
+		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
+	h.exec(`INSERT INTO app.project_locks(project_id, workflow_run_id) VALUES($1,$2)`, projectID, workflowID)
+	h.exec(`INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github','7','https://example.test/pull/7','abc','open')`, newID(), workflowID)
+
+	// sequencedGitHub's zero value is the ordinary success path: Checks reports
+	// green, MergeSquash succeeds, and Merged confirms it -- exactly what
+	// observeWorkflow sees before it ever reaches its own confirming update.
+	h.github = &sequencedGitHub{}
+
+	// The race: an operator cancels the run (mirroring exactly what
+	// controlWorkflow's "cancel" case does -- status to 'cancelled', project
+	// lock released) in the window between GitHub confirming the merge above
+	// and observeWorkflow's own guarded database write.
+	h.exec(`UPDATE app.workflow_runs SET status='cancelled', current_phase='cancelled', terminal_reason='operator cancelled it' WHERE id=$1`, workflowID)
+	h.exec(`DELETE FROM app.project_locks WHERE workflow_run_id=$1`, workflowID)
+
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+
+	state := h.runState(workflowID)
+	if state.status != "completed" {
+		t.Fatalf("status = %q, want completed: a confirmed merge must not be lost because the run's own status raced away from waiting_github_checks", state.status)
+	}
+	if !state.completed {
+		t.Fatal("completed_at was not set on the forced completion")
+	}
+
+	if merged := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1 AND state='merged'`, workflowID); merged != 1 {
+		t.Fatal("app.pull_requests still says the pull request is open even though GitHub confirmed the merge")
+	}
+
+	if raced := h.scalar(`SELECT COUNT(*) FROM app.workflow_events WHERE workflow_run_id=$1 AND event_type='delivery.completion_raced' AND severity='warning'`, workflowID); raced != 1 {
+		t.Fatal("the race was not logged as its own workflow event")
+	}
+	if mergedEvent := h.scalar(`SELECT COUNT(*) FROM app.workflow_events WHERE workflow_run_id=$1 AND event_type='pull_request.merged'`, workflowID); mergedEvent != 1 {
+		t.Fatal("pull_request.merged was not recorded even though the merge is confirmed")
+	}
+
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("the project lock is still held after a confirmed merge")
+	}
+
+	if h.schedulable(issueID) {
+		t.Fatal("the issue is schedulable again even though its pull request is already merged into main")
+	}
+}
+
 // seedDelivering inserts a workflow run already at 'delivering' with its
 // project lock held, the state deliverWorkflow expects to find itself
 // re-driven from -- see TestRecoverySweepResumesAStrandedDeliveryByStatusAlone
