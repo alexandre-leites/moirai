@@ -106,6 +106,14 @@ type Querier interface {
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
 	RecordRunnerHeartbeat(ctx context.Context, arg RecordRunnerHeartbeatParams) error
+	// Bumps the count of consecutive transient GitHub failures blockOrRetryExternal
+	// (delivery.go) has absorbed for this run without moving its status, and
+	// returns the new count so the caller can decide whether to keep retrying or
+	// fall through to blockExternal. updated_at advances with it so a transient
+	// failure during 'delivering' also pushes back resumeStrandedDeliveries'
+	// re-drive window (recovery.go's strandedDelivery), which is what turns
+	// these retries into spaced-out attempts instead of a tight loop.
+	RecordTransientDeliveryFailure(ctx context.Context, id string) (int32, error)
 	RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (pgtype.Timestamptz, error)
 	ReopenIssueForRetry(ctx context.Context, id string) error
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error

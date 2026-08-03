@@ -1,0 +1,17 @@
+-- Adds a bounded attempt counter for transient GitHub failures encountered
+-- during delivery (deliverWorkflow) and check observation (observeWorkflow)
+-- -- see #280.
+--
+-- Before this column existed every error the GitHub interface returned in
+-- that path -- a rate limit, a DNS blip, a 502, gh's own invocation timing
+-- out -- funnelled straight to blockExternal, indistinguishable from a
+-- genuine 404 or a real merge conflict. blockExternal is terminal: it parks
+-- the run's issue, so a brief GitHub outage blocked every in-flight delivery
+-- at once and each one then needed a manual retry.
+--
+-- delivery_attempts counts consecutive transient failures so
+-- blockOrRetryExternal (delivery.go) knows when to stop retrying and finally
+-- fall through to blockExternal, the same way abandonedChecks
+-- (recovery.go) bounds the case where GitHub simply never reports a result
+-- at all.
+ALTER TABLE app.workflow_runs ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL DEFAULT 0;
