@@ -39,20 +39,25 @@ export type StatusMeta = {
   phase: Phase | null;
 };
 
+// The Go V1 orchestrator writes exactly seven of these
+// (orchestrator/internal/server/status.go's Status type is the source of
+// truth): offered, preparing, waiting_github_checks and the four terminal
+// statuses. `waiting_human` is kept even though nothing writes it yet --
+// SubmitHumanDecision (orchestrator/internal/server/management.go) is a real,
+// wired RPC that today always answers "V1 has no approval phase", and the
+// console's DecisionPanel (workflow-detail.tsx) is built against the day it
+// doesn't. Every other entry this table used to carry -- planning,
+// implementing, local_pipeline, repairing, ai_review, pushing, pr_created,
+// merging, recovering -- named phases of a pipeline the deleted
+// internal/workflow package (#247) modelled but the Go orchestrator never
+// implemented, and were pruned in #265: statusMeta's fallback below covers a
+// status this table does not recognise, which is what every one of those
+// would have hit in production anyway.
 export const STATUS_META: Record<string, StatusMeta> = {
   offered: { label: "Offered", variant: "idle", pulse: false, phase: "prepare" },
   preparing: { label: "Preparing", variant: "run", pulse: true, phase: "prepare" },
-  planning: { label: "Planning", variant: "run", pulse: true, phase: "plan" },
-  implementing: { label: "Implementing", variant: "run", pulse: true, phase: "implement" },
-  local_pipeline: { label: "Pipeline", variant: "run", pulse: true, phase: "pipeline" },
-  repairing: { label: "Repairing", variant: "warn", pulse: true, phase: "pipeline" },
-  ai_review: { label: "AI review", variant: "run", pulse: true, phase: "review" },
-  pushing: { label: "Pushing", variant: "run", pulse: true, phase: "push" },
-  pr_created: { label: "PR open", variant: "wait", pulse: false, phase: "pr" },
   waiting_github_checks: { label: "Waiting on checks", variant: "wait", pulse: false, phase: "checks" },
   waiting_human: { label: "Needs decision", variant: "wait", pulse: false, phase: "human" },
-  merging: { label: "Merging", variant: "run", pulse: true, phase: "merge" },
-  recovering: { label: "Recovering", variant: "warn", pulse: true, phase: "implement" },
   completed: { label: "Delivered", variant: "ok", pulse: false, phase: "done" },
   blocked: { label: "Blocked", variant: "bad", pulse: false, phase: null },
   failed: { label: "Failed", variant: "bad", pulse: false, phase: null },

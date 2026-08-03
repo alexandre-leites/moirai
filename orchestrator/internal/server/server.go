@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -986,7 +985,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	}
 	workflowID, jobID, offerID := newID(), newID(), newID()
 	branch := "agent/" + workflowID
-	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'offered','offered',$5)`, workflowID, projectID, issueID, workflowID, branch); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,`+qOffered+`,`+qOffered+`,$5)`, workflowID, projectID, issueID, workflowID, branch); err != nil {
 		return false, databaseError(err)
 	}
 	lock, err := tx.Exec(ctx, `INSERT INTO app.project_locks(project_id,workflow_run_id) VALUES($1,$2) ON CONFLICT(project_id) DO NOTHING`, projectID, workflowID)
@@ -1045,7 +1044,7 @@ func (s *Server) releaseUndeliveredOffer(jobID, workflowID, projectID string) er
 	if _, err := tx.Exec(ctx, `UPDATE app.job_offers SET status='cancelled',responded_at=now() WHERE job_id=$1 AND status='offered'`, jobID); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='cancelled',current_phase='cancelled',completed_at=now(),terminal_reason=$2 WHERE id=$1`, workflowID, reason); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qCancelled+`,current_phase=`+qCancelled+`,completed_at=now(),terminal_reason=$2 WHERE id=$1`, workflowID, reason); err != nil {
 		return databaseError(err)
 	}
 	// The issue stays eligible on purpose: no execution ran, so nothing was
@@ -1121,7 +1120,7 @@ func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64
 	if err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='preparing', updated_at=now() WHERE id=(SELECT workflow_run_id FROM app.jobs WHERE id=$1) AND status NOT IN ('completed','failed','blocked','cancelled')`, jobID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qPreparing+`, updated_at=now() WHERE id=(SELECT workflow_run_id FROM app.jobs WHERE id=$1) AND status NOT IN (`+terminalStatusList+`)`, jobID); err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1153,7 +1152,7 @@ func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string
 	if _, err := tx.Exec(ctx, `UPDATE app.jobs SET status='cancelled', finished_at=now(), recovery_reason=NULLIF($2,'') WHERE id=$1`, jobID, truncate(reason, 1024)); err != nil {
 		return databaseError(err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='cancelled', current_phase='cancelled', terminal_reason='runner rejected offer', completed_at=now(), updated_at=now() WHERE id=$1`, workflowID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qCancelled+`, current_phase=`+qCancelled+`, terminal_reason='runner rejected offer', completed_at=now(), updated_at=now() WHERE id=$1`, workflowID); err != nil {
 		return databaseError(err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM app.project_locks WHERE project_id=$1 AND workflow_run_id=$2`, projectID, workflowID); err != nil {
@@ -1219,13 +1218,16 @@ func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, eve
 		// the run and fence its job, and this statement is only reached by an
 		// event that passed the fence — so the COALESCE is a backstop against
 		// that reasoning changing, not a case anything is known to hit.
-		runStatus, blockingReason := event.GetType(), ""
+		// event.GetType() is one of "completed", "failed" or "cancelled" here
+		// (terminalEvent already fenced anything else), which is exactly the
+		// runner-event vocabulary Status shares for these three values.
+		runStatus, blockingReason := Status(event.GetType()), ""
 		if event.GetType() == "failed" {
 			if reason, blocked := agentBlockReason(event.GetPayloadJson()); blocked {
-				runStatus, blockingReason = "blocked", reason
+				runStatus, blockingReason = StatusBlocked, reason
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=COALESCE(NULLIF($3,''),blocking_reason),terminal_reason=COALESCE(NULLIF($3,''),terminal_reason),updated_at=now(),completed_at=CASE WHEN $2 IN (`+terminalStatusList+`) THEN now() ELSE completed_at END WHERE id=$1`, workflowID, runStatus, blockingReason); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=COALESCE(NULLIF($3,''),blocking_reason),terminal_reason=COALESCE(NULLIF($3,''),terminal_reason),updated_at=now(),completed_at=CASE WHEN $2 IN (`+terminalStatusList+`) THEN now() ELSE completed_at END WHERE id=$1`, workflowID, runStatus.String(), blockingReason); err != nil {
 			return databaseError(err)
 		}
 		if event.GetType() != "completed" {
@@ -1392,7 +1394,11 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 	var leaseGenerationAtCancel int64
 	switch action {
 	case "retry":
-		if current != "failed" && current != "blocked" && current != "cancelled" {
+		// Retryable is exactly genuinelyTerminalStatuses, not terminalStatuses:
+		// a completed run is done but not retryable through this action, and
+		// (today) not retryable at all -- it has already delivered, or is
+		// still trying to.
+		if !genuinelyTerminalStatus(current) {
 			return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
 		}
 		// Retry reopens the issue rather than reviving this run. A job is
@@ -1412,15 +1418,15 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 			return nil, databaseError(err)
 		}
 	case "cancel", "block":
-		next := action + "led"
+		next := StatusCancelled
 		if action == "block" {
-			next = "blocked"
+			next = StatusBlocked
 		}
-		if current != next {
+		if current != next.String() {
 			if terminalStatus(current) {
 				return nil, status.Error(codes.FailedPrecondition, "workflow run is already terminal")
 			}
-			if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=CASE WHEN $2='blocked' THEN $3 ELSE blocking_reason END,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1`, id, next, defaultReason(action, reason)); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=CASE WHEN $2=`+qBlocked+` THEN $3 ELSE blocking_reason END,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1`, id, next.String(), defaultReason(action, reason)); err != nil {
 				return nil, databaseError(err)
 			}
 			err = tx.QueryRow(ctx, `UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason=$2 WHERE workflow_run_id=$1 AND status IN ('offered','preparing','running') RETURNING id::text,runner_id::text,lease_generation-1`, id, defaultReason(action, reason)).Scan(&jobToCancel, &runnerHoldingLease, &leaseGenerationAtCancel)
@@ -1697,20 +1703,6 @@ func hashSecret(value string) string {
 }
 func jsonLabels(labels []string) string { encoded, _ := json.Marshal(labels); return string(encoded) }
 
-// terminalStatuses are the workflow-run statuses a run never leaves. Both the
-// Go predicate below and the SQL the active-workflow gauge counts with are
-// derived from this one list: they were independent copies, and a fifth
-// terminal status added to one and not the other would have left the gauge
-// counting finished work as active, with nothing to catch it.
-var terminalStatuses = []string{"completed", "failed", "blocked", "cancelled"}
-
-// terminalStatusList renders them as the SQL literal list `'a','b'`. Built from
-// the constants above, never from input.
-var terminalStatusList = "'" + strings.Join(terminalStatuses, "','") + "'"
-
-func terminalStatus(state string) bool {
-	return slices.Contains(terminalStatuses, state)
-}
 func terminalEvent(event string) bool {
 	return event == "completed" || event == "failed" || event == "cancelled"
 }

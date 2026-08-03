@@ -26,7 +26,7 @@ async function mountConsole(api: ApiClient, route = "/"): Promise<HTMLElement> {
 const populated = () => stubApi({
   listProjects: async () => [project()],
   listWorkflows: async () => [
-    workflow({ id: "wf-1", status: "implementing" }),
+    workflow({ id: "wf-1", status: "preparing" }),
     workflow({ id: "wf-2", status: "waiting_human" }),
     workflow({ id: "wf-3", status: "completed" }),
   ],
@@ -61,7 +61,7 @@ describe("Console shell", () => {
     const hot = await mountConsole(populated());
     expect(hot.querySelector(".side .count.hot")).not.toBeNull();
 
-    const calm = await mountConsole(stubApi({ listWorkflows: async () => [workflow({ status: "implementing" })] }));
+    const calm = await mountConsole(stubApi({ listWorkflows: async () => [workflow({ status: "preparing" })] }));
     expect(calm.querySelector(".side .count.hot")).toBeNull();
   });
 

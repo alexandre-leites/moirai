@@ -16,12 +16,12 @@ describe("WorkflowDetailPage", () => {
   it("heads the view with the project, issue and status, and draws the full thread", async () => {
     const api = stubApi({
       listProjects: async () => [project({ id: "project-1", name: "moirai" })],
-      getWorkflow: async () => workflow({ status: "ai_review", reviewCycles: 1 }),
+      getWorkflow: async () => workflow({ status: "preparing", reviewCycles: 1 }),
     });
     const container = await mountDetail(api);
 
     expect(container.querySelector("h1")?.textContent).toBe("moirai #103");
-    expect(container.textContent).toContain("AI review");
+    expect(container.textContent).toContain("Preparing");
     expect(container.querySelector(".threadline")).not.toBeNull();
     expect(container.textContent).toContain("spun");
   });
@@ -61,7 +61,7 @@ describe("WorkflowDetailPage", () => {
   });
 
   it("posts the decision and its comment when the gate is approved", async () => {
-    const submitWorkflowDecision = vi.fn(async () => workflow({ status: "merging" }));
+    const submitWorkflowDecision = vi.fn(async () => workflow({ status: "waiting_github_checks" }));
     const api = stubApi({
       getWorkflow: async () => workflow({ status: "waiting_human", pullRequestUrl: "https://example.test/pull/112", pullRequestExternalId: "112" }),
       submitWorkflowDecision,
@@ -99,7 +99,7 @@ describe("WorkflowDetailPage", () => {
 
   it("requires a reason before a run can be blocked, and confirms first", async () => {
     const blockWorkflow = vi.fn(async () => workflow({ status: "blocked" }));
-    const api = stubApi({ getWorkflow: async () => workflow({ status: "implementing" }), blockWorkflow });
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "preparing" }), blockWorkflow });
     const container = await mountDetail(api);
 
     const block = button(container, /Block & hold issue/);
@@ -120,7 +120,7 @@ describe("WorkflowDetailPage", () => {
     const terminalView = await mountDetail(terminal);
     expect(buttons(terminalView, /Cancel workflow/)).toHaveLength(0);
 
-    const viewer = stubApi({ me: async () => VIEWER, getWorkflow: async () => workflow({ status: "implementing" }) });
+    const viewer = stubApi({ me: async () => VIEWER, getWorkflow: async () => workflow({ status: "preparing" }) });
     const viewerView = await mountDetail(viewer);
     expect(buttons(viewerView, /Cancel workflow/)).toHaveLength(0);
   });
@@ -202,7 +202,7 @@ describe("WorkflowDetailPage", () => {
   });
 
   it("shows gates and the six attempt meters", async () => {
-    const api = stubApi({ getWorkflow: async () => workflow({ status: "ai_review", reviewCycles: 1 }) });
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "preparing", reviewCycles: 1 }) });
     const container = await mountDetail(api);
 
     expect(container.textContent).toContain("Plan valid");

@@ -528,7 +528,7 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	if err := h.pool.QueryRow(ctx, `SELECT id::text FROM app.issues WHERE project_id=$1 LIMIT 1`, queuedProject).Scan(&issueID); err != nil {
 		t.Fatal(err)
 	}
-	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'running','implementation')`, activeRun, queuedProject, issueID, "thread-"+activeRun)
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, activeRun, queuedProject, issueID, "thread-"+activeRun)
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'completed','done')`, doneRun, queuedProject, issueID, "thread-"+doneRun)
 	// One scheduled job, and one that has finished.
 	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'running')`, newID(), activeRun, queuedProject)
@@ -998,7 +998,7 @@ func TestCancelAndBlockNotifyTheRunnersControlStream(t *testing.T) {
 }
 
 // A workflow can be cancelled or blocked before the scheduler ever gave it a
-// job — while the run is still in "planning", say — in which case there is no
+// job — while the run is still "offered", say — in which case there is no
 // runner to notify. That must stay a no-op rather than an error or a panic.
 func TestCancelWithoutAJobDoesNotErrorOrNotifyAnyone(t *testing.T) {
 	h := newHarness(t)
@@ -1006,7 +1006,7 @@ func TestCancelWithoutAJobDoesNotErrorOrNotifyAnyone(t *testing.T) {
 	runnerID := h.runner()
 	outbound := h.outboundChannel(runnerID)
 	workflowID := newID()
-	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'planning','planning','agent/'||$4)`, workflowID, projectID, issueID, workflowID)
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'offered','offered','agent/'||$4)`, workflowID, projectID, issueID, workflowID)
 
 	if _, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
 		t.Fatalf("CancelWorkflow: %v", err)
@@ -1095,5 +1095,31 @@ func TestSetRunnerStateEnableDoesNotNotifyTheRunner(t *testing.T) {
 	case message := <-outbound:
 		t.Fatalf("SetRunnerState(enable) sent %T to the runner, want nothing", message.GetMessage())
 	default:
+	}
+}
+
+// 021_workflow_run_status_check.sql is the database's half of #265's typed
+// Status vocabulary: every value in knownStatuses must still be accepted, and
+// nothing outside it may ever reach the column again, from any writer,
+// present or future.
+func TestWorkflowRunStatusCheckConstraintMatchesKnownStatuses(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+
+	for status := range knownStatuses {
+		workflowID := newID()
+		h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,$5,$5)`,
+			workflowID, projectID, issueID, "thread-"+workflowID, status.String())
+	}
+
+	workflowID := newID()
+	_, err := h.pool.Exec(context.Background(),
+		`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'implementing','implementing')`,
+		workflowID, projectID, issueID, "thread-"+workflowID)
+	if err == nil {
+		t.Fatal("inserting workflow_runs.status='implementing' succeeded; workflow_runs_status_is_known should have rejected it")
+	}
+	if !strings.Contains(err.Error(), "workflow_runs_status_is_known") {
+		t.Fatalf("insert of an unknown status failed with %v, want the workflow_runs_status_is_known constraint", err)
 	}
 }

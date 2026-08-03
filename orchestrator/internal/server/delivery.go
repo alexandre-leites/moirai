@@ -42,7 +42,7 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 	if _, err := tx.Exec(ctx, `INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github',$3,$4,$5,$6) ON CONFLICT(workflow_run_id) DO UPDATE SET external_id=EXCLUDED.external_id,url=EXCLUDED.url,head_commit=EXCLUDED.head_commit,state=EXCLUDED.state`, newID(), workflowID, pr.Number, pr.URL, pr.HeadSHA, pr.State); err != nil {
 		return databaseError(err)
 	}
-	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='waiting_github_checks',current_phase='waiting_github_checks',updated_at=now(),completed_at=NULL WHERE id=$1 AND status='completed'`, workflowID)
+	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qWaitingGithubChecks+`,current_phase=`+qWaitingGithubChecks+`,updated_at=now(),completed_at=NULL WHERE id=$1 AND status=`+qCompleted, workflowID)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -56,7 +56,7 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 }
 
 func (s *Server) ObserveWorkflows(ctx context.Context) error {
-	return s.eachWorkflow(ctx, `SELECT wr.id::text FROM app.workflow_runs wr WHERE wr.status='waiting_github_checks' ORDER BY wr.updated_at,wr.id LIMIT 20`, s.observeWorkflow)
+	return s.eachWorkflow(ctx, `SELECT wr.id::text FROM app.workflow_runs wr WHERE wr.status=`+qWaitingGithubChecks+` ORDER BY wr.updated_at,wr.id LIMIT 20`, s.observeWorkflow)
 }
 
 // eachWorkflow drains a batch of workflow identifiers and runs `do` against
@@ -100,7 +100,7 @@ func (s *Server) eachWorkflow(ctx context.Context, query string, do func(context
 // park says whether the issue should stop being scheduled. It is false only
 // when nothing was spent — an offer nobody answered ran no execution, so that
 // work should simply be offered again rather than waiting for a human.
-func (s *Server) terminateWorkflow(ctx context.Context, workflowID, state, eventType, cause string, park bool) error {
+func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state Status, eventType, cause string, park bool) error {
 	reason := truncate(cause, 1024)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -108,7 +108,7 @@ func (s *Server) terminateWorkflow(ctx context.Context, workflowID, state, event
 	}
 	defer tx.Rollback(ctx)
 	var projectID string
-	err = tx.QueryRow(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=$3,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1 AND status NOT IN ('blocked','failed','cancelled') RETURNING project_id::text`, workflowID, state, reason).Scan(&projectID)
+	err = tx.QueryRow(ctx, `UPDATE app.workflow_runs SET status=$2,current_phase=$2,blocking_reason=$3,terminal_reason=$3,completed_at=now(),updated_at=now() WHERE id=$1 AND status NOT IN (`+genuinelyTerminalStatusList+`) RETURNING project_id::text`, workflowID, state.String(), reason).Scan(&projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -166,7 +166,7 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 		return databaseError(err)
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status='completed',current_phase='completed',completed_at=now(),updated_at=now() WHERE id=$1 AND status='waiting_github_checks'`, workflowID)
+	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qCompleted+`,current_phase=`+qCompleted+`,completed_at=now(),updated_at=now() WHERE id=$1 AND status=`+qWaitingGithubChecks, workflowID)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -211,5 +211,5 @@ func (s *Server) deliveryWorkflow(ctx context.Context, workflowID string, requir
 }
 
 func (s *Server) blockExternal(ctx context.Context, workflowID string, cause error) error {
-	return s.terminateWorkflow(ctx, workflowID, "blocked", "delivery.failed", "external delivery failed: "+cause.Error(), true)
+	return s.terminateWorkflow(ctx, workflowID, StatusBlocked, "delivery.failed", "external delivery failed: "+cause.Error(), true)
 }

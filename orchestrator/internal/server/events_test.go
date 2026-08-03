@@ -86,7 +86,7 @@ func (h *harness) workflowRun(projectID string) (workflowID string) {
 	issueID := newID()
 	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github',$3,$3,'Test issue','https://example.test/issues/'||$3,'open',true,now(),now())`, issueID, projectID, issueID[:8])
 	workflowID = newID()
-	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'running','implementation')`, workflowID, projectID, issueID, "thread-"+workflowID)
+	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, workflowID, projectID, issueID, "thread-"+workflowID)
 	return workflowID
 }
 

@@ -17,7 +17,7 @@ describe("triage", () => {
       workflow({ id: "wf-blocked", status: "blocked", blockingReason: "non-progress guard" }),
       workflow({ id: "wf-failed", status: "failed", pullRequestUrl: "https://example.test/pull/9" }),
       workflow({ id: "wf-waiting", status: "waiting_human" }),
-      workflow({ id: "wf-running", status: "implementing" }),
+      workflow({ id: "wf-running", status: "preparing" }),
     ]);
     expect(items.map((item) => item.workflow.id)).toEqual(["wf-waiting", "wf-blocked", "wf-failed"]);
     expect(items[1].detail).toBe("non-progress guard");
@@ -37,14 +37,14 @@ describe("OverviewPage", () => {
   const api = () => stubApi({
     listProjects: async () => [project()],
     listWorkflows: async () => [
-      workflow({ id: "wf-1", status: "implementing" }),
+      workflow({ id: "wf-1", status: "preparing" }),
       workflow({ id: "wf-2", status: "waiting_human", issueExternalId: "#58" }),
       workflow({ id: "wf-3", status: "completed", issueExternalId: "#198" }),
       workflow({ id: "wf-4", status: "blocked", issueExternalId: "#96", blockingReason: "non-progress guard" }),
     ],
     listRunners: async () => [runner(), runner({ id: "r2", name: "loom-03", status: "offline" })],
     listQueue: async () => [],
-    listWorkflowEvents: async () => ({ events: [event({ type: "workflow_transition", payload: { status: "implementing" } })] }),
+    listWorkflowEvents: async () => ({ events: [event({ type: "workflow_transition", payload: { status: "preparing" } })] }),
   });
 
   it("counts the fleet, the queue and the work in flight", async () => {
@@ -96,7 +96,7 @@ describe("OverviewPage", () => {
   });
 
   it("uses the specification's empty copy when nothing needs a decision", async () => {
-    const client = stubApi({ listWorkflows: async () => [workflow({ status: "implementing" })] });
+    const client = stubApi({ listWorkflows: async () => [workflow({ status: "preparing" })] });
     const container = await mountView(<OverviewPage api={client} />, client);
     expect(container.textContent).toContain("The Fates are spinning on their own.");
   });
