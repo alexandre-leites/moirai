@@ -37,7 +37,6 @@ RETURNING workflow_run_id::text AS workflow_run_id;
 -- name: SelectStrandedDeliveryWorkflows :many
 SELECT wr.id::text AS id
 FROM app.workflow_runs wr
-JOIN app.project_locks l ON l.workflow_run_id = wr.id
-WHERE wr.status = 'completed' AND wr.updated_at < now() - sqlc.arg(stranded_delivery)::interval
+WHERE wr.status = 'delivering' AND wr.updated_at < now() - sqlc.arg(stranded_delivery)::interval
 ORDER BY wr.updated_at, wr.id
 LIMIT 20;

@@ -42,7 +42,7 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 	if _, err := tx.Exec(ctx, `INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github',$3,$4,$5,$6) ON CONFLICT(workflow_run_id) DO UPDATE SET external_id=EXCLUDED.external_id,url=EXCLUDED.url,head_commit=EXCLUDED.head_commit,state=EXCLUDED.state`, newID(), workflowID, pr.Number, pr.URL, pr.HeadSHA, pr.State); err != nil {
 		return databaseError(err)
 	}
-	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qWaitingGithubChecks+`,current_phase=`+qWaitingGithubChecks+`,updated_at=now(),completed_at=NULL WHERE id=$1 AND status=`+qCompleted, workflowID)
+	command, err := tx.Exec(ctx, `UPDATE app.workflow_runs SET status=`+qWaitingGithubChecks+`,current_phase=`+qWaitingGithubChecks+`,updated_at=now(),completed_at=NULL WHERE id=$1 AND status=`+qDelivering, workflowID)
 	if err != nil {
 		return databaseError(err)
 	}

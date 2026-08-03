@@ -6,9 +6,10 @@ import "slices"
 // type existed the vocabulary was spelled out as raw SQL string literals
 // scattered across server.go, delivery.go and recovery.go, with no compiler
 // check that a new writer used a value any reader recognised -- see #265.
-// These seven values are every one those files write today; 021_workflow_run_
-// status_check.sql enforces the same set as a database CHECK, so the two
-// copies cannot drift silently again.
+// These eight values are every one those files write today; 021_workflow_run_
+// status_check.sql (extended by 022_workflow_run_delivering_status.sql to add
+// 'delivering') enforces the same set as a database CHECK, so the two copies
+// cannot drift silently again.
 //
 // 'running' is deliberately not here: it is a status app.jobs uses for an
 // execution in flight, but no code path ever writes it to a workflow run.
@@ -25,12 +26,27 @@ const (
 	// StatusWaitingGithubChecks is set once a pull request has been opened
 	// and the run is waiting for GitHub's checks to report a result.
 	StatusWaitingGithubChecks Status = "waiting_github_checks"
-	// StatusCompleted marks a run whose agent execution succeeded. It is
-	// reached twice: once when the agent finishes (persistExecutionEvent),
-	// and again once GitHub confirms the merge (observeWorkflow) -- the run
-	// passes back through 'waiting_github_checks' in between. See
-	// genuinelyTerminalStatuses for why this status is not treated as
-	// terminal everywhere.
+	// StatusDelivering marks a run whose agent execution succeeded and whose
+	// pull request is being opened. persistExecutionEvent sets it (in place of
+	// StatusCompleted -- see #267) for the runner's 'completed' event, and it
+	// deliberately keeps the project lock while it holds this status: the run
+	// still has to hand its work to GitHub, and a crash before that finishes
+	// must not look like nothing is holding the project.
+	//
+	// Before this status existed 'completed' was written at this point too,
+	// which meant "the agent succeeded" and "the pull request merged" were the
+	// same value and could only be told apart by whether a project_locks row
+	// still happened to exist -- see resumeStrandedDeliveries (recovery.go)
+	// for what that ambiguity cost. A run leaves 'delivering' for
+	// 'waiting_github_checks' once deliverWorkflow opens the pull request, or
+	// sideways to 'blocked' if opening it fails (blockExternal).
+	StatusDelivering Status = "delivering"
+	// StatusCompleted marks a run whose pull request GitHub has confirmed
+	// merged (observeWorkflow) -- the true terminal "done" state. See
+	// StatusDelivering for the status this run passed through on the way
+	// here, and genuinelyTerminalStatuses for why StatusCompleted is still
+	// not treated as terminal by the retry/cancel guard even though nothing
+	// today writes a run away from it.
 	StatusCompleted Status = "completed"
 	// StatusFailed marks an agent execution that ended badly and did not
 	// declare itself blocked, or a job whose lease lapsed without a runner
@@ -63,6 +79,7 @@ var (
 	qOffered             = StatusOffered.quoted()
 	qPreparing           = StatusPreparing.quoted()
 	qWaitingGithubChecks = StatusWaitingGithubChecks.quoted()
+	qDelivering          = StatusDelivering.quoted()
 	qCompleted           = StatusCompleted.quoted()
 	qBlocked             = StatusBlocked.quoted()
 	qCancelled           = StatusCancelled.quoted()
@@ -74,6 +91,7 @@ var knownStatuses = map[Status]bool{
 	StatusOffered:             true,
 	StatusPreparing:           true,
 	StatusWaitingGithubChecks: true,
+	StatusDelivering:          true,
 	StatusCompleted:           true,
 	StatusFailed:              true,
 	StatusBlocked:             true,
@@ -98,17 +116,12 @@ func ParseStatus(value string) (Status, bool) {
 // other would have left the gauge counting finished work as active, with
 // nothing to catch it.
 //
-// StatusCompleted is on this list even though terminateWorkflow's own guard
-// (see genuinelyTerminalStatuses) deliberately still allows a completed run
-// to move to 'blocked': the two predicates answer different questions.
-// terminalStatuses answers "is this run done, for a dashboard counting active
-// work" -- yes, a completed run is done. genuinelyTerminalStatuses answers
-// "can external delivery still fail this run" -- yes, because 'completed'
-// only means the agent succeeded, and the pull request it still has to open
-// or merge can fail after that. That asymmetry is what lets a delivery
-// failure turn a 'completed' run into 'blocked' without racing a second
-// delivery attempt for the same run (see resumeStrandedDeliveries in
-// recovery.go).
+// StatusDelivering is deliberately absent: a run holding it is still doing
+// active work (opening a pull request), the same reason 'offered', 'preparing'
+// and 'waiting_github_checks' are absent. See genuinelyTerminalStatuses for
+// the narrower set terminateWorkflow's own guard uses, and StatusDelivering's
+// doc comment above for why 'completed' and 'delivering' no longer share one
+// meaning the way this list's single StatusCompleted entry once had to cover.
 var terminalStatuses = []Status{StatusCompleted, StatusFailed, StatusBlocked, StatusCancelled}
 
 // terminalStatusList renders them as the SQL literal list `'a','b'`. Built
@@ -124,16 +137,18 @@ func terminalStatus(state string) bool {
 // run away from once reached -- deliberately not the same set as
 // terminalStatuses, which also lists StatusCompleted.
 //
-// StatusCompleted is left out here on purpose: it means the agent execution
-// succeeded, not that delivery did, and two different writers still move a
-// run away from it -- deliverWorkflow forward to 'waiting_github_checks', and
-// blockExternal (via terminateWorkflow) sideways to 'blocked' when opening or
-// merging the pull request fails. Excluding StatusCompleted from
-// terminateWorkflow's own guard is what lets that delivery failure still
-// land; including it here would leave a run whose delivery failed reporting
-// success forever, and RetryWorkflow would never make it eligible again
-// either. See terminalStatuses for the (different, and equally intentional)
-// set that does include it.
+// StatusCompleted is left out here on purpose, even though (since #267 split
+// 'completed' from StatusDelivering) nothing today actually moves a run away
+// from it once GitHub confirms the merge: RetryWorkflow's guard is "current
+// status is genuinely terminal", and a completed run is done, not retryable,
+// so it must read as *not* genuinely terminal here to keep failing that guard
+// with "not retryable" rather than being treated as eligible for a fresh
+// attempt. StatusDelivering is excluded from this list for the opposite,
+// ordinary reason: a run holding it is still in flight, and blockExternal (via
+// terminateWorkflow) sideways-moves it to 'blocked' when opening or merging
+// the pull request fails -- see StatusDelivering's doc comment. See
+// terminalStatuses for the (different, and equally intentional) set that does
+// include StatusCompleted.
 var genuinelyTerminalStatuses = []Status{StatusFailed, StatusBlocked, StatusCancelled}
 
 var genuinelyTerminalStatusList = sqlStatusList(genuinelyTerminalStatuses)
