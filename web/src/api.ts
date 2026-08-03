@@ -174,10 +174,27 @@ export type SyncResult = {
   error?: string;
 };
 
+/**
+ * One background reconciliation loop's liveness (scheduler tick, workflow
+ * observer, recovery sweep, issue sync). `healthy` is false once the loop's
+ * last success has aged past a threshold sized to its own tick interval —
+ * the same verdict the orchestrator's own healthcheck acts on, so the console
+ * cannot show "fine" for a loop the container runtime is about to restart
+ * over, or the reverse.
+ */
+export type LoopStatus = {
+  name: string;
+  healthy: boolean;
+  lastSuccessAt?: string;
+  lastError?: string;
+  lastErrorAt?: string;
+};
+
 export type SchedulerMetrics = {
   queueDepth: number;
   activeWorkflows: number;
   scheduledJobs: number;
+  loops: LoopStatus[];
 };
 
 /**

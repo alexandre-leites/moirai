@@ -69,7 +69,7 @@ Every secret below can be supplied either directly or as `<NAME>_FILE` pointing 
 | `moirai_scheduled_jobs` | gauge | | Jobs offered to, being prepared by, or running on a runner. |
 | `moirai_enabled_runners` | gauge | | Runners an operator has neither disabled nor revoked. |
 | `moirai_runner_heartbeat_age_seconds` | gauge | | Seconds since the **least** recently seen enabled runner checked in — the fleet-wide worst case. Absent when no runner is enabled. |
-| `moirai_orchestrator_loop_runs_total` | counter | `loop`, `result` | Passes of the recovery sweep and the issue sync, by `success` or `failure`. |
+| `moirai_orchestrator_loop_runs_total` | counter | `loop`, `result` | Passes of each background loop (`scheduler_tick`, `workflow_observer`, `recovery_sweep`, `issue_sync`), by `success` or `failure`. |
 | `moirai_orchestrator_loop_last_success_age_seconds` | gauge | `loop` | Seconds since that loop last completed without error, counting from process start until its first success. |
 | `moirai_orchestrator_metrics_scrape_errors_total` | counter | | Scrapes that could not read the database and therefore omitted the state series. |
 
@@ -85,6 +85,15 @@ Four properties are deliberate:
 **Renamed since the Python orchestrator.** It served the same four state series on this port, and two carry different names now: `moirai_active_workflow_count` → `moirai_active_workflows` and `moirai_scheduled_job_count` → `moirai_scheduled_jobs`. Both match their proto fields, and `_count` is a suffix Prometheus reserves for summaries and histograms. The scrape target is unchanged; a query written against either old name returns no data and has to be updated.
 
 The endpoint is unauthenticated, as the API's and the runner's are. It exposes counts and ages only — no issue titles, project names, or identifiers — and `compose.yaml` publishes no port for the orchestrator, so it is reachable only from the Compose networks. Attach Prometheus to the `control` network rather than publishing 9090.
+
+### Loop liveness, readiness and the healthcheck
+
+Each of the four background loops (the scheduler tick, the workflow/check observer, the recovery sweep, and issue sync) records its own last-success time and its most recent error in memory, independent of whether the loop is currently succeeding — see [#278](https://github.com/alexandre-leites/moirai/issues/278). A loop is reported unhealthy once its last success has aged past 5× its own tick interval (floored at 30s, so a single slow pass on the 1-second scheduler tick is not mistaken for a stalled loop). This is what turns a loop that silently stops — a schema drift the observer chokes on, `gh` missing, an expired token — into something visible instead of one log line every tick forever, while every in-flight workflow it should have advanced sits stuck.
+
+That liveness is surfaced two ways:
+
+- **`GET /readyz`** on the metrics listener answers `200` while every loop is within its budget and `503` (with a JSON body naming which loop is stale and its last error) once one is not. `docker compose`'s `orchestrator healthcheck` subcommand is what Docker actually runs, and it fetches this endpoint — it is a separate process invocation from the running server, so it has no way to read the server's in-memory state directly; the HTTP round trip through loopback is the only channel it has. If `LOOP_METRICS_BIND` is explicitly set empty, that channel does not exist, and the healthcheck falls back to the old bare TCP dial against `LOOP_GRPC_BIND` — it still catches "the process is gone" but not "a loop stalled".
+- **`GetSchedulerMetrics`** (the console's RPC) returns a `loop_statuses` entry per loop with the same `healthy`/`last_success_at`/`last_error`/`last_error_at` fields `/readyz` reports, computed from the same in-memory recorder, so the two can never disagree about which loop is stuck.
 
 ### TLS
 

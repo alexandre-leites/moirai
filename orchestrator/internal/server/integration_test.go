@@ -979,6 +979,55 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	}
 }
 
+// GetSchedulerMetrics is where the console would read background-loop
+// liveness (issue #278): it has to agree with the recorder that main.go wires
+// every loop's outcome into, including reporting a loop unhealthy once it has
+// gone stale and surfacing the error the loop last hit.
+func TestGetSchedulerMetricsReportsLoopLiveness(t *testing.T) {
+	h := newHarness(t)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	recorder := metrics.NewWithClock("", nil, func() time.Time { return now }).Recorder()
+	h.Server.SetLoopRecorder(recorder)
+
+	recorder.RecordLoopRun(metrics.LoopIssueSync, errors.New("gh: rate limited"))
+	now = now.Add(time.Second)
+	recorder.RecordLoopRun(metrics.LoopIssueSync, nil)
+	// recovery_sweep never succeeds and its interval (30s) is well under this
+	// gap, so it must come back unhealthy.
+	now = now.Add(10 * time.Minute)
+
+	resp, err := h.GetSchedulerMetrics(h.adminContext(), &controlv1.GetSchedulerMetricsRequest{})
+	if err != nil {
+		t.Fatalf("GetSchedulerMetrics: %v", err)
+	}
+	byName := make(map[string]*controlv1.LoopStatus, len(resp.GetLoopStatuses()))
+	for _, status := range resp.GetLoopStatuses() {
+		byName[status.GetName()] = status
+	}
+
+	issueSync, ok := byName[metrics.LoopIssueSync]
+	if !ok {
+		t.Fatal("GetSchedulerMetrics did not report issue_sync")
+	}
+	if !issueSync.GetHealthy() {
+		t.Errorf("issue_sync reported unhealthy right after a fresh success: %+v", issueSync)
+	}
+	if issueSync.GetLastError() != "gh: rate limited" {
+		t.Errorf("issue_sync LastError = %q, want the earlier failure preserved", issueSync.GetLastError())
+	}
+	if issueSync.GetLastSuccessAt() == "" {
+		t.Error("issue_sync LastSuccessAt is empty after a recorded success")
+	}
+
+	recoverySweep, ok := byName[metrics.LoopRecoverySweep]
+	if !ok {
+		t.Fatal("GetSchedulerMetrics did not report recovery_sweep")
+	}
+	if recoverySweep.GetHealthy() {
+		t.Errorf("recovery_sweep reported healthy after never succeeding for 10 minutes: %+v", recoverySweep)
+	}
+}
+
 // A scrape must not be able to take the orchestrator down, and must not report
 // zeros it did not measure, when the database is gone.
 func TestScrapeSurvivesAnUnreachableDatabase(t *testing.T) {
@@ -1561,13 +1610,28 @@ func TestWorkflowRunStatusCheckConstraintMatchesKnownStatuses(t *testing.T) {
 type labelStub struct {
 	stubGitHub
 	labels []string
+	// createdAt/updatedAt default to time.Now() on every call (the zero value
+	// of each), which is what the existing label-edit tests want: each sync
+	// pass is a distinct point in time regardless of the tracker row's own
+	// timestamps. A test asserting on whether a pass counts as a no-op (see
+	// TestUpsertIssueSkipsWritingWhenNothingChanged) sets these to a fixed
+	// instant instead, matching a real tracker reporting the same
+	// external_updated_at across polls when nothing actually changed.
+	createdAt, updatedAt time.Time
 }
 
 func (s *labelStub) ListIssues(context.Context, string, string) ([]githubIssue, error) {
 	priority, eligible := issuePriority(s.labels)
+	createdAt, updatedAt := s.createdAt, s.updatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	if updatedAt.IsZero() {
+		updatedAt = time.Now()
+	}
 	return []githubIssue{{
 		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
-		Labels: s.labels, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Labels: s.labels, CreatedAt: createdAt, UpdatedAt: updatedAt,
 		Priority: priority, Eligible: eligible, State: "open",
 	}}, nil
 }
@@ -1705,6 +1769,68 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	}
 	if !h.schedulable(issueID) {
 		t.Fatal("reopening the issue on GitHub did not make it schedulable again")
+	}
+}
+
+// TestUpsertIssueSkipsWritingWhenNothingChanged pins #290's sync-upsert cost:
+// UpsertIssue's ON CONFLICT DO UPDATE used to rewrite every issue row --
+// full raw_snapshot JSONB included -- on every single sync pass even when
+// GitHub reported nothing new, which is the steady-state case for almost
+// every pass on almost every project. Postgres does not expose "was this row
+// written" directly, but xmin changes on (and only on) an actual tuple
+// write, so comparing it across passes is a direct, precise proxy: unchanged
+// xmin *is* zero writes, not merely "looks unchanged" from the columns a
+// SELECT can see.
+func TestUpsertIssueSkipsWritingWhenNothingChanged(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	// Fixed CreatedAt/UpdatedAt, unlike labelStub's time.Now() on every call:
+	// a real tracker reports the same external_updated_at across polls when
+	// nothing changed, and the guard is meant to key off exactly that, so a
+	// stub whose timestamps drift on every call would make every pass look
+	// like a real change regardless of the fix.
+	fixedTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	stub := &labelStub{labels: []string{"agent:ready"}, createdAt: fixedTime, updatedAt: fixedTime}
+	h.github = stub
+
+	xmin := func() uint32 {
+		t.Helper()
+		var x uint32
+		if err := h.pool.QueryRow(context.Background(), `SELECT xmin::text::bigint FROM app.issues WHERE id=$1`, issueID).Scan(&x); err != nil {
+			t.Fatalf("read xmin: %v", err)
+		}
+		return x
+	}
+
+	// The seeded issue (h.project) does not match labelStub's row exactly, so
+	// this first sync is expected to write once and establish a baseline xmin.
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject (baseline): %v", err)
+	}
+	baseline := xmin()
+
+	// Two consecutive no-op passes: GitHub reports the exact same issue both
+	// times, nothing on the tracker moved.
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject (no-op #1): %v", err)
+	}
+	if after := xmin(); after != baseline {
+		t.Fatalf("xmin changed from %d to %d on a no-op sync pass; the DO UPDATE guard did not skip the write", baseline, after)
+	}
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject (no-op #2): %v", err)
+	}
+	if after := xmin(); after != baseline {
+		t.Fatalf("xmin changed from %d to %d on a second consecutive no-op sync pass; the DO UPDATE guard did not skip the write", baseline, after)
+	}
+
+	// A real change (a new label flipping priority/eligible) must still write.
+	stub.labels = nil
+	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git"); err != nil {
+		t.Fatalf("syncProject (real change): %v", err)
+	}
+	if after := xmin(); after == baseline {
+		t.Fatal("xmin did not change after a real label edit; the guard is over-suppressing writes, not just no-ops")
 	}
 }
 
@@ -1914,6 +2040,57 @@ func TestRunnerCapacityAllowsMultipleConcurrentJobs(t *testing.T) {
 		t.Fatalf("ScheduleOnce: %v", err)
 	} else if ok {
 		t.Fatal("ScheduleOnce claimed a fourth job for a runner already holding its registered capacity of 3")
+	}
+}
+
+// TestDrainingScheduleRespectsCapacityAcrossMultipleRunners pins the #290
+// drain-loop fix from the other side of TestRunnerCapacityAllowsMultipleConcurrentJobs:
+// that test pins one runner with capacity 3 against 4 issues; this one pins N
+// separate runners each capacity 1 against M > N eligible issues (one project
+// per issue, so a project's own single-active-workflow lock never becomes
+// the limiting factor). Calling ScheduleOnce in a tight loop -- exactly what
+// main.go's drainSchedule now does within a single tick instead of waiting a
+// full second per job -- must place exactly N jobs, one per runner, and never
+// more: capacity is enforced by ClaimSchedulableIssue's own WHERE clause, ANDed
+// fresh on every call, not by anything the caller's loop shape does.
+func TestDrainingScheduleRespectsCapacityAcrossMultipleRunners(t *testing.T) {
+	h := newHarness(t)
+	const runnerCount = 3
+	const issueCount = 7 // > runnerCount, so the queue outlives every runner's capacity
+	runnerIDs := make(map[string]bool, runnerCount)
+	for range runnerCount {
+		runnerIDs[h.runnerWithCapacity(1)] = true
+	}
+	for range issueCount {
+		h.project()
+	}
+
+	scheduled := 0
+	for range issueCount + 1 { // one extra iteration to prove it stops, not just slows
+		ok, err := h.ScheduleOnce(context.Background())
+		if err != nil {
+			t.Fatalf("ScheduleOnce: %v", err)
+		}
+		if !ok {
+			break
+		}
+		scheduled++
+	}
+	if scheduled != runnerCount {
+		t.Fatalf("draining scheduled %d jobs across %d runners each at capacity 1, want exactly %d (one per runner), not %d issues' worth", scheduled, runnerCount, runnerCount, issueCount)
+	}
+
+	jobsByRunner := h.scalar(`SELECT COUNT(DISTINCT runner_id) FROM app.jobs WHERE status IN ('offered','preparing','running')`)
+	if jobsByRunner != runnerCount {
+		t.Fatalf("in-flight jobs are spread across %d runners, want all %d runners to have exactly one each", jobsByRunner, runnerCount)
+	}
+	for runnerID := range runnerIDs {
+		if inFlight := h.scalar(`SELECT COUNT(*) FROM app.jobs WHERE runner_id=$1 AND status IN ('offered','preparing','running')`, runnerID); inFlight != 1 {
+			t.Fatalf("runner %s has %d in-flight jobs, want exactly 1 (its registered capacity)", runnerID, inFlight)
+		}
+	}
+	if remaining := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE eligible AND state='open' AND NOT EXISTS (SELECT 1 FROM app.workflow_runs w WHERE w.issue_id = app.issues.id)`); remaining != issueCount-runnerCount {
+		t.Fatalf("unclaimed eligible issues = %d, want %d (the %d issues beyond runner capacity, left queued rather than dropped)", remaining, issueCount-runnerCount, issueCount-runnerCount)
 	}
 }
 

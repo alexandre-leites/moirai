@@ -352,6 +352,202 @@ func TestUnknownLoopHasNoAgeSeries(t *testing.T) {
 	}
 }
 
+// A loop that has never run at all is still healthy from process start: an
+// alert on staleness must not fire the instant the process boots, before the
+// first tick has even had a chance to land.
+func TestLoopStatusesReportHealthyFromProcessStart(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	server := NewWithClock("", &stubSource{}, func() time.Time { return now })
+	recorder := server.Recorder()
+
+	healthy, statuses := recorder.Ready()
+	if !healthy {
+		t.Fatalf("Ready() = false at process start, want true; statuses: %+v", statuses)
+	}
+	for _, status := range statuses {
+		if !status.Healthy {
+			t.Errorf("loop %q reported unhealthy at process start", status.Name)
+		}
+		if !status.LastSuccess.Equal(now) {
+			t.Errorf("loop %q LastSuccess = %v, want %v (seeded at construction)", status.Name, status.LastSuccess, now)
+		}
+	}
+}
+
+// The crux of the acceptance criteria: a loop that stops succeeding must be
+// reported unhealthy once its last success ages past its own staleness
+// threshold, and healthy again the moment it recovers.
+func TestLoopStatusesReportUnhealthyOnceStale(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	server := NewWithClock("", &stubSource{}, func() time.Time { return now })
+	recorder := server.Recorder()
+	// Every loop succeeds once at t=0, so only recovery_sweep is left to go
+	// stale below -- the other three are re-recorded as time passes to isolate
+	// the one loop under test.
+	for _, loop := range scheduledLoops {
+		recorder.RecordLoopRun(loop, nil)
+	}
+	recoverySweepStatus := func() LoopStatus {
+		for _, status := range recorder.LoopStatuses() {
+			if status.Name == LoopRecoverySweep {
+				return status
+			}
+		}
+		t.Fatal("recovery_sweep missing from LoopStatuses()")
+		return LoopStatus{}
+	}
+
+	// recovery_sweep's interval is 30s; 5x is 150s, comfortably above the floor.
+	now = now.Add(100 * time.Second)
+	recorder.RecordLoopRun(LoopScheduler, nil)
+	recorder.RecordLoopRun(LoopWorkflowObserver, nil)
+	recorder.RecordLoopRun(LoopIssueSync, nil)
+	if status := recoverySweepStatus(); !status.Healthy {
+		t.Fatalf("recovery_sweep = unhealthy at 100s (threshold 150s), want healthy; status: %+v", status)
+	}
+
+	now = now.Add(100 * time.Second) // 200s since recovery_sweep's last success
+	recorder.RecordLoopRun(LoopScheduler, nil)
+	recorder.RecordLoopRun(LoopWorkflowObserver, nil)
+	recorder.RecordLoopRun(LoopIssueSync, nil)
+	if status := recoverySweepStatus(); status.Healthy {
+		t.Fatal("recovery_sweep = healthy at 200s (threshold 150s), want unhealthy: it has been stalled for 50s past its own budget")
+	}
+	if healthy, statuses := recorder.Ready(); healthy {
+		t.Fatalf("Ready() = true with recovery_sweep stalled, want false; statuses: %+v", statuses)
+	}
+
+	// A subsequent success clears the staleness immediately.
+	recorder.RecordLoopRun(LoopRecoverySweep, nil)
+	if status := recoverySweepStatus(); !status.Healthy {
+		t.Fatalf("recovery_sweep = unhealthy right after a fresh success, want healthy; status: %+v", status)
+	}
+	if healthy, statuses := recorder.Ready(); !healthy {
+		t.Fatalf("Ready() = false once every loop has succeeded recently, want true; statuses: %+v", statuses)
+	}
+}
+
+// The scheduler tick runs every second; 5x that is only 5s, which a single
+// slow database round trip could exceed without the loop actually having
+// stopped. The floor exists precisely to absorb that.
+func TestLoopStalenessFloorProtectsFastLoops(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	server := NewWithClock("", &stubSource{}, func() time.Time { return now })
+	recorder := server.Recorder()
+	recorder.RecordLoopRun(LoopScheduler, nil)
+
+	now = now.Add(10 * time.Second) // past 5x1s=5s, well under the 30s floor
+	healthy, statuses := recorder.Ready()
+	if !healthy {
+		t.Fatalf("Ready() = false at 10s for a 1s-interval loop, want true (floored at 30s); statuses: %+v", statuses)
+	}
+
+	now = now.Add(25 * time.Second) // 35s total, past the 30s floor
+	if healthy, statuses := recorder.Ready(); healthy {
+		t.Fatalf("Ready() = true at 35s for a 1s-interval loop, want false; statuses: %+v", statuses)
+	}
+}
+
+// A loop's last error survives its next success: an operator looking at a
+// currently-healthy loop should still be able to see that it flaked earlier,
+// not have the evidence erased the moment it recovers.
+func TestLastErrorSurvivesASubsequentSuccess(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	server := NewWithClock("", &stubSource{}, func() time.Time { return now })
+	recorder := server.Recorder()
+
+	recorder.RecordLoopRun(LoopIssueSync, errors.New("gh: rate limited"))
+	now = now.Add(time.Second)
+	recorder.RecordLoopRun(LoopIssueSync, nil)
+
+	_, statuses := recorder.Ready()
+	for _, status := range statuses {
+		if status.Name != LoopIssueSync {
+			continue
+		}
+		if status.LastError != "gh: rate limited" {
+			t.Errorf("issue_sync LastError = %q, want the earlier failure preserved", status.LastError)
+		}
+		if !status.Healthy {
+			t.Error("issue_sync reported unhealthy right after a fresh success")
+		}
+		return
+	}
+	t.Fatal("issue_sync missing from Ready()'s statuses")
+}
+
+// SetLoopInterval is how main.go tells the recorder issue sync's real,
+// operator-configurable interval; before it is called the recorder must still
+// have a sane default rather than treating the loop as having no budget at
+// all.
+func TestSetLoopIntervalChangesTheStalenessThreshold(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	server := NewWithClock("", &stubSource{}, func() time.Time { return now })
+	recorder := server.Recorder()
+	recorder.RecordLoopRun(LoopIssueSync, nil)
+	recorder.SetLoopInterval(LoopIssueSync, time.Second) // 5x1s=5s, floored at 30s
+
+	now = now.Add(45 * time.Second)
+	if healthy, statuses := recorder.Ready(); healthy {
+		t.Fatalf("Ready() = true at 45s after narrowing issue_sync's interval to 1s, want false; statuses: %+v", statuses)
+	}
+}
+
+// The whole point of /readyz: it is the one channel a *separate* healthcheck
+// process has into this process's in-memory loop state, since it cannot read
+// this process's memory directly. It must answer 503 once a loop is stale, and
+// 200 while every loop is within budget.
+func TestReadyzReflectsLoopHealth(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	server := NewWithClock("127.0.0.1:0", &stubSource{}, func() time.Time { return now })
+	if err := server.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	defer func() {
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	recorder := server.Recorder()
+	recorder.RecordLoopRun(LoopRecoverySweep, nil)
+	recorder.RecordLoopRun(LoopIssueSync, nil)
+	recorder.RecordLoopRun(LoopScheduler, nil)
+	recorder.RecordLoopRun(LoopWorkflowObserver, nil)
+
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	url := "http://" + server.Addr() + "/readyz"
+
+	response, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("GET %s = %d while every loop is fresh, want 200", url, response.StatusCode)
+	}
+
+	// Age recovery_sweep (30s interval, 150s threshold) past its budget.
+	now = now.Add(200 * time.Second)
+	response, err = client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("GET %s = %d once recovery_sweep is stale, want 503; body: %s", url, response.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"recovery_sweep"`) {
+		t.Errorf("/readyz body does not name the stalled loop; body: %s", body)
+	}
+	if !strings.Contains(string(body), `"healthy":false`) {
+		t.Errorf("/readyz body does not report overall unhealthy; body: %s", body)
+	}
+}
+
 // The endpoint reads the database on every request and the pool it reads
 // through is the one the scheduler and the runner streams use, so the number of
 // scrapes that may be in flight at once is bounded. Beyond the bound the

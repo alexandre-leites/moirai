@@ -58,6 +58,20 @@ type Server struct {
 	// from ever returning.
 	shutdown     chan struct{}
 	shutdownOnce sync.Once
+	// loopRecorder reports background-loop liveness through GetSchedulerMetrics.
+	// It is wired in by main.go once the metrics recorder exists (SetLoopRecorder),
+	// after this Server is already constructed; nil until then, and in most unit
+	// tests, which is why every read of it goes through the recorder's own
+	// nil-safe methods rather than a nil check here.
+	loopRecorder *metrics.Recorder
+}
+
+// SetLoopRecorder wires the background-loop liveness recorder into the server
+// so GetSchedulerMetrics can expose it over gRPC, in addition to the recorder's
+// own Prometheus surface and readiness endpoint. Optional: a Server this is
+// never called on (most unit tests) simply reports no loop statuses.
+func (s *Server) SetLoopRecorder(recorder *metrics.Recorder) {
+	s.loopRecorder = recorder
 }
 
 type actor struct {
@@ -815,11 +829,26 @@ func (s *Server) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedu
 	if err != nil {
 		return nil, err
 	}
-	return &controlv1.GetSchedulerMetricsResponse{
+	response := &controlv1.GetSchedulerMetricsResponse{
 		QueueDepth:      int32(snapshot.queueDepth),
 		ActiveWorkflows: int32(snapshot.activeWorkflows),
 		ScheduledJobs:   int32(snapshot.scheduledJobs),
-	}, nil
+	}
+	// LoopStatuses() is nil-safe: a Server that never had SetLoopRecorder called
+	// on it (most unit tests, and any process that has not finished starting up
+	// yet) reports no loop statuses rather than panicking.
+	for _, status := range s.loopRecorder.LoopStatuses() {
+		entry := &controlv1.LoopStatus{Name: status.Name, Healthy: status.Healthy}
+		if !status.LastSuccess.IsZero() {
+			entry.LastSuccessAt = timestamp(status.LastSuccess)
+		}
+		if status.LastError != "" {
+			entry.LastError = status.LastError
+			entry.LastErrorAt = timestamp(status.LastErrorAt)
+		}
+		response.LoopStatuses = append(response.LoopStatuses, entry)
+	}
+	return response, nil
 }
 
 // MetricsSnapshot reads the orchestrator-owned state the Prometheus surface

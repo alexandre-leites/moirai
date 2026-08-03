@@ -5,8 +5,10 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,19 +25,55 @@ import (
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "healthcheck" {
-		connection, err := net.DialTimeout("tcp", healthcheckAddress(), time.Second)
-		if err == nil {
-			err = connection.Close()
-		}
-		if err != nil {
-			os.Exit(1)
-		}
-		return
+		os.Exit(healthcheckExitCode())
 	}
 	if err := run(); err != nil {
 		slog.Error("orchestrator stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// healthcheckExitCode is the `orchestrator healthcheck` subcommand Docker
+// invokes: a separate process from the running server, so it has no way to
+// read that process's in-memory loop-liveness state directly. What it *can*
+// do is fetch /readyz on the metrics listener, which the running server
+// updates from that same state on every request (see metrics.readyHandler) --
+// an HTTP round trip through loopback rather than a shared-memory read, but
+// the only channel a subprocess actually has into the other process.
+//
+// Metrics can be explicitly disabled (LOOP_METRICS_BIND=""), in which case no
+// such channel exists at all, and this falls back to the old bare TCP dial: it
+// still catches "the process is gone" but not "a loop stalled", which is the
+// best a healthcheck can do with no readiness endpoint to ask.
+func healthcheckExitCode() int {
+	address, ok := readinessAddress()
+	if !ok {
+		return livenessExitCode()
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	response, err := client.Get("http://" + address + "/readyz")
+	if err != nil {
+		return 1
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
+}
+
+// livenessExitCode is the bare-dial check the healthcheck subcommand used
+// before this file tracked loop liveness at all, kept as the fallback for a
+// deployment that has explicitly turned the metrics listener off.
+func livenessExitCode() int {
+	connection, err := net.DialTimeout("tcp", healthcheckAddress(), time.Second)
+	if err == nil {
+		err = connection.Close()
+	}
+	if err != nil {
+		return 1
+	}
+	return 0
 }
 
 // healthcheckAddress dials the port the server was actually told to bind, so
@@ -51,6 +89,25 @@ func healthcheckAddress() string {
 		_, port, _ = net.SplitHostPort(config.DefaultGRPCBind)
 	}
 	return net.JoinHostPort("127.0.0.1", port)
+}
+
+// readinessAddress is the loopback address /readyz is served on, derived the
+// same way healthcheckAddress derives the gRPC one. The bool is false when
+// LOOP_METRICS_BIND was explicitly set empty: metrics, and therefore
+// readiness, are deliberately off, and there is no port here to ask.
+func readinessAddress() (string, bool) {
+	bind := config.DefaultMetricsBind
+	if configured, set := os.LookupEnv("LOOP_METRICS_BIND"); set {
+		bind = strings.TrimSpace(configured)
+	}
+	if bind == "" {
+		return "", false
+	}
+	_, port, err := net.SplitHostPort(bind)
+	if err != nil || port == "" {
+		_, port, _ = net.SplitHostPort(config.DefaultMetricsBind)
+	}
+	return net.JoinHostPort("127.0.0.1", port), true
 }
 
 // observed reports each pass of a reconciliation loop to the metrics recorder
@@ -90,6 +147,49 @@ func every(ctx context.Context, interval time.Duration, name string, fn func(con
 			}
 		}
 	}()
+}
+
+// maxScheduledPerTick bounds how many jobs a single scheduler tick may place
+// via drainSchedule before yielding back to the ticker. Without a bound, a
+// queue that keeps ScheduleOnce returning true (the fifty-eligible-issues
+// case #290 was filed about) would let one tick run indefinitely, starving
+// every other loop `every` drives on this same process and its shared
+// database pool -- the workflow observer, the recovery sweep, issue sync --
+// for as long as the queue stayed non-empty. 500 is chosen well above any
+// realistic single-tick fleet size while still bounding the worst case: at
+// roughly one round trip to Postgres per claim, a few hundred claims cost low
+// tens of milliseconds, comfortably inside the 1-second tick this loop
+// shares with everything else. A queue deeper than that drains over
+// successive ticks instead of one, which is a far better failure mode than a
+// scheduler tick that never yields.
+const maxScheduledPerTick = 500
+
+// drainSchedule repeatedly calls scheduleOnce -- ScheduleOnce in production --
+// until it reports nothing left to place (false, nil) or maxScheduledPerTick
+// placements have happened in this tick, instead of the fixed one-job-per-tick
+// rate that discarding ScheduleOnce's bool return produced (#290): a queue
+// with fifty eligible issues and ten idle runners used to fill at one job per
+// second rather than draining in a single pass.
+//
+// Runner capacity (#272) is enforced inside ClaimSchedulableIssue's own WHERE
+// clause, re-evaluated fresh on every call within its own committed
+// transaction, so calling scheduleOnce in a tight loop does not schedule past
+// what a runner's registered capacity allows -- the loop just reaches the
+// same "nothing left to claim" (false) sooner once every idle runner is full.
+func drainSchedule(ctx context.Context, scheduleOnce func(context.Context) (bool, error)) error {
+	for i := 0; i < maxScheduledPerTick; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		scheduled, err := scheduleOnce(ctx)
+		if err != nil {
+			return err
+		}
+		if !scheduled {
+			return nil
+		}
+	}
+	return nil
 }
 
 func run() error {
@@ -135,10 +235,12 @@ func run() error {
 	// start reconnecting.
 	//
 	// Resuming interrupted deliveries is deliberately *not* done here. It shells
-	// out to `gh` once per stranded workflow, and the listener is already open
-	// by this point, so a slow or hung GitHub would leave connections sitting in
-	// the accept queue while the healthcheck — a bare TCP dial — reported the
-	// container ready. The periodic sweep picks those up within 30 seconds.
+	// out to `gh` once per stranded workflow, and the gRPC listener is already
+	// open by this point, so a slow or hung GitHub would leave connections
+	// sitting in the accept queue for as long as this took. The metrics listener
+	// /readyz answers from is not up yet either, so the healthcheck fails closed
+	// (connection refused) for this window rather than reporting ready early.
+	// The periodic sweep picks up any stranded delivery within 30 seconds.
 	if err := service.ReconcileDatabaseOnce(ctx); err != nil {
 		slog.Error("startup recovery failed", "error", err)
 	}
@@ -171,13 +273,20 @@ func run() error {
 		}()
 	}
 	recorder := metricsServer.Recorder()
+	// Issue sync is the one loop whose interval is operator-configurable
+	// (LOOP_ISSUE_SYNC_INTERVAL); every other loop's is fixed in code and the
+	// recorder already knows it (see metrics.defaultLoopIntervals). This has to
+	// happen before the loop below starts recording into it.
+	recorder.SetLoopInterval(metrics.LoopIssueSync, cfg.IssueSyncInterval)
+	// So GetSchedulerMetrics can report the same loop liveness the healthcheck's
+	// /readyz endpoint does -- one recorder, read two ways, never two answers.
+	service.SetLoopRecorder(recorder)
 	controlv1.RegisterControlPlaneServer(grpcServer, service)
 	runnerv1.RegisterRunnerControlServer(grpcServer, service)
-	every(ctx, time.Second, "scheduler tick", func(ctx context.Context) error {
-		_, err := service.ScheduleOnce(ctx)
-		return err
-	})
-	every(ctx, 15*time.Second, "workflow observer", service.ObserveWorkflows)
+	every(ctx, time.Second, "scheduler tick", observed(recorder, metrics.LoopScheduler, func(ctx context.Context) error {
+		return drainSchedule(ctx, service.ScheduleOnce)
+	}))
+	every(ctx, 15*time.Second, "workflow observer", observed(recorder, metrics.LoopWorkflowObserver, service.ObserveWorkflows))
 	every(ctx, 30*time.Second, "recovery sweep", observed(recorder, metrics.LoopRecoverySweep, service.RecoverOnce))
 	// Issues are otherwise only discovered when an operator opens the console and
 	// presses "Sync now", which leaves an unattended deployment idle no matter how
