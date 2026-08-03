@@ -9,6 +9,7 @@ WORKDIR /workspace
 COPY orchestrator/cmd ./orchestrator/cmd
 COPY orchestrator/internal ./orchestrator/internal
 COPY orchestrator/migrations ./orchestrator/migrations
+COPY orchestrator/*.go ./orchestrator/
 WORKDIR /workspace/orchestrator
 ARG MOIRAI_BUILD_VERSION
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/orchestrator ./cmd/orchestrator
@@ -30,7 +31,6 @@ RUN apt-get update \
     && mkdir -p /app /run/loop-secrets \
     && chown -R loop:loop /app /run/loop-secrets
 COPY --from=build /out/orchestrator /app/orchestrator
-COPY orchestrator/migrations /app/migrations
 COPY orchestrator/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod 0755 /docker-entrypoint.sh
 EXPOSE 50051
