@@ -56,6 +56,21 @@ UPDATE app.workflow_runs
 SET status = 'completed', current_phase = 'completed', completed_at = now(), updated_at = now(), delivery_attempts = 0
 WHERE id = sqlc.arg(id) AND status = 'waiting_github_checks';
 
+-- name: ForceWorkflowCompleted :one
+-- Used only when MarkWorkflowCompleted's guard above misses: GitHub has
+-- already confirmed the pull request merged (observeWorkflow calls this only
+-- after that), which is irreversible, regardless of what this run's status
+-- column raced to in the meantime (an operator cancelling it, abandonedChecks
+-- blocking it, or anything else). The WHERE clause deliberately does not
+-- repeat the 'waiting_github_checks' guard: the merge is a fact this write
+-- must land no matter which status it finds. previous_status lets the caller
+-- log what the race actually was.
+WITH previous AS (SELECT status FROM app.workflow_runs WHERE app.workflow_runs.id = sqlc.arg(id))
+UPDATE app.workflow_runs
+SET status = 'completed', current_phase = 'completed', completed_at = now(), updated_at = now(), delivery_attempts = 0
+WHERE app.workflow_runs.id = sqlc.arg(id)
+RETURNING (SELECT status FROM previous) AS previous_status;
+
 -- name: MarkPullRequestMerged :exec
 UPDATE app.pull_requests SET state = 'merged', merged_at = now() WHERE workflow_run_id = sqlc.arg(workflow_run_id);
 

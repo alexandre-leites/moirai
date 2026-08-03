@@ -25,6 +25,29 @@ func (q *Queries) DeleteProjectLock(ctx context.Context, arg DeleteProjectLockPa
 	return err
 }
 
+const forceWorkflowCompleted = `-- name: ForceWorkflowCompleted :one
+WITH previous AS (SELECT status FROM app.workflow_runs WHERE app.workflow_runs.id = $1)
+UPDATE app.workflow_runs
+SET status = 'completed', current_phase = 'completed', completed_at = now(), updated_at = now(), delivery_attempts = 0
+WHERE app.workflow_runs.id = $1
+RETURNING (SELECT status FROM previous) AS previous_status
+`
+
+// Used only when MarkWorkflowCompleted's guard above misses: GitHub has
+// already confirmed the pull request merged (observeWorkflow calls this only
+// after that), which is irreversible, regardless of what this run's status
+// column raced to in the meantime (an operator cancelling it, abandonedChecks
+// blocking it, or anything else). The WHERE clause deliberately does not
+// repeat the 'waiting_github_checks' guard: the merge is a fact this write
+// must land no matter which status it finds. previous_status lets the caller
+// log what the race actually was.
+func (q *Queries) ForceWorkflowCompleted(ctx context.Context, id string) (string, error) {
+	row := q.db.QueryRow(ctx, forceWorkflowCompleted, id)
+	var previous_status string
+	err := row.Scan(&previous_status)
+	return previous_status, err
+}
+
 const getDeliveryWorkflow = `-- name: GetDeliveryWorkflow :one
 SELECT wr.project_id::text AS project_id, wr.issue_id::text AS issue_id, i.external_id, i.title, i.body,
        COALESCE(p.repository_url, '') AS repository_url, p.default_branch,
