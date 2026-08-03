@@ -129,22 +129,21 @@ describe("WorkflowDetailPage", () => {
     const api = stubApi({
       listWorkflowEvents: async () => ({
         events: [
-          event({ id: "12", type: "log", payload: { payload: { message: "applying plan step 3/6" } }, createdAt: NOW }),
-          event({ id: "11", type: "execution_requeued", payload: { role: "developer", attempt: 2 }, createdAt: NOW }),
+          event({ id: "12", type: "log", payload: { message: "applying plan step 3/6", chunkIndex: 0, chunkCount: 1 }, createdAt: NOW }),
+          event({ id: "11", type: "delivery.failed", payload: { reason: "GitHub checks did not report a result within 6h0m0s" }, createdAt: NOW }),
         ],
       }),
     });
     const container = await mountDetail(api);
 
-    expect(container.textContent).toContain("Execution lost and requeued");
-    expect(container.textContent).not.toContain("Execution errors");
+    expect(container.textContent).toContain("Delivery failed");
     expect(container.querySelector(".evt.warn")).not.toBeNull();
     expect(container.querySelector(".logline")?.textContent).toContain("applying plan step 3/6");
   });
 
   it("shows execution errors when a runner reports one", async () => {
     const api = stubApi({
-      listWorkflowEvents: async () => ({ events: [event({ type: "failed", payload: { payload: { error: "GITHUB_TOKEN is not configured" } } })] }),
+      listWorkflowEvents: async () => ({ events: [event({ type: "failed", payload: { status: "failed", exitCode: 1, error: "GITHUB_TOKEN is not configured" } })] }),
     });
     const container = await mountDetail(api);
     expect(container.textContent).toContain("Execution errors");
@@ -158,7 +157,7 @@ describe("WorkflowDetailPage", () => {
     const line = "\u001b[0m\u001b[0mGrep \"agent:ready\"\u001b[90m 79 matches\u001b[0m";
     const api = stubApi({
       listWorkflowEvents: async () => ({
-        events: [event({ id: "12", type: "log", payload: { payload: { message: line } }, createdAt: NOW })],
+        events: [event({ id: "12", type: "log", payload: { message: line, chunkIndex: 0, chunkCount: 1 }, createdAt: NOW })],
       }),
     });
     const container = await mountDetail(api);
@@ -192,7 +191,7 @@ describe("WorkflowDetailPage", () => {
 
   it("reads the agent log out of the same page the timeline uses", async () => {
     const listWorkflowEvents = vi.fn(async () => ({
-      events: [event({ id: "3", type: "log", payload: { payload: { message: "compiling" } } })],
+      events: [event({ id: "3", type: "log", payload: { message: "compiling", chunkIndex: 0, chunkCount: 1 } })],
     }));
     const api = stubApi({ listWorkflowEvents });
     const container = await mountDetail(api);
