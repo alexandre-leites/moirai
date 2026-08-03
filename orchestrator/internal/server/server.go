@@ -64,7 +64,11 @@ func New(pool *pgxpool.Pool, version string) (*Server, error) {
 	if pool == nil {
 		return nil, errors.New("database pool is required")
 	}
-	return NewWithGitHub(pool, version, NewGitHubCLI(nil))
+	queries := db.New(pool)
+	github := NewGitHubCLI(nil, func(ctx context.Context, projectID string) (string, error) {
+		return resolveGitHubToken(ctx, queries, projectID)
+	})
+	return NewWithGitHub(pool, version, github)
 }
 
 func NewWithGitHub(pool *pgxpool.Pool, version string, github GitHub) (*Server, error) {
@@ -546,7 +550,7 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 	if err != nil {
 		return err
 	}
-	issues, err := s.github.ListIssues(ctx, repository)
+	issues, err := s.github.ListIssues(ctx, projectID, repository)
 	if err != nil {
 		_ = s.recordSyncFailure(ctx, projectID, err)
 		return err

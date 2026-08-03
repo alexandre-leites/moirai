@@ -30,7 +30,7 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	pr, err := s.github.FindOrCreatePR(ctx, repository, workflow.branch, workflow.defaultBranch, workflow.issueTitle, "Resolves #"+workflow.externalID)
+	pr, err := s.github.FindOrCreatePR(ctx, workflow.projectID, repository, workflow.branch, workflow.defaultBranch, workflow.issueTitle, "Resolves #"+workflow.externalID)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
@@ -141,7 +141,7 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	checks, err := s.github.Checks(ctx, repository, workflow.prNumber)
+	checks, err := s.github.Checks(ctx, workflow.projectID, repository, workflow.prNumber)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
@@ -151,10 +151,10 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 	if checks != checksGreen {
 		return nil // pending, or a state this code does not recognise: never merge
 	}
-	if err := s.github.MergeSquash(ctx, repository, workflow.prNumber); err != nil {
+	if err := s.github.MergeSquash(ctx, workflow.projectID, repository, workflow.prNumber); err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}
-	merged, err := s.github.Merged(ctx, repository, workflow.prNumber)
+	merged, err := s.github.Merged(ctx, workflow.projectID, repository, workflow.prNumber)
 	if err != nil {
 		return s.blockExternal(ctx, workflowID, err)
 	}

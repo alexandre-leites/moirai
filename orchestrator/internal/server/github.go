@@ -11,10 +11,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/loop-engineering/orchestrator/internal/db"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type Command interface {
-	Run(context.Context, ...string) ([]byte, error)
+	Run(context.Context, string, ...string) ([]byte, error)
 }
 
 type execCommand struct{}
@@ -24,16 +29,24 @@ type execCommand struct{}
 // heartbeats and lease renewals as well as the workflow.
 const githubTimeout = 60 * time.Second
 
-func (execCommand) Run(parent context.Context, args ...string) ([]byte, error) {
+func (execCommand) Run(parent context.Context, token string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, githubTimeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, "gh", args...)
-	if file := os.Getenv("LOOP_GITHUB_TOKEN_FILE"); file != "" {
-		token, err := os.ReadFile(file)
-		if err != nil {
-			return nil, fmt.Errorf("read GitHub token: %w", err)
+	// A per-project token wins; the global file is the fallback for projects
+	// that have not configured one. An empty token with no file leaves gh to
+	// its own auth, which is the pre-existing behaviour for local development.
+	if token == "" {
+		if file := os.Getenv("LOOP_GITHUB_TOKEN_FILE"); file != "" {
+			value, err := os.ReadFile(file)
+			if err != nil {
+				return nil, fmt.Errorf("read GitHub token: %w", err)
+			}
+			token = strings.TrimSpace(string(value))
 		}
-		command.Env = append(os.Environ(), "GH_TOKEN="+strings.TrimSpace(string(token)))
+	}
+	if token != "" {
+		command.Env = append(os.Environ(), "GH_TOKEN="+token)
 	}
 	// Stdout is captured on its own rather than combined with stderr: callers
 	// parse this as JSON, and gh writes upgrade notices and deprecation
@@ -64,14 +77,17 @@ func redactSecrets(value string) string {
 }
 
 type GitHub interface {
-	ListIssues(ctx context.Context, repository string) ([]githubIssue, error)
-	FindOrCreatePR(ctx context.Context, repository, branch, base, title, body string) (githubPR, error)
-	Checks(ctx context.Context, repository, number string) (checkState, error)
-	MergeSquash(ctx context.Context, repository, number string) error
-	Merged(ctx context.Context, repository, number string) (bool, error)
+	ListIssues(ctx context.Context, projectID, repository string) ([]githubIssue, error)
+	FindOrCreatePR(ctx context.Context, projectID, repository, branch, base, title, body string) (githubPR, error)
+	Checks(ctx context.Context, projectID, repository, number string) (checkState, error)
+	MergeSquash(ctx context.Context, projectID, repository, number string) error
+	Merged(ctx context.Context, projectID, repository, number string) (bool, error)
 }
 
-type githubCLI struct{ command Command }
+type githubCLI struct {
+	command Command
+	token   func(context.Context, string) (string, error)
+}
 
 type githubIssue struct {
 	ExternalID string
@@ -131,15 +147,46 @@ func (check checkRun) result() checkState {
 	return checksPending
 }
 
-func NewGitHubCLI(command Command) GitHub {
+func NewGitHubCLI(command Command, token func(context.Context, string) (string, error)) GitHub {
 	if command == nil {
 		command = execCommand{}
 	}
-	return githubCLI{command: command}
+	return githubCLI{command: command, token: token}
 }
 
-func (client githubCLI) ListIssues(ctx context.Context, repository string) ([]githubIssue, error) {
-	output, err := client.command.Run(ctx, "issue", "list", "--repo", repository, "--state", "open", "--limit", "100", "--json", "number,title,body,url,labels,createdAt,updatedAt")
+// resolveGitHubToken returns the project's stored github_token, or an empty
+// string when the project has none configured so the caller falls back to the
+// global token file. A project that stores a token it cannot decrypt is an
+// error, not a silent fallback: using the wrong tenant's token would publish
+// one project's work under another's identity.
+func resolveGitHubToken(ctx context.Context, queries *db.Queries, projectID string) (string, error) {
+	if projectID == "" {
+		return "", nil
+	}
+	secret, err := queries.GetProjectCredentialSecret(ctx, db.GetProjectCredentialSecretParams{ProjectID: projectID, Kind: "github_token"})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", databaseError(err)
+	}
+	aead, err := configuredCipher()
+	if err != nil {
+		return "", err
+	}
+	plaintext, err := aead.Open(nil, secret.Nonce, secret.Ciphertext, nil)
+	if err != nil {
+		return "", status.Error(codes.FailedPrecondition, "stored GitHub token could not be opened")
+	}
+	return string(plaintext), nil
+}
+
+func (client githubCLI) ListIssues(ctx context.Context, projectID, repository string) ([]githubIssue, error) {
+	token, err := client.token(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	output, err := client.command.Run(ctx, token, "issue", "list", "--repo", repository, "--state", "open", "--limit", "100", "--json", "number,title,body,url,labels,createdAt,updatedAt")
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +219,12 @@ func (client githubCLI) ListIssues(ctx context.Context, repository string) ([]gi
 	return issues, nil
 }
 
-func (client githubCLI) FindOrCreatePR(ctx context.Context, repository, branch, base, title, body string) (githubPR, error) {
-	output, err := client.command.Run(ctx, "pr", "list", "--repo", repository, "--head", branch, "--state", "open", "--json", "number,url,state,headRefOid")
+func (client githubCLI) FindOrCreatePR(ctx context.Context, projectID, repository, branch, base, title, body string) (githubPR, error) {
+	token, err := client.token(ctx, projectID)
+	if err != nil {
+		return githubPR{}, err
+	}
+	output, err := client.command.Run(ctx, token, "pr", "list", "--repo", repository, "--head", branch, "--state", "open", "--json", "number,url,state,headRefOid")
 	if err != nil {
 		return githubPR{}, err
 	}
@@ -184,10 +235,10 @@ func (client githubCLI) FindOrCreatePR(ctx context.Context, repository, branch, 
 	if found {
 		return pr, nil
 	}
-	if _, err := client.command.Run(ctx, "pr", "create", "--repo", repository, "--head", branch, "--base", base, "--title", title, "--body", body); err != nil {
+	if _, err := client.command.Run(ctx, token, "pr", "create", "--repo", repository, "--head", branch, "--base", base, "--title", title, "--body", body); err != nil {
 		return githubPR{}, err
 	}
-	output, err = client.command.Run(ctx, "pr", "list", "--repo", repository, "--head", branch, "--state", "open", "--json", "number,url,state,headRefOid")
+	output, err = client.command.Run(ctx, token, "pr", "list", "--repo", repository, "--head", branch, "--state", "open", "--json", "number,url,state,headRefOid")
 	if err != nil {
 		return githubPR{}, err
 	}
@@ -201,8 +252,12 @@ func (client githubCLI) FindOrCreatePR(ctx context.Context, repository, branch, 
 	return pr, nil
 }
 
-func (client githubCLI) Checks(ctx context.Context, repository, number string) (checkState, error) {
-	output, err := client.command.Run(ctx, "pr", "view", number, "--repo", repository, "--json", "statusCheckRollup")
+func (client githubCLI) Checks(ctx context.Context, projectID, repository, number string) (checkState, error) {
+	token, err := client.token(ctx, projectID)
+	if err != nil {
+		return checksPending, err
+	}
+	output, err := client.command.Run(ctx, token, "pr", "view", number, "--repo", repository, "--json", "statusCheckRollup")
 	if err != nil {
 		return checksPending, err
 	}
@@ -215,13 +270,21 @@ func (client githubCLI) Checks(ctx context.Context, repository, number string) (
 	return checksResult(value.StatusCheckRollup), nil
 }
 
-func (client githubCLI) MergeSquash(ctx context.Context, repository, number string) error {
-	_, err := client.command.Run(ctx, "pr", "merge", number, "--repo", repository, "--squash", "--delete-branch")
+func (client githubCLI) MergeSquash(ctx context.Context, projectID, repository, number string) error {
+	token, err := client.token(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	_, err = client.command.Run(ctx, token, "pr", "merge", number, "--repo", repository, "--squash", "--delete-branch")
 	return err
 }
 
-func (client githubCLI) Merged(ctx context.Context, repository, number string) (bool, error) {
-	output, err := client.command.Run(ctx, "pr", "view", number, "--repo", repository, "--json", "state,mergedAt")
+func (client githubCLI) Merged(ctx context.Context, projectID, repository, number string) (bool, error) {
+	token, err := client.token(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	output, err := client.command.Run(ctx, token, "pr", "view", number, "--repo", repository, "--json", "state,mergedAt")
 	if err != nil {
 		return false, err
 	}

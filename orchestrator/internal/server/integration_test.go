@@ -71,15 +71,15 @@ func newHarness(t *testing.T) *harness {
 // around an execution, not about talking to GitHub.
 type stubGitHub struct{}
 
-func (stubGitHub) ListIssues(context.Context, string) ([]githubIssue, error) { return nil, nil }
-func (stubGitHub) FindOrCreatePR(context.Context, string, string, string, string, string) (githubPR, error) {
+func (stubGitHub) ListIssues(context.Context, string, string) ([]githubIssue, error) { return nil, nil }
+func (stubGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (githubPR, error) {
 	return githubPR{Number: "1", URL: "https://example.test/pull/1", State: "OPEN", HeadSHA: "abc"}, nil
 }
-func (stubGitHub) Checks(context.Context, string, string) (checkState, error) {
+func (stubGitHub) Checks(context.Context, string, string, string) (checkState, error) {
 	return checksPending, nil
 }
-func (stubGitHub) MergeSquash(context.Context, string, string) error { return nil }
-func (stubGitHub) Merged(context.Context, string, string) (bool, error) {
+func (stubGitHub) MergeSquash(context.Context, string, string, string) error { return nil }
+func (stubGitHub) Merged(context.Context, string, string, string) (bool, error) {
 	return false, nil
 }
 

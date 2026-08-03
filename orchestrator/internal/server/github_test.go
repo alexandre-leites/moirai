@@ -10,16 +10,18 @@ type fakeCommand struct {
 	calls   [][]string
 }
 
-func (fake *fakeCommand) Run(_ context.Context, args ...string) ([]byte, error) {
+func (fake *fakeCommand) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
 	fake.calls = append(fake.calls, args)
 	output := fake.outputs[0]
 	fake.outputs = fake.outputs[1:]
 	return output, nil
 }
 
+func noToken(context.Context, string) (string, error) { return "", nil }
+
 func TestGitHubIssueParsing(t *testing.T) {
 	command := &fakeCommand{outputs: [][]byte{[]byte(`[{"number":42,"title":"Fix","body":"","url":"https://github.com/acme/demo/issues/42","labels":[{"name":"agent:ready"},{"name":"agent-priority:7"}],"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}]`)}}
-	issues, err := NewGitHubCLI(command).ListIssues(context.Background(), "acme/demo")
+	issues, err := NewGitHubCLI(command, noToken).ListIssues(context.Background(), "p1", "acme/demo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +39,7 @@ func TestGitHubPRCreationFindsCreatedPR(t *testing.T) {
 		[]byte(`https://github.com/acme/demo/pull/7\n`),
 		[]byte(`[{"number":7,"url":"https://github.com/acme/demo/pull/7","state":"OPEN","headRefOid":"abc123"}]`),
 	}}
-	pr, err := NewGitHubCLI(command).FindOrCreatePR(context.Background(), "acme/demo", "agent/demo", "main", "Title", "Body")
+	pr, err := NewGitHubCLI(command, noToken).FindOrCreatePR(context.Background(), "p1", "acme/demo", "agent/demo", "main", "Title", "Body")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +98,7 @@ func TestChecksResultAcceptsSettledSuccess(t *testing.T) {
 
 func TestChecksDecodesLegacyStatusContexts(t *testing.T) {
 	command := &fakeCommand{outputs: [][]byte{[]byte(`{"statusCheckRollup":[{"__typename":"StatusContext","context":"ci/jenkins","state":"FAILURE"}]}`)}}
-	state, err := NewGitHubCLI(command).Checks(context.Background(), "acme/demo", "7")
+	state, err := NewGitHubCLI(command, noToken).Checks(context.Background(), "p1", "acme/demo", "7")
 	if err != nil {
 		t.Fatal(err)
 	}
