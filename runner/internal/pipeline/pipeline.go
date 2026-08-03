@@ -17,6 +17,13 @@ const maxOutputBytes = 16 * 1024
 type Command struct {
 	Command string
 	Timeout time.Duration
+	// Required marks a command whose own failure or timeout stops the pipeline
+	// and fails it (Run returns early with an error). A command with Required
+	// false still runs in order and its Result is still recorded, but neither
+	// outcome stops the remaining commands or fails the overall Run -- see
+	// taskpacket.PipelineCommand.Required's doc comment for the project-facing
+	// contract this implements.
+	Required bool
 }
 
 type Result struct {
@@ -50,9 +57,15 @@ func (runner DockerRunner) Run(ctx context.Context, workspace string, environmen
 		result := Result{Command: command.Command, ExitCode: executionResult.ExitCode, Output: truncateOutput(output.String()), Duration: time.Since(started), TimedOut: errors.Is(err, context.DeadlineExceeded)}
 		results = append(results, result)
 		if result.TimedOut {
+			if !command.Required {
+				continue
+			}
 			return results, fmt.Errorf("pipeline command timed out: %s", command.Command)
 		}
 		if err != nil || result.ExitCode != 0 {
+			if !command.Required {
+				continue
+			}
 			return results, fmt.Errorf("pipeline command failed with exit code %d: %s", result.ExitCode, command.Command)
 		}
 	}
@@ -68,9 +81,15 @@ func (LocalRunner) Run(ctx context.Context, workspace string, environment map[st
 		result := run(ctx, workspace, environment, command)
 		results = append(results, result)
 		if result.TimedOut {
+			if !command.Required {
+				continue
+			}
 			return results, fmt.Errorf("pipeline command timed out: %s", command.Command)
 		}
 		if result.ExitCode != 0 {
+			if !command.Required {
+				continue
+			}
 			return results, fmt.Errorf("pipeline command failed with exit code %d: %s", result.ExitCode, command.Command)
 		}
 	}

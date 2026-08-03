@@ -117,7 +117,7 @@ func TestPasswordHashCompatibility(t *testing.T) {
 }
 
 func TestDeveloperPacket(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600, nil)
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDeveloperPacket(t *testing.T) {
 // agent process never returns. developerPacket must always carry the caller's
 // resolved, positive timeout.
 func TestDeveloperPacketSendsRealTimeout(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 1800, nil)
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 1800, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestDeveloperPacketSendsRealTimeout(t *testing.T) {
 }
 
 func TestDeveloperPacketRejectsNonPositiveTimeout(t *testing.T) {
-	if _, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 0, nil); err == nil {
+	if _, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 0, nil, nil); err == nil {
 		t.Fatal("developerPacket accepted a zero timeout")
 	}
 }
@@ -162,7 +162,7 @@ func TestExecutionTimeoutSecondsFallsBackToDefault(t *testing.T) {
 // that to a developer packet and refuses it for a planner, so these two
 // constraints are what stand between a scheduled job and a deliverable branch.
 func TestDeveloperPacketMayModifyAndPush(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600, nil)
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
