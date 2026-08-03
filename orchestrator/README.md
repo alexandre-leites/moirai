@@ -9,6 +9,25 @@ go test ./...
 go vet ./...
 ```
 
+## Database queries (sqlc)
+
+All database access goes through [sqlc](https://sqlc.dev)-generated code — see AGENTS.md Engineering rules §12. Hand-written SQL string literals in Go (`pool.Exec(ctx, \`...\`)`, `pool.Query(ctx, \`...\`)`, `pool.QueryRow(ctx, \`...\`)`) are not accepted for new or changed code; every query is compiler-checked against `migrations/` at generation time instead of failing silently at runtime.
+
+- Query files live in `internal/db/queries/*.sql`, one file per subject area (`credentials.sql`, `recovery.sql`, ...), each statement annotated with a `-- name: ...` sqlc directive.
+- `sqlc.yaml` (repo root of this module) points sqlc at `migrations/` as the schema and generates into `internal/db` (package `db`) using the `pgx/v5` driver, so generated methods take the same `*pgxpool.Pool` / `pgx.Tx` the rest of the server already uses. `db.New(pool)` builds a `*db.Queries`; `queries.WithTx(tx)` scopes the same generated methods to an open transaction where a flow needs several statements to commit together (the scheduler's claim, `terminateWorkflow`, offer-delivery cleanup).
+- `id`/`uuid` columns are generated as plain Go `string` (matching the `validID`/`newID` convention used throughout `internal/server`) via an override in `sqlc.yaml`, so call sites don't need to juggle `pgtype.UUID`.
+
+**To add or change a query:**
+
+1. Edit (or add) a `.sql` file under `internal/db/queries/`.
+2. Regenerate: `make sqlc-generate` (from the repo root; requires Docker — it runs the pinned `sqlc/sqlc` image against `orchestrator/`).
+3. Call the new generated method from `internal/server/*.go` via `s.queries`.
+4. Commit the regenerated files under `internal/db/` alongside your `.sql` change — they are checked in, not built on the fly.
+
+`make sqlc-check` (from the repo root) regenerates and runs `git diff --exit-code` against `internal/db`, the same gate `proto-check` runs for the protobuf bindings. It runs in CI (`sqlc-check` job) and is part of `make validate`, so a `.sql` change committed without regenerating, or a manual edit to a generated file, fails the build.
+
+As of this writing, `recovery.go` and `credentials.go` are fully converted; `server.go`, `delivery.go`, and `management.go` still contain hand-written SQL pending follow-up conversion (tracked from issue #292).
+
 ## Run locally
 
 ```bash

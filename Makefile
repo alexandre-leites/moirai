@@ -1,8 +1,9 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
+SQLC_IMAGE ?= sqlc/sqlc:1.29.0
 GO ?= go
 
 .PHONY: help test lint typecheck validate compose compose-overlays \
-        proto-lint proto-generate proto-check test-release-tags compose-tls-stack \
+        proto-lint proto-generate proto-check sqlc-generate sqlc-check test-release-tags compose-tls-stack \
         test-orchestrator test-postgres-integration test-runner test-api test-web \
         build-orchestrator \
         build-runner build-api build-web build-images
@@ -83,4 +84,14 @@ proto-generate:
 proto-check: proto-lint proto-generate
 	git diff --exit-code -- gen/go
 
-validate: test-orchestrator lint typecheck compose compose-overlays test-release-tags proto-check
+# Database access goes through sqlc-generated code (see AGENTS.md §12 and
+# orchestrator/README.md): queries live in orchestrator/internal/db/queries as
+# .sql files, and this is how the Go bindings in orchestrator/internal/db are
+# produced from them.
+sqlc-generate:
+	docker run --rm -v "$(CURDIR)/orchestrator:/src" -w /src --user "$$(id -u):$$(id -g)" $(SQLC_IMAGE) generate
+
+sqlc-check: sqlc-generate
+	git diff --exit-code -- orchestrator/internal/db
+
+validate: test-orchestrator lint typecheck compose compose-overlays test-release-tags proto-check sqlc-check

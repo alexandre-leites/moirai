@@ -501,6 +501,7 @@ Follow these rules throughout implementation:
 - Do not silently omit requirements from `PROJECT.md`.
 - Fix P0 and P1 bugs before adding new features when the bug blocks the feature.
 - When multiple agents are active, coordinate through `PROGRESS.md` and avoid touching shared files without checking.
+- Database access in the orchestrator goes through [sqlc](https://sqlc.dev)-generated code (`orchestrator/internal/db`, generated from `orchestrator/internal/db/queries/*.sql` and `orchestrator/migrations/`). Hand-written SQL string literals in Go (`pool.Exec(ctx, \`...\`)`, `pool.Query(ctx, \`...\`)`, `pool.QueryRow(ctx, \`...\`)`) are not accepted for new or changed code. A new or changed query means editing a `.sql` file under `orchestrator/internal/db/queries/` and running `make sqlc-generate` to regenerate; `make sqlc-check` (wired into CI and `make validate`) fails the build when the checked-in generated code is stale. See `orchestrator/README.md` for the full workflow.
 
 ---
 

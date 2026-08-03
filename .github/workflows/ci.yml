@@ -88,6 +88,17 @@ jobs:
           cache-dependency-path: orchestrator/go.sum
       - run: make typecheck
 
+  # Database access goes through sqlc-generated code (AGENTS.md Engineering
+  # rules §12): this regenerates orchestrator/internal/db from
+  # orchestrator/internal/db/queries and orchestrator/migrations and fails the
+  # build if the checked-in generated code is stale, the same enforcement
+  # `proto-check` gives the protobuf bindings.
+  sqlc-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: make sqlc-check
+
   runner:
     # runs-on: [self-hosted, linux]
     runs-on: ubuntu-latest
@@ -259,7 +270,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [test-orchestrator, test-postgres-integration, lint, typecheck, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
+    needs: [test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
     # runs-on: [self-hosted, linux]
     runs-on: ubuntu-latest
     steps:

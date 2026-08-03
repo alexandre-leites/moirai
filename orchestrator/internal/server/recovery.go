@@ -3,6 +3,11 @@ package server
 import (
 	"context"
 	"errors"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/loop-engineering/orchestrator/internal/db"
 )
 
 // abandonedLease is the one description of a job whose runner stopped
@@ -13,12 +18,12 @@ const abandonedLease = "runner stopped renewing its lease before reporting an ou
 // staleRunner is how long a runner may go without a heartbeat before it is
 // recorded offline. Runners heartbeat every 10 seconds by default, so this is
 // several missed beats rather than a single slow one.
-const staleRunner = "90 seconds"
+const staleRunner = 90 * time.Second
 
 // unansweredOffer is how long an offer may sit unanswered before the job behind
 // it is reclaimed. The runner answers immediately in the normal case; this
 // covers one that took the offer and died before accepting it.
-const unansweredOffer = "5 minutes"
+const unansweredOffer = 5 * time.Minute
 
 // unansweredOfferReason describes that outcome wherever it is recorded.
 const unansweredOfferReason = "runner never answered the job offer"
@@ -26,13 +31,13 @@ const unansweredOfferReason = "runner never answered the job offer"
 // strandedDelivery is how long a run may sit at 'completed' holding its project
 // lock before the sweep assumes the delivery that was meant to follow is never
 // going to finish.
-const strandedDelivery = "5 minutes"
+const strandedDelivery = 5 * time.Minute
 
 // abandonedChecks bounds the wait for GitHub checks. Nothing else ends that
 // wait: a repository whose checks never report — no CI configured, a workflow
 // that never queues — would otherwise hold its project lock forever, which is
 // the cost of correctly refusing to read "no checks" as success.
-const abandonedChecks = "6 hours"
+const abandonedChecks = 6 * time.Hour
 
 // RecoverOnce reconciles state that no live request will ever come back to
 // finish. Every guard in this package is written as `lease_expires_at>now()` or
@@ -67,32 +72,51 @@ func (s *Server) ReconcileDatabaseOnce(ctx context.Context) error {
 	)
 }
 
+// pgInterval converts a Go duration into the pgtype.Interval sqlc-generated
+// queries expect for an `interval` column or cast, so every sweep timeout
+// stays a single compiler-checked `time.Duration` constant instead of a
+// separately hand-maintained SQL literal.
+func pgInterval(d time.Duration) pgtype.Interval {
+	return pgtype.Interval{Microseconds: d.Microseconds(), Valid: true}
+}
+
+func pgText(value string) pgtype.Text {
+	return pgtype.Text{String: value, Valid: true}
+}
+
 // reclaimUnansweredOffers releases jobs a runner was offered and never answered.
 // An offered job has no lease yet, so the lease sweep cannot see it, and its
 // project lock is held from the moment the offer is written — a runner that
 // takes an offer and dies before accepting would otherwise wedge that project
 // with nothing to reclaim it.
 func (s *Server) reclaimUnansweredOffers(ctx context.Context) error {
-	if _, err := s.pool.Exec(ctx, `UPDATE app.job_offers SET status='expired',responded_at=now() WHERE status='offered' AND job_id IN (SELECT id FROM app.jobs WHERE status='offered' AND offered_at<now()-'`+unansweredOffer+`'::interval)`); err != nil {
+	if err := s.queries.ExpireUnansweredOffers(ctx, pgInterval(unansweredOffer)); err != nil {
 		return databaseError(err)
 	}
-	return s.eachWorkflow(ctx,
-		`UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason='`+unansweredOfferReason+`' WHERE status='offered' AND offered_at<now()-'`+unansweredOffer+`'::interval RETURNING workflow_run_id::text`,
-		func(ctx context.Context, workflowID string) error {
-			// The issue is left eligible: nothing ran, so nothing was spent and
-			// this work should simply be offered again.
-			return s.terminateWorkflow(ctx, workflowID, "cancelled", "cancelled", unansweredOfferReason, false)
-		})
+	workflowIDs, err := s.queries.CancelUnansweredOfferJobs(ctx, db.CancelUnansweredOfferJobsParams{
+		Reason:          pgText(unansweredOfferReason),
+		UnansweredOffer: pgInterval(unansweredOffer),
+	})
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, func(ctx context.Context, workflowID string) error {
+		// The issue is left eligible: nothing ran, so nothing was spent and
+		// this work should simply be offered again.
+		return s.terminateWorkflow(ctx, workflowID, "cancelled", "cancelled", unansweredOfferReason, false)
+	})
 }
 
 // blockAbandonedChecks ends a wait for GitHub checks that is never going to
 // resolve, so the project can schedule again.
 func (s *Server) blockAbandonedChecks(ctx context.Context) error {
-	return s.eachWorkflow(ctx,
-		`SELECT id::text FROM app.workflow_runs WHERE status='waiting_github_checks' AND updated_at<now()-'`+abandonedChecks+`'::interval ORDER BY updated_at,id LIMIT 20`,
-		func(ctx context.Context, workflowID string) error {
-			return s.terminateWorkflow(ctx, workflowID, "blocked", "delivery.failed", "GitHub checks did not report a result within "+abandonedChecks, true)
-		})
+	workflowIDs, err := s.queries.SelectAbandonedChecksWorkflows(ctx, pgInterval(abandonedChecks))
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, func(ctx context.Context, workflowID string) error {
+		return s.terminateWorkflow(ctx, workflowID, "blocked", "delivery.failed", "GitHub checks did not report a result within "+abandonedChecks.String(), true)
+	})
 }
 
 // markStaleRunnersOffline clears the online flag for runners that have stopped
@@ -104,8 +128,7 @@ func (s *Server) blockAbandonedChecks(ctx context.Context) error {
 // so that a second orchestrator replica does not continually mark the runners
 // attached to the first one offline.
 func (s *Server) markStaleRunnersOffline(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `UPDATE app.runners SET status='offline' WHERE status='online' AND (last_seen_at IS NULL OR last_seen_at < now()-$1::interval)`, staleRunner)
-	return databaseError(err)
+	return databaseError(s.queries.MarkStaleRunnersOffline(ctx, pgInterval(staleRunner)))
 }
 
 // reclaimExpiredLeases fails jobs whose runner stopped renewing. The runner
@@ -113,11 +136,13 @@ func (s *Server) markStaleRunnersOffline(ctx context.Context) error {
 // lease, so once the lease lapses a reconnecting runner can neither renew it
 // nor report the outcome, and the job would stay 'running' forever.
 func (s *Server) reclaimExpiredLeases(ctx context.Context) error {
-	return s.eachWorkflow(ctx,
-		`UPDATE app.jobs SET status='cancelled',finished_at=now(),lease_generation=lease_generation+1,recovery_reason='`+abandonedLease+`' WHERE status IN ('preparing','running') AND lease_expires_at<now() RETURNING workflow_run_id::text`,
-		func(ctx context.Context, workflowID string) error {
-			return s.terminateWorkflow(ctx, workflowID, "failed", "failed", abandonedLease, true)
-		})
+	workflowIDs, err := s.queries.CancelExpiredLeaseJobs(ctx, pgText(abandonedLease))
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, func(ctx context.Context, workflowID string) error {
+		return s.terminateWorkflow(ctx, workflowID, "failed", "failed", abandonedLease, true)
+	})
 }
 
 // resumeStrandedDeliveries re-drives workflows left at 'completed' while still
@@ -137,5 +162,25 @@ func (s *Server) reclaimExpiredLeases(ctx context.Context) error {
 // status update matching no row — reported as a delivery failure, which would
 // block a run whose pull request had just been opened successfully.
 func (s *Server) resumeStrandedDeliveries(ctx context.Context) error {
-	return s.eachWorkflow(ctx, `SELECT wr.id::text FROM app.workflow_runs wr JOIN app.project_locks l ON l.workflow_run_id=wr.id WHERE wr.status='completed' AND wr.updated_at < now()-'`+strandedDelivery+`'::interval ORDER BY wr.updated_at,wr.id LIMIT 20`, s.deliverWorkflow)
+	workflowIDs, err := s.queries.SelectStrandedDeliveryWorkflows(ctx, pgInterval(strandedDelivery))
+	if err != nil {
+		return databaseError(err)
+	}
+	return s.eachWorkflowID(ctx, workflowIDs, s.deliverWorkflow)
+}
+
+// eachWorkflowID runs `do` against every already-fetched workflow identifier,
+// collecting failures rather than stopping at the first. These batches are
+// ordered oldest-first by their query, so returning early would let one
+// persistently failing workflow sit at the head and starve the rest — and in
+// the recovery sweep that head-of-line row is one holding a project lock, so a
+// single bad row would block lock release for every other project.
+func (s *Server) eachWorkflowID(ctx context.Context, workflowIDs []string, do func(context.Context, string) error) error {
+	var failures []error
+	for _, workflowID := range workflowIDs {
+		if err := do(ctx, workflowID); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
