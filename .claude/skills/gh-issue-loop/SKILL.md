@@ -61,6 +61,8 @@ when you want the loop to keep an existing long-running issue alive without star
 | `QUEUE_LABEL` | `ai-doable` | The queue. Human-curated. |
 | `WORKING_LABEL` | `ai-working` | The claim. Never removed, including on failure. |
 | `FINISHED_LABEL` | `ai-finished` | Applied only when the work is genuinely complete. |
+| `PRIORITY_HIGH_LABEL` | `priority:high` | Selected before anything else. |
+| `PRIORITY_LOW_LABEL` | `priority:low` | Selected only once nothing else is eligible. |
 | `BATCH_SIZE` | `5` | Max issues selected in one pass. |
 | `MAX_AGENTS` | `5` | Hard ceiling on simultaneously running issue agents. |
 | `CRON` | `*/5 * * * *` | Schedule interval. |
@@ -90,6 +92,8 @@ WORKTREE_DIR="$REPO/.claude/worktrees"
 QUEUE_LABEL="${QUEUE_LABEL:-ai-doable}"
 WORKING_LABEL="${WORKING_LABEL:-ai-working}"
 FINISHED_LABEL="${FINISHED_LABEL:-ai-finished}"
+PRIORITY_HIGH_LABEL="${PRIORITY_HIGH_LABEL:-priority:high}"
+PRIORITY_LOW_LABEL="${PRIORITY_LOW_LABEL:-priority:low}"
 BATCH_SIZE=${BATCH_SIZE:-5}
 export MAX_AGENTS=${MAX_AGENTS:-5} REAP_AFTER_MIN=${REAP_AFTER_MIN:-90} STARTUP_GRACE_MIN=${STARTUP_GRACE_MIN:-10}
 for c in "$REPO/.claude/skills/gh-issue-loop/bin/loop-slots.sh" \
@@ -357,13 +361,42 @@ gh pr list --state open --limit 30 --json number,headRefName,mergeable \
   --jq '.[] | select(.headRefName|startswith("issue-")) | "\(.headRefName) \(.mergeable)"'
 gh issue list --state open --label "$QUEUE_LABEL" --limit 100 --json number,labels \
   | jq -r --arg w "$WORKING_LABEL" --arg f "$FINISHED_LABEL" \
-      '[.[] | select((.labels|map(.name)|index($w))==null
-             and (.labels|map(.name)|index($f))==null) | .number] | sort | join(",")'
+          --arg hi "$PRIORITY_HIGH_LABEL" --arg lo "$PRIORITY_LOW_LABEL" '
+      [ .[]
+        | (.labels|map(.name)) as $l
+        | select(($l|index($w))==null and ($l|index($f))==null)
+        | {number, rank: (if   ($l|index($hi)) then 0
+                          elif ($l|index($lo)) then 2
+                          else 1 end)} ]
+      | sort_by(.rank, .number)
+      | (map(.number|tostring)|join(",")),
+        (map("\(.number)=\(["high","medium","low"][.rank])")|join(" "))'
 ```
+
+Two lines come out: the eligible numbers **in selection order**, then the same issues with the
+priority each was read as. The first line is what STEP 2 consumes and what `last-run.json` stores;
+the second exists so a pass can report *why* it chose what it chose.
 
 Note the eligibility filter is piped to `jq` with `--arg` rather than using `gh --jq`, so that
 overriding `WORKING_LABEL` or `FINISHED_LABEL` actually takes effect. Hardcoding those two inside
-a single-quoted jq program silently ignores the override and re-picks claimed issues.
+a single-quoted jq program silently ignores the override and re-picks claimed issues. The same
+applies to the two priority labels.
+
+**Ordering is by priority, then by issue number.** `sort_by(.rank, .number)` puts every
+`PRIORITY_HIGH_LABEL` issue ahead of every unlabelled one, and every unlabelled one ahead of every
+`PRIORITY_LOW_LABEL` issue; ties break on the lower number, which is the old behaviour and keeps
+the ordering deterministic. Three consequences worth stating:
+
+- **An issue with no priority label ranks as medium, not last.** An unlabelled issue is untriaged,
+  not deprioritised, and ranking it below `priority:low` would silently starve the default case —
+  a queue where nobody sets labels would then be ordered by nothing at all. Marking an issue
+  `priority:low` is the *only* way to push it behind untriaged work, which is what that label means.
+- **`PRIORITY_HIGH_LABEL` wins if an issue carries both high and low.** The `if/elif` reads high
+  first, deliberately: contradictory labels resolve toward doing the work sooner, and a human who
+  wanted otherwise can remove the high label.
+- **Priority is part of the cached eligible set.** Because the stored string is priority-ordered,
+  re-labelling an issue changes it and so invalidates the STEP -1 early exit. That is intended:
+  a human re-prioritising the queue is exactly when the loop should stop trusting its cache.
 
 **Compare against the previous pass.** Nothing persists between passes on its own, so record the
 observations at the end of every pass and read them back here:
@@ -547,7 +580,11 @@ Every `continue` is a refusal to delete: a slot still held, uncommitted or unpus
 branch with no merged PR all leave the worktree alone. Only a worktree whose work is demonstrably
 in the default branch is removed.
 
-### STEP 2 — select up to BATCH_SIZE non-conflicting issues, lowest number first
+### STEP 2 — select up to BATCH_SIZE non-conflicting issues, highest priority first
+
+Walk the STEP -1 eligible list **in the order it came out** — priority first, lower issue number
+breaking ties — and take the first BATCH_SIZE that survive the exclusion rules below. Do not
+re-sort it numerically; that ordering is the priority decision and re-sorting silently discards it.
 
 Build the exclusion set **first**: for every open unmerged PR, list its files with
 `gh pr diff <N> --name-only`.
@@ -577,13 +614,21 @@ The shared progress log alone **never** disqualifies a pairing; STEP 0 cleans th
 
 If **zero** issues are safe, claim nothing — do not force a batch. Say so plainly and list which
 PRs must merge to unblock which issues. Always state which issues were grouped and why, and which
-were excluded and why.
+were excluded and why — including the priority each carried, since "the top of the queue was
+blocked" and "the queue was empty" are different problems for a human to fix.
+
+**Priority orders the queue; it does not override the conflict rules.** A `priority:high` issue
+that overlaps an open PR is still excluded, and the next issue down is still taken — a blocked
+issue at the top must never stall the ones beneath it. Equally, priority is not a reason to widen
+a batch: BATCH_SIZE and the overlap rules bind exactly as before. When a high-priority issue is
+skipped for overlap, say so explicitly in the report, because that is the case where a human most
+wants to know that merging one PR would unblock the thing they marked urgent.
 
 Then reserve slots for the survivors:
 
 ```bash
 "$SLOTS" verify || { echo "FATAL: slot registry does not record what it reports"; exit 1; }
-"$SLOTS" reserve <candidates in ascending order>
+"$SLOTS" reserve <survivors, in the selection order above>
 ```
 
 `verify` round-trips a reservation and checks the count actually moved. It runs **before any label
@@ -908,7 +953,9 @@ must be a **self-contained instruction to read this file**, not a slash command:
 ```
 Read <ABS PATH TO THIS SKILL.md> in full and execute it in `run` mode
 (one pass, STEP -1 through STEP 5). Parameters: QUEUE_LABEL=ai-doable
-WORKING_LABEL=ai-working FINISHED_LABEL=ai-finished BATCH_SIZE=5 MAX_AGENTS=5.
+WORKING_LABEL=ai-working FINISHED_LABEL=ai-finished
+PRIORITY_HIGH_LABEL=priority:high PRIORITY_LOW_LABEL=priority:low
+BATCH_SIZE=5 MAX_AGENTS=5.
 Repository: <ABS REPO PATH>.
 ```
 
