@@ -18,15 +18,21 @@
 # side effect of tagging.
 name: Release
 
-# Runner pool: this repository's jobs normally target a self-hosted pool. Those
-# declarations are commented out below rather than deleted, next to the
-# GitHub-hosted `ubuntu-latest` line that replaces each one, so the switch back
-# is a one-line edit per job.
+# Runner pool: jobs run on the self-hosted pool when the repository variable
+# CI_SELFHOSTED_RUNNERS is "true"; otherwise (unset or "false") they run on
+# GitHub-hosted ubuntu-latest. resolve-runner picks the pool once and every work
+# job inherits it. There is no automatic fallback between pools, so when the
+# flag is on the pool must be healthy or jobs will queue.
 #
-# Why: no self-hosted runner was picking jobs up, so every CI run on main queued
-# until the next push cancelled it via `cancel-in-progress` -- eleven consecutive
-# cancelled runs, and nothing merged in that window was verified. Switched to
-# hosted runners on 2026-08-01 (fresh monthly Actions allowance).
+# Required Tooling:
+# - git: >= 2.39
+# - make: GNU make >= 4.3
+# - gcc: build-essential >= 12 (for `go test -race`)
+# - docker: daemon + CLI >= 24, runner user in the docker group
+# - docker compose: v2 plugin
+# - curl: >= 7.68
+# - bash: >= 5.0
+# - base: Ubuntu 22.04 / 24.04 LTS
 
 on:
   push:
@@ -49,12 +55,32 @@ concurrency:
 env:
   IMAGE_PREFIX: ghcr.io/${{ github.repository }}
   PLATFORMS: linux/amd64,linux/arm64
+  # True selects the self-hosted pool; unset or any other value selects
+  # GitHub-hosted runners. Set it as a repository variable.
+  CI_SELFHOSTED_RUNNERS: ${{ vars.CI_SELFHOSTED_RUNNERS || 'false' }}
 
 jobs:
+  resolve-runner:
+    # Always GitHub-hosted: this is the job that decides where everything else
+    # runs, so it cannot depend on the pool it is selecting.
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.resolve.outputs.runner }}
+    steps:
+      - name: Select runner pool
+        id: resolve
+        run: |
+          if [[ "${CI_SELFHOSTED_RUNNERS,,}" == "true" ]]; then
+            echo "runner=[\"self-hosted\", \"linux\"]" >> "$GITHUB_OUTPUT"
+            echo "::notice::CI_SELFHOSTED_RUNNERS=true -- running on the self-hosted pool."
+          else
+            echo "runner=[\"ubuntu-latest\"]" >> "$GITHUB_OUTPUT"
+          fi
+
   plan:
     name: Plan release
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     outputs:
       version: ${{ steps.plan.outputs.version }}
       channel: ${{ steps.plan.outputs.channel }}
@@ -174,9 +200,8 @@ jobs:
 
   images:
     name: Build ${{ matrix.service }}
-    needs: plan
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: [plan, resolve-runner]
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     permissions:
       contents: read
       packages: write
@@ -303,10 +328,9 @@ jobs:
 
   verify:
     name: Verify published manifests
-    needs: [plan, images]
+    needs: [plan, images, resolve-runner]
     if: needs.plan.outputs.push == 'true'
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     permissions:
       contents: read
       packages: read

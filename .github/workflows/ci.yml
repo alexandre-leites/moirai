@@ -1,14 +1,20 @@
 name: CI
 
-# Runner pool: this repository's jobs normally target a self-hosted pool. Those
-# declarations are commented out below rather than deleted, next to the
-# GitHub-hosted `ubuntu-latest` line that replaces each one, so the switch back
-# is a one-line edit per job.
+# Runner pool: jobs run on the self-hosted pool when the repository variable
+# CI_SELFHOSTED_RUNNERS is "true"; otherwise (unset or "false") they run on
+# GitHub-hosted ubuntu-latest. resolve-runner picks the pool once and every work
+# job inherits it. There is no automatic fallback between pools, so when the
+# flag is on the pool must be healthy or jobs will queue.
 #
-# Why: no self-hosted runner was picking jobs up, so every CI run on main queued
-# until the next push cancelled it via `cancel-in-progress` -- eleven consecutive
-# cancelled runs, and nothing merged in that window was verified. Switched to
-# hosted runners on 2026-08-01 (fresh monthly Actions allowance).
+# Required Tooling:
+# - git: >= 2.39
+# - make: GNU make >= 4.3
+# - gcc: build-essential >= 12 (for `go test -race`)
+# - docker: daemon + CLI >= 24, runner user in the docker group
+# - docker compose: v2 plugin
+# - curl: >= 7.68
+# - bash: >= 5.0
+# - base: Ubuntu 22.04 / 24.04 LTS
 
 on:
   push:
@@ -27,10 +33,31 @@ env:
   # Pinned explicitly: the Node image ships npm 11, and package.json declares
   # npm@12 as this project's package manager.
   NPM_VERSION: "12.0.2"
+  # True selects the self-hosted pool; unset or any other value selects
+  # GitHub-hosted runners. Set it as a repository variable.
+  CI_SELFHOSTED_RUNNERS: ${{ vars.CI_SELFHOSTED_RUNNERS || 'false' }}
 
 jobs:
-  test-orchestrator:
+  resolve-runner:
+    # Always GitHub-hosted: this is the job that decides where everything else
+    # runs, so it cannot depend on the pool it is selecting.
     runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.resolve.outputs.runner }}
+    steps:
+      - name: Select runner pool
+        id: resolve
+        run: |
+          if [[ "${CI_SELFHOSTED_RUNNERS,,}" == "true" ]]; then
+            echo "runner=[\"self-hosted\", \"linux\"]" >> "$GITHUB_OUTPUT"
+            echo "::notice::CI_SELFHOSTED_RUNNERS=true -- running on the self-hosted pool."
+          else
+            echo "runner=[\"ubuntu-latest\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-orchestrator:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -44,7 +71,8 @@ jobs:
   # database. This is the job that would have caught a retry that wedges a
   # project or a failure that respawns itself every second.
   test-postgres-integration:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     env:
       LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
     services:
@@ -70,7 +98,8 @@ jobs:
       - run: make test-postgres-integration
 
   lint:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -79,7 +108,8 @@ jobs:
       - run: make lint
 
   typecheck:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -94,14 +124,15 @@ jobs:
   # build if the checked-in generated code is stale, the same enforcement
   # `proto-check` gives the protobuf bindings.
   sqlc-check:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - run: make sqlc-check
 
   runner:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -112,8 +143,8 @@ jobs:
       - run: cd runner && go vet ./...
 
   api:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -132,8 +163,8 @@ jobs:
   # gates eslint *errors* only; the ten warnings in the quality backlog do not
   # fail this job today.
   test-web:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -145,8 +176,8 @@ jobs:
       - run: make test-web
 
   build-web:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -158,8 +189,8 @@ jobs:
       - run: make build-web
 
   compose-smoke:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Validate every Compose combination
@@ -242,8 +273,8 @@ jobs:
         run: docker compose -f compose.yaml -f compose.build.yaml down --volumes --remove-orphans
 
   vulnerability-scan:
-    # runs-on: [self-hosted, linux]
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -270,8 +301,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
-    # runs-on: [self-hosted, linux]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true
