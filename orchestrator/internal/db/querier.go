@@ -77,6 +77,11 @@ type Querier interface {
 	// run's project-scoped delivery facts from.
 	GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error)
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
+	// Everything dispatchImplementationAfterPlanning needs to build a developer
+	// packet for a workflow whose planning execution just completed, mirroring
+	// what ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+	// dispatch.
+	GetImplementationDispatchFacts(ctx context.Context, id string) (GetImplementationDispatchFactsRow, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
 	GetProject(ctx context.Context, id string) (GetProjectRow, error)
 	// task_source_id (empty string = NULL, the same NULLIF convention CreateProject
@@ -122,6 +127,14 @@ type Querier interface {
 	// very first workflow scanned before a pull request exists.
 	GetWorkflowDetail(ctx context.Context, id string) (GetWorkflowDetailRow, error)
 	GetWorkflowForControl(ctx context.Context, id string) (GetWorkflowForControlRow, error)
+	// acceptOffer reads this before deciding whether the offer it is accepting is
+	// the planning job's or the developer job's: it only ever has the job ID, not
+	// the task packet, so ScheduleOnce's MarkWorkflowPlanningOffered marker (set
+	// on current_phase before the offer goes out, distinct from the ordinary
+	// 'offered' both phases otherwise share) is what tells the two apart.
+	GetWorkflowPhaseForJob(ctx context.Context, id string) (string, error)
+	GetWorkflowStatusByID(ctx context.Context, id string) (string, error)
+	IncrementPlanningAttempts(ctx context.Context, id string) error
 	InsertPullRequestCreatedEvent(ctx context.Context, arg InsertPullRequestCreatedEventParams) error
 	InsertPullRequestMergedEvent(ctx context.Context, workflowRunID string) error
 	InsertWorkflowTerminationEvent(ctx context.Context, arg InsertWorkflowTerminationEventParams) error
@@ -216,6 +229,16 @@ type Querier interface {
 	MarkWorkflowAwaitingApproval(ctx context.Context, id string) (int64, error)
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
+	// Flips the marker GetWorkflowPhaseForJob reads back to plain 'offered' when
+	// the developer packet is dispatched on the same job that just ran planning,
+	// so the developer job's own acceptance takes the ordinary SetWorkflowPreparing
+	// branch rather than being mistaken for another planning offer.
+	MarkWorkflowImplementationOffered(ctx context.Context, id string) error
+	// Sets a marker distinct from plain 'offered' the instant ScheduleOnce
+	// dispatches a planner packet instead of a developer one -- see
+	// GetWorkflowPhaseForJob. status stays 'offered', the generic value both
+	// phases start from.
+	MarkWorkflowPlanningOffered(ctx context.Context, id string) error
 	ProjectExists(ctx context.Context, id string) (bool, error)
 	// Distinguishes "unknown project" (no row, pgx.ErrNoRows) from "disabled
 	// project" (a row, enabled = false) for SyncNow's single-project path, which
@@ -223,6 +246,7 @@ type Querier interface {
 	// sense for one that is both known and enabled.
 	ProjectIsEnabled(ctx context.Context, id string) (bool, error)
 	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
+	RecordPlanSummary(ctx context.Context, arg RecordPlanSummaryParams) error
 	RecordRunnerHeartbeat(ctx context.Context, arg RecordRunnerHeartbeatParams) error
 	// Bumps the count of consecutive transient GitHub failures blockOrRetryExternal
 	// (delivery.go) has absorbed for this run without moving its status, and
@@ -239,6 +263,15 @@ type Querier interface {
 	// against a run genuinely sitting at the approval gate.
 	RejectWorkflowApproval(ctx context.Context, arg RejectWorkflowApprovalParams) (string, error)
 	RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (pgtype.Timestamptz, error)
+	// Re-offers the one job a workflow run is ever given (app.jobs.workflow_run_id
+	// is UNIQUE) for its developer execution, once its planning execution has
+	// completed. This is a second offer/accept/lease cycle for the same job row,
+	// not a second job: the runner's own offer/lease state (runner/internal/
+	// control's OfferState) keys everything by job ID and forgets it entirely once
+	// Abandon runs at the end of the first (planning) execution, so a fresh
+	// JobOffer for the same ID with an incremented lease_generation is
+	// indistinguishable, to the runner, from any other new job.
+	ReofferJobForImplementation(ctx context.Context, id string) (ReofferJobForImplementationRow, error)
 	RevokeOtherUserSessions(ctx context.Context, arg RevokeOtherUserSessionsParams) error
 	RevokeRunner(ctx context.Context, id string) (int64, error)
 	RevokeRunnerCredentials(ctx context.Context, runnerID string) error
@@ -251,6 +284,7 @@ type Querier interface {
 	SetProjectEnabled(ctx context.Context, arg SetProjectEnabledParams) (int64, error)
 	SetRunnerDraining(ctx context.Context, arg SetRunnerDrainingParams) error
 	SetWorkflowControlStatus(ctx context.Context, arg SetWorkflowControlStatusParams) error
+	SetWorkflowPlanningActive(ctx context.Context, id string) error
 	SetWorkflowPreparing(ctx context.Context, id string) error
 	SetWorkflowTerminalStatus(ctx context.Context, arg SetWorkflowTerminalStatusParams) error
 	// Retry no longer writes app.issues.eligible directly (see #268 and migration

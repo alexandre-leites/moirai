@@ -213,6 +213,7 @@ func workflowDetailPayload(workflow *controlv1.Workflow) map[string]any {
 	payload["ciRepairAttempts"] = workflow.CiRepairAttempts
 	payload["reviewCycles"] = workflow.ReviewCycles
 	payload["totalAgentExecutions"] = workflow.TotalAgentExecutions
+	payload["planSummary"] = workflow.PlanSummary
 	payload["createdAt"] = workflow.CreatedAt
 	payload["updatedAt"] = workflow.UpdatedAt
 	return payload

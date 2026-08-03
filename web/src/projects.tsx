@@ -158,6 +158,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   const [pipelineSteps, setPipelineSteps] = useState(project?.pipelineSteps ?? []);
   const [executionImage, setExecutionImage] = useState(project?.executionImage ?? "");
   const [requireHumanApproval, setRequireHumanApproval] = useState(project?.requireHumanApproval ?? false);
+  const [requirePlanning, setRequirePlanning] = useState(project?.requirePlanning ?? false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -186,6 +187,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       pipelineSteps: pipelineSteps.map((step, position) => ({ ...step, position })),
       executionImage: executionImage.trim() || undefined,
       requireHumanApproval: requireHumanApproval || undefined,
+      requirePlanning: requirePlanning || undefined,
     }).then(
       () => { onDone(); onClose(); },
       (reason: unknown) => {
@@ -269,6 +271,17 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
         </fieldset>
         <fieldset>
           <legend>Delivery policy</legend>
+          <label>
+            <input
+              type="checkbox"
+              checked={requirePlanning}
+              onChange={(event) => setRequirePlanning(event.target.checked)}
+            /> Plan before implementing
+          </label>
+          <p className="t2">
+            When checked, a planner execution runs before the developer one and its output is carried into the
+            developer packet's context; the run sits at "Planning" while it does. Off by default.
+          </p>
           <label>
             <input
               type="checkbox"

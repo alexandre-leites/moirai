@@ -912,6 +912,13 @@ components:
             'waiting_human' status once every automated gate (implementation,
             GitHub checks) passes, and only merges once an admin approves it
             via the decision panel. Defaults to false.
+        requirePlanning:
+          type: boolean
+          description: >-
+            Opt-in planning gate (#351): when true, the orchestrator dispatches
+            a planner execution before the developer one, and its output feeds
+            the developer packet's context. A run sits at the 'planning' status
+            while that execution runs. Defaults to false.
     Project:
       type: object
       required: [id, name, enabled]
@@ -944,6 +951,13 @@ components:
             'waiting_human' status once every automated gate (implementation,
             GitHub checks) passes, and only merges once an admin approves it
             via the decision panel. Defaults to false.
+        requirePlanning:
+          type: boolean
+          description: >-
+            Opt-in planning gate (#351): when true, the orchestrator dispatches
+            a planner execution before the developer one, and its output feeds
+            the developer packet's context. A run sits at the 'planning' status
+            while that execution runs. Defaults to false.
         taskSources:
           type: array
           items: { $ref: '#/components/schemas/TaskSource' }
@@ -1162,7 +1176,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/Workflow'
         - type: object
-          required: [issueExternalId, issueTitle, branchName, planningAttempts, implementationAttempts, pipelineRepairAttempts, ciRepairAttempts, reviewCycles, totalAgentExecutions, createdAt, updatedAt]
+          required: [issueExternalId, issueTitle, branchName, planningAttempts, implementationAttempts, pipelineRepairAttempts, ciRepairAttempts, reviewCycles, totalAgentExecutions, planSummary, createdAt, updatedAt]
           properties:
             issueExternalId: { type: string }
             issueTitle: { type: string }
@@ -1182,6 +1196,13 @@ components:
               description: >-
                 Agent executions spent across every role. The cap it is measured
                 against lives in the orchestrator's RetryBudget.
+            planSummary:
+              type: string
+              description: >-
+                The planning phase's own account of the work (#351): the
+                planner execution's summary, or empty when the project never
+                opted into requirePlanning or the run has not reached that
+                phase yet.
             createdAt: { type: string, format: date-time }
             updatedAt: { type: string, format: date-time }
     WorkflowEvent:

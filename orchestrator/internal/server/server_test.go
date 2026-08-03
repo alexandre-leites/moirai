@@ -117,7 +117,7 @@ func TestPasswordHashCompatibility(t *testing.T) {
 }
 
 func TestDeveloperPacket(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600)
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestDeveloperPacket(t *testing.T) {
 // agent process never returns. developerPacket must always carry the caller's
 // resolved, positive timeout.
 func TestDeveloperPacketSendsRealTimeout(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 1800)
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 1800, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestDeveloperPacketSendsRealTimeout(t *testing.T) {
 }
 
 func TestDeveloperPacketRejectsNonPositiveTimeout(t *testing.T) {
-	if _, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 0); err == nil {
+	if _, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 0, nil); err == nil {
 		t.Fatal("developerPacket accepted a zero timeout")
 	}
 }
@@ -162,7 +162,7 @@ func TestExecutionTimeoutSecondsFallsBackToDefault(t *testing.T) {
 // that to a developer packet and refuses it for a planner, so these two
 // constraints are what stand between a scheduled job and a deliverable branch.
 func TestDeveloperPacketMayModifyAndPush(t *testing.T) {
-	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600)
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +175,49 @@ func TestDeveloperPacketMayModifyAndPush(t *testing.T) {
 	}
 	if constraints["mayMerge"] {
 		t.Fatal("merging is the orchestrator's decision; the runner rejects a packet that claims it")
+	}
+}
+
+// A planner packet (#351) must never be allowed to modify files or push --
+// the runner's own taskpacket.Validate refuses that combination independently,
+// but plannerPacket must not rely solely on the runner catching its mistake.
+func TestPlannerPacketMayNotModifyOrPush(t *testing.T) {
+	packet, err := plannerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://example.test/repo.git", "", "main", "agent/test", "", 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet["role"] != "planner" || packet["executionId"] != "1b5f4a4d-2345-4ff2-a014-189531caf2d7-plan" {
+		t.Fatalf("unexpected packet: %#v", packet)
+	}
+	constraints, ok := packet["constraints"].(map[string]bool)
+	if !ok {
+		t.Fatalf("constraints = %#v", packet["constraints"])
+	}
+	if constraints["mayModifyFiles"] || constraints["mayPush"] || constraints["mayMerge"] {
+		t.Fatal("a planner packet must not be allowed to modify files, push, or merge")
+	}
+}
+
+// planFromPayload is what folds a planner execution's terminal payload into
+// the developer packet dispatched afterward: the summary first, then each
+// remaining-work entry, in the order promptFor renders packet.Plan under
+// "# CURRENT PLAN".
+func TestPlanFromPayload(t *testing.T) {
+	plan := planFromPayload(`{"status":"completed","summary":"Add a cache","remainingWork":["Write the struct","Wire it up"]}`)
+	want := []string{"Add a cache", "Write the struct", "Wire it up"}
+	if len(plan) != len(want) {
+		t.Fatalf("plan = %#v, want %#v", plan, want)
+	}
+	for i := range want {
+		if plan[i] != want[i] {
+			t.Fatalf("plan = %#v, want %#v", plan, want)
+		}
+	}
+	if plan := planFromPayload(`{"status":"completed"}`); len(plan) != 0 {
+		t.Fatalf("plan = %#v, want empty for a payload with no summary or remaining work", plan)
+	}
+	if plan := planFromPayload(`not json`); plan != nil {
+		t.Fatalf("plan = %#v, want nil for a payload that does not parse", plan)
 	}
 }
 

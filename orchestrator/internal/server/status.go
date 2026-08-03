@@ -23,6 +23,19 @@ const (
 	// for the whole execution -- there is no separate "running" status for a
 	// workflow run, only for the job underneath it.
 	StatusPreparing Status = "preparing"
+	// StatusPlanning is set once a runner accepts a planning job offer (see
+	// projectConfig.RequirePlanning), and holds for the whole planner
+	// execution -- the same relationship StatusPreparing has to the developer
+	// execution that follows it. ScheduleOnce dispatches a planner-role
+	// packet instead of the developer packet for an opted-in project; once
+	// that execution reports "completed", persistExecutionEvent records the
+	// plan and re-offers the same job (app.jobs.workflow_run_id stays UNIQUE
+	// -- this is a second offer/accept/lease cycle for the one job the
+	// workflow already has, not a second job) with the developer packet,
+	// carrying the plan forward as its Plan context. A planner execution that
+	// fails, is blocked, or is cancelled falls through to the ordinary
+	// terminal handling below, exactly like a failed developer execution.
+	StatusPlanning Status = "planning"
 	// StatusWaitingGithubChecks is set once a pull request has been opened
 	// and the run is waiting for GitHub's checks to report a result.
 	StatusWaitingGithubChecks Status = "waiting_github_checks"
@@ -103,6 +116,7 @@ var (
 var knownStatuses = map[Status]bool{
 	StatusOffered:             true,
 	StatusPreparing:           true,
+	StatusPlanning:            true,
 	StatusWaitingGithubChecks: true,
 	StatusWaitingHuman:        true,
 	StatusDelivering:          true,
@@ -132,7 +146,9 @@ func ParseStatus(value string) (Status, bool) {
 //
 // StatusDelivering is deliberately absent: a run holding it is still doing
 // active work (opening a pull request), the same reason 'offered', 'preparing',
-// 'waiting_github_checks' and 'waiting_human' are absent -- a run waiting on a
+// 'planning', 'waiting_github_checks' and 'waiting_human' are absent -- a run
+// running its planner execution holds the project lock exactly as actively as
+// one running its developer execution, and a run waiting on a
 // person to decide is exactly as active as one waiting on GitHub's checks, and
 // must keep its project lock and count toward moirai_active_workflows the same
 // way. See genuinelyTerminalStatuses for the narrower set terminateWorkflow's

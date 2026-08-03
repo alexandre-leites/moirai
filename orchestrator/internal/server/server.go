@@ -123,6 +123,14 @@ type projectConfig struct {
 	// missing JSON key decodes to false, not an error. See
 	// observeWorkflow/deliveryWorkflow (delivery.go) for where it is read.
 	RequireHumanApproval bool `json:"require_human_approval"`
+	// RequirePlanning opts a project into the planning phase (#351):
+	// ScheduleOnce dispatches a planner-role packet before the developer
+	// packet, and persistExecutionEvent folds its output into the developer
+	// packet's Plan context once it completes. Absent (the zero value, false)
+	// on every project created before this field existed, for the same
+	// reason RequireHumanApproval is -- a missing JSON key decodes to false,
+	// not an error.
+	RequirePlanning bool `json:"require_planning"`
 }
 
 // defaultExecutionTimeoutSeconds bounds a dispatched developer execution's
@@ -375,7 +383,7 @@ func (s *ControlServer) CreateProject(ctx context.Context, request *controlv1.Cr
 		return nil, err
 	}
 	id := idgen.NewID()
-	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval(), RequirePlanning: cfg.GetRequirePlanning()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
 	}
@@ -420,7 +428,7 @@ func (s *ControlServer) UpdateProject(ctx context.Context, request *controlv1.Up
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval(), RequirePlanning: cfg.GetRequirePlanning()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
 	}
@@ -1291,7 +1299,24 @@ func (s *Core) ScheduleOnce(ctx context.Context) (bool, error) {
 	if err := json.Unmarshal(configuration, &config); err != nil {
 		return false, configurationError(err)
 	}
-	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
+	var packet map[string]any
+	if config.RequirePlanning {
+		// A planner-role packet goes out first; dispatchImplementationAfterPlanning
+		// (persistExecutionEvent) builds and sends the developer packet once it
+		// completes, re-offering this same job (see ReofferJobForImplementation's
+		// doc comment for why that is a second offer/accept/lease cycle rather
+		// than a second job). MarkWorkflowPlanningOffered is what lets acceptOffer
+		// tell the two offers apart later, since it only ever has the job ID.
+		if err := queries.MarkWorkflowPlanningOffered(ctx, workflowID); err != nil {
+			return false, databaseError(err)
+		}
+		if err := queries.IncrementPlanningAttempts(ctx, workflowID); err != nil {
+			return false, databaseError(err)
+		}
+		packet, err = plannerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
+	} else {
+		packet, err = developerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), nil)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -1342,36 +1367,73 @@ func (s *Core) releaseUndeliveredOffer(jobID, workflowID, projectID string) erro
 	return commit(tx)
 }
 
-// developerPacket builds the single execution a V1 workflow dispatches.
+// developerPacket builds the execution that writes the code and publishes the
+// branch. It is the only execution a V1 workflow dispatches unless the
+// project opted into RequirePlanning (#351), in which case plannerPacket goes
+// out first and this one follows once persistExecutionEvent sees it complete,
+// carrying that execution's plan forward as this packet's Plan context.
 //
 // The role has to be `developer`. The runner refuses to modify or push for a
 // planner, pipeline or reviewer packet, and only pushes at all for a role
 // granted mayPush — so a planner packet leaves the agent branch unpublished and
 // the delivery step that follows opens a pull request from a branch the remote
-// has never heard of. V1 has no separate planning phase, so the one execution
-// it does dispatch is the one that writes the code and publishes the branch.
+// has never heard of.
 //
 // mayMerge stays false in every packet: merging is the orchestrator's decision,
 // taken after GitHub reports the checks green, and the runner rejects a packet
 // that claims otherwise.
 // implementExecutionID derives the execution ID the runner will report back
-// against a job's single "implement" execution. Deterministic from the job
-// ID rather than stored, so cancelling a job can address the runner's active
-// execution without another round trip through the database.
+// against a job's developer execution. Deterministic from the job ID rather
+// than stored, so cancelling a job can address the runner's active execution
+// without another round trip through the database. See planExecutionID for
+// the same job's planner execution, when it has one.
 func implementExecutionID(jobID string) string {
 	return jobID + "-implement"
 }
 
-func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int) (map[string]any, error) {
+// planExecutionID is implementExecutionID's counterpart for a job's planning
+// execution (#351) -- distinct so a CancelExecution sent while a job is still
+// planning addresses the execution actually running, not the developer one
+// that has not been dispatched yet.
+func planExecutionID(jobID string) string {
+	return jobID + "-plan"
+}
+
+func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int, plan []string) (map[string]any, error) {
 	if !idgen.ValidID(jobID) || !idgen.ValidID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
 		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
+	}
+	if plan == nil {
+		plan = []string{}
 	}
 	return map[string]any{
 		"protocolVersion": "1.0", "jobId": jobID, "executionId": implementExecutionID(jobID), "role": "developer", "objective": "Implement " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
 		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": []any{}, "executionImage": executionImage,
-		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": []string{}, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
+		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": plan, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
+	}, nil
+}
+
+// plannerPacket builds the execution a RequirePlanning project runs before its
+// developer packet (#351). It shares the developer packet's repository and
+// issue context, but its constraints refuse both mayModifyFiles and mayPush —
+// enforced independently by the runner's own taskpacket.Validate, not just
+// trusted here — so the runner's existing role-generic dispatch (runner/
+// internal/dispatch/dispatch.go) never commits or pushes on its behalf: it
+// runs the agent, snapshots the repository, and reports its summary and
+// remaining-work list as the plan, exactly the way any other non-modifying
+// role already does. No runner-side change was needed to support this role.
+func plannerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int) (map[string]any, error) {
+	if !idgen.ValidID(jobID) || !idgen.ValidID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
+		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
+	}
+	return map[string]any{
+		"protocolVersion": "1.0", "jobId": jobID, "executionId": planExecutionID(jobID), "role": "planner", "objective": "Plan an implementation for " + externalID + ": " + title,
+		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
+		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
+		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": []any{}, "executionImage": executionImage,
+		"constraints": map[string]bool{"mayModifyFiles": false, "mayPush": false, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": []string{}, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
 	}, nil
 }
 
@@ -1410,7 +1472,20 @@ func (s *Core) acceptOffer(ctx context.Context, runnerID, jobID string) (int64, 
 		return 0, time.Time{}, databaseError(err)
 	}
 	generation, expiresAt := accepted.LeaseGeneration, accepted.LeaseExpiresAt.Time
-	if err := queries.SetWorkflowPreparing(ctx, jobID); err != nil {
+	// GetWorkflowPhaseForJob is how acceptOffer tells a planning offer apart
+	// from a developer one: it only ever has the job ID, never the task
+	// packet, and ScheduleOnce (or dispatchImplementationAfterPlanning) is
+	// what stamped this marker onto current_phase before the offer went out.
+	phase, err := queries.GetWorkflowPhaseForJob(ctx, jobID)
+	if err != nil {
+		return 0, time.Time{}, databaseError(err)
+	}
+	if phase == "planning_offered" {
+		err = queries.SetWorkflowPlanningActive(ctx, jobID)
+	} else {
+		err = queries.SetWorkflowPreparing(ctx, jobID)
+	}
+	if err != nil {
 		return 0, time.Time{}, databaseError(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1515,6 +1590,28 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 	}); err != nil {
 		return databaseError(err)
 	}
+	if event.GetType() == "completed" {
+		// A "completed" event from a job currently running its planning
+		// execution (#351) means the plan is ready, not that the workflow's
+		// deliverable work is done -- it takes a completely different path
+		// than the generic terminal handling below: no StatusDelivering, no
+		// deliverWorkflow, and no project-lock release, since the same job
+		// is about to be re-offered for its developer execution instead.
+		workflowStatus, err := queries.GetWorkflowStatusByID(ctx, workflowID)
+		if err != nil {
+			return databaseError(err)
+		}
+		if Status(workflowStatus) == StatusPlanning {
+			dispatch, err := s.preparePlanningCompletion(ctx, queries, workflowID, event.GetJobId(), payloadJSON)
+			if err != nil {
+				return err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return databaseError(err)
+			}
+			return s.dispatchOrReleaseImplementation(dispatch)
+		}
+	}
 	if terminalEvent(event.GetType()) {
 		// The event type is the shared vocabulary and is stored as it arrived;
 		// the run's own terminal status is derived from it. An agent that
@@ -1579,6 +1676,124 @@ func (s *Core) persistExecutionEvent(ctx context.Context, runnerID string, event
 		return s.deliverWorkflow(ctx, workflowID)
 	}
 	return nil
+}
+
+// implementationDispatch is what preparePlanningCompletion commits before
+// dispatchOrReleaseImplementation sends (or, on a disconnected runner, undoes)
+// the developer offer it describes -- the same commit-then-enqueue shape
+// ScheduleOnce itself uses, since a gRPC send must never happen inside an open
+// transaction its own failure would need to roll back.
+type implementationDispatch struct {
+	workflowID      string
+	jobID           string
+	runnerID        string
+	projectID       string
+	packetJSON      string
+	leaseGeneration int64
+}
+
+// planFromPayload extracts the plan a planner execution's terminal payload
+// carries (runner/internal/dispatch/control_loop.go's terminalPayload:
+// "summary" and, when non-empty, "remainingWork") into the developer packet's
+// Plan context: the summary first, then each remaining-work entry, the same
+// order promptFor (runner/internal/dispatch/dispatch.go) renders packet.Plan
+// in under "# CURRENT PLAN". Both fields already passed through the runner's
+// own boundedAgentText/boundedList limits when the planner reported them, well
+// inside the developer packet's own Plan bounds (taskpacket.go: 64 entries,
+// 8192 bytes each), so nothing here needs to re-bound them.
+func planFromPayload(payloadJSON string) []string {
+	var payload struct {
+		Summary       string   `json:"summary"`
+		RemainingWork []string `json:"remainingWork"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil
+	}
+	plan := make([]string, 0, len(payload.RemainingWork)+1)
+	if payload.Summary != "" {
+		plan = append(plan, payload.Summary)
+	}
+	plan = append(plan, payload.RemainingWork...)
+	return plan
+}
+
+// preparePlanningCompletion runs inside persistExecutionEvent's own
+// transaction, once a "completed" event arrives for a job currently at
+// StatusPlanning: it records the plan, re-offers that same job (app.jobs.
+// workflow_run_id stays UNIQUE -- see ReofferJobForImplementation) for its
+// developer execution, and returns what dispatchOrReleaseImplementation needs
+// to deliver that offer after the transaction commits.
+func (s *Core) preparePlanningCompletion(ctx context.Context, queries *db.Queries, workflowID, jobID, payloadJSON string) (implementationDispatch, error) {
+	plan := planFromPayload(payloadJSON)
+	summary := ""
+	if len(plan) > 0 {
+		summary = plan[0]
+	}
+	if err := queries.RecordPlanSummary(ctx, db.RecordPlanSummaryParams{ID: workflowID, PlanSummary: summary}); err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	// A dedicated event, distinct from the "completed" row CreateWorkflowEvent
+	// already wrote above, so the console's timeline reads "the plan is ready"
+	// rather than "an agent execution completed" for a phase an operator has
+	// no other way to tell apart from the developer one that follows it.
+	planPayload, err := json.Marshal(map[string]any{"plan": plan})
+	if err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+		WorkflowRunID: workflowID, EventType: "plan.recorded", Severity: "info", Column4: planPayload,
+	}); err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	reoffer, err := queries.ReofferJobForImplementation(ctx, jobID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return implementationDispatch{}, errors.New("planning job is no longer available to re-offer")
+	}
+	if err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	facts, err := queries.GetImplementationDispatchFacts(ctx, workflowID)
+	if err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	var config projectConfig
+	if err := json.Unmarshal([]byte(facts.Configuration), &config); err != nil {
+		return implementationDispatch{}, configurationError(err)
+	}
+	packet, err := developerPacket(jobID, facts.ProjectID, facts.ExternalID, facts.Title, facts.Body, facts.RepositoryMode,
+		textutil.TextValue(facts.RepositoryUrl), textutil.TextValue(facts.LocalRepositoryPath), facts.DefaultBranch,
+		textutil.TextValue(facts.BranchName), config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), plan)
+	if err != nil {
+		return implementationDispatch{}, err
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	if err := queries.CreateJobOffer(ctx, db.CreateJobOfferParams{ID: idgen.NewID(), JobID: jobID, RunnerID: reoffer.RunnerID}); err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	if err := queries.MarkWorkflowImplementationOffered(ctx, workflowID); err != nil {
+		return implementationDispatch{}, databaseError(err)
+	}
+	return implementationDispatch{
+		workflowID: workflowID, jobID: jobID, runnerID: reoffer.RunnerID, projectID: facts.ProjectID,
+		packetJSON: string(encoded), leaseGeneration: reoffer.LeaseGeneration,
+	}, nil
+}
+
+// dispatchOrReleaseImplementation delivers the developer offer
+// preparePlanningCompletion just committed, or -- if the runner that ran
+// planning is no longer connected -- undoes it exactly the way ScheduleOnce's
+// own enqueue failure does, via the same releaseUndeliveredOffer.
+func (s *Core) dispatchOrReleaseImplementation(dispatch implementationDispatch) error {
+	message := &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: &runnerv1.JobOffer{
+		JobId: dispatch.jobID, LeaseGeneration: dispatch.leaseGeneration, TaskPacketJson: dispatch.packetJSON,
+	}}}
+	if s.enqueue(dispatch.runnerID, message) {
+		return nil
+	}
+	return s.releaseUndeliveredOffer(dispatch.jobID, dispatch.workflowID, dispatch.projectID)
 }
 
 // jsonUnicodeEscapeMarker is how a `\uXXXX` escape spells in JSON text --
@@ -1804,6 +2019,7 @@ func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (
 	project.RequiredRunnerLabels, project.ExecutionImage = config.Labels, config.ExecutionImage
 	project.ExecutionTimeoutSeconds = config.ExecutionTimeoutSeconds
 	project.RequireHumanApproval = config.RequireHumanApproval
+	project.RequirePlanning = config.RequirePlanning
 	steps, err := queries.ListProjectPipelineSteps(ctx, id)
 	if err != nil {
 		return nil, databaseError(err)
@@ -1873,6 +2089,7 @@ func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 		CiRepairAttempts:       row.CiRepairAttempts,
 		ReviewCycles:           row.ReviewCycles,
 		TotalAgentExecutions:   row.TotalAgentExecutions,
+		PlanSummary:            textutil.TextValue(row.PlanSummary),
 	}
 	workflow.CreatedAt, workflow.UpdatedAt = textutil.Timestamp(row.CreatedAt.Time), textutil.Timestamp(row.UpdatedAt.Time)
 	return workflow
@@ -1996,8 +2213,17 @@ func (s *Core) controlWorkflow(ctx context.Context, id, reason, action string) (
 	// lease sweep is the backstop. Never fail the RPC over it — the database
 	// state is already committed and correct regardless of delivery.
 	if jobToCancel != "" && runnerHoldingLease != "" {
+		// A job cancelled mid-planning (#351) is still running its
+		// planner-role execution, not the developer one -- current (read
+		// before this function's own switch above) is this run's status at
+		// the moment cancellation was requested, and StatusPlanning is the
+		// only status a job's execution ID differs under.
+		executionID := implementExecutionID(jobToCancel)
+		if Status(current) == StatusPlanning {
+			executionID = planExecutionID(jobToCancel)
+		}
 		s.enqueue(runnerHoldingLease, &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Cancel{Cancel: &runnerv1.CancelExecution{
-			ExecutionId:     implementExecutionID(jobToCancel),
+			ExecutionId:     executionID,
 			LeaseGeneration: leaseGenerationAtCancel,
 		}}})
 	}
@@ -2063,6 +2289,7 @@ func validateProject(cfg *controlv1.ProjectConfiguration) (*controlv1.ProjectCon
 		ExecutionImage:          cfg.GetExecutionImage(),
 		ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(),
 		RequireHumanApproval:    cfg.GetRequireHumanApproval(),
+		RequirePlanning:         cfg.GetRequirePlanning(),
 	}, cfg.GetPipelineSteps(), nil
 }
 

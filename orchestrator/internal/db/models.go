@@ -347,6 +347,7 @@ type AppWorkflowRun struct {
 	GithubCheckPollAttempts int32
 	SupersededAt            pgtype.Timestamptz
 	DeliveryAttempts        int32
+	PlanSummary             pgtype.Text
 }
 
 type AppWorkflowTransitionOutbox struct {

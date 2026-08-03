@@ -39,22 +39,25 @@ export type StatusMeta = {
   phase: Phase | null;
 };
 
-// The Go V1 orchestrator writes exactly seven of these
+// The Go V1 orchestrator writes exactly eight of these
 // (orchestrator/internal/server/status.go's Status type is the source of
-// truth): offered, preparing, waiting_github_checks and the four terminal
-// statuses. `waiting_human` is kept even though nothing writes it yet --
-// SubmitHumanDecision (orchestrator/internal/server/management.go) is a real,
-// wired RPC that today always answers "V1 has no approval phase", and the
-// console's DecisionPanel (workflow-detail.tsx) is built against the day it
-// doesn't. Every other entry this table used to carry -- planning,
-// implementing, local_pipeline, repairing, ai_review, pushing, pr_created,
-// merging, recovering -- named phases of a pipeline the deleted
+// truth): offered, preparing, planning, waiting_github_checks and the four
+// terminal statuses. `waiting_human` is kept even though nothing writes it
+// yet -- SubmitHumanDecision (orchestrator/internal/server/management.go) is
+// a real, wired RPC that today always answers "V1 has no approval phase",
+// and the console's DecisionPanel (workflow-detail.tsx) is built against the
+// day it doesn't. `planning` (#351) is a real, wired status: a project that
+// opts into requirePlanning sits here while its planner execution runs,
+// before ever reaching `preparing`. Every other entry this table used to
+// carry -- implementing, local_pipeline, repairing, ai_review, pushing,
+// pr_created, merging, recovering -- named phases of a pipeline the deleted
 // internal/workflow package (#247) modelled but the Go orchestrator never
 // implemented, and were pruned in #265: statusMeta's fallback below covers a
 // status this table does not recognise, which is what every one of those
 // would have hit in production anyway.
 export const STATUS_META: Record<string, StatusMeta> = {
   offered: { label: "Offered", variant: "idle", pulse: false, phase: "prepare" },
+  planning: { label: "Planning", variant: "run", pulse: true, phase: "plan" },
   preparing: { label: "Preparing", variant: "run", pulse: true, phase: "prepare" },
   waiting_github_checks: { label: "Waiting on checks", variant: "wait", pulse: false, phase: "checks" },
   waiting_human: { label: "Needs decision", variant: "wait", pulse: false, phase: "human" },
@@ -252,6 +255,18 @@ export function describeEvent(event: WorkflowEvent): { text: string; phase: stri
     }
     case "pull_request.merged":
       return { text: "Pull request merged", phase: "merge", warn: false };
+    case "plan.recorded": {
+      // Written by preparePlanningCompletion (orchestrator/internal/server/
+      // server.go) as `{"plan": [...]}` once a planner execution completes;
+      // the first entry is always its summary (planFromPayload), the rest its
+      // remaining-work steps.
+      const plan = Array.isArray(payload.plan) ? (payload.plan as unknown[]).filter((entry) => typeof entry === "string") : [];
+      return {
+        text: plan.length > 0 ? `Plan ready: ${plan[0] as string}` : "Plan ready",
+        phase: "plan",
+        warn: false,
+      };
+    }
     case "delivery.failed": {
       // Written by `terminateWorkflow` with `{"reason": "<cause>"}`.
       const reason = text(payload.reason);

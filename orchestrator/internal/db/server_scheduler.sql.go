@@ -311,6 +311,52 @@ func (q *Queries) DeleteProjectLockByWorkflow(ctx context.Context, workflowRunID
 	return err
 }
 
+const getImplementationDispatchFacts = `-- name: GetImplementationDispatchFacts :one
+SELECT wr.project_id::text AS project_id, wr.branch_name,
+       i.external_id, i.title, i.body,
+       p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
+       p.configuration::text AS configuration
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+JOIN app.projects p ON p.id = wr.project_id
+WHERE wr.id = $1
+`
+
+type GetImplementationDispatchFactsRow struct {
+	ProjectID           string
+	BranchName          pgtype.Text
+	ExternalID          string
+	Title               string
+	Body                string
+	RepositoryMode      string
+	RepositoryUrl       pgtype.Text
+	LocalRepositoryPath pgtype.Text
+	DefaultBranch       string
+	Configuration       string
+}
+
+// Everything dispatchImplementationAfterPlanning needs to build a developer
+// packet for a workflow whose planning execution just completed, mirroring
+// what ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+// dispatch.
+func (q *Queries) GetImplementationDispatchFacts(ctx context.Context, id string) (GetImplementationDispatchFactsRow, error) {
+	row := q.db.QueryRow(ctx, getImplementationDispatchFacts, id)
+	var i GetImplementationDispatchFactsRow
+	err := row.Scan(
+		&i.ProjectID,
+		&i.BranchName,
+		&i.ExternalID,
+		&i.Title,
+		&i.Body,
+		&i.RepositoryMode,
+		&i.RepositoryUrl,
+		&i.LocalRepositoryPath,
+		&i.DefaultBranch,
+		&i.Configuration,
+	)
+	return i, err
+}
+
 const getJobForOfferReject = `-- name: GetJobForOfferReject :one
 SELECT j.workflow_run_id::text AS workflow_run_id, j.project_id::text AS project_id
 FROM app.jobs j
@@ -387,6 +433,43 @@ func (q *Queries) GetSchedulerSnapshot(ctx context.Context) (GetSchedulerSnapsho
 	return i, err
 }
 
+const getWorkflowPhaseForJob = `-- name: GetWorkflowPhaseForJob :one
+SELECT current_phase FROM app.workflow_runs
+WHERE id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
+`
+
+// acceptOffer reads this before deciding whether the offer it is accepting is
+// the planning job's or the developer job's: it only ever has the job ID, not
+// the task packet, so ScheduleOnce's MarkWorkflowPlanningOffered marker (set
+// on current_phase before the offer goes out, distinct from the ordinary
+// 'offered' both phases otherwise share) is what tells the two apart.
+func (q *Queries) GetWorkflowPhaseForJob(ctx context.Context, id string) (string, error) {
+	row := q.db.QueryRow(ctx, getWorkflowPhaseForJob, id)
+	var current_phase string
+	err := row.Scan(&current_phase)
+	return current_phase, err
+}
+
+const getWorkflowStatusByID = `-- name: GetWorkflowStatusByID :one
+SELECT status FROM app.workflow_runs WHERE id = $1
+`
+
+func (q *Queries) GetWorkflowStatusByID(ctx context.Context, id string) (string, error) {
+	row := q.db.QueryRow(ctx, getWorkflowStatusByID, id)
+	var status string
+	err := row.Scan(&status)
+	return status, err
+}
+
+const incrementPlanningAttempts = `-- name: IncrementPlanningAttempts :exec
+UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) IncrementPlanningAttempts(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, incrementPlanningAttempts, id)
+	return err
+}
+
 const listQueueEntries = `-- name: ListQueueEntries :many
 SELECT p.id::text AS project_id, p.name AS project_name, i.external_id, i.title, i.priority,
        CASE WHEN NOT p.enabled THEN 'project_disabled'
@@ -438,6 +521,32 @@ func (q *Queries) ListQueueEntries(ctx context.Context, limit int32) ([]ListQueu
 	return items, nil
 }
 
+const markWorkflowImplementationOffered = `-- name: MarkWorkflowImplementationOffered :exec
+UPDATE app.workflow_runs SET status = 'offered', current_phase = 'offered', updated_at = now() WHERE id = $1
+`
+
+// Flips the marker GetWorkflowPhaseForJob reads back to plain 'offered' when
+// the developer packet is dispatched on the same job that just ran planning,
+// so the developer job's own acceptance takes the ordinary SetWorkflowPreparing
+// branch rather than being mistaken for another planning offer.
+func (q *Queries) MarkWorkflowImplementationOffered(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, markWorkflowImplementationOffered, id)
+	return err
+}
+
+const markWorkflowPlanningOffered = `-- name: MarkWorkflowPlanningOffered :exec
+UPDATE app.workflow_runs SET current_phase = 'planning_offered', updated_at = now() WHERE id = $1
+`
+
+// Sets a marker distinct from plain 'offered' the instant ScheduleOnce
+// dispatches a planner packet instead of a developer one -- see
+// GetWorkflowPhaseForJob. status stays 'offered', the generic value both
+// phases start from.
+func (q *Queries) MarkWorkflowPlanningOffered(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, markWorkflowPlanningOffered, id)
+	return err
+}
+
 const recordJobExecutionEvent = `-- name: RecordJobExecutionEvent :one
 UPDATE app.jobs SET
   last_event_sequence = $1,
@@ -469,6 +578,20 @@ func (q *Queries) RecordJobExecutionEvent(ctx context.Context, arg RecordJobExec
 	return workflow_run_id, err
 }
 
+const recordPlanSummary = `-- name: RecordPlanSummary :exec
+UPDATE app.workflow_runs SET plan_summary = NULLIF($1::text, ''), updated_at = now() WHERE id = $2
+`
+
+type RecordPlanSummaryParams struct {
+	PlanSummary string
+	ID          string
+}
+
+func (q *Queries) RecordPlanSummary(ctx context.Context, arg RecordPlanSummaryParams) error {
+	_, err := q.db.Exec(ctx, recordPlanSummary, arg.PlanSummary, arg.ID)
+	return err
+}
+
 const renewJobLease = `-- name: RenewJobLease :one
 UPDATE app.jobs SET lease_expires_at = $1
 WHERE id = $2 AND runner_id = $3::uuid AND lease_generation = $4 AND status IN ('preparing','running') AND lease_expires_at > now()
@@ -492,6 +615,45 @@ func (q *Queries) RenewJobLease(ctx context.Context, arg RenewJobLeaseParams) (p
 	var lease_expires_at pgtype.Timestamptz
 	err := row.Scan(&lease_expires_at)
 	return lease_expires_at, err
+}
+
+const reofferJobForImplementation = `-- name: ReofferJobForImplementation :one
+UPDATE app.jobs SET
+  status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
+  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL
+WHERE id = $1 AND status = 'completed'
+RETURNING lease_generation, runner_id::text AS runner_id
+`
+
+type ReofferJobForImplementationRow struct {
+	LeaseGeneration int64
+	RunnerID        string
+}
+
+// Re-offers the one job a workflow run is ever given (app.jobs.workflow_run_id
+// is UNIQUE) for its developer execution, once its planning execution has
+// completed. This is a second offer/accept/lease cycle for the same job row,
+// not a second job: the runner's own offer/lease state (runner/internal/
+// control's OfferState) keys everything by job ID and forgets it entirely once
+// Abandon runs at the end of the first (planning) execution, so a fresh
+// JobOffer for the same ID with an incremented lease_generation is
+// indistinguishable, to the runner, from any other new job.
+func (q *Queries) ReofferJobForImplementation(ctx context.Context, id string) (ReofferJobForImplementationRow, error) {
+	row := q.db.QueryRow(ctx, reofferJobForImplementation, id)
+	var i ReofferJobForImplementationRow
+	err := row.Scan(&i.LeaseGeneration, &i.RunnerID)
+	return i, err
+}
+
+const setWorkflowPlanningActive = `-- name: SetWorkflowPlanningActive :exec
+UPDATE app.workflow_runs SET status = 'planning', current_phase = 'planning', updated_at = now()
+WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
+  AND status NOT IN ('completed','failed','blocked','cancelled')
+`
+
+func (q *Queries) SetWorkflowPlanningActive(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, setWorkflowPlanningActive, id)
+	return err
 }
 
 const setWorkflowPreparing = `-- name: SetWorkflowPreparing :exec

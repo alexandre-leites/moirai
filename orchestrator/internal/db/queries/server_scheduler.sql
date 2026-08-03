@@ -115,6 +115,72 @@ UPDATE app.workflow_runs SET status = 'preparing', updated_at = now()
 WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
   AND status NOT IN ('completed','failed','blocked','cancelled');
 
+-- name: GetWorkflowPhaseForJob :one
+-- acceptOffer reads this before deciding whether the offer it is accepting is
+-- the planning job's or the developer job's: it only ever has the job ID, not
+-- the task packet, so ScheduleOnce's MarkWorkflowPlanningOffered marker (set
+-- on current_phase before the offer goes out, distinct from the ordinary
+-- 'offered' both phases otherwise share) is what tells the two apart.
+SELECT current_phase FROM app.workflow_runs
+WHERE id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1);
+
+-- name: MarkWorkflowPlanningOffered :exec
+-- Sets a marker distinct from plain 'offered' the instant ScheduleOnce
+-- dispatches a planner packet instead of a developer one -- see
+-- GetWorkflowPhaseForJob. status stays 'offered', the generic value both
+-- phases start from.
+UPDATE app.workflow_runs SET current_phase = 'planning_offered', updated_at = now() WHERE id = $1;
+
+-- name: SetWorkflowPlanningActive :exec
+UPDATE app.workflow_runs SET status = 'planning', current_phase = 'planning', updated_at = now()
+WHERE app.workflow_runs.id = (SELECT j.workflow_run_id FROM app.jobs j WHERE j.id = $1)
+  AND status NOT IN ('completed','failed','blocked','cancelled');
+
+-- name: GetWorkflowStatusByID :one
+SELECT status FROM app.workflow_runs WHERE id = $1;
+
+-- name: IncrementPlanningAttempts :exec
+UPDATE app.workflow_runs SET planning_attempts = planning_attempts + 1, updated_at = now() WHERE id = $1;
+
+-- name: RecordPlanSummary :exec
+UPDATE app.workflow_runs SET plan_summary = NULLIF(sqlc.arg(plan_summary)::text, ''), updated_at = now() WHERE id = sqlc.arg(id);
+
+-- name: MarkWorkflowImplementationOffered :exec
+-- Flips the marker GetWorkflowPhaseForJob reads back to plain 'offered' when
+-- the developer packet is dispatched on the same job that just ran planning,
+-- so the developer job's own acceptance takes the ordinary SetWorkflowPreparing
+-- branch rather than being mistaken for another planning offer.
+UPDATE app.workflow_runs SET status = 'offered', current_phase = 'offered', updated_at = now() WHERE id = $1;
+
+-- name: ReofferJobForImplementation :one
+-- Re-offers the one job a workflow run is ever given (app.jobs.workflow_run_id
+-- is UNIQUE) for its developer execution, once its planning execution has
+-- completed. This is a second offer/accept/lease cycle for the same job row,
+-- not a second job: the runner's own offer/lease state (runner/internal/
+-- control's OfferState) keys everything by job ID and forgets it entirely once
+-- Abandon runs at the end of the first (planning) execution, so a fresh
+-- JobOffer for the same ID with an incremented lease_generation is
+-- indistinguishable, to the runner, from any other new job.
+UPDATE app.jobs SET
+  status = 'offered', lease_generation = lease_generation + 1, last_event_sequence = 0,
+  offered_at = now(), accepted_at = NULL, started_at = NULL, finished_at = NULL
+WHERE id = $1 AND status = 'completed'
+RETURNING lease_generation, runner_id::text AS runner_id;
+
+-- name: GetImplementationDispatchFacts :one
+-- Everything dispatchImplementationAfterPlanning needs to build a developer
+-- packet for a workflow whose planning execution just completed, mirroring
+-- what ClaimSchedulableIssue hands ScheduleOnce for the ordinary (no-planning)
+-- dispatch.
+SELECT wr.project_id::text AS project_id, wr.branch_name,
+       i.external_id, i.title, i.body,
+       p.repository_mode, p.repository_url, p.local_repository_path, p.default_branch,
+       p.configuration::text AS configuration
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+JOIN app.projects p ON p.id = wr.project_id
+WHERE wr.id = $1;
+
 -- name: GetJobForOfferReject :one
 SELECT j.workflow_run_id::text AS workflow_run_id, j.project_id::text AS project_id
 FROM app.jobs j
