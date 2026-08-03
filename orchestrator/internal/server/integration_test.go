@@ -10,6 +10,19 @@
 //
 //	LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:5432/loop_test \
 //	    go test -tags integration -race ./internal/server/
+//
+// Opting into this suite (-tags integration) without also setting
+// LOOP_TEST_DATABASE_URL used to be silent: each test called t.Skip, and
+// `go test`'s default non-verbose output shows neither individual skips nor
+// a skip count, so the run reported a plain "ok" indistinguishable from
+// having actually exercised the state machine (#363). newHarness and
+// scratchDatabaseURL now t.Fatal instead, which `go test` always surfaces
+// regardless of -v, because -tags integration is itself the developer
+// opting into this suite -- silence at that point hides exactly the
+// coverage the suite exists for. Plain `go test ./...` (no -tags
+// integration) is unaffected: the build tag above excludes this file from
+// compilation entirely, so a developer who is not trying to run the
+// database suite never hits this path.
 package server
 
 import (
@@ -46,6 +59,25 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// missingTestDatabaseMessage is what a developer sees when they run this
+// suite (-tags integration) without LOOP_TEST_DATABASE_URL set. It is a
+// t.Fatal, not a t.Skip, specifically so `go test` prints it: `go test`
+// only surfaces a passing test's output with -v, but a failing test's
+// output always prints, which is what makes this message load-bearing
+// rather than decorative (#363).
+const missingTestDatabaseMessage = `LOOP_TEST_DATABASE_URL is not set.
+
+This package's Postgres-backed integration suite (` + "`-tags integration`" + `) needs a
+real database -- it exists to test the orchestrator state machine against
+actual transaction and constraint behavior, which nothing else here does.
+
+Run it with:
+    make test-postgres-integration
+or directly:
+    LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:5432/loop_test \
+        go test -tags integration -race -count=1 ./internal/server/
+`
+
 // harness embeds the shared *Core directly, so every helper method on Core
 // (ScheduleOnce, acceptOffer, addSession, the delivery/observation chain,
 // requireActor, ...) is reachable as h.Whatever(...) exactly as it was before
@@ -73,7 +105,7 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	url := os.Getenv("LOOP_TEST_DATABASE_URL")
 	if url == "" {
-		t.Skip("LOOP_TEST_DATABASE_URL is not set")
+		t.Fatal(missingTestDatabaseMessage)
 	}
 	ctx := context.Background()
 	// Applying the real migrations directory is itself a check: it proves the

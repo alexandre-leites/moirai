@@ -21,7 +21,7 @@ test-orchestrator:
 # PostgreSQL. The guard is deliberate: a silently skipped suite is worse than a
 # missing one.
 test-postgres-integration:
-	test -n "$(LOOP_TEST_DATABASE_URL)"
+	@test -n "$(LOOP_TEST_DATABASE_URL)" || { echo "test-postgres-integration: LOOP_TEST_DATABASE_URL is not set; e.g. LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:5432/loop_test make test-postgres-integration" >&2; exit 1; }
 	cd orchestrator && $(GO) test -tags integration -race -count=1 ./internal/server/
 
 test-runner:
