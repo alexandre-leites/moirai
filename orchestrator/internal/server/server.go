@@ -2,18 +2,13 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +21,10 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/db"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
-	"golang.org/x/crypto/scrypt"
+	"github.com/loop-engineering/orchestrator/internal/secrethash"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -174,14 +171,14 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 			if username == "" {
 				username = "admin"
 			}
-			if len(username) > 128 || !validPassword(password) {
+			if len(username) > 128 || !secrethash.ValidPassword(password) {
 				return errors.New("initial administrator configuration is invalid")
 			}
-			hash, err := passwordHash(password)
+			hash, err := secrethash.PasswordHash(password)
 			if err != nil {
 				return err
 			}
-			if err := s.queries.CreateAdminUser(ctx, db.CreateAdminUserParams{ID: newID(), Username: username, PasswordHash: hash}); err != nil {
+			if err := s.queries.CreateAdminUser(ctx, db.CreateAdminUserParams{ID: idgen.NewID(), Username: username, PasswordHash: hash}); err != nil {
 				return databaseError(err)
 			}
 		}
@@ -218,7 +215,7 @@ func (s *Server) Bootstrap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = s.queries.UpsertSeedRunnerRegistrationToken(ctx, db.UpsertSeedRunnerRegistrationTokenParams{ID: newID(), TokenHash: hashSecret(token), Column3: []byte(encodedLabels)})
+	err = s.queries.UpsertSeedRunnerRegistrationToken(ctx, db.UpsertSeedRunnerRegistrationTokenParams{ID: idgen.NewID(), TokenHash: secrethash.HashSecret(token), Column3: []byte(encodedLabels)})
 	return databaseError(err)
 }
 
@@ -229,14 +226,14 @@ func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*c
 	}
 	row, err := s.queries.GetUserByUsername(ctx, username)
 	if errors.Is(err, pgx.ErrNoRows) {
-		_, _ = passwordMatches(request.GetPassword(), "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+		_, _ = secrethash.PasswordMatches(request.GetPassword(), "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
 	}
 	if err != nil {
 		return nil, databaseError(err)
 	}
 	userID, encoded, enabled := row.ID, row.PasswordHash, row.Enabled
-	matches, err := passwordMatches(request.GetPassword(), encoded)
+	matches, err := secrethash.PasswordMatches(request.GetPassword(), encoded)
 	if err != nil {
 		// A genuine scrypt failure, not a wrong password: log it so it isn't
 		// silently indistinguishable from bad credentials.
@@ -245,9 +242,9 @@ func (s *Server) Login(ctx context.Context, request *controlv1.LoginRequest) (*c
 	if err != nil || !enabled || !matches {
 		return nil, status.Error(codes.Unauthenticated, "login was rejected")
 	}
-	sessionToken, csrfToken := randomSecret(), randomSecret()
+	sessionToken, csrfToken := idgen.RandomSecret(), idgen.RandomSecret()
 	expiresAt := time.Now().UTC().Add(7 * 24 * time.Hour)
-	if err := s.queries.CreateUserSession(ctx, db.CreateUserSessionParams{ID: newID(), UserID: userID, TokenHash: hashSecret(sessionToken), CsrfTokenHash: hashSecret(csrfToken), ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}}); err != nil {
+	if err := s.queries.CreateUserSession(ctx, db.CreateUserSessionParams{ID: idgen.NewID(), UserID: userID, TokenHash: secrethash.HashSecret(sessionToken), CsrfTokenHash: secrethash.HashSecret(csrfToken), ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}}); err != nil {
 		return nil, databaseError(err)
 	}
 	return &controlv1.LoginResponse{SessionToken: sessionToken, UserId: userID, CsrfToken: csrfToken}, nil
@@ -272,7 +269,7 @@ func (s *Server) Logout(ctx context.Context, _ *controlv1.LogoutRequest) (*contr
 	if !ok || len(md.Get(sessionHeader)) != 1 || len(md.Get(csrfHeader)) != 1 {
 		return nil, status.Error(codes.Unauthenticated, "session is required")
 	}
-	affected, err := s.queries.RevokeSessionByTokens(ctx, db.RevokeSessionByTokensParams{TokenHash: hashSecret(md.Get(sessionHeader)[0]), CsrfTokenHash: hashSecret(md.Get(csrfHeader)[0])})
+	affected, err := s.queries.RevokeSessionByTokens(ctx, db.RevokeSessionByTokensParams{TokenHash: secrethash.HashSecret(md.Get(sessionHeader)[0]), CsrfTokenHash: secrethash.HashSecret(md.Get(csrfHeader)[0])})
 	if err != nil {
 		return nil, databaseError(err)
 	}
@@ -310,7 +307,7 @@ func (s *Server) CreateProject(ctx context.Context, request *controlv1.CreatePro
 	if err != nil {
 		return nil, err
 	}
-	id := newID()
+	id := idgen.NewID()
 	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
@@ -349,7 +346,7 @@ func (s *Server) UpdateProject(ctx context.Context, request *controlv1.UpdatePro
 	if err != nil {
 		return nil, err
 	}
-	if !validID(request.GetProjectId()) {
+	if !idgen.ValidID(request.GetProjectId()) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
 	cfg, steps, err := validateProject(request.GetProject())
@@ -398,7 +395,7 @@ func (s *Server) SetProjectEnabled(ctx context.Context, request *controlv1.SetPr
 	if err != nil {
 		return nil, err
 	}
-	if !validID(request.GetProjectId()) {
+	if !idgen.ValidID(request.GetProjectId()) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
 	affected, err := s.queries.SetProjectEnabled(ctx, db.SetProjectEnabledParams{ID: request.GetProjectId(), Enabled: request.GetEnabled()})
@@ -460,7 +457,7 @@ func (s *Server) ListWorkflowEvents(ctx context.Context, request *controlv1.List
 	if _, err := s.requireActor(ctx, false); err != nil {
 		return nil, err
 	}
-	if !validID(request.GetWorkflowRunId()) || request.GetAfterId() < 0 {
+	if !idgen.ValidID(request.GetWorkflowRunId()) || request.GetAfterId() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "workflow event request is invalid")
 	}
 	limit := request.GetLimit()
@@ -481,10 +478,10 @@ func (s *Server) ListWorkflowEvents(ctx context.Context, request *controlv1.List
 			Id:          row.ID,
 			EventType:   row.EventType,
 			PayloadJson: row.Payload,
-			CreatedAt:   timestamp(row.CreatedAt.Time),
+			CreatedAt:   textutil.Timestamp(row.CreatedAt.Time),
 		}
 		response.Events = append(response.Events, &event)
-		parsed, err := parseInt(event.Id)
+		parsed, err := textutil.ParseInt(event.Id)
 		if err != nil {
 			return nil, eventIDError(event.Id, err)
 		}
@@ -525,7 +522,7 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 		return nil, err
 	}
 	projectID := strings.TrimSpace(request.GetProjectId())
-	if projectID != "" && !validID(projectID) {
+	if projectID != "" && !idgen.ValidID(projectID) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
 	var candidates []db.ListSyncableProjectsRow
@@ -547,7 +544,7 @@ func (s *Server) SyncNow(ctx context.Context, request *controlv1.SyncNowRequest)
 	response := &controlv1.SyncNowResponse{}
 	for _, candidate := range candidates {
 		result := &controlv1.ProjectSyncResult{ProjectId: candidate.ID}
-		if err := s.syncProject(ctx, candidate.ID, textValue(candidate.RepositoryUrl)); err != nil {
+		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl)); err != nil {
 			result.Error = syncErrorMessage(err)
 		} else {
 			count, err := s.queries.CountProjectIssues(ctx, candidate.ID)
@@ -583,7 +580,7 @@ func (s *Server) SyncProjects(ctx context.Context) error {
 	}
 	var failures []error
 	for _, candidate := range projects {
-		if err := s.syncProject(ctx, candidate.ID, textValue(candidate.RepositoryUrl)); err != nil {
+		if err := s.syncProject(ctx, candidate.ID, textutil.TextValue(candidate.RepositoryUrl)); err != nil {
 			failures = append(failures, fmt.Errorf("project %s: %w", candidate.ID, err))
 		}
 	}
@@ -608,13 +605,13 @@ func (s *Server) IssueSyncStatus(ctx context.Context, _ *controlv1.IssueSyncStat
 			EligibleCount: int32(row.EligibleCount),
 		}
 		if row.LastSyncedAt.Valid {
-			entry.LastSyncedAt = timestamp(row.LastSyncedAt.Time)
+			entry.LastSyncedAt = textutil.Timestamp(row.LastSyncedAt.Time)
 		}
 		if row.ConsecutiveFailures.Valid {
 			entry.ConsecutiveFailures = row.ConsecutiveFailures.Int32
 		}
 		if row.NextRetryAt.Valid {
-			entry.NextRetryAt = timestamp(row.NextRetryAt.Time)
+			entry.NextRetryAt = textutil.Timestamp(row.NextRetryAt.Time)
 		}
 		if row.LastError.Valid {
 			entry.LastError = row.LastError.String
@@ -668,7 +665,7 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 			return err
 		}
 		if err := queries.UpsertIssue(ctx, db.UpsertIssueParams{
-			ID: newID(), ProjectID: projectID, ExternalID: issue.ExternalID, Title: issue.Title, Body: issue.Body, Url: issue.URL,
+			ID: idgen.NewID(), ProjectID: projectID, ExternalID: issue.ExternalID, Title: issue.Title, Body: issue.Body, Url: issue.URL,
 			State: issue.State, Column8: labels, Priority: int32(issue.Priority), Eligible: issue.Eligible,
 			ExternalCreatedAt: pgtype.Timestamptz{Time: issue.CreatedAt, Valid: true},
 			ExternalUpdatedAt: pgtype.Timestamptz{Time: issue.UpdatedAt, Valid: true},
@@ -684,7 +681,7 @@ func (s *Server) syncProject(ctx context.Context, projectID, repositoryURL strin
 }
 
 func (s *Server) recordSyncFailure(ctx context.Context, projectID string, cause error) error {
-	err := s.queries.UpsertIssueSyncStateFailure(ctx, db.UpsertIssueSyncStateFailureParams{ProjectID: projectID, LastError: pgtype.Text{String: truncate(cause.Error(), 1024), Valid: true}})
+	err := s.queries.UpsertIssueSyncStateFailure(ctx, db.UpsertIssueSyncStateFailureParams{ProjectID: projectID, LastError: pgtype.Text{String: textutil.Truncate(cause.Error(), 1024), Valid: true}})
 	return databaseError(err)
 }
 
@@ -712,7 +709,7 @@ func (s *Server) SetRunnerState(ctx context.Context, request *controlv1.SetRunne
 	if err != nil {
 		return nil, err
 	}
-	if !validID(request.GetRunnerId()) {
+	if !idgen.ValidID(request.GetRunnerId()) {
 		return nil, status.Error(codes.InvalidArgument, "runner ID is invalid")
 	}
 	var affected int64
@@ -846,11 +843,11 @@ func (s *Server) GetSchedulerMetrics(ctx context.Context, _ *controlv1.GetSchedu
 	for _, status := range s.loopRecorder.LoopStatuses() {
 		entry := &controlv1.LoopStatus{Name: status.Name, Healthy: status.Healthy}
 		if !status.LastSuccess.IsZero() {
-			entry.LastSuccessAt = timestamp(status.LastSuccess)
+			entry.LastSuccessAt = textutil.Timestamp(status.LastSuccess)
 		}
 		if status.LastError != "" {
 			entry.LastError = status.LastError
-			entry.LastErrorAt = timestamp(status.LastErrorAt)
+			entry.LastErrorAt = textutil.Timestamp(status.LastErrorAt)
 		}
 		response.LoopStatuses = append(response.LoopStatuses, entry)
 	}
@@ -920,18 +917,18 @@ func (s *Server) RegisterRunner(ctx context.Context, request *runnerv1.RegisterR
 	}
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
-	tokenID, err := queries.SelectValidRegistrationToken(ctx, db.SelectValidRegistrationTokenParams{TokenHash: hashSecret(request.GetToken()), Column2: []byte(encodedLabels)})
+	tokenID, err := queries.SelectValidRegistrationToken(ctx, db.SelectValidRegistrationTokenParams{TokenHash: secrethash.HashSecret(request.GetToken()), Column2: []byte(encodedLabels)})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.PermissionDenied, "runner registration was rejected")
 	}
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	runnerID, credential := newID(), randomSecret()
+	runnerID, credential := idgen.NewID(), idgen.RandomSecret()
 	if err := queries.CreateRunner(ctx, db.CreateRunnerParams{ID: runnerID, Name: strings.TrimSpace(request.GetName()), Column3: []byte(encodedLabels), Capacity: capacity}); err != nil {
 		return nil, databaseError(err)
 	}
-	if err := queries.CreateRunnerCredential(ctx, db.CreateRunnerCredentialParams{ID: newID(), RunnerID: runnerID, CredentialHash: hashSecret(credential)}); err != nil {
+	if err := queries.CreateRunnerCredential(ctx, db.CreateRunnerCredentialParams{ID: idgen.NewID(), RunnerID: runnerID, CredentialHash: secrethash.HashSecret(credential)}); err != nil {
 		return nil, databaseError(err)
 	}
 	if err := queries.MarkRegistrationTokenUsed(ctx, tokenID); err != nil {
@@ -1019,7 +1016,7 @@ func (s *Server) handleRunnerMessage(ctx context.Context, runnerID string, messa
 		if _, err := normalizeLabels(heartbeat.GetLabels()); err != nil {
 			return status.Error(codes.InvalidArgument, "runner heartbeat labels are invalid")
 		}
-		err := s.queries.RecordRunnerHeartbeat(ctx, db.RecordRunnerHeartbeatParams{ID: runnerID, Column2: truncate(heartbeat.GetVersion(), 12)})
+		err := s.queries.RecordRunnerHeartbeat(ctx, db.RecordRunnerHeartbeatParams{ID: runnerID, Column2: textutil.Truncate(heartbeat.GetVersion(), 12)})
 		return databaseError(err)
 	case message.GetOfferAccepted() != nil:
 		generation, expiresAt, err := s.acceptOffer(ctx, runnerID, message.GetOfferAccepted().GetJobId())
@@ -1117,7 +1114,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	projectID, mode, defaultBranch, runnerID := claim.ProjectID, claim.RepositoryMode, claim.DefaultBranch, claim.RunnerID
 	repositoryURL, localPath := claim.RepositoryUrl, claim.LocalRepositoryPath
 	configuration := []byte(claim.Configuration)
-	workflowID, jobID, offerID := newID(), newID(), newID()
+	workflowID, jobID, offerID := idgen.NewID(), idgen.NewID(), idgen.NewID()
 	branch := "agent/" + workflowID
 	if err := queries.CreateWorkflowRun(ctx, db.CreateWorkflowRunParams{ID: workflowID, ProjectID: projectID, IssueID: issueID, ThreadID: workflowID, BranchName: pgtype.Text{String: branch, Valid: true}}); err != nil {
 		return false, databaseError(err)
@@ -1139,7 +1136,7 @@ func (s *Server) ScheduleOnce(ctx context.Context) (bool, error) {
 	if err := json.Unmarshal(configuration, &config); err != nil {
 		return false, configurationError(err)
 	}
-	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textValue(repositoryURL), textValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
+	packet, err := developerPacket(jobID, projectID, externalID, title, body, mode, textutil.TextValue(repositoryURL), textutil.TextValue(localPath), defaultBranch, branch, config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
 	if err != nil {
 		return false, err
 	}
@@ -1211,7 +1208,7 @@ func implementExecutionID(jobID string) string {
 }
 
 func developerPacket(jobID, projectID, externalID, title, body, mode, repositoryURL, localPath, defaultBranch, branch, executionImage string, timeoutSeconds int) (map[string]any, error) {
-	if !validID(jobID) || !validID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
+	if !idgen.ValidID(jobID) || !idgen.ValidID(projectID) || externalID == "" || title == "" || defaultBranch == "" || branch == "" || (mode == "managed_clone" && repositoryURL == "") || (mode == "existing_path" && localPath == "") || (mode != "managed_clone" && mode != "existing_path") || timeoutSeconds < 1 {
 		return nil, status.Error(codes.FailedPrecondition, "scheduled task is invalid")
 	}
 	return map[string]any{
@@ -1224,7 +1221,7 @@ func developerPacket(jobID, projectID, externalID, title, body, mode, repository
 }
 
 func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64, time.Time, error) {
-	if !validID(jobID) {
+	if !idgen.ValidID(jobID) {
 		return 0, time.Time{}, status.Error(codes.InvalidArgument, "job ID is invalid")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1268,7 +1265,7 @@ func (s *Server) acceptOffer(ctx context.Context, runnerID, jobID string) (int64
 }
 
 func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string) error {
-	if !validID(jobID) {
+	if !idgen.ValidID(jobID) {
 		return status.Error(codes.InvalidArgument, "job ID is invalid")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1288,7 +1285,7 @@ func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string
 	if err := queries.CancelJobOfferByRunner(ctx, db.CancelJobOfferByRunnerParams{JobID: jobID, RunnerID: runnerID}); err != nil {
 		return databaseError(err)
 	}
-	if err := queries.CancelJob(ctx, db.CancelJobParams{ID: jobID, Column2: truncate(reason, 1024)}); err != nil {
+	if err := queries.CancelJob(ctx, db.CancelJobParams{ID: jobID, Column2: textutil.Truncate(reason, 1024)}); err != nil {
 		return databaseError(err)
 	}
 	if err := queries.CancelWorkflowRunOfferRejected(ctx, workflowID); err != nil {
@@ -1301,7 +1298,7 @@ func (s *Server) rejectOffer(ctx context.Context, runnerID, jobID, reason string
 }
 
 func (s *Server) renewLease(ctx context.Context, runnerID string, renewal *runnerv1.LeaseRenewal) (time.Time, error) {
-	if !validID(renewal.GetJobId()) || renewal.GetLeaseGeneration() < 1 || renewal.GetRequestedExpiresAtUnixMs() <= time.Now().UnixMilli() {
+	if !idgen.ValidID(renewal.GetJobId()) || renewal.GetLeaseGeneration() < 1 || renewal.GetRequestedExpiresAtUnixMs() <= time.Now().UnixMilli() {
 		return time.Time{}, status.Error(codes.InvalidArgument, "lease renewal is invalid")
 	}
 	expiresAt := time.UnixMilli(renewal.GetRequestedExpiresAtUnixMs()).UTC()
@@ -1321,7 +1318,7 @@ func (s *Server) renewLease(ctx context.Context, runnerID string, renewal *runne
 }
 
 func (s *Server) persistExecutionEvent(ctx context.Context, runnerID string, event *runnerv1.ExecutionEvent) error {
-	if !validID(event.GetJobId()) || event.GetLeaseGeneration() < 1 || event.GetEventSequence() < 1 || !validEventType(event.GetType()) || !json.Valid([]byte(event.GetPayloadJson())) {
+	if !idgen.ValidID(event.GetJobId()) || event.GetLeaseGeneration() < 1 || event.GetEventSequence() < 1 || !validEventType(event.GetType()) || !json.Valid([]byte(event.GetPayloadJson())) {
 		return status.Error(codes.InvalidArgument, "execution event is invalid")
 	}
 	// payload_json is agent-supplied end to end: the runner forwards
@@ -1582,7 +1579,7 @@ func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error)
 	if !ok || len(md.Get(sessionHeader)) != 1 || strings.TrimSpace(md.Get(sessionHeader)[0]) == "" {
 		return actor{}, status.Error(codes.Unauthenticated, "session is required")
 	}
-	row, err := s.queries.GetSessionActor(ctx, hashSecret(md.Get(sessionHeader)[0]))
+	row, err := s.queries.GetSessionActor(ctx, secrethash.HashSecret(md.Get(sessionHeader)[0]))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return actor{}, status.Error(codes.Unauthenticated, "session is invalid")
 	}
@@ -1592,7 +1589,7 @@ func (s *Server) requireActor(ctx context.Context, mutation bool) (actor, error)
 	id, role, csrfHash := row.ID, row.Role, row.CsrfTokenHash
 	if mutation {
 		csrf := md.Get(csrfHeader)
-		if len(csrf) != 1 || subtle.ConstantTimeCompare([]byte(hashSecret(csrf[0])), []byte(csrfHash)) != 1 {
+		if len(csrf) != 1 || subtle.ConstantTimeCompare([]byte(secrethash.HashSecret(csrf[0])), []byte(csrfHash)) != 1 {
 			return actor{}, status.Error(codes.PermissionDenied, "CSRF token is invalid")
 		}
 		if role != "admin" {
@@ -1607,11 +1604,11 @@ func (s *Server) requireMutation(ctx context.Context) (actor, error) {
 }
 
 func (s *Server) authenticateRunner(ctx context.Context, runnerID, credential string) error {
-	if !validID(runnerID) {
+	if !idgen.ValidID(runnerID) {
 		return status.Error(codes.Unauthenticated, "runner authentication was rejected")
 	}
 	stored, err := s.queries.GetRunnerCredentialHash(ctx, runnerID)
-	if err != nil || subtle.ConstantTimeCompare([]byte(stored), []byte(hashSecret(credential))) != 1 {
+	if err != nil || subtle.ConstantTimeCompare([]byte(stored), []byte(secrethash.HashSecret(credential))) != 1 {
 		return status.Error(codes.Unauthenticated, "runner authentication was rejected")
 	}
 	return nil
@@ -1627,7 +1624,7 @@ type projectQuerier interface {
 }
 
 func (s *Server) project(ctx context.Context, queries projectQuerier, id string) (*controlv1.Project, error) {
-	if !validID(id) {
+	if !idgen.ValidID(id) {
 		return nil, status.Error(codes.InvalidArgument, "project ID is invalid")
 	}
 	row, err := queries.GetProject(ctx, id)
@@ -1640,8 +1637,8 @@ func (s *Server) project(ctx context.Context, queries projectQuerier, id string)
 	project := &controlv1.Project{
 		Id: row.ID, Name: row.Name, Enabled: row.Enabled, RepositoryMode: row.RepositoryMode,
 		DefaultBranch:       row.DefaultBranch,
-		RepositoryUrl:       textValue(row.RepositoryUrl),
-		LocalRepositoryPath: textValue(row.LocalRepositoryPath),
+		RepositoryUrl:       textutil.TextValue(row.RepositoryUrl),
+		LocalRepositoryPath: textutil.TextValue(row.LocalRepositoryPath),
 	}
 	var config projectConfig
 	if err := json.Unmarshal([]byte(row.Configuration), &config); err != nil {
@@ -1663,7 +1660,7 @@ func (s *Server) project(ctx context.Context, queries projectQuerier, id string)
 }
 
 func (s *Server) workflow(ctx context.Context, id string) (*controlv1.Workflow, error) {
-	if !validID(id) {
+	if !idgen.ValidID(id) {
 		return nil, status.Error(codes.InvalidArgument, "workflow run ID is invalid")
 	}
 	row, err := s.queries.GetWorkflowDetail(ctx, id)
@@ -1686,11 +1683,11 @@ func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 		Id: row.ID, ProjectId: row.ProjectID, Status: row.Status, Phase: row.CurrentPhase,
 		IssueExternalId:        row.ExternalID,
 		IssueTitle:             row.Title,
-		BranchName:             textValue(row.BranchName),
-		PullRequestExternalId:  coalesceText(row.PrExternalID, row.RunPullRequestExternalID),
-		PullRequestUrl:         coalesceText(row.PrUrl, row.RunPullRequestUrl),
-		PullRequestState:       textValue(row.PullRequestState),
-		BlockingReason:         textValue(row.BlockingReason),
+		BranchName:             textutil.TextValue(row.BranchName),
+		PullRequestExternalId:  textutil.CoalesceText(row.PrExternalID, row.RunPullRequestExternalID),
+		PullRequestUrl:         textutil.CoalesceText(row.PrUrl, row.RunPullRequestUrl),
+		PullRequestState:       textutil.TextValue(row.PullRequestState),
+		BlockingReason:         textutil.TextValue(row.BlockingReason),
 		PlanningAttempts:       row.PlanningAttempts,
 		ImplementationAttempts: row.ImplementationAttempts,
 		PipelineRepairAttempts: row.PipelineRepairAttempts,
@@ -1698,7 +1695,7 @@ func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 		ReviewCycles:           row.ReviewCycles,
 		TotalAgentExecutions:   row.TotalAgentExecutions,
 	}
-	workflow.CreatedAt, workflow.UpdatedAt = timestamp(row.CreatedAt.Time), timestamp(row.UpdatedAt.Time)
+	workflow.CreatedAt, workflow.UpdatedAt = textutil.Timestamp(row.CreatedAt.Time), textutil.Timestamp(row.UpdatedAt.Time)
 	return workflow
 }
 
@@ -1707,7 +1704,7 @@ func (s *Server) controlWorkflow(ctx context.Context, id, reason, action string)
 	if err != nil {
 		return nil, err
 	}
-	if !validID(id) || len(reason) > 1024 || (action == "block" && strings.TrimSpace(reason) == "") {
+	if !idgen.ValidID(id) || len(reason) > 1024 || (action == "block" && strings.TrimSpace(reason) == "") {
 		return nil, status.Error(codes.InvalidArgument, "workflow control request is invalid")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -1834,7 +1831,7 @@ func replacePipelineSteps(ctx context.Context, queries *db.Queries, projectID st
 	}
 	for _, step := range steps {
 		if err := queries.CreateProjectPipelineStep(ctx, db.CreateProjectPipelineStepParams{
-			ID: newID(), ProjectID: projectID, Position: step.GetPosition(), Name: step.GetCommand(),
+			ID: idgen.NewID(), ProjectID: projectID, Position: step.GetPosition(), Name: step.GetCommand(),
 			TimeoutSeconds: step.GetTimeoutSeconds(), Required: step.GetRequired(),
 		}); err != nil {
 			return databaseError(err)
@@ -1904,7 +1901,7 @@ func normalizeLabels(labels []string) ([]string, error) {
 	return result, nil
 }
 func (s *Server) runner(ctx context.Context, id string) (*controlv1.Runner, error) {
-	if !validID(id) {
+	if !idgen.ValidID(id) {
 		return nil, status.Error(codes.InvalidArgument, "runner ID is invalid")
 	}
 	row, err := s.queries.GetRunner(ctx, id)
@@ -1922,7 +1919,7 @@ func scanRunnerRowValues(id, name string, enabled, draining bool, status_ string
 		return nil, configurationError(err)
 	}
 	if seen.Valid {
-		runner.LastSeenAt = timestamp(seen.Time)
+		runner.LastSeenAt = textutil.Timestamp(seen.Time)
 	}
 	return runner, nil
 }
@@ -1946,39 +1943,6 @@ func commit(tx pgx.Tx) error {
 	}
 	return nil
 }
-func validID(value string) bool {
-	if len(value) != 36 {
-		return false
-	}
-	for i, c := range value {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if c != '-' {
-				return false
-			}
-		} else if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
-			return false
-		}
-	}
-	return true
-}
-func newID() string {
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		panic(err)
-	}
-	bytes[6] = bytes[6]&0x0f | 0x40
-	bytes[8] = bytes[8]&0x3f | 0x80
-	encoded := hex.EncodeToString(bytes)
-	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:]
-}
-func randomSecret() string {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		panic(err)
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes)
-}
-
 func optionalSecret(name string) (string, bool, error) {
 	value, file := os.Getenv(name), os.Getenv(name+"_FILE")
 	if value != "" && file != "" {
@@ -2000,78 +1964,6 @@ func optionalSecret(name string) (string, bool, error) {
 	}
 	value = strings.TrimSpace(string(contents))
 	return value, value != "", nil
-}
-
-func validPassword(password string) bool {
-	if len(password) < 8 || len(password) > 1024 {
-		return false
-	}
-	var digit, upper, lower, symbol bool
-	for _, character := range password {
-		switch {
-		case character >= '0' && character <= '9':
-			digit = true
-		case character >= 'A' && character <= 'Z':
-			upper = true
-		case character >= 'a' && character <= 'z':
-			lower = true
-		default:
-			symbol = true
-		}
-	}
-	return digit && upper && lower && symbol
-}
-
-func passwordHash(password string) (string, error) {
-	if !validPassword(password) {
-		return "", errors.New("password is invalid")
-	}
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	digest, err := scrypt.Key([]byte(password), salt, 1<<14, 8, 1, 32)
-	if err != nil {
-		return "", err
-	}
-	return strings.Join([]string{"scrypt", "16384", "8", "1", base64.RawURLEncoding.EncodeToString(salt), base64.RawURLEncoding.EncodeToString(digest)}, "$"), nil
-}
-
-// passwordMatches reports whether password matches the stored, encoded
-// scrypt hash. It intentionally always returns (false, nil) — never an
-// error — for a hash that doesn't parse as the expected format: to the
-// caller this must be indistinguishable from a wrong password, since
-// otherwise the error return would give a timing/behavior oracle for which
-// accounts have a corrupted password_hash row. That indistinguishability is
-// exactly what makes a corrupted row silently unrecoverable, so the
-// unparseable cases are logged here — for an operator reading logs, not for
-// the caller — before returning.
-func passwordMatches(password, encoded string) (bool, error) {
-	parts := strings.Split(encoded, "$")
-	if len(parts) != 6 || parts[0] != "scrypt" || parts[1] != "16384" || parts[2] != "8" || parts[3] != "1" {
-		slog.Error("password hash has an unrecognized format", "encoding", parts[0])
-		return false, nil
-	}
-	salt, err := base64.RawURLEncoding.DecodeString(parts[4])
-	if err != nil {
-		slog.Error("password hash has an invalid salt encoding", "error", err)
-		return false, nil
-	}
-	expected, err := base64.RawURLEncoding.DecodeString(parts[5])
-	if err != nil || len(expected) != 32 {
-		slog.Error("password hash has an invalid digest encoding", "error", err)
-		return false, nil
-	}
-	actual, err := scrypt.Key([]byte(password), salt, 1<<14, 8, 1, len(expected))
-	if err != nil {
-		return false, err
-	}
-	return subtle.ConstantTimeCompare(actual, expected) == 1, nil
-}
-
-func hashSecret(value string) string {
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:])
 }
 
 // jsonLabels marshals a runner/token label set for a jsonb column. The input
@@ -2268,48 +2160,4 @@ func defaultReason(action, reason string) string {
 		return "operator " + action
 	}
 	return strings.TrimSpace(reason)
-}
-func timestamp(value time.Time) string { return value.UTC().Format(time.RFC3339Nano) }
-func stringValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
-// textValue reads a nullable sqlc-generated pgtype.Text the same way
-// stringValue reads a *string: empty when NULL.
-func textValue(value pgtype.Text) string {
-	if !value.Valid {
-		return ""
-	}
-	return value.String
-}
-
-// coalesceText mirrors SQL's COALESCE over two nullable columns read
-// separately (see GetWorkflowDetail's query comment for why they are no
-// longer combined with COALESCE in SQL): the first valid value wins, and
-// both absent yields "".
-func coalesceText(preferred, fallback pgtype.Text) string {
-	if preferred.Valid {
-		return preferred.String
-	}
-	return textValue(fallback)
-}
-func truncate(value string, length int) string {
-	if len(value) > length {
-		return value[:length]
-	}
-	return value
-}
-
-// parseInt converts a decimal string to an int64, rejecting the whole value
-// on any malformed input. fmt.Sscan was tried here previously, but it scans a
-// leading numeric prefix and reports success even when trailing characters
-// remain (e.g. "123abc" silently becomes 123) and leaves its destination
-// holding whatever it held before the call when nothing scans (e.g. "abc"),
-// which is a second way to fail without returning an error. strconv.ParseInt
-// requires the entire string to be a valid integer.
-func parseInt(value string) (int64, error) {
-	return strconv.ParseInt(value, 10, 64)
 }

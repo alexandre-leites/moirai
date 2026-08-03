@@ -32,8 +32,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
+	"github.com/loop-engineering/orchestrator/internal/secrethash"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
@@ -181,7 +184,7 @@ func (h *harness) schedulable(issueID string) bool {
 // project seeds an enabled project with one eligible open issue.
 func (h *harness) project() (projectID, issueID string) {
 	h.t.Helper()
-	projectID, issueID = newID(), newID()
+	projectID, issueID = idgen.NewID(), idgen.NewID()
 	h.exec(`INSERT INTO app.projects(id,name,repository_mode,repository_url,default_branch) VALUES($1,$2,'managed_clone','https://github.com/acme/demo.git','main')`, projectID, "demo-"+projectID[:8])
 	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','42','42','Fix scheduler','https://example.test/issues/42','open',true,now(),now())`, issueID, projectID)
 	return projectID, issueID
@@ -199,7 +202,7 @@ func (h *harness) runner() string {
 // tests exercising capacity-aware scheduling.
 func (h *harness) runnerWithCapacity(capacity int) string {
 	h.t.Helper()
-	runnerID := newID()
+	runnerID := idgen.NewID()
 	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,capacity,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,$3,now())`, runnerID, "runner-"+runnerID[:8], capacity)
 	if !h.addSession(runnerID, make(chan *runnerv1.OrchestratorToRunner, 16)) {
 		h.t.Fatal("runner session was already registered")
@@ -211,13 +214,13 @@ func (h *harness) runnerWithCapacity(capacity int) string {
 // carrying the session and CSRF metadata a mutating RPC requires.
 func (h *harness) adminContext() context.Context {
 	h.t.Helper()
-	userID, session, csrf := newID(), newID(), newID()
-	hash, err := passwordHash("Correct-Horse-1")
+	userID, session, csrf := idgen.NewID(), idgen.NewID(), idgen.NewID()
+	hash, err := secrethash.PasswordHash("Correct-Horse-1")
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	h.exec(`INSERT INTO app.users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')`, userID, "admin-"+userID[:8], hash)
-	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()+interval '1 hour',now())`, newID(), userID, hashSecret(session), hashSecret(csrf))
+	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()+interval '1 hour',now())`, idgen.NewID(), userID, secrethash.HashSecret(session), secrethash.HashSecret(csrf))
 	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, csrf))
 }
 
@@ -244,7 +247,7 @@ func (h *harness) runJob(runnerID string) (jobID, workflowID string) {
 func TestOnlyOneWorkflowRunsPerProject(t *testing.T) {
 	h := newHarness(t)
 	projectID, _ := h.project()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, newID(), projectID)
+	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, idgen.NewID(), projectID)
 	h.runner()
 	h.runner()
 
@@ -382,7 +385,7 @@ func TestRecoverySweepReclaimsAnExpiredLease(t *testing.T) {
 func TestRecoverySweepMarksStaleRunnersOffline(t *testing.T) {
 	h := newHarness(t)
 	beating := h.runner()
-	silent, never := newID(), newID()
+	silent, never := idgen.NewID(), idgen.NewID()
 	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,'silent','online','1','[]'::jsonb,now()-interval '10 minutes')`, silent)
 	h.exec(`INSERT INTO app.runners(id,name,status,version,labels) VALUES($1,'never','online','1','[]'::jsonb)`, never)
 
@@ -472,7 +475,7 @@ func TestCompletedEventDeliversThroughDeliveringStatus(t *testing.T) {
 func TestRecoverySweepResumesAStrandedDeliveryByStatusAlone(t *testing.T) {
 	h := newHarness(t)
 	projectID, issueID := h.project()
-	workflowID := newID()
+	workflowID := idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name,updated_at) VALUES($1,$2,$3,$4,'delivering','delivering',$5,now()-interval '10 minutes')`,
 		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
 
@@ -507,11 +510,11 @@ func TestRecoverySweepResumesAStrandedDeliveryByStatusAlone(t *testing.T) {
 func TestObserveWorkflowRecordsAConfirmedMergeEvenIfItsOwnStatusRaced(t *testing.T) {
 	h := newHarness(t)
 	projectID, issueID := h.project()
-	workflowID := newID()
+	workflowID := idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'waiting_github_checks','waiting_github_checks',$5)`,
 		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
 	h.exec(`INSERT INTO app.project_locks(project_id, workflow_run_id) VALUES($1,$2)`, projectID, workflowID)
-	h.exec(`INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github','7','https://example.test/pull/7','abc','open')`, newID(), workflowID)
+	h.exec(`INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github','7','https://example.test/pull/7','abc','open')`, idgen.NewID(), workflowID)
 
 	// sequencedGitHub's zero value is the ordinary success path: Checks reports
 	// green, MergeSquash succeeds, and Merged confirms it -- exactly what
@@ -564,7 +567,7 @@ func TestObserveWorkflowRecordsAConfirmedMergeEvenIfItsOwnStatusRaced(t *testing
 // how these tests reach that state directly.
 func (h *harness) seedDelivering(projectID, issueID string) (workflowID string) {
 	h.t.Helper()
-	workflowID = newID()
+	workflowID = idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'delivering','delivering',$5)`,
 		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
 	h.exec(`INSERT INTO app.project_locks(project_id, workflow_run_id) VALUES($1,$2)`, projectID, workflowID)
@@ -576,11 +579,11 @@ func (h *harness) seedDelivering(projectID, issueID string) (workflowID string) 
 // expects to find itself invoked against once GitHub reports checks green.
 func (h *harness) seedWaitingChecks(projectID, issueID string) (workflowID string) {
 	h.t.Helper()
-	workflowID = newID()
+	workflowID = idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'waiting_github_checks','waiting_github_checks',$5)`,
 		workflowID, projectID, issueID, "thread-"+workflowID, "agent/"+workflowID)
 	h.exec(`INSERT INTO app.project_locks(project_id, workflow_run_id) VALUES($1,$2)`, projectID, workflowID)
-	h.exec(`INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github','11','https://example.test/pull/11','abc','open')`, newID(), workflowID)
+	h.exec(`INSERT INTO app.pull_requests(id,workflow_run_id,provider,external_id,url,head_commit,state) VALUES($1,$2,'github','11','https://example.test/pull/11','abc','open')`, idgen.NewID(), workflowID)
 	return workflowID
 }
 
@@ -856,7 +859,7 @@ func TestDeliveryBlocksAfterExhaustingItsRetryBudget(t *testing.T) {
 func TestSchedulerMetricsCountsADeliveringRunAsActive(t *testing.T) {
 	h := newHarness(t)
 	projectID, issueID := h.project()
-	workflowID := newID()
+	workflowID := idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'delivering','delivering')`,
 		workflowID, projectID, issueID, "thread-"+workflowID)
 
@@ -1047,7 +1050,7 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	ctx := context.Background()
 	// Two eligible open issues in enabled projects: the queue depth.
 	queuedProject, _ := h.project()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, newID(), queuedProject)
+	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, idgen.NewID(), queuedProject)
 	// Neither of these counts: one project is disabled, one issue is closed.
 	disabledProject, _ := h.project()
 	h.exec(`UPDATE app.projects SET enabled=false WHERE id=$1`, disabledProject)
@@ -1061,22 +1064,22 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	// now excludes an issue with a completed run of its own (#268) -- reusing
 	// one of the counted issues here would make this fixture's "done" run
 	// silently subtract from a count it is not testing.
-	runsIssueID := newID()
+	runsIssueID := idgen.NewID()
 	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','44','44','Run host','https://example.test/issues/44','open',false,now(),now())`, runsIssueID, queuedProject)
-	activeRun, doneRun := newID(), newID()
+	activeRun, doneRun := idgen.NewID(), idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, activeRun, queuedProject, runsIssueID, "thread-"+activeRun)
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'completed','done')`, doneRun, queuedProject, runsIssueID, "thread-"+doneRun)
 	// One scheduled job, and one that has finished.
-	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'running')`, newID(), activeRun, queuedProject)
-	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'completed')`, newID(), doneRun, queuedProject)
+	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'running')`, idgen.NewID(), activeRun, queuedProject)
+	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,status) VALUES($1,$2,$3,'completed')`, idgen.NewID(), doneRun, queuedProject)
 
 	// Four runners. The heartbeat age must be the oldest *enabled* one: 600s.
 	// The disabled and revoked runners are far older, and picking either the
 	// newest enabled runner or an out-of-service one is the failure this pins.
-	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '600 seconds')`, newID(), "stale-"+newID()[:8])
-	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '5 seconds')`, newID(), "fresh-"+newID()[:8])
-	h.exec(`INSERT INTO app.runners(id,name,enabled,status,version,labels,last_seen_at) VALUES($1,$2,false,'offline','1','[]'::jsonb,now()-interval '9 hours')`, newID(), "disabled-"+newID()[:8])
-	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at,revoked_at) VALUES($1,$2,'offline','1','[]'::jsonb,now()-interval '20 hours',now())`, newID(), "revoked-"+newID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '600 seconds')`, idgen.NewID(), "stale-"+idgen.NewID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '5 seconds')`, idgen.NewID(), "fresh-"+idgen.NewID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,enabled,status,version,labels,last_seen_at) VALUES($1,$2,false,'offline','1','[]'::jsonb,now()-interval '9 hours')`, idgen.NewID(), "disabled-"+idgen.NewID()[:8])
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at,revoked_at) VALUES($1,$2,'offline','1','[]'::jsonb,now()-interval '20 hours',now())`, idgen.NewID(), "revoked-"+idgen.NewID()[:8])
 
 	snapshot, err := h.MetricsSnapshot(ctx)
 	if err != nil {
@@ -1242,8 +1245,8 @@ func TestScrapeSurvivesAnUnreachableDatabase(t *testing.T) {
 // until the first heartbeat.
 func TestHeartbeatAgeCountsANeverConnectedRunnerFromRegistration(t *testing.T) {
 	h := newHarness(t)
-	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at,registered_at) VALUES($1,$2,'offline','1','[]'::jsonb,NULL,now()-interval '3000 seconds')`, newID(), "never-connected")
-	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '10 seconds')`, newID(), "connected")
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at,registered_at) VALUES($1,$2,'offline','1','[]'::jsonb,NULL,now()-interval '3000 seconds')`, idgen.NewID(), "never-connected")
+	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now()-interval '10 seconds')`, idgen.NewID(), "connected")
 
 	snapshot, err := h.MetricsSnapshot(context.Background())
 	if err != nil {
@@ -1313,7 +1316,7 @@ func (h *harness) runState(workflowID string) runState {
 		Scan(&state.status, &state.phase, &blocking, &terminal, &state.completed); err != nil {
 		h.t.Fatal(err)
 	}
-	state.blocking, state.terminal = stringValue(blocking), stringValue(terminal)
+	state.blocking, state.terminal = textutil.StringValue(blocking), textutil.StringValue(terminal)
 	return state
 }
 
@@ -1657,7 +1660,7 @@ func TestCancelWithoutAJobDoesNotErrorOrNotifyAnyone(t *testing.T) {
 	projectID, issueID := h.project()
 	runnerID := h.runner()
 	outbound := h.outboundChannel(runnerID)
-	workflowID := newID()
+	workflowID := idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase,branch_name) VALUES($1,$2,$3,$4,'offered','offered','agent/'||$4)`, workflowID, projectID, issueID, workflowID)
 
 	if _, err := h.CancelWorkflow(h.adminContext(), &controlv1.CancelWorkflowRequest{WorkflowRunId: workflowID, Reason: "operator stopped it"}); err != nil {
@@ -1759,12 +1762,12 @@ func TestWorkflowRunStatusCheckConstraintMatchesKnownStatuses(t *testing.T) {
 	projectID, issueID := h.project()
 
 	for status := range knownStatuses {
-		workflowID := newID()
+		workflowID := idgen.NewID()
 		h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,$5,$5)`,
 			workflowID, projectID, issueID, "thread-"+workflowID, status.String())
 	}
 
-	workflowID := newID()
+	workflowID := idgen.NewID()
 	_, err := h.pool.Exec(context.Background(),
 		`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'implementing','implementing')`,
 		workflowID, projectID, issueID, "thread-"+workflowID)
@@ -2032,7 +2035,7 @@ func TestListWorkflowsIsBoundedAndBatched(t *testing.T) {
 	ids := make([]string, total)
 	threads := make([]string, total)
 	for i := range ids {
-		ids[i] = newID()
+		ids[i] = idgen.NewID()
 		threads[i] = "thread-" + ids[i]
 	}
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase)
@@ -2092,7 +2095,7 @@ func TestStoreJobSecretWritesAnAuditEntry(t *testing.T) {
 
 	projectID, _ := h.project()
 	runnerID := h.runner()
-	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret("runner-credential"))
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, idgen.NewID(), runnerID, secrethash.HashSecret("runner-credential"))
 	// StoreJobSecret only ever rotates an existing credential (its query is an
 	// UPDATE, not an upsert), so a row must already exist for the kind.
 	h.exec(`INSERT INTO app.project_credentials(project_id,kind,ciphertext,nonce) VALUES($1,'agent:OPENROUTER_API_KEY','\x00'::bytea,'\x00'::bytea)`, projectID)
@@ -2142,7 +2145,7 @@ func TestStoreJobSecretRecordsNoAuditEntryWhenNothingWasStored(t *testing.T) {
 
 	_, _ = h.project()
 	runnerID := h.runner()
-	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret("runner-credential"))
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, idgen.NewID(), runnerID, secrethash.HashSecret("runner-credential"))
 	jobID, _ := h.runJob(runnerID)
 	var generation int64
 	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
@@ -2436,13 +2439,13 @@ func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
 // deliberately wrong pair from them.
 func (h *harness) userSession(role string) (ctx context.Context, session, csrf string) {
 	h.t.Helper()
-	userID, session, csrf := newID(), newID(), newID()
-	hash, err := passwordHash("Correct-Horse-1")
+	userID, session, csrf := idgen.NewID(), idgen.NewID(), idgen.NewID()
+	hash, err := secrethash.PasswordHash("Correct-Horse-1")
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	h.exec(`INSERT INTO app.users(id,username,password_hash,role) VALUES($1,$2,$3,$4)`, userID, "user-"+userID[:8], hash, role)
-	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()+interval '1 hour',now())`, newID(), userID, hashSecret(session), hashSecret(csrf))
+	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()+interval '1 hour',now())`, idgen.NewID(), userID, secrethash.HashSecret(session), secrethash.HashSecret(csrf))
 	return metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, csrf)), session, csrf
 }
 
@@ -2466,13 +2469,13 @@ func TestRequireActorRejectsAnUnknownSessionToken(t *testing.T) {
 // and this is what pins that the predicate keeps checking it.
 func TestRequireActorRejectsAnExpiredSession(t *testing.T) {
 	h := newHarness(t)
-	userID, session, csrf := newID(), newID(), newID()
-	hash, err := passwordHash("Correct-Horse-1")
+	userID, session, csrf := idgen.NewID(), idgen.NewID(), idgen.NewID()
+	hash, err := secrethash.PasswordHash("Correct-Horse-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.exec(`INSERT INTO app.users(id,username,password_hash,role) VALUES($1,$2,$3,'admin')`, userID, "expired-"+userID[:8], hash)
-	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()-interval '1 minute',now())`, newID(), userID, hashSecret(session), hashSecret(csrf))
+	h.exec(`INSERT INTO app.user_sessions(id,user_id,token_hash,csrf_token_hash,expires_at,last_seen_at) VALUES($1,$2,$3,$4,now()-interval '1 minute',now())`, idgen.NewID(), userID, secrethash.HashSecret(session), secrethash.HashSecret(csrf))
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(sessionHeader, session, csrfHeader, csrf))
 	if _, err := h.requireActor(ctx, false); status.Code(err) != codes.Unauthenticated {
 		t.Fatalf("requireActor with an expired session = %v, want Unauthenticated", err)
@@ -2608,9 +2611,9 @@ func heartbeatMessage(runnerID, credential string) *runnerv1.RunnerToOrchestrato
 // stream session -- the Connect tests below drive that themselves.
 func (h *harness) runnerCredential() (runnerID, credential string) {
 	h.t.Helper()
-	runnerID, credential = newID(), randomSecret()
+	runnerID, credential = idgen.NewID(), idgen.RandomSecret()
 	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'offline','1','[]'::jsonb,now())`, runnerID, "runner-"+runnerID[:8])
-	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret(credential))
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, idgen.NewID(), runnerID, secrethash.HashSecret(credential))
 	return runnerID, credential
 }
 
@@ -2749,7 +2752,7 @@ func TestConnectReAuthenticatesEveryMessageNotJustTheFirst(t *testing.T) {
 // exactly one more.
 func TestEnqueueDropsOnceTheSixteenDeepBufferIsFull(t *testing.T) {
 	h := newHarness(t)
-	runnerID := newID()
+	runnerID := idgen.NewID()
 	outbound := make(chan *runnerv1.OrchestratorToRunner, 16)
 	if !h.addSession(runnerID, outbound) {
 		t.Fatal("addSession rejected a fresh runner ID")
@@ -2800,7 +2803,7 @@ func boundedEnqueue(t *testing.T, s *Server, runnerID string) bool {
 // the live session.
 func TestRemoveSessionDoesNotEvictAReconnectedRunnersNewSession(t *testing.T) {
 	h := newHarness(t)
-	runnerID := newID()
+	runnerID := idgen.NewID()
 
 	oldSession := make(chan *runnerv1.OrchestratorToRunner, 16)
 	if !h.addSession(runnerID, oldSession) {
@@ -2910,10 +2913,10 @@ func TestResolveJobSecretRoundTripsTheEncryptedValue(t *testing.T) {
 // those tests don't otherwise need.
 func (h *harness) seedFencedJob(runnerID, projectID string) (jobID string, generation int64) {
 	h.t.Helper()
-	workflowID, issueID := newID(), newID()
+	workflowID, issueID := idgen.NewID(), idgen.NewID()
 	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github',$3,$3,'issue','https://example.test/issues/x','open',true,now(),now())`, issueID, projectID, issueID[:8])
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, workflowID, projectID, issueID, "thread-"+workflowID)
-	jobID = newID()
+	jobID = idgen.NewID()
 	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,runner_id,status,lease_generation,lease_expires_at) VALUES($1,$2,$3,$4,'running',1,now()+interval '1 hour')`, jobID, workflowID, projectID, runnerID)
 	return jobID, 1
 }
@@ -3014,7 +3017,7 @@ func TestRegistrationTokenIsSingleUse(t *testing.T) {
 func TestRegistrationTokenExpiryIsEnforced(t *testing.T) {
 	h := newHarness(t)
 	token := h.createRegistrationToken(t, []string{"linux"})
-	h.exec(`UPDATE app.runner_registration_tokens SET expires_at=now()-interval '1 minute' WHERE token_hash=$1`, hashSecret(token))
+	h.exec(`UPDATE app.runner_registration_tokens SET expires_at=now()-interval '1 minute' WHERE token_hash=$1`, secrethash.HashSecret(token))
 
 	if _, err := h.RegisterRunner(context.Background(), &runnerv1.RegisterRunnerRequest{
 		Name: "runner-one", Token: token, ProtocolVersion: "1.0", Labels: []string{"linux"},

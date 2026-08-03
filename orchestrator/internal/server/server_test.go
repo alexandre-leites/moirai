@@ -16,6 +16,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
+	"github.com/loop-engineering/orchestrator/internal/secrethash"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 )
 
 // captureLogs swaps the default slog logger for one that writes to the
@@ -96,19 +99,19 @@ func TestValidateProjectRejectsExistingPathEvenWithOtherwiseValidFields(t *testi
 }
 
 func TestPasswordHashCompatibility(t *testing.T) {
-	hash, err := passwordHash("Correct1!")
+	hash, err := secrethash.PasswordHash("Correct1!")
 	if err != nil {
 		t.Fatal(err)
 	}
-	matched, err := passwordMatches("Correct1!", hash)
+	matched, err := secrethash.PasswordMatches("Correct1!", hash)
 	if err != nil || !matched {
 		t.Fatalf("password did not match: %v", err)
 	}
-	matched, err = passwordMatches("Wrong1!x", hash)
+	matched, err = secrethash.PasswordMatches("Wrong1!x", hash)
 	if err != nil || matched {
 		t.Fatalf("wrong password matched: %v", err)
 	}
-	if validPassword("password") {
+	if secrethash.ValidPassword("password") {
 		t.Fatal("weak password accepted")
 	}
 }
@@ -306,7 +309,7 @@ func TestEventAndIdentifierValidation(t *testing.T) {
 	if !validEventType("completed") || validEventType("retry") || !terminalEvent("failed") || terminalEvent("progress") {
 		t.Fatal("event validation is incorrect")
 	}
-	if !validID("1b5f4a4d-2345-4ff2-a014-189531caf2d7") || validID("not-a-uuid") {
+	if !idgen.ValidID("1b5f4a4d-2345-4ff2-a014-189531caf2d7") || idgen.ValidID("not-a-uuid") {
 		t.Fatal("identifier validation is incorrect")
 	}
 }
@@ -739,7 +742,7 @@ func TestConfiguredCipherDistinguishesMisconfiguredFromUnset(t *testing.T) {
 func TestPasswordMatchesLogsUnparseableHashWithoutChangingItsResult(t *testing.T) {
 	logs := captureLogs(t)
 
-	matches, err := passwordMatches("any-password", "not-a-valid-scrypt-hash")
+	matches, err := secrethash.PasswordMatches("any-password", "not-a-valid-scrypt-hash")
 	if err != nil {
 		t.Fatalf("passwordMatches error = %v, want nil (must stay indistinguishable from a wrong password)", err)
 	}
@@ -791,20 +794,20 @@ func TestJsonLabelsPropagatesItsMarshalError(t *testing.T) {
 // outright.
 func TestParseIntRejectsMalformedInput(t *testing.T) {
 	for _, value := range []string{"123abc", "abc", "", "12.5", " 123", "123 ", "0x1F"} {
-		if _, err := parseInt(value); err == nil {
-			t.Fatalf("parseInt(%q): want an error, got none", value)
+		if _, err := textutil.ParseInt(value); err == nil {
+			t.Fatalf("textutil.ParseInt(%q): want an error, got none", value)
 		}
 	}
 }
 
 func TestParseIntAcceptsValidIntegers(t *testing.T) {
 	for value, want := range map[string]int64{"0": 0, "123": 123, "9223372036854775807": 9223372036854775807} {
-		got, err := parseInt(value)
+		got, err := textutil.ParseInt(value)
 		if err != nil {
-			t.Fatalf("parseInt(%q): unexpected error %v", value, err)
+			t.Fatalf("textutil.ParseInt(%q): unexpected error %v", value, err)
 		}
 		if got != want {
-			t.Fatalf("parseInt(%q) = %d, want %d", value, got, want)
+			t.Fatalf("textutil.ParseInt(%q) = %d, want %d", value, got, want)
 		}
 	}
 }
@@ -857,7 +860,7 @@ func TestSyncErrorMessagePassesThroughPlainErrors(t *testing.T) {
 // costing anything close to a real one.
 func TestLoginsDummyHashForUnknownUsernamesStillParses(t *testing.T) {
 	logs := captureLogs(t)
-	matches, err := passwordMatches("whatever-password", "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	matches, err := secrethash.PasswordMatches("whatever-password", "scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	if err != nil {
 		t.Fatalf("Login's dummy hash failed to parse: %v", err)
 	}

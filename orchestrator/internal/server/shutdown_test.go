@@ -17,6 +17,8 @@ import (
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
+	"github.com/loop-engineering/orchestrator/internal/secrethash"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -59,9 +61,9 @@ func (f *fakeConnectStream) RecvMsg(m any) error          { return nil }
 // plaintext credential Connect's first message must present.
 func (h *harness) runnerWithCredential() (runnerID, credential string) {
 	h.t.Helper()
-	runnerID, credential = newID(), randomSecret()
+	runnerID, credential = idgen.NewID(), idgen.RandomSecret()
 	h.exec(`INSERT INTO app.runners(id,name,status,version,labels,last_seen_at) VALUES($1,$2,'online','1','[]'::jsonb,now())`, runnerID, "runner-"+runnerID[:8])
-	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, newID(), runnerID, hashSecret(credential))
+	h.exec(`INSERT INTO app.runner_credentials(id,runner_id,credential_hash) VALUES($1,$2,$3)`, idgen.NewID(), runnerID, secrethash.HashSecret(credential))
 	return runnerID, credential
 }
 

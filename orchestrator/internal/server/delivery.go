@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/loop-engineering/orchestrator/internal/db"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 )
 
 type deliveryWorkflow struct {
@@ -52,7 +54,7 @@ func (s *Server) deliverWorkflow(ctx context.Context, workflowID string) error {
 	defer tx.Rollback(ctx)
 	queries := s.queries.WithTx(tx)
 	if err := queries.UpsertPullRequest(ctx, db.UpsertPullRequestParams{
-		ID:            newID(),
+		ID:            idgen.NewID(),
 		WorkflowRunID: workflowID,
 		ExternalID:    pr.Number,
 		Url:           pr.URL,
@@ -104,7 +106,7 @@ func (s *Server) ObserveWorkflows(ctx context.Context) error {
 // offer nobody answered — nothing was spent, so that work should simply be
 // offered again rather than waiting for a human.
 func (s *Server) terminateWorkflow(ctx context.Context, workflowID string, state Status, eventType, cause string) error {
-	reason := truncate(cause, 1024)
+	reason := textutil.Truncate(cause, 1024)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return databaseError(err)
@@ -375,7 +377,7 @@ func (s *Server) rejectWorkflow(ctx context.Context, workflowID, comment string)
 	if comment != "" {
 		reason += ": " + comment
 	}
-	reason = truncate(reason, 1024)
+	reason = textutil.Truncate(reason, 1024)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return databaseError(err)

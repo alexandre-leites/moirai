@@ -8,6 +8,8 @@ import (
 	"time"
 
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	"github.com/loop-engineering/orchestrator/internal/idgen"
+	"github.com/loop-engineering/orchestrator/internal/textutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -191,7 +193,7 @@ func (s *Server) emitWorkflowEvents(ctx context.Context, stream grpc.ServerStrea
 // state even if several updates coalesced before this notification was
 // processed, and picks up fields the trigger doesn't emit (e.g. version).
 func (s *Server) emitRunnerEvent(ctx context.Context, stream grpc.ServerStreamingServer[controlv1.ControlPlaneEvent], payload dashboardNotification) error {
-	if !validID(payload.Runner.ID) {
+	if !idgen.ValidID(payload.Runner.ID) {
 		return nil
 	}
 	runner, err := s.runner(ctx, payload.Runner.ID)
@@ -227,8 +229,8 @@ func (s *Server) workflowsByIDs(ctx context.Context, ids []string) (map[string]*
 		if err := rows.Scan(&workflow.Id, &workflow.ProjectId, &workflow.Status, &workflow.Phase, &workflow.IssueExternalId, &workflow.IssueTitle, &branch, &externalID, &url, &state, &reason, &workflow.PlanningAttempts, &workflow.ImplementationAttempts, &workflow.PipelineRepairAttempts, &workflow.CiRepairAttempts, &workflow.ReviewCycles, &workflow.TotalAgentExecutions, &created, &updated); err != nil {
 			return nil, databaseError(err)
 		}
-		workflow.BranchName, workflow.PullRequestExternalId, workflow.PullRequestUrl, workflow.PullRequestState, workflow.BlockingReason = stringValue(branch), stringValue(externalID), stringValue(url), stringValue(state), stringValue(reason)
-		workflow.CreatedAt, workflow.UpdatedAt = timestamp(created), timestamp(updated)
+		workflow.BranchName, workflow.PullRequestExternalId, workflow.PullRequestUrl, workflow.PullRequestState, workflow.BlockingReason = textutil.StringValue(branch), textutil.StringValue(externalID), textutil.StringValue(url), textutil.StringValue(state), textutil.StringValue(reason)
+		workflow.CreatedAt, workflow.UpdatedAt = textutil.Timestamp(created), textutil.Timestamp(updated)
 		workflows[workflow.Id] = workflow
 	}
 	if err := rows.Err(); err != nil {
