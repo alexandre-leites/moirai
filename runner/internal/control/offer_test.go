@@ -106,7 +106,7 @@ func TestOfferStateAdmitsTheSameJobIDAgainAfterItIsAbandoned(t *testing.T) {
 	}
 
 	// The re-offer: same job ID, next lease_generation, exactly what
-	// preparePlanningCompletion (orchestrator/internal/server/server.go)
+	// dispatchImplementationJob (orchestrator/internal/server/server.go)
 	// sends once the planner execution's terminal event is processed.
 	second := validOffer(t, "job-1", 2)
 	admitted, err := state.Admit(second)
