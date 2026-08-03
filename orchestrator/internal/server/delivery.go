@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -169,16 +170,43 @@ func (s *Server) observeWorkflow(ctx context.Context, workflowID string) error {
 		return databaseError(err)
 	}
 	if rowsAffected != 1 {
-		return nil
+		// GitHub already confirmed the merge above -- that already happened,
+		// irreversibly -- so a miss here is not "nothing to do", it is this
+		// run's status column having moved out from under the guard (an
+		// operator cancelled it, abandonedChecks blocked it, or anything
+		// else) in the window between this function reading it and GitHub
+		// answering. Force the completion through regardless of whatever
+		// status it raced to and say so loudly: silently returning here is
+		// exactly what left app.pull_requests saying "open" and the issue
+		// schedulable for work whose pull request was already in main (#281).
+		previousStatus, forceErr := queries.ForceWorkflowCompleted(ctx, workflowID)
+		if forceErr != nil {
+			return databaseError(forceErr)
+		}
+		slog.Warn("pull request merge confirmed but the completing update raced; forcing the run to completed",
+			"workflow_run_id", workflowID, "previous_status", previousStatus)
+		if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+			WorkflowRunID: workflowID,
+			EventType:     "delivery.completion_raced",
+			Severity:      "warning",
+			Column4:       []byte(fmt.Sprintf(`{"previous_status":%q}`, previousStatus)),
+		}); err != nil {
+			return databaseError(err)
+		}
 	}
 	if err := queries.MarkPullRequestMerged(ctx, workflowID); err != nil {
 		return databaseError(err)
 	}
-	// Nothing needs writing to the issue itself: MarkWorkflowCompleted above
-	// already landed this run on 'completed', which the scheduler's
-	// app.workflow_runs join (ListQueueEntries, ClaimSchedulableIssue)
-	// excludes permanently — there is no retry path off StatusCompleted (see
-	// genuinelyTerminalStatuses), so nothing ever supersedes it. See #268.
+	// Nothing needs writing to the issue itself: MarkWorkflowCompleted (or,
+	// on the raced path above, ForceWorkflowCompleted) already landed this
+	// run on 'completed', which the scheduler's app.workflow_runs join
+	// (ListQueueEntries, ClaimSchedulableIssue) excludes permanently — there
+	// is no retry path off StatusCompleted (see genuinelyTerminalStatuses),
+	// so nothing ever supersedes it. See #268 and #281.
+	//
+	// DeleteProjectLock below is safe to run unconditionally even when the
+	// raced path already released the lock (e.g. an operator's cancel):
+	// deleting a lock row that is already gone is a no-op.
 	if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: workflow.projectID, WorkflowRunID: workflowID}); err != nil {
 		return databaseError(err)
 	}

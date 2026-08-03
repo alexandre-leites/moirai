@@ -59,6 +59,15 @@ type Querier interface {
 	DrainRunner(ctx context.Context, id string) (int64, error)
 	EnableRunner(ctx context.Context, id string) (int64, error)
 	ExpireUnansweredOffers(ctx context.Context, unansweredOffer pgtype.Interval) error
+	// Used only when MarkWorkflowCompleted's guard above misses: GitHub has
+	// already confirmed the pull request merged (observeWorkflow calls this only
+	// after that), which is irreversible, regardless of what this run's status
+	// column raced to in the meantime (an operator cancelling it, abandonedChecks
+	// blocking it, or anything else). The WHERE clause deliberately does not
+	// repeat the 'waiting_github_checks' guard: the merge is a fact this write
+	// must land no matter which status it finds. previous_status lets the caller
+	// log what the race actually was.
+	ForceWorkflowCompleted(ctx context.Context, id string) (string, error)
 	GetDeliveryWorkflow(ctx context.Context, id string) (GetDeliveryWorkflowRow, error)
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
