@@ -1222,11 +1222,12 @@ func TestOnlyAGenuineBlockDeclarationDivertsTheTerminalStatus(t *testing.T) {
 	}
 }
 
-// Agent prose reaching a text column: PostgreSQL rejects a NUL byte outright,
-// and the whole terminal event fails with it -- the run would keep its project
-// lock and never end. The bound is the orchestrator's own; the runner applies
-// one too, but the orchestrator does not get to assume a runner it does not
-// control did so.
+// Agent prose reaching a text column: PostgreSQL used to reject a NUL byte
+// outright, failing the whole terminal event with it -- the run would keep
+// its project lock and never end (#302). sanitizeEventPayload now rewrites a
+// NUL to a visible placeholder before the payload reaches either the
+// event's own ::jsonb column or agentBlockReason, so it is exercised here
+// beside the other hostile prose this payload already carries.
 func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
 	h := newHarness(t)
 	h.project()
@@ -1240,12 +1241,11 @@ func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
 	payload, err := json.Marshal(map[string]any{
 		"status":  "blocked",
 		"blocked": true,
-		// An ANSI introducer, which PostgreSQL stores in jsonb happily and
-		// which must not survive into an operator-facing column. A NUL byte
-		// cannot be tested here: jsonb rejects one anywhere in the payload,
-		// so the whole event insert fails before the reason is composed --
-		// a separate defect, pinned against the composer in server_test.go.
-		"summary":       "credential missing\x1b[31m and more prose",
+		// An ANSI introducer and a NUL byte, neither of which may survive
+		// into an operator-facing column: jsonb stores the former happily
+		// but only sanitizeEventPayload keeps the latter from failing the
+		// event outright (#302).
+		"summary":       "credential missing\x1b[31m and more prose\x00 trailing",
 		"remainingWork": entries,
 	})
 	if err != nil {
@@ -1268,14 +1268,80 @@ func TestAnAgentBlockSurvivesHostileAndOversizedProse(t *testing.T) {
 	if strings.ContainsAny(state.blocking, "\x00\x1b") || !utf8.ValidString(state.blocking) {
 		t.Fatalf("blocking_reason = %q kept a control byte or invalid UTF-8", state.blocking)
 	}
-	if !strings.Contains(state.blocking, "credential missing") {
-		t.Fatalf("blocking_reason = %q lost the agent's words", state.blocking)
+	if !strings.Contains(state.blocking, "credential missing") || !strings.Contains(state.blocking, "trailing") {
+		t.Fatalf("blocking_reason = %q lost the agent's words around the sanitized NUL byte", state.blocking)
 	}
 	// The remaining-work list is the half an operator acts on, so it has to
 	// survive the bound rather than be crowded out by prose, and the list it
 	// opens has to close.
 	if !strings.Contains(state.blocking, "\u6f22") || !strings.HasSuffix(state.blocking, ")") {
 		t.Fatalf("blocking_reason = %q dropped the remaining work or left its list unclosed", state.blocking)
+	}
+}
+
+// TestNULByteInALogEventPayloadIsStoredNotRejected pins #302 against a
+// non-terminal event: the runner forwards payload["result"] verbatim, and an
+// agent that writes a NUL anywhere into .loop/result.json used to abort the
+// jsonb INSERT and fail delivery outright, before this fix. The NUL sits
+// nested inside an object and an array, not just a top-level field, matching
+// how an arbitrary agent result document is actually shaped.
+func TestNULByteInALogEventPayloadIsStoredNotRejected(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	nul := literalUnicodeEscape("0000")
+	payload := `{"result":{"raw":"agent output with a stray` + nul + `byte","steps":["ok",{"note":"nested` + nul + `NUL"}]}}`
+
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: "log", PayloadJson: payload,
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent with a NUL byte in the payload: %v", err)
+	}
+
+	var stored []byte
+	if err := h.pool.QueryRow(context.Background(), `SELECT payload FROM app.workflow_events WHERE workflow_run_id=$1 AND event_type='log'`, workflowID).Scan(&stored); err != nil {
+		t.Fatalf("the event was not retrievable: %v", err)
+	}
+	if strings.ContainsRune(string(stored), 0) {
+		t.Fatalf("stored payload %s still carries a raw NUL byte", stored)
+	}
+	if !strings.Contains(string(stored), "agent output with a stray") || !strings.Contains(string(stored), "byte") {
+		t.Fatalf("stored payload %s lost content around the sanitized NUL", stored)
+	}
+}
+
+// TestNULByteInATerminalEventPayloadStillReachesTerminalStatus pins #302's
+// worst case: a NUL byte anywhere in a terminal event's payload must not
+// strand the run. Before this fix, the jsonb INSERT for the event row failed
+// before SetWorkflowTerminalStatus and DeleteProjectLockByWorkflow ever ran,
+// leaving the run without a terminal status, the project lock held forever,
+// and the issue permanently unschedulable.
+func TestNULByteInATerminalEventPayloadStillReachesTerminalStatus(t *testing.T) {
+	h := newHarness(t)
+	_, issueID := h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	nul := literalUnicodeEscape("0000")
+	payload := `{"status":"failed","exitCode":1,"error":"agent exited 1","result":{"raw":"crash trace with a stray` + nul + `byte"}}`
+
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: h.leaseGeneration(jobID), EventSequence: 1, Type: "failed", PayloadJson: payload,
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent with a NUL byte in a terminal payload: %v", err)
+	}
+
+	state := h.runState(workflowID)
+	if state.status != "failed" {
+		t.Fatalf("status = %q, want failed: a NUL byte in the payload must not strand the run with no terminal status", state.status)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE workflow_run_id=$1`, workflowID); locks != 0 {
+		t.Fatal("a terminal event with a NUL byte in its payload left the project lock behind, wedging the project")
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("a terminal event with a NUL byte in its payload left the issue schedulable")
 	}
 }
 
