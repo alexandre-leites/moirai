@@ -24,7 +24,7 @@ func TestLocalFileTaskSourceListsTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tasks, err := LocalFileTaskSource{}.ListTasks(context.Background(), "p1", dir)
+	tasks, err := LocalFileTaskSource{}.ListTasks(context.Background(), "p1", "s1", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,13 +65,13 @@ func TestLocalFileTaskSourceListsTasks(t *testing.T) {
 }
 
 func TestLocalFileTaskSourceRejectsMissingDirectory(t *testing.T) {
-	if _, err := (LocalFileTaskSource{}).ListTasks(context.Background(), "p1", filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+	if _, err := (LocalFileTaskSource{}).ListTasks(context.Background(), "p1", "s1", filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
 		t.Fatal("expected an error for a missing directory")
 	}
 }
 
 func TestLocalFileTaskSourceRejectsEmptyRef(t *testing.T) {
-	if _, err := (LocalFileTaskSource{}).ListTasks(context.Background(), "p1", ""); err == nil {
+	if _, err := (LocalFileTaskSource{}).ListTasks(context.Background(), "p1", "s1", ""); err == nil {
 		t.Fatal("expected an error for an empty ref")
 	}
 }
@@ -79,7 +79,7 @@ func TestLocalFileTaskSourceRejectsEmptyRef(t *testing.T) {
 func TestLocalFileTaskSourceRejectsATaskWithNoTitle(t *testing.T) {
 	dir := t.TempDir()
 	writeTaskFile(t, dir, "no-title.json", `{"eligible":true}`)
-	if _, err := (LocalFileTaskSource{}).ListTasks(context.Background(), "p1", dir); err == nil {
+	if _, err := (LocalFileTaskSource{}).ListTasks(context.Background(), "p1", "s1", dir); err == nil {
 		t.Fatal("expected an error for a task file with no title")
 	}
 }

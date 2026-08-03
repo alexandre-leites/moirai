@@ -102,7 +102,15 @@ func redactSecrets(value string) string {
 // leaking into code that has to stay provider-neutral.
 type githubCLI struct {
 	command Command
-	token   func(context.Context, string) (string, error)
+	// token resolves the GitHub token to use, given a project and (for a
+	// TaskSource call only) the task source making the call. CodeHost
+	// methods always pass an empty taskSourceID -- a project has 0..1 code
+	// hosts, never one per task source (see tasksource.go's TaskSource doc
+	// comment) -- so they can only ever resolve a project-level token.
+	// ListTasks passes its real taskSourceID, so two GitHub task sources on
+	// the same project can each resolve their own token instead of sharing
+	// the project's one slot (see resolveGitHubToken).
+	token func(ctx context.Context, projectID, taskSourceID string) (string, error)
 }
 
 // githubIssue is gh's own issue shape, decoded straight off `gh issue list
@@ -192,23 +200,27 @@ func (check checkRun) result() CheckState {
 
 // NewGitHubCLI builds the single adapter instance that satisfies both
 // TaskSource and CodeHost for a GitHub-tracked, GitHub-hosted project.
-func NewGitHubCLI(command Command, token func(context.Context, string) (string, error)) githubCLI {
+func NewGitHubCLI(command Command, token func(ctx context.Context, projectID, taskSourceID string) (string, error)) githubCLI {
 	if command == nil {
 		command = execCommand{}
 	}
 	return githubCLI{command: command, token: token}
 }
 
-// resolveGitHubToken returns the project's stored github_token, or an empty
-// string when the project has none configured so the caller falls back to the
-// global token file. A project that stores a token it cannot decrypt is an
-// error, not a silent fallback: using the wrong tenant's token would publish
-// one project's work under another's identity.
-func resolveGitHubToken(ctx context.Context, queries *db.Queries, projectID string) (string, error) {
+// resolveGitHubToken returns the stored github_token to use for projectID,
+// scoped to taskSourceID when given (a TaskSource call, see githubCLI.token),
+// or project-level only when taskSourceID is empty (every CodeHost call:
+// FindOrCreatePR/Checks/Merge/Merged never pass one, since a project has 0..1
+// code hosts, never one per task source). It returns an empty string when
+// nothing is configured at that scope so the caller falls back to the global
+// token file. A project that stores a token it cannot decrypt is an error,
+// not a silent fallback: using the wrong tenant's token would publish one
+// project's work under another's identity.
+func resolveGitHubToken(ctx context.Context, queries *db.Queries, projectID, taskSourceID string) (string, error) {
 	if projectID == "" {
 		return "", nil
 	}
-	secret, err := queries.GetProjectCredentialSecret(ctx, db.GetProjectCredentialSecretParams{ProjectID: projectID, Kind: "github_token"})
+	secret, err := queries.GetProjectCredentialSecret(ctx, db.GetProjectCredentialSecretParams{ProjectID: projectID, Kind: "github_token", TaskSourceID: taskSourceID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
@@ -238,15 +250,18 @@ func resolveGitHubToken(ctx context.Context, queries *db.Queries, projectID stri
 // exactly the whole list".
 const githubIssueListLimit = 5000
 
-// ListTasks implements TaskSource. ref is the project's configured
-// repository_url exactly as stored; it is parsed into an owner/name slug here
-// (via repositoryRef), not by the generic sync code that calls this.
-func (client githubCLI) ListTasks(ctx context.Context, projectID, ref string) ([]Task, error) {
+// ListTasks implements TaskSource. ref is this task source's own
+// configuration->>'ref' (see syncSource), parsed into an owner/name slug
+// here (via repositoryRef), not by the generic sync code that calls this.
+// taskSourceID scopes the GitHub token lookup to this source (see
+// resolveGitHubToken), so two GitHub sources on the same project can each
+// hold their own token.
+func (client githubCLI) ListTasks(ctx context.Context, projectID, taskSourceID, ref string) ([]Task, error) {
 	repository, err := repositoryRef(ref)
 	if err != nil {
 		return nil, err
 	}
-	token, err := client.token(ctx, projectID)
+	token, err := client.token(ctx, projectID, taskSourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +320,7 @@ func (client githubCLI) FindOrCreatePR(ctx context.Context, projectID, ref, bran
 	if err != nil {
 		return PullRequest{}, err
 	}
-	token, err := client.token(ctx, projectID)
+	token, err := client.token(ctx, projectID, "")
 	if err != nil {
 		return PullRequest{}, err
 	}
@@ -344,7 +359,7 @@ func (client githubCLI) Checks(ctx context.Context, projectID, ref, number strin
 	if err != nil {
 		return checksPending, err
 	}
-	token, err := client.token(ctx, projectID)
+	token, err := client.token(ctx, projectID, "")
 	if err != nil {
 		return checksPending, err
 	}
@@ -368,7 +383,7 @@ func (client githubCLI) Merge(ctx context.Context, projectID, ref, number string
 	if err != nil {
 		return err
 	}
-	token, err := client.token(ctx, projectID)
+	token, err := client.token(ctx, projectID, "")
 	if err != nil {
 		return err
 	}
@@ -383,7 +398,7 @@ func (client githubCLI) Merged(ctx context.Context, projectID, ref, number strin
 	if err != nil {
 		return false, err
 	}
-	token, err := client.token(ctx, projectID)
+	token, err := client.token(ctx, projectID, "")
 	if err != nil {
 		return false, err
 	}

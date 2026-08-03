@@ -37,20 +37,26 @@ type Task struct {
 
 // TaskSource is where work comes from -- an issue tracker, in the MVP's only
 // shipped adapter, but the interface itself commits to nothing GitHub-shaped.
-// A project's issue_tracker_type selects which TaskSource constructs its
-// tasks (see resolveTaskSource); every implementation is responsible for
+// A project can configure any number of sources (app.project_task_sources,
+// see #293); each row's own provider selects which TaskSource constructs its
+// tasks (see resolveTaskSource), and every implementation is responsible for
 // deciding eligibility and priority itself before a Task ever reaches the
 // scheduler.
 type TaskSource interface {
-	// ListTasks returns every task currently known for the project. ref
-	// locates the project's tasks in whatever shape this source needs: the
-	// GitHub adapter reads it as an "owner/name" repository slug (see
-	// repositoryRef), the local-file adapter (localfile.go) reads it as a
-	// directory path. Both are populated from the same app.projects.repository_url
-	// column; a source-specific interpretation of the same configured string
-	// is exactly what lets a project be pointed at a different kind of source
-	// without a schema change.
-	ListTasks(ctx context.Context, projectID, ref string) ([]Task, error)
+	// ListTasks returns every task currently known for one configured source.
+	// taskSourceID identifies which app.project_task_sources row this call is
+	// for -- distinct from projectID because a project may have several
+	// sources, and is what lets an adapter scope anything source-specific
+	// (a per-source credential, see resolveGitHubToken) rather than only
+	// ever project-specific. ref locates that source's tasks in whatever
+	// shape this source needs: the GitHub adapter reads it as an
+	// "owner/name" repository slug (see repositoryRef), the local-file
+	// adapter (localfile.go) reads it as a directory path. Both come from
+	// the source's own configuration->>'ref' (see syncSource); a
+	// source-specific interpretation of the same configured string is
+	// exactly what lets one source be pointed at a different kind of
+	// tracker without a schema change.
+	ListTasks(ctx context.Context, projectID, taskSourceID, ref string) ([]Task, error)
 }
 
 // PullRequest is the neutral result of a CodeHost creating or finding a

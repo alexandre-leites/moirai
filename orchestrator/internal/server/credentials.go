@@ -128,6 +128,10 @@ func (s *RunnerServer) ResolveJobSecret(ctx context.Context, request *runnerv1.R
 	secret, err := s.queries.GetProjectCredentialSecret(ctx, db.GetProjectCredentialSecretParams{
 		ProjectID: projectID,
 		Kind:      kind,
+		// "" (project-level): a job's fenced project has no task source of
+		// its own here, and every credential a runner resolves this way
+		// (github_token, ssh_private_key, agent:*) is genuinely project-wide
+		// rather than task-source-specific.
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, status.Error(codes.NotFound, "no credential is configured for this project")

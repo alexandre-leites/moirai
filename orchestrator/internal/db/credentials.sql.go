@@ -12,7 +12,7 @@ import (
 )
 
 const deleteProjectCredential = `-- name: DeleteProjectCredential :execrows
-DELETE FROM app.project_credentials WHERE project_id = $1 AND kind = $2
+DELETE FROM app.project_credentials WHERE project_id = $1 AND kind = $2 AND task_source_id IS NULL
 `
 
 type DeleteProjectCredentialParams struct {
@@ -22,6 +22,24 @@ type DeleteProjectCredentialParams struct {
 
 func (q *Queries) DeleteProjectCredential(ctx context.Context, arg DeleteProjectCredentialParams) (int64, error) {
 	result, err := q.db.Exec(ctx, deleteProjectCredential, arg.ProjectID, arg.Kind)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteProjectCredentialForSource = `-- name: DeleteProjectCredentialForSource :execrows
+DELETE FROM app.project_credentials WHERE project_id = $1 AND kind = $2 AND task_source_id = $3
+`
+
+type DeleteProjectCredentialForSourceParams struct {
+	ProjectID    string
+	Kind         string
+	TaskSourceID pgtype.UUID
+}
+
+func (q *Queries) DeleteProjectCredentialForSource(ctx context.Context, arg DeleteProjectCredentialForSourceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteProjectCredentialForSource, arg.ProjectID, arg.Kind, arg.TaskSourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -53,11 +71,15 @@ const getProjectCredentialSecret = `-- name: GetProjectCredentialSecret :one
 SELECT ciphertext, nonce, file_path
 FROM app.project_credentials
 WHERE project_id = $1 AND kind = $2
+  AND (task_source_id = NULLIF($3::text, '')::uuid OR task_source_id IS NULL)
+ORDER BY (task_source_id IS NOT NULL) DESC
+LIMIT 1
 `
 
 type GetProjectCredentialSecretParams struct {
-	ProjectID string
-	Kind      string
+	ProjectID    string
+	Kind         string
+	TaskSourceID string
 }
 
 type GetProjectCredentialSecretRow struct {
@@ -66,27 +88,44 @@ type GetProjectCredentialSecretRow struct {
 	FilePath   string
 }
 
+// task_source_id (empty string = NULL, the same NULLIF convention CreateProject
+// uses for repository_url) is the caller's scope: a CodeHost lookup always
+// passes "" (a project has 0..1 code hosts, never per-source -- see
+// #291/#293), so only a project-level row (task_source_id IS NULL) can ever
+// match the OR's second arm for it, since the first arm compares against a
+// NULL and can never be true. A TaskSource lookup passes its own source id
+// and prefers a credential scoped to that source (the ORDER BY puts it
+// first when both exist), falling back to the project-level one when the
+// source has none of its own -- which is exactly what keeps an existing
+// single-source project's credential (set before this migration,
+// necessarily project-level) working unchanged after 026.
 func (q *Queries) GetProjectCredentialSecret(ctx context.Context, arg GetProjectCredentialSecretParams) (GetProjectCredentialSecretRow, error) {
-	row := q.db.QueryRow(ctx, getProjectCredentialSecret, arg.ProjectID, arg.Kind)
+	row := q.db.QueryRow(ctx, getProjectCredentialSecret, arg.ProjectID, arg.Kind, arg.TaskSourceID)
 	var i GetProjectCredentialSecretRow
 	err := row.Scan(&i.Ciphertext, &i.Nonce, &i.FilePath)
 	return i, err
 }
 
 const listProjectCredentials = `-- name: ListProjectCredentials :many
-SELECT kind, created_at, updated_at, file_path
+SELECT kind, created_at, updated_at, file_path, COALESCE(task_source_id::text, '') AS task_source_id
 FROM app.project_credentials
 WHERE project_id = $1
-ORDER BY kind
+ORDER BY kind, task_source_id NULLS FIRST
 `
 
 type ListProjectCredentialsRow struct {
-	Kind      string
-	CreatedAt pgtype.Timestamptz
-	UpdatedAt pgtype.Timestamptz
-	FilePath  string
+	Kind         string
+	CreatedAt    pgtype.Timestamptz
+	UpdatedAt    pgtype.Timestamptz
+	FilePath     string
+	TaskSourceID interface{}
 }
 
+// Lists every credential configured for the project, project-level and
+// source-scoped alike; task_source_id (nullable) is what tells them apart.
+// The gRPC surface (ListProjectCredentials/ProjectCredential) only ever
+// writes project-level rows today, so in practice this is empty for every
+// source-scoped row until a caller uses UpsertProjectCredentialForSource.
 func (q *Queries) ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error) {
 	rows, err := q.db.Query(ctx, listProjectCredentials, projectID)
 	if err != nil {
@@ -101,6 +140,7 @@ func (q *Queries) ListProjectCredentials(ctx context.Context, projectID string) 
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.FilePath,
+			&i.TaskSourceID,
 		); err != nil {
 			return nil, err
 		}
@@ -126,7 +166,7 @@ func (q *Queries) ProjectExists(ctx context.Context, id string) (bool, error) {
 const updateProjectCredentialSecret = `-- name: UpdateProjectCredentialSecret :execrows
 UPDATE app.project_credentials
 SET ciphertext = $3, nonce = $4, updated_at = now()
-WHERE project_id = $1 AND kind = $2
+WHERE project_id = $1 AND kind = $2 AND task_source_id IS NULL
 `
 
 type UpdateProjectCredentialSecretParams struct {
@@ -153,7 +193,7 @@ const upsertProjectCredential = `-- name: UpsertProjectCredential :execrows
 INSERT INTO app.project_credentials(project_id, kind, ciphertext, nonce, file_path)
 SELECT $1, $2, $3, $4, $5
 WHERE EXISTS (SELECT 1 FROM app.projects WHERE id = $1)
-ON CONFLICT (project_id, kind) DO UPDATE SET
+ON CONFLICT (project_id, kind) WHERE task_source_id IS NULL DO UPDATE SET
   ciphertext = EXCLUDED.ciphertext,
   nonce = EXCLUDED.nonce,
   file_path = EXCLUDED.file_path,
@@ -168,10 +208,56 @@ type UpsertProjectCredentialParams struct {
 	FilePath   string
 }
 
+// Project-level credential (task_source_id NULL): the only kind the API
+// exposes today (SetProjectCredential/ClearProjectCredential/
+// ListProjectCredentials never take a source id -- see #293's PR
+// description). Targets the partial unique index migration 026 added for
+// exactly this row shape.
 func (q *Queries) UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error) {
 	result, err := q.db.Exec(ctx, upsertProjectCredential,
 		arg.ProjectID,
 		arg.Kind,
+		arg.Ciphertext,
+		arg.Nonce,
+		arg.FilePath,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const upsertProjectCredentialForSource = `-- name: UpsertProjectCredentialForSource :execrows
+INSERT INTO app.project_credentials(project_id, kind, task_source_id, ciphertext, nonce, file_path)
+SELECT $1, $2, $3, $4, $5, $6
+WHERE EXISTS (SELECT 1 FROM app.projects WHERE id = $1)
+ON CONFLICT (project_id, kind, task_source_id) WHERE task_source_id IS NOT NULL DO UPDATE SET
+  ciphertext = EXCLUDED.ciphertext,
+  nonce = EXCLUDED.nonce,
+  file_path = EXCLUDED.file_path,
+  updated_at = now()
+`
+
+type UpsertProjectCredentialForSourceParams struct {
+	ProjectID    string
+	Kind         string
+	TaskSourceID pgtype.UUID
+	Ciphertext   []byte
+	Nonce        []byte
+	FilePath     string
+}
+
+// Source-scoped credential (task_source_id set): what lets two task sources
+// of the same provider each hold their own secret of a given kind, rather
+// than colliding on the one project-level slot. Not wired to a gRPC RPC yet
+// (see #293's PR description); exercised directly by
+// TestProjectCredentialSourceScopingPreventsCollision to prove the schema
+// decision actually holds.
+func (q *Queries) UpsertProjectCredentialForSource(ctx context.Context, arg UpsertProjectCredentialForSourceParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertProjectCredentialForSource,
+		arg.ProjectID,
+		arg.Kind,
+		arg.TaskSourceID,
 		arg.Ciphertext,
 		arg.Nonce,
 		arg.FilePath,

@@ -44,8 +44,10 @@ type localFileTask struct {
 // ListTasks implements TaskSource by reading every "*.json" file directly
 // inside the directory named by ref, in name order. A missing directory is an
 // error, matching how the GitHub adapter fails loudly on an invalid
-// repository reference rather than silently returning no tasks.
-func (LocalFileTaskSource) ListTasks(_ context.Context, _ string, ref string) ([]Task, error) {
+// repository reference rather than silently returning no tasks. taskSourceID
+// is unused: this adapter has no credential or other per-source state to
+// scope by it.
+func (LocalFileTaskSource) ListTasks(_ context.Context, _, _ string, ref string) ([]Task, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil, errors.New("local file task source requires a directory path")

@@ -73,6 +73,31 @@ message Project {
   // Defaults to false, so an existing project's behavior is unchanged unless
   // it explicitly turns this on.
   bool require_human_approval = 12;
+  // The project's configured task sources (app.project_task_sources): 0, 1 or
+  // N of them, each independently enabled and provider-configured. Read-only
+  // for now -- creating/editing/deleting a source needs #294's field-level
+  // descriptor (which configuration fields a provider needs, and which of
+  // them are secrets) for a real write API; every project has at least one
+  // (auto-created from its old issue_tracker_type when this field was
+  // introduced), so this is never misleadingly empty for an existing project.
+  repeated TaskSource task_sources = 13;
+}
+// TaskSource is one configured source of work for a project (see #293):
+// GitHub, Linear, Jira, a local file directory, or any future provider. A
+// project may have any number of these, in any combination, including none.
+message TaskSource {
+  string id = 1;
+  // "github", "local_file", or any other provider this orchestrator has an
+  // adapter for.
+  string provider = 2;
+  // Operator-facing label distinguishing two sources of the same provider
+  // (e.g. two GitHub repositories feeding one project).
+  string name = 3;
+  bool enabled = 4;
+  // Provider-specific connection details (repo slug, JQL, team id, local
+  // path, ...) as a JSON object. Opaque until #294's descriptor gives each
+  // provider's configuration a documented shape; read-only here.
+  string configuration = 5;
 }
 message ListProjectsResponse { repeated Project projects = 1; }
 message ProjectConfiguration {

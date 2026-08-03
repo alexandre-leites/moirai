@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	"github.com/loop-engineering/orchestrator/internal/db"
 	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/metrics"
 	"github.com/loop-engineering/orchestrator/internal/migrate"
@@ -98,7 +100,7 @@ func newHarness(t *testing.T) *harness {
 // around an execution, not about talking to GitHub.
 type stubGitHub struct{}
 
-func (stubGitHub) ListTasks(context.Context, string, string) ([]Task, error) { return nil, nil }
+func (stubGitHub) ListTasks(context.Context, string, string, string) ([]Task, error) { return nil, nil }
 func (stubGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (PullRequest, error) {
 	return PullRequest{Number: "1", URL: "https://example.test/pull/1", State: "OPEN", HeadSHA: "abc"}, nil
 }
@@ -135,7 +137,7 @@ func (g *sequencedGitHub) nextErr() error {
 	return g.alwaysErr
 }
 
-func (g *sequencedGitHub) ListTasks(context.Context, string, string) ([]Task, error) {
+func (g *sequencedGitHub) ListTasks(context.Context, string, string, string) ([]Task, error) {
 	return nil, nil
 }
 func (g *sequencedGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (PullRequest, error) {
@@ -198,13 +200,41 @@ func (h *harness) schedulable(issueID string) bool {
 		)`, issueID) == 1
 }
 
-// project seeds an enabled project with one eligible open issue.
+// project seeds an enabled project, its one default GitHub task source (see
+// migration 026 -- app.issues.task_source_id is NOT NULL, so every issue a
+// test seeds directly needs a real app.project_task_sources row to point at),
+// and one eligible open issue on that source.
 func (h *harness) project() (projectID, issueID string) {
 	h.t.Helper()
 	projectID, issueID = idgen.NewID(), idgen.NewID()
 	h.exec(`INSERT INTO app.projects(id,name,repository_mode,repository_url,default_branch) VALUES($1,$2,'managed_clone','https://github.com/acme/demo.git','main')`, projectID, "demo-"+projectID[:8])
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','42','42','Fix scheduler','https://example.test/issues/42','open',true,now(),now())`, issueID, projectID)
+	sourceID := h.taskSource(projectID, "github", `{"ref":"https://github.com/acme/demo.git"}`)
+	h.exec(`INSERT INTO app.issues(id,project_id,task_source_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,$3,'github','42','42','Fix scheduler','https://example.test/issues/42','open',true,now(),now())`, issueID, projectID, sourceID)
 	return projectID, issueID
+}
+
+// taskSource inserts one app.project_task_sources row for projectID and
+// returns its id, for tests that need to seed app.issues/app.issue_sync_state
+// rows directly at the SQL level (both are keyed by task_source_id -- see
+// migration 026) without going through a real sync pass.
+func (h *harness) taskSource(projectID, provider, configuration string) string {
+	h.t.Helper()
+	sourceID := idgen.NewID()
+	h.exec(`INSERT INTO app.project_task_sources(id,project_id,provider,name,configuration) VALUES($1,$2,$3,$4,$5::jsonb)`,
+		sourceID, projectID, provider, provider+"-"+sourceID[:8], configuration)
+	return sourceID
+}
+
+// defaultTaskSource looks up the one task source h.project() created for
+// projectID, for a test that needs to seed a second app.issues row (or call
+// syncSource directly) against the same source rather than creating another.
+func (h *harness) defaultTaskSource(projectID string) string {
+	h.t.Helper()
+	var sourceID string
+	if err := h.pool.QueryRow(context.Background(), `SELECT id::text FROM app.project_task_sources WHERE project_id=$1 ORDER BY name, id LIMIT 1`, projectID).Scan(&sourceID); err != nil {
+		h.t.Fatalf("look up default task source for project %s: %v", projectID, err)
+	}
+	return sourceID
 }
 
 // runner seeds an online, freshly heartbeating runner and registers a
@@ -264,7 +294,7 @@ func (h *harness) runJob(runnerID string) (jobID, workflowID string) {
 func TestOnlyOneWorkflowRunsPerProject(t *testing.T) {
 	h := newHarness(t)
 	projectID, _ := h.project()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, idgen.NewID(), projectID)
+	h.exec(`INSERT INTO app.issues(id,project_id,task_source_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,$3,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, idgen.NewID(), projectID, h.defaultTaskSource(projectID))
 	h.runner()
 	h.runner()
 
@@ -1067,7 +1097,7 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	ctx := context.Background()
 	// Two eligible open issues in enabled projects: the queue depth.
 	queuedProject, _ := h.project()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, idgen.NewID(), queuedProject)
+	h.exec(`INSERT INTO app.issues(id,project_id,task_source_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,$3,'github','43','43','Second issue','https://example.test/issues/43','open',true,now(),now())`, idgen.NewID(), queuedProject, h.defaultTaskSource(queuedProject))
 	// Neither of these counts: one project is disabled, one issue is closed.
 	disabledProject, _ := h.project()
 	h.exec(`UPDATE app.projects SET enabled=false WHERE id=$1`, disabledProject)
@@ -1082,7 +1112,7 @@ func TestMetricsSnapshotReportsTheDatabaseState(t *testing.T) {
 	// one of the counted issues here would make this fixture's "done" run
 	// silently subtract from a count it is not testing.
 	runsIssueID := idgen.NewID()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github','44','44','Run host','https://example.test/issues/44','open',false,now(),now())`, runsIssueID, queuedProject)
+	h.exec(`INSERT INTO app.issues(id,project_id,task_source_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,$3,'github','44','44','Run host','https://example.test/issues/44','open',false,now(),now())`, runsIssueID, queuedProject, h.defaultTaskSource(queuedProject))
 	activeRun, doneRun := idgen.NewID(), idgen.NewID()
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, activeRun, queuedProject, runsIssueID, "thread-"+activeRun)
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'completed','done')`, doneRun, queuedProject, runsIssueID, "thread-"+doneRun)
@@ -1812,7 +1842,7 @@ type labelStub struct {
 	createdAt, updatedAt time.Time
 }
 
-func (s *labelStub) ListTasks(context.Context, string, string) ([]Task, error) {
+func (s *labelStub) ListTasks(context.Context, string, string, string) ([]Task, error) {
 	priority, eligible := issuePriority(s.labels)
 	createdAt, updatedAt := s.createdAt, s.updatedAt
 	if createdAt.IsZero() {
@@ -1861,7 +1891,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Scenario 1: removing agent:ready after a run exists must actually take
 	// effect on the tracker's own bit, not be silently swallowed.
 	stub.labels = nil
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
@@ -1871,7 +1901,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Scenario 2: adding agent:blocked after a run exists must also take
 	// effect.
 	stub.labels = []string{"agent:ready", "agent:blocked"}
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 0 {
@@ -1881,7 +1911,7 @@ func TestSyncHonoursTrackerLabelEditsAfterARunExists(t *testing.T) {
 	// Restoring agent:ready brings the label bit back, but must not by
 	// itself reopen a failed run's issue: only RetryWorkflow does that.
 	stub.labels = []string{"agent:ready"}
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if eligible := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND eligible`, issueID); eligible != 1 {
@@ -1910,7 +1940,7 @@ type stateStub struct {
 	state string
 }
 
-func (s *stateStub) ListTasks(context.Context, string, string) ([]Task, error) {
+func (s *stateStub) ListTasks(context.Context, string, string, string) ([]Task, error) {
 	return []Task{{
 		ExternalID: "42", Title: "Fix scheduler", URL: "https://example.test/issues/42",
 		CreatedAt: time.Now(), UpdatedAt: time.Now(),
@@ -1932,7 +1962,7 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	stub := &stateStub{state: "open"}
 	h.setGitHub(stub)
 
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if !h.schedulable(issueID) {
@@ -1940,7 +1970,7 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	}
 
 	stub.state = "closed"
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if state := h.scalar(`SELECT COUNT(*) FROM app.issues WHERE id=$1 AND state='closed'`, issueID); state != 1 {
@@ -1956,7 +1986,7 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 	// Reopening it on GitHub must bring it back, proving this is a live
 	// reconciliation and not a one-way trip.
 	stub.state = "open"
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject: %v", err)
 	}
 	if !h.schedulable(issueID) {
@@ -1965,13 +1995,14 @@ func TestSyncReconcilesAnIssueClosedOnGitHub(t *testing.T) {
 }
 
 // TestSyncSelectsTaskSourceFromProjectConfiguration is the config-driven-
-// selection acceptance test for #291: a project's own issue_tracker_type
-// (read straight off app.projects, never touched before this change) must
-// pick which TaskSource actually runs, with every project that predates the
-// column (issue_tracker_type = "" here, its schema default) behaving exactly
-// as it always did -- the GitHub adapter -- while a project explicitly
-// configured for "local_file" genuinely goes through LocalFileTaskSource
-// instead, never silently falling back to GitHub.
+// selection acceptance test for #291/#293: a task source's own provider
+// column (app.project_task_sources.provider) must pick which TaskSource
+// actually runs, with every source migration 026 auto-created for a project
+// that predates this column (provider "github", copied from the old
+// issue_tracker_type default) behaving exactly as it always did -- the
+// GitHub adapter -- while a source explicitly configured for "local_file"
+// genuinely goes through LocalFileTaskSource instead, never silently falling
+// back to GitHub.
 func TestSyncSelectsTaskSourceFromProjectConfiguration(t *testing.T) {
 	h := newHarness(t)
 	h.Core.adapters.localFileTaskSource = LocalFileTaskSource{}
@@ -1983,7 +2014,7 @@ func TestSyncSelectsTaskSourceFromProjectConfiguration(t *testing.T) {
 	githubOnly := &countingGitHub{}
 	h.setGitHub(githubOnly)
 	githubProjectID, githubIssueID := h.project()
-	if err := h.syncProject(context.Background(), githubProjectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), githubProjectID); err != nil {
 		t.Fatalf("syncProject (github default): %v", err)
 	}
 	if githubOnly.calls != 1 {
@@ -2001,9 +2032,10 @@ func TestSyncSelectsTaskSourceFromProjectConfiguration(t *testing.T) {
 	dir := t.TempDir()
 	writeTaskFile(t, dir, "77.json", `{"title":"From a local file","eligible":true,"priority":3}`)
 	localProjectID := idgen.NewID()
-	h.exec(`INSERT INTO app.projects(id,name,repository_mode,repository_url,default_branch,issue_tracker_type) VALUES($1,$2,'managed_clone',$3,'main','local_file')`,
+	h.exec(`INSERT INTO app.projects(id,name,repository_mode,repository_url,default_branch) VALUES($1,$2,'managed_clone',$3,'main')`,
 		localProjectID, "local-"+localProjectID[:8], dir)
-	if err := h.syncProject(context.Background(), localProjectID, dir, "local_file"); err != nil {
+	h.taskSource(localProjectID, "local_file", fmt.Sprintf(`{"ref":%q}`, dir))
+	if err := h.syncProject(context.Background(), localProjectID); err != nil {
 		t.Fatalf("syncProject (local_file): %v", err)
 	}
 	if h.scalar(`SELECT COUNT(*) FROM app.issues WHERE project_id=$1 AND external_id='77' AND title='From a local file' AND priority=3 AND eligible`, localProjectID) != 1 {
@@ -2046,20 +2078,20 @@ func TestUpsertIssueSkipsWritingWhenNothingChanged(t *testing.T) {
 
 	// The seeded issue (h.project) does not match labelStub's row exactly, so
 	// this first sync is expected to write once and establish a baseline xmin.
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject (baseline): %v", err)
 	}
 	baseline := xmin()
 
 	// Two consecutive no-op passes: GitHub reports the exact same issue both
 	// times, nothing on the tracker moved.
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject (no-op #1): %v", err)
 	}
 	if after := xmin(); after != baseline {
 		t.Fatalf("xmin changed from %d to %d on a no-op sync pass; the DO UPDATE guard did not skip the write", baseline, after)
 	}
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject (no-op #2): %v", err)
 	}
 	if after := xmin(); after != baseline {
@@ -2068,7 +2100,7 @@ func TestUpsertIssueSkipsWritingWhenNothingChanged(t *testing.T) {
 
 	// A real change (a new label flipping priority/eligible) must still write.
 	stub.labels = nil
-	if err := h.syncProject(context.Background(), projectID, "https://github.com/acme/demo.git", ""); err != nil {
+	if err := h.syncProject(context.Background(), projectID); err != nil {
 		t.Fatalf("syncProject (real change): %v", err)
 	}
 	if after := xmin(); after == baseline {
@@ -2344,7 +2376,7 @@ type failingGitHub struct {
 	err error
 }
 
-func (g *failingGitHub) ListTasks(context.Context, string, string) ([]Task, error) {
+func (g *failingGitHub) ListTasks(context.Context, string, string, string) ([]Task, error) {
 	return nil, g.err
 }
 
@@ -2357,14 +2389,15 @@ func (g *failingGitHub) ListTasks(context.Context, string, string) ([]Task, erro
 func TestRecordSyncFailureSetsExponentialBackoff(t *testing.T) {
 	h := newHarness(t)
 	projectID, _ := h.project()
+	sourceID := h.defaultTaskSource(projectID)
 	ctx := context.Background()
 
-	if err := h.recordSyncFailure(ctx, projectID, errors.New("boom")); err != nil {
+	if err := h.recordSyncFailure(ctx, sourceID, projectID, errors.New("boom")); err != nil {
 		t.Fatalf("recordSyncFailure: %v", err)
 	}
 	var failures int
 	var nextRetry time.Time
-	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&failures, &nextRetry); err != nil {
+	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at FROM app.issue_sync_state WHERE task_source_id=$1`, sourceID).Scan(&failures, &nextRetry); err != nil {
 		t.Fatal(err)
 	}
 	if failures != 1 {
@@ -2380,11 +2413,11 @@ func TestRecordSyncFailureSetsExponentialBackoff(t *testing.T) {
 	// confirm it still lands within the 1 hour ceiling instead of erroring
 	// out or producing a nonsensical timestamp.
 	for range 30 {
-		if err := h.recordSyncFailure(ctx, projectID, errors.New("still failing")); err != nil {
+		if err := h.recordSyncFailure(ctx, sourceID, projectID, errors.New("still failing")); err != nil {
 			t.Fatalf("recordSyncFailure: %v", err)
 		}
 	}
-	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&failures, &nextRetry); err != nil {
+	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at FROM app.issue_sync_state WHERE task_source_id=$1`, sourceID).Scan(&failures, &nextRetry); err != nil {
 		t.Fatal(err)
 	}
 	if failures != 31 {
@@ -2395,13 +2428,13 @@ func TestRecordSyncFailureSetsExponentialBackoff(t *testing.T) {
 		t.Fatalf("next_retry_at after 31 failures is %s away, want capped at ~1 hour", wait)
 	}
 
-	// A subsequent success must clear both fields, so a recovered project is
+	// A subsequent success must clear both fields, so a recovered source is
 	// not skipped by a stale future timestamp forever.
-	if err := h.queries.UpsertIssueSyncStateSuccess(ctx, projectID); err != nil {
+	if err := h.queries.UpsertIssueSyncStateSuccess(ctx, db.UpsertIssueSyncStateSuccessParams{TaskSourceID: sourceID, ProjectID: projectID}); err != nil {
 		t.Fatalf("UpsertIssueSyncStateSuccess: %v", err)
 	}
 	var nextRetryValid bool
-	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at IS NOT NULL FROM app.issue_sync_state WHERE project_id=$1`, projectID).Scan(&failures, &nextRetryValid); err != nil {
+	if err := h.pool.QueryRow(ctx, `SELECT consecutive_failures, next_retry_at IS NOT NULL FROM app.issue_sync_state WHERE task_source_id=$1`, sourceID).Scan(&failures, &nextRetryValid); err != nil {
 		t.Fatal(err)
 	}
 	if failures != 0 || nextRetryValid {
@@ -2463,7 +2496,7 @@ type countingGitHub struct {
 	calls int
 }
 
-func (g *countingGitHub) ListTasks(context.Context, string, string) ([]Task, error) {
+func (g *countingGitHub) ListTasks(context.Context, string, string, string) ([]Task, error) {
 	g.calls++
 	return nil, nil
 }
@@ -2474,8 +2507,10 @@ func (g *countingGitHub) ListTasks(context.Context, string, string) ([]Task, err
 // that had already been through databaseError/configurationError, and here
 // pins the plain (never-wrapped) side of that same fix end to end through
 // the real RPC handler: syncProject's ListIssues failure is an ordinary Go
-// error, so it must reach ProjectSyncResult.Error unchanged, never dressed up
-// as "rpc error: code = ... desc = ...".
+// error (syncSource's "task source %s: %w" prefix, added by #293 so a
+// multi-source project's result names which source failed, is the only
+// wrapping), so it must reach ProjectSyncResult.Error with the adapter's own
+// message intact, never dressed up as "rpc error: code = ... desc = ...".
 func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
 	h := newHarness(t)
 	h.project()
@@ -2489,8 +2524,8 @@ func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
 		t.Fatalf("SyncNow results = %d, want 1", len(resp.Results))
 	}
 	const want = "revoked token"
-	if got := resp.Results[0].Error; got != want {
-		t.Fatalf("SyncNow result error = %q, want %q", got, want)
+	if got := resp.Results[0].Error; !strings.Contains(got, want) {
+		t.Fatalf("SyncNow result error = %q, want it to contain %q", got, want)
 	}
 	if strings.Contains(resp.Results[0].Error, "rpc error") {
 		t.Fatalf("SyncNow result error leaked a gRPC status wrapper: %q", resp.Results[0].Error)
@@ -2982,7 +3017,7 @@ func TestResolveJobSecretRoundTripsTheEncryptedValue(t *testing.T) {
 func (h *harness) seedFencedJob(runnerID, projectID string) (jobID string, generation int64) {
 	h.t.Helper()
 	workflowID, issueID := idgen.NewID(), idgen.NewID()
-	h.exec(`INSERT INTO app.issues(id,project_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,'github',$3,$3,'issue','https://example.test/issues/x','open',true,now(),now())`, issueID, projectID, issueID[:8])
+	h.exec(`INSERT INTO app.issues(id,project_id,task_source_id,provider,external_id,display_number,title,url,state,eligible,external_created_at,external_updated_at) VALUES($1,$2,$3,'github',$4,$4,'issue','https://example.test/issues/x','open',true,now(),now())`, issueID, projectID, h.defaultTaskSource(projectID), issueID[:8])
 	h.exec(`INSERT INTO app.workflow_runs(id,project_id,issue_id,thread_id,status,current_phase) VALUES($1,$2,$3,$4,'preparing','preparing')`, workflowID, projectID, issueID, "thread-"+workflowID)
 	jobID = idgen.NewID()
 	h.exec(`INSERT INTO app.jobs(id,workflow_run_id,project_id,runner_id,status,lease_generation,lease_expires_at) VALUES($1,$2,$3,$4,'running',1,now()+interval '1 hour')`, jobID, workflowID, projectID, runnerID)

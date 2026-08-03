@@ -53,6 +53,7 @@ type Querier interface {
 	CreateWorkflowEvent(ctx context.Context, arg CreateWorkflowEventParams) error
 	CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunParams) error
 	DeleteProjectCredential(ctx context.Context, arg DeleteProjectCredentialParams) (int64, error)
+	DeleteProjectCredentialForSource(ctx context.Context, arg DeleteProjectCredentialForSourceParams) (int64, error)
 	DeleteProjectLock(ctx context.Context, arg DeleteProjectLockParams) error
 	DeleteProjectLockByWorkflow(ctx context.Context, workflowRunID string) error
 	DeleteProjectPipelineSteps(ctx context.Context, projectID string) error
@@ -76,6 +77,17 @@ type Querier interface {
 	GetFencedJobProject(ctx context.Context, arg GetFencedJobProjectParams) (string, error)
 	GetJobForOfferReject(ctx context.Context, arg GetJobForOfferRejectParams) (GetJobForOfferRejectRow, error)
 	GetProject(ctx context.Context, id string) (GetProjectRow, error)
+	// task_source_id (empty string = NULL, the same NULLIF convention CreateProject
+	// uses for repository_url) is the caller's scope: a CodeHost lookup always
+	// passes "" (a project has 0..1 code hosts, never per-source -- see
+	// #291/#293), so only a project-level row (task_source_id IS NULL) can ever
+	// match the OR's second arm for it, since the first arm compares against a
+	// NULL and can never be true. A TaskSource lookup passes its own source id
+	// and prefers a credential scoped to that source (the ORDER BY puts it
+	// first when both exist), falling back to the project-level one when the
+	// source has none of its own -- which is exactly what keeps an existing
+	// single-source project's credential (set before this migration,
+	// necessarily project-level) working unchanged after 026.
 	GetProjectCredentialSecret(ctx context.Context, arg GetProjectCredentialSecretParams) (GetProjectCredentialSecretRow, error)
 	GetRunner(ctx context.Context, id string) (GetRunnerRow, error)
 	GetRunnerCredentialHash(ctx context.Context, id string) (string, error)
@@ -107,24 +119,62 @@ type Querier interface {
 	// but sitting on a failed, blocked or delivered run that has not been
 	// superseded by a retry is not actually schedulable, and the sidebar badge
 	// would otherwise overcount it.
+	//
+	// This reports one row per *project*, aggregated across however many task
+	// sources it has, rather than one row per source: the console's sync panel
+	// (out of scope for #293 -- see the PR description) reads this shape today,
+	// and a project with its one auto-migrated source produces exactly the same
+	// row it always did. last_synced_at/consecutive_failures take the MAX across
+	// a project's sources (the worst case is the one worth surfacing),
+	// next_retry_at the soonest non-null retry, and last_error the most
+	// recently updated source's error. A true per-source breakdown is future
+	// work once the console has somewhere to show it.
 	IssueSyncStatusEntries(ctx context.Context) ([]IssueSyncStatusEntriesRow, error)
+	// SyncNow's "sync every project" path (no project_id given): the set of
+	// projects whose task sources are even candidates for ListSyncableSources.
+	ListEnabledProjectIDs(ctx context.Context) ([]string, error)
+	// Lists every credential configured for the project, project-level and
+	// source-scoped alike; task_source_id (nullable) is what tells them apart.
+	// The gRPC surface (ListProjectCredentials/ProjectCredential) only ever
+	// writes project-level rows today, so in practice this is empty for every
+	// source-scoped row until a caller uses UpsertProjectCredentialForSource.
 	ListProjectCredentials(ctx context.Context, projectID string) ([]ListProjectCredentialsRow, error)
 	ListProjectIDs(ctx context.Context) ([]string, error)
 	ListProjectPipelineSteps(ctx context.Context, projectID string) ([]ListProjectPipelineStepsRow, error)
-	// Used by the unattended sync loop only (SyncProjects): a project whose last
+	// Task sources (#293): the first-class row a project's task sources live
+	// in, re-keying what used to be app.projects.issue_tracker_type (a single
+	// scalar, dropped by migration 026) onto app.project_task_sources (1..N per
+	// project, 0 valid).
+	//
+	// Only a read query is defined here for now. Creating, editing, enabling and
+	// deleting a source needs the field-level descriptor #294 introduces (which
+	// kind of source needs which configuration fields, and which of them are
+	// secrets) to have a real write API rather than a hand-rolled one #294 would
+	// have to redesign around anyway -- see the PR description for #293. Every
+	// project already has at least its migrated default source from 026, so a
+	// read-only surface is enough to make what is configured visible.
+	ListProjectTaskSources(ctx context.Context, projectID string) ([]ListProjectTaskSourcesRow, error)
+	ListQueueEntries(ctx context.Context, limit int32) ([]ListQueueEntriesRow, error)
+	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
+	ListRunners(ctx context.Context) ([]ListRunnersRow, error)
+	// Used by the unattended sync loop only (SyncProjects): a source whose last
 	// failure set app.issue_sync_state.next_retry_at in the future (see
 	// UpsertIssueSyncStateFailure's exponential backoff) is skipped so a
 	// repository with a revoked token or a deleted remote is not hammered on
 	// every tick forever. The operator-triggered "Sync now" path (SyncNow) goes
-	// through ListSyncableProjects/ListSyncableProjectByID instead and always
+	// through ListSyncableSources/ListSyncableSourcesByProject instead and always
 	// bypasses backoff, since a human explicitly asking for a sync right now is
-	// exactly the case backoff should not stand in front of.
-	ListProjectsDueForSync(ctx context.Context) ([]ListProjectsDueForSyncRow, error)
-	ListQueueEntries(ctx context.Context, limit int32) ([]ListQueueEntriesRow, error)
-	ListRunnerRegistrationTokens(ctx context.Context) ([]ListRunnerRegistrationTokensRow, error)
-	ListRunners(ctx context.Context) ([]ListRunnersRow, error)
-	ListSyncableProjectByID(ctx context.Context, id string) ([]ListSyncableProjectByIDRow, error)
-	ListSyncableProjects(ctx context.Context) ([]ListSyncableProjectsRow, error)
+	// exactly the case backoff should not stand in front of. Backoff is tracked
+	// per source (app.issue_sync_state is keyed by task_source_id), so one
+	// source's failure no longer throttles a healthy sibling source on the same
+	// project.
+	ListSourcesDueForSync(ctx context.Context) ([]ListSourcesDueForSyncRow, error)
+	// One row per enabled task source of every enabled project -- the unit the
+	// sync loop now iterates is a source, not a project (see #293): a project
+	// with zero configured sources simply contributes no rows here, and a
+	// disabled source is skipped the same way a disabled project always was.
+	ListSyncableSources(ctx context.Context) ([]ListSyncableSourcesRow, error)
+	ListSyncableSourcesByProject(ctx context.Context, projectID string) ([]ListSyncableSourcesByProjectRow, error)
 	ListWorkflowEvents(ctx context.Context, arg ListWorkflowEventsParams) ([]ListWorkflowEventsRow, error)
 	// Replaces the old ListWorkflowIDs + one GetWorkflowDetail per row: that shape
 	// was O(all workflow runs) in both rows and queries, and app.workflow_runs
@@ -154,6 +204,11 @@ type Querier interface {
 	MarkWorkflowCompleted(ctx context.Context, id string) (int64, error)
 	MarkWorkflowDelivered(ctx context.Context, id string) (int64, error)
 	ProjectExists(ctx context.Context, id string) (bool, error)
+	// Distinguishes "unknown project" (no row, pgx.ErrNoRows) from "disabled
+	// project" (a row, enabled = false) for SyncNow's single-project path, which
+	// reports both as the same 404 -- syncing a specific project only ever makes
+	// sense for one that is both known and enabled.
+	ProjectIsEnabled(ctx context.Context, id string) (bool, error)
 	RecordJobExecutionEvent(ctx context.Context, arg RecordJobExecutionEventParams) (string, error)
 	RecordRunnerHeartbeat(ctx context.Context, arg RecordRunnerHeartbeatParams) error
 	// Bumps the count of consecutive transient GitHub failures blockOrRetryExternal
@@ -226,15 +281,29 @@ type Querier interface {
 	// 2, 4, 8, ...), capped at 1 hour. The exponent itself is capped (via the
 	// inner LEAST) before POWER ever sees it, rather than relying on the outer
 	// LEAST against '1 hour' alone: POWER(2, n) is evaluated first, and an
-	// uncapped n for a project that has been failing for days would overflow
+	// uncapped n for a source that has been failing for days would overflow
 	// double precision (and then interval multiplication) before that outer
 	// LEAST ever got a chance to clamp the result.
 	UpsertIssueSyncStateFailure(ctx context.Context, arg UpsertIssueSyncStateFailureParams) error
 	// next_retry_at is reset to NULL on success: leaving a stale future timestamp
-	// around after a project recovers would keep ListProjectsDueForSync skipping
-	// it long after there is anything to back off from.
-	UpsertIssueSyncStateSuccess(ctx context.Context, projectID string) error
+	// around after a source recovers would keep ListSourcesDueForSync skipping
+	// it long after there is anything to back off from. Keyed by task_source_id
+	// (see migration 026): a project's sources back off independently, so one
+	// source's failure streak cannot mask or reset alongside a sibling's success.
+	UpsertIssueSyncStateSuccess(ctx context.Context, arg UpsertIssueSyncStateSuccessParams) error
+	// Project-level credential (task_source_id NULL): the only kind the API
+	// exposes today (SetProjectCredential/ClearProjectCredential/
+	// ListProjectCredentials never take a source id -- see #293's PR
+	// description). Targets the partial unique index migration 026 added for
+	// exactly this row shape.
 	UpsertProjectCredential(ctx context.Context, arg UpsertProjectCredentialParams) (int64, error)
+	// Source-scoped credential (task_source_id set): what lets two task sources
+	// of the same provider each hold their own secret of a given kind, rather
+	// than colliding on the one project-level slot. Not wired to a gRPC RPC yet
+	// (see #293's PR description); exercised directly by
+	// TestProjectCredentialSourceScopingPreventsCollision to prove the schema
+	// decision actually holds.
+	UpsertProjectCredentialForSource(ctx context.Context, arg UpsertProjectCredentialForSourceParams) (int64, error)
 	UpsertPullRequest(ctx context.Context, arg UpsertPullRequestParams) error
 	UpsertSeedRunnerRegistrationToken(ctx context.Context, arg UpsertSeedRunnerRegistrationTokenParams) error
 }
