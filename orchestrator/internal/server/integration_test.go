@@ -1979,3 +1979,32 @@ func (g *countingGitHub) ListIssues(context.Context, string, string) ([]githubIs
 	g.calls++
 	return nil, nil
 }
+
+// TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus pins #287:
+// SyncNow's per-project result used to carry err.Error() verbatim, which
+// leaks the gRPC status wrapper onto a console-facing field for anything
+// that had already been through databaseError/configurationError, and here
+// pins the plain (never-wrapped) side of that same fix end to end through
+// the real RPC handler: syncProject's ListIssues failure is an ordinary Go
+// error, so it must reach ProjectSyncResult.Error unchanged, never dressed up
+// as "rpc error: code = ... desc = ...".
+func TestSyncNowReportsAPlainErrorMessageNotAWrappedGRPCStatus(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	h.github = &failingGitHub{err: errors.New("revoked token")}
+
+	resp, err := h.SyncNow(h.adminContext(), &controlv1.SyncNowRequest{})
+	if err != nil {
+		t.Fatalf("SyncNow: %v", err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("SyncNow results = %d, want 1", len(resp.Results))
+	}
+	const want = "revoked token"
+	if got := resp.Results[0].Error; got != want {
+		t.Fatalf("SyncNow result error = %q, want %q", got, want)
+	}
+	if strings.Contains(resp.Results[0].Error, "rpc error") {
+		t.Fatalf("SyncNow result error leaked a gRPC status wrapper: %q", resp.Results[0].Error)
+	}
+}
