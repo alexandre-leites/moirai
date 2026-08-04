@@ -71,20 +71,23 @@ jobs:
   test-postgres-integration:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
-    # Runs in a container with the service's published port reached over
-    # --network host, not directly on the runner: a job that runs directly on
-    # the runner depends on the *runner machine's* own network stack seeing
-    # the service's host-published port, which breaks for any self-hosted
-    # runner that itself executes inside a container without a network
-    # namespace shared with the Docker host -- the "connection refused to
-    # localhost:5432" failure mode this replaced. --network host attaches this
-    # container to the same host network the service's port is actually
-    # published on, regardless of the runner process's own namespace.
+    # The job container and the postgres service share the user-defined network
+    # GitHub Actions creates for the job, so the container reaches the service
+    # by its service name on port 5432 -- no dependence on the runner machine's
+    # own network stack, which is exactly what made `localhost` unusable for
+    # self-hosted runners that themselves execute inside a container. A previous
+    # version put the job container on the host network (`--network host`) to
+    # reach the service's host-published port, but GitHub Actions always
+    # attaches the job container to the job's own user-defined network too, and
+    # Docker rejects the combination ("conflicting options: cannot attach both
+    # user-defined and non-user-defined network-modes"), so the job never ran.
+    # No port is published either: the service is reached by name on the job
+    # network, and a published port would collide between concurrent runs that
+    # share a self-hosted pool.
     container:
       image: golang:1.25.12
-      options: --network host
     env:
-      LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@localhost:5432/loop_test
+      LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@postgres:5432/loop_test
     services:
       postgres:
         image: postgres:16-alpine
@@ -92,8 +95,6 @@ jobs:
           POSTGRES_DB: loop_test
           POSTGRES_USER: loop
           POSTGRES_PASSWORD: loop-test-password
-        ports:
-          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U loop -d loop_test"
           --health-interval 10s
@@ -138,6 +139,20 @@ jobs:
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # `make sqlc-check` shells out to `go install` (Makefile sqlc-generate),
+      # so the job cannot rely on the runner image having Go preinstalled -- a
+      # previous version failed with "go: not found" on pool machines that
+      # didn't. sqlc also compiles libpg_query in /tmp during generation, which
+      # exhausted the runner disk in earlier runs; prune Docker's accumulated
+      # images and build cache first to reclaim the same filesystem.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.25.12"
+          cache-dependency-path: orchestrator/go.sum
+      - name: Free disk space
+        run: |
+          docker builder prune --all --force || true
+          docker system prune --all --force --filter "until=1h" || true
       - run: make sqlc-check
 
   runner:
@@ -221,12 +236,29 @@ jobs:
           docker compose config --quiet
           docker compose -f compose.yaml -f compose.build.yaml config --quiet
           docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
+      # Building all four images from scratch pulls a Go toolchain per service
+      # plus a Node base image, and earlier runs exhausted the self-hosted
+      # runner's disk mid-build ("no space left on device"). The build cache is
+      # the dominant consumer (18 GB on the host daemon in recent history), so
+      # prune it fully first to guarantee headroom; the 1h window on the image
+      # prune leaves a concurrently-running job's freshly pulled base images
+      # alone.
+      - name: Free disk space before building
+        run: |
+          docker builder prune --all --force || true
+          docker system prune --all --force --filter "until=1h" || true
       # Builds from the checkout rather than pulling: this job has to fail on a
       # Dockerfile a pull request broke, and the published images are whatever
       # the last release produced. The defaults in compose.yaml are enough to
       # start the stack, so nothing has to be prepared first.
       - name: Build and start stack
         run: MOIRAI_BUILD_VERSION="$(git rev-parse --short=12 HEAD)" docker compose -f compose.yaml -f compose.build.yaml up --build --detach --wait --wait-timeout 240
+      # The four builds above regenerated several GB of BuildKit cache on the
+      # host daemon (the runner mounts the socket, so the build writes to the
+      # host's /var/lib/docker -- the same disk the runner itself runs on).
+      # Prune it now, while the stack runs, so it never lingers between jobs.
+      - name: Reclaim build cache
+        run: docker builder prune --all --force || true
       - name: Verify readiness endpoints
         run: |
           curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/
@@ -293,7 +325,14 @@ jobs:
         run: docker compose -f compose.yaml -f compose.build.yaml ps && docker compose -f compose.yaml -f compose.build.yaml logs --no-color
       - name: Tear down stack
         if: always()
-        run: docker compose -f compose.yaml -f compose.build.yaml down --volumes --remove-orphans
+        run: |
+          docker compose -f compose.yaml -f compose.build.yaml down --volumes --remove-orphans
+          # Don't leave the four freshly built images behind to accumulate on the
+          # shared runner's disk across runs.
+          docker image rm ghcr.io/alexandre-leites/moirai/api ghcr.io/alexandre-leites/moirai/orchestrator ghcr.io/alexandre-leites/moirai/runner ghcr.io/alexandre-leites/moirai/web || true
+          # And reclaim whatever build cache this run generated, so the daemon is
+          # left clean for the next job on this host.
+          docker builder prune --all --force || true
 
   vulnerability-scan:
     needs: resolve-runner
