@@ -8,24 +8,44 @@ GO ?= go
 
 .PHONY: help test lint typecheck validate compose compose-overlays \
         proto-lint proto-generate proto-check sqlc-generate sqlc-check test-release-tags compose-tls-stack \
-        test-orchestrator test-postgres-integration test-runner test-api test-web \
+        test-orchestrator test-postgres-integration test-integration-notice test-runner test-api test-web \
         build-orchestrator \
         build-runner build-api build-web build-images
 
 help:
-	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run Go orchestrator tests.' '  make lint              Verify Go formatting.' '  make typecheck         Run Go vet.' '  make validate          Run test, format, vet, Compose, and proto checks.'
+	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run Go orchestrator tests (no database; PostgreSQL suites excluded).' '  make test-postgres-integration  Run the PostgreSQL suites. Needs LOOP_TEST_DATABASE_URL.' '  make lint              Verify Go formatting.' '  make typecheck         Run Go vet.' '  make validate          Run test, format, vet, Compose, and proto checks.'
 
 test: test-orchestrator test-runner test-api test-web
 
+# The notice is not decoration. This target does not build the `integration`
+# suites at all, and `go test` in package-list mode prints nothing for a
+# package that passes, so without it the omission of 100+ state-machine tests
+# is invisible and the run just looks green (issue #363).
 test-orchestrator:
 	cd orchestrator && $(GO) test -race ./...
+	@GO='$(GO)' sh scripts/integration-suite-notice.sh
+
+test-integration-notice:
+	sh scripts/integration-suite-notice_test.sh
 
 # The orchestrator's correctness is mostly its SQL -- mutual exclusion is a
 # primary key, fencing is a WHERE clause -- so these run against a real
 # PostgreSQL. The guard is deliberate: a silently skipped suite is worse than a
-# missing one.
+# missing one. It says so out loud because `test -n` on its own fails with
+# nothing but a make error code, which reads like a broken build rather than a
+# missing database.
 test-postgres-integration:
-	test -n "$(LOOP_TEST_DATABASE_URL)"
+	@test -n "$(LOOP_TEST_DATABASE_URL)" || { \
+		printf '%s\n' 'LOOP_TEST_DATABASE_URL is not set; these suites need a real PostgreSQL.' \
+			'' \
+			'    docker run -d --name moirai-test-postgres -p 5432:5432 \' \
+			'      -e POSTGRES_DB=loop_test -e POSTGRES_USER=loop \' \
+			'      -e POSTGRES_PASSWORD=loop-test-password postgres:16-alpine' \
+			'' \
+			'    LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:5432/loop_test \' \
+			'      make test-postgres-integration' >&2; \
+		exit 1; \
+	}
 	cd orchestrator && $(GO) test -tags integration -race -count=1 ./internal/server/
 
 test-runner:
@@ -106,4 +126,4 @@ sqlc-generate:
 sqlc-check: sqlc-generate
 	git diff --exit-code -- orchestrator/internal/db
 
-validate: test-orchestrator lint typecheck compose compose-overlays test-release-tags proto-check sqlc-check
+validate: test-orchestrator test-integration-notice lint typecheck compose compose-overlays test-release-tags proto-check sqlc-check

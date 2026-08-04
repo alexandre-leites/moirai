@@ -71,10 +71,9 @@ func (h *harness) setGitHub(adapter gitHubLikeAdapter) {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	// No emptiness check: TestMain (integration_gate_test.go) has already
+	// refused to run the package without it, so by here it is set.
 	url := os.Getenv("LOOP_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("LOOP_TEST_DATABASE_URL is not set")
-	}
 	ctx := context.Background()
 	// Applying the real migrations directory is itself a check: it proves the
 	// shipped .sql files parse and apply, which nothing else verifies.

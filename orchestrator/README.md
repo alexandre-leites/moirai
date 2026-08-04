@@ -9,6 +9,30 @@ go test ./...
 go vet ./...
 ```
 
+`go test ./...` does **not** run the PostgreSQL integration suites in
+`internal/server`. They carry the `integration` build tag, so they are not
+skipped at run time — they are never compiled, and a green run above says
+nothing about most of the workflow state machine. Run `make test-orchestrator`
+from the repository root instead of `go test ./...`: it runs the same tests and
+then prints exactly which suites were left out and how many tests that was.
+
+To run the excluded suites you need a PostgreSQL:
+
+```bash
+docker run -d --name moirai-test-postgres -p 5432:5432 \
+  -e POSTGRES_DB=loop_test -e POSTGRES_USER=loop \
+  -e POSTGRES_PASSWORD=loop-test-password postgres:16-alpine
+
+LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:5432/loop_test \
+  make test-postgres-integration
+```
+
+`LOOP_TEST_DATABASE_URL` is required, not optional: with the tag set and the
+variable missing the package refuses to run rather than skipping, because a
+skipped suite reports success for a run that tested nothing. The suites
+truncate every table in the database they are pointed at, so point them at a
+throwaway one.
+
 ## Database queries (sqlc)
 
 All database access goes through [sqlc](https://sqlc.dev)-generated code — see AGENTS.md Engineering rules §12. Hand-written SQL string literals in Go (`pool.Exec(ctx, \`...\`)`, `pool.Query(ctx, \`...\`)`, `pool.QueryRow(ctx, \`...\`)`) are not accepted for new or changed code; every query is compiler-checked against `migrations/` at generation time instead of failing silently at runtime.

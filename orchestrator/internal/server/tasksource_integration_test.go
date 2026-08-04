@@ -190,14 +190,12 @@ func (e excludeMigrationFS) ReadDir(name string) ([]fs.DirEntry, error) {
 // scratchDatabaseURL creates a fresh, empty database on the same PostgreSQL
 // server LOOP_TEST_DATABASE_URL points at (dropping the environment's shared
 // loop_test database is not an option -- every other integration test uses
-// it concurrently), and registers its cleanup. Returns "" (skipping the
-// test) if LOOP_TEST_DATABASE_URL is not set, matching newHarness.
+// it concurrently), and registers its cleanup. Like newHarness it assumes
+// LOOP_TEST_DATABASE_URL is set, which TestMain (integration_gate_test.go)
+// has already established for the whole package.
 func scratchDatabaseURL(t *testing.T, name string) string {
 	t.Helper()
 	base := os.Getenv("LOOP_TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("LOOP_TEST_DATABASE_URL is not set")
-	}
 	parsed, err := url.Parse(base)
 	if err != nil {
 		t.Fatalf("parse LOOP_TEST_DATABASE_URL: %v", err)
