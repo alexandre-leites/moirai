@@ -16,8 +16,12 @@
 # The arm64 leg (TARGETARCH URLs and checksums) is only exercised by the
 # publish job, i.e. after merge to main and on the weekly cadence.
 #
-# It builds and publishes here because the image is what *runs* on the
-# self-hosted pool; it cannot build itself.
+# Both jobs follow the same resolve-runner pattern as ci.yml: they run on the
+# self-hosted pool when CI_SELFHOSTED_RUNNERS is "true", GitHub-hosted
+# ubuntu-latest otherwise. While the pool still runs its previous image it can
+# build the ci-runner image itself; once the pool moves onto the ci-runner
+# image, this workflow must fall back to GitHub-hosted runners (the image
+# cannot build itself) by clearing that variable or excluding this workflow.
 
 name: CI Runner image
 
@@ -46,15 +50,35 @@ concurrency:
 env:
   IMAGE: ghcr.io/${{ github.repository }}/ci-runner
   PLATFORMS: linux/amd64,linux/arm64
+  # True selects the self-hosted pool; unset or any other value selects
+  # GitHub-hosted runners. Set it as a repository variable. The pool currently
+  # runs a different image, so it can build the ci-runner image itself.
+  CI_SELFHOSTED_RUNNERS: ${{ vars.CI_SELFHOSTED_RUNNERS || 'false' }}
 
 jobs:
+  resolve-runner:
+    runs-on: ["self-hosted", "linux"]
+    outputs:
+      runner: ${{ steps.resolve.outputs.runner }}
+    steps:
+      - name: Select runner pool
+        id: resolve
+        run: |
+          if [[ "${CI_SELFHOSTED_RUNNERS,,}" == "true" ]]; then
+            echo "runner=[\"self-hosted\", \"linux\"]" >> "$GITHUB_OUTPUT"
+            echo "::notice::CI_SELFHOSTED_RUNNERS=true -- running on the self-hosted pool."
+          else
+            echo "runner=[\"ubuntu-latest\"]" >> "$GITHUB_OUTPUT"
+          fi
+
   # PR-only gate: builds the image (amd64, no push) and syntax-checks the shell
   # scripts so a broken Dockerfile/entrypoint is caught before merge. Uses the
   # Actions cache (type=gha) restored from main; never logs in to GHCR and never
   # writes the registry buildcache.
   build:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -78,7 +102,8 @@ jobs:
 
   publish:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
