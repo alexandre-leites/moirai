@@ -1,22 +1,33 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
-	"github.com/loop-engineering/api/internal/orchestrator"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
+// workflowClient is the slice of the orchestrator client these handlers use.
+type workflowClient interface {
+	ListWorkflows(ctx context.Context) (*controlv1.ListWorkflowsResponse, error)
+	GetWorkflow(ctx context.Context, workflowRunID string) (*controlv1.GetWorkflowResponse, error)
+	ListWorkflowEvents(ctx context.Context, workflowRunID string, afterID int64, limit int32) (*controlv1.ListWorkflowEventsResponse, error)
+	SubmitHumanDecision(ctx context.Context, workflowRunID, decision, comment string) (*controlv1.SubmitHumanDecisionResponse, error)
+	RetryWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.RetryWorkflowResponse, error)
+	CancelWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.CancelWorkflowResponse, error)
+	BlockWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.BlockWorkflowResponse, error)
+}
+
 type WorkflowHandlers struct {
-	client  *orchestrator.Client
+	client  workflowClient
 	limiter *auth.RateLimiter
 }
 
-func NewWorkflowHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *WorkflowHandlers {
+func NewWorkflowHandlers(client workflowClient, limiter *auth.RateLimiter) *WorkflowHandlers {
 	return &WorkflowHandlers{client: client, limiter: limiter}
 }
 

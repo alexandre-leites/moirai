@@ -2,28 +2,35 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
-	"github.com/loop-engineering/api/internal/orchestrator"
+	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
 // The console sends a small JSON object or nothing at all; the cap is here so a
 // client cannot make the server buffer an arbitrary body before it is rejected.
 const maxSyncRequestBytes = 1 << 20
 
+// syncClient is the slice of the orchestrator client these handlers use.
+type syncClient interface {
+	SyncNow(ctx context.Context, projectID string) (*controlv1.SyncNowResponse, error)
+	IssueSyncStatus(ctx context.Context) (*controlv1.IssueSyncStatusResponse, error)
+}
+
 // SyncHandlers exposes manual issue synchronization and per-project sync
 // status to the web console, so an operator can see that a registered project
 // is (or is not) being picked up without waiting for the next background pass.
 type SyncHandlers struct {
-	client  *orchestrator.Client
+	client  syncClient
 	limiter *auth.RateLimiter
 }
 
-func NewSyncHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *SyncHandlers {
+func NewSyncHandlers(client syncClient, limiter *auth.RateLimiter) *SyncHandlers {
 	return &SyncHandlers{client: client, limiter: limiter}
 }
 

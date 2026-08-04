@@ -170,3 +170,146 @@ func TestSyncNowRequiresSessionAndCSRF(t *testing.T) {
 		t.Fatalf("an unauthenticated request reached the orchestrator: %#v", fake.requested)
 	}
 }
+
+func syncMux(client syncClient) http.Handler {
+	mux := http.NewServeMux()
+	NewSyncHandlers(client, auth.NewRateLimiter(time.Minute, 60)).RegisterRoutes(mux)
+	return mux
+}
+
+// The status view is how an operator sees that a registered project is (or is
+// not) being picked up, so every field the console renders has to survive the
+// translation -- including the back-off fields that explain a stalled project.
+func TestSyncStatusReportsEveryProjectEntry(t *testing.T) {
+	stub := &stubClient{issueSyncStatus: func(context.Context) (*controlv1.IssueSyncStatusResponse, error) {
+		return &controlv1.IssueSyncStatusResponse{Entries: []*controlv1.IssueSyncStatusEntry{
+			{
+				ProjectId: "p-1", ProjectName: "billing", Enabled: true,
+				IssueCount: 12, EligibleCount: 3, LastSyncedAt: "2026-08-01T00:00:00Z",
+			},
+			{
+				ProjectId: "p-2", ProjectName: "secure", Enabled: false,
+				ConsecutiveFailures: 4, NextRetryAt: "2026-08-01T01:00:00Z",
+				LastError: "credentials rejected", BackingOff: true,
+			},
+		}}, nil
+	}}
+	rec := httptest.NewRecorder()
+	syncMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodGet, "/api/v1/sync/status", "", "admin-session"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Entries []struct {
+			ProjectID           string `json:"projectId"`
+			ProjectName         string `json:"projectName"`
+			Enabled             bool   `json:"enabled"`
+			IssueCount          int32  `json:"issueCount"`
+			EligibleCount       int32  `json:"eligibleCount"`
+			LastSyncedAt        string `json:"lastSyncedAt"`
+			ConsecutiveFailures int32  `json:"consecutiveFailures"`
+			NextRetryAt         string `json:"nextRetryAt"`
+			LastError           string `json:"lastError"`
+			BackingOff          bool   `json:"backingOff"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Entries) != 2 {
+		t.Fatalf("entries = %#v, want 2", body.Entries)
+	}
+	healthy := body.Entries[0]
+	if healthy.ProjectID != "p-1" || healthy.ProjectName != "billing" || !healthy.Enabled ||
+		healthy.IssueCount != 12 || healthy.EligibleCount != 3 ||
+		healthy.LastSyncedAt != "2026-08-01T00:00:00Z" {
+		t.Errorf("healthy entry = %#v", healthy)
+	}
+	stalled := body.Entries[1]
+	if stalled.ConsecutiveFailures != 4 || !stalled.BackingOff ||
+		stalled.LastError != "credentials rejected" || stalled.NextRetryAt != "2026-08-01T01:00:00Z" {
+		t.Errorf("stalled entry = %#v", stalled)
+	}
+}
+
+func TestSyncStatusAnswersAnEmptyListRatherThanNull(t *testing.T) {
+	stub := &stubClient{issueSyncStatus: func(context.Context) (*controlv1.IssueSyncStatusResponse, error) {
+		return &controlv1.IssueSyncStatusResponse{}, nil
+	}}
+	rec := httptest.NewRecorder()
+	syncMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodGet, "/api/v1/sync/status", "", "admin-session"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"entries":[]}` {
+		t.Fatalf("body = %s, want an empty entries array", got)
+	}
+}
+
+func TestSyncStatusMapsOrchestratorErrors(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want int
+	}{
+		{orchestrator.ErrUnauthorized, http.StatusUnauthorized},
+		{orchestrator.ErrForbidden, http.StatusForbidden},
+		{context.DeadlineExceeded, http.StatusGatewayTimeout},
+	} {
+		stub := &stubClient{issueSyncStatus: func(context.Context) (*controlv1.IssueSyncStatusResponse, error) {
+			return nil, tc.err
+		}}
+		rec := httptest.NewRecorder()
+		syncMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodGet, "/api/v1/sync/status", "", "admin-session"))
+		if rec.Code != tc.want {
+			t.Errorf("%v: status = %d, want %d", tc.err, rec.Code, tc.want)
+		}
+	}
+}
+
+func TestSyncStatusRequiresASession(t *testing.T) {
+	stub := &stubClient{}
+	rec := httptest.NewRecorder()
+	syncMux(stub).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/sync/status", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if len(stub.calls) != 0 {
+		t.Fatalf("an unauthenticated request reached the orchestrator: %#v", stub.calls)
+	}
+}
+
+// A body larger than the cap is refused rather than buffered, and must not be
+// mistaken for "no project specified" and sync every project.
+func TestSyncNowRejectsAnOversizedBody(t *testing.T) {
+	stub := &stubClient{syncNow: func(context.Context, string) (*controlv1.SyncNowResponse, error) {
+		return &controlv1.SyncNowResponse{}, nil
+	}}
+	oversized := `{"projectId":"` + strings.Repeat("x", maxSyncRequestBytes) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sync", strings.NewReader(oversized))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "admin-session"})
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "csrf-token"})
+	req.Header.Set(auth.CSRFHeaderName, "csrf-token")
+
+	rec := httptest.NewRecorder()
+	syncMux(stub).ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(stub.calls) != 0 {
+		t.Fatalf("an oversized request reached the orchestrator: %#v", stub.calls)
+	}
+}
+
+func TestSyncNowSurfacesOrchestratorRejection(t *testing.T) {
+	stub := &stubClient{syncNow: func(context.Context, string) (*controlv1.SyncNowResponse, error) {
+		return nil, orchestrator.ErrNotFound
+	}}
+	rec := httptest.NewRecorder()
+	syncMux(stub).ServeHTTP(rec, mutateRequest(
+		t, http.MethodPost, "/api/v1/sync", `{"projectId":"nope"}`, "admin-session"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
