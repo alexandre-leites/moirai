@@ -173,8 +173,25 @@ type Result struct {
 	GateVerdict   string `json:"gateVerdict,omitempty"`
 }
 
+// perExecution returns the dispatcher a single execution runs on: a copy of the
+// shared configuration. Execute overrides the agent backend and pipeline runner
+// when a packet names an execution image, and those overrides must stay inside
+// the one run that asked for them — the dispatcher a control loop holds is
+// shared by every concurrent execution (see ControlLoop.execute, which starts
+// each one in its own goroutine against the same *Dispatcher), so writing an
+// override back into it would hand one job's toolchain image to another.
+//
+// Returning a Dispatcher value is what makes that structural rather than
+// conventional: the result is a copy no matter what receiver form Execute is
+// given, so the safety of these overrides no longer depends on Execute's
+// receiver staying a value.
+func (dispatcher Dispatcher) perExecution() Dispatcher {
+	return dispatcher
+}
+
 func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (result Result, err error) {
-	if dispatcher.Workspaces == nil || (lease.Packet.Role != taskpacket.RolePipeline && dispatcher.Backend == nil) {
+	execution := dispatcher.perExecution()
+	if execution.Workspaces == nil || (lease.Packet.Role != taskpacket.RolePipeline && execution.Backend == nil) {
 		return Result{}, errors.New("workspace manager and agent backend are required")
 	}
 	if lease.JobID == "" || lease.Generation < 1 || lease.Packet.JobID != lease.JobID {
@@ -182,18 +199,19 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	}
 	packet := lease.Packet
 	if packet.ExecutionImage != "" {
-		if dispatcher.ExecutionEnvironment == nil {
+		if execution.ExecutionEnvironment == nil {
 			return Result{}, fmt.Errorf("execution image %q cannot run on this runner: Docker execution is unavailable", packet.ExecutionImage)
 		}
-		backend, pipelineRunner, environmentErr := dispatcher.ExecutionEnvironment(packet.ExecutionImage)
+		backend, pipelineRunner, environmentErr := execution.ExecutionEnvironment(packet.ExecutionImage)
 		if environmentErr != nil {
 			return Result{}, environmentErr
 		}
-		dispatcher.Backend = backend
-		dispatcher.Pipeline = pipelineRunner
+		// Overriding the copy, never the receiver: see perExecution.
+		execution.Backend = backend
+		execution.Pipeline = pipelineRunner
 	}
-	if dispatcher.Projects != nil {
-		release, err := dispatcher.Projects.Acquire(packet.Repository.ProjectID)
+	if execution.Projects != nil {
+		release, err := execution.Projects.Acquire(packet.Repository.ProjectID)
 		if err != nil {
 			return Result{}, err
 		}
@@ -203,35 +221,35 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// execution's workspace is off limits to every concurrent sweep from the
 	// moment it could be prepared, even though a retained record for the same
 	// job ID may still exist (one job ID serves every execution of a workflow).
-	defer dispatcher.Active.Claim(packet.JobID)()
+	defer execution.Active.Claim(packet.JobID)()
 	// Retained workspaces are released before free space is measured, so the
 	// forensics kept for earlier failures cost the next execution capacity
 	// rather than blocking it.
-	if sweepErr := dispatcher.SweepRetainedWorkspaces(ctx); sweepErr != nil {
+	if sweepErr := execution.SweepRetainedWorkspaces(ctx); sweepErr != nil {
 		slog.Warn("could not fully sweep retained workspaces", "job_id", lease.JobID, "error", sweepErr)
 	}
-	if dispatcher.MinimumFreeBytes > 0 {
-		if dispatcher.AvailableBytes == nil {
+	if execution.MinimumFreeBytes > 0 {
+		if execution.AvailableBytes == nil {
 			return Result{}, errors.New("disk availability probe is required")
 		}
-		available, diskErr := dispatcher.AvailableBytes(dispatcher.DiskPath)
+		available, diskErr := execution.AvailableBytes(execution.DiskPath)
 		if diskErr != nil {
 			return Result{}, fmt.Errorf("inspect workspace disk space: %w", diskErr)
 		}
-		if available < dispatcher.MinimumFreeBytes {
-			return Result{}, fmt.Errorf("insufficient runner disk space: %d available, %d required", available, dispatcher.MinimumFreeBytes)
+		if available < execution.MinimumFreeBytes {
+			return Result{}, fmt.Errorf("insufficient runner disk space: %d available, %d required", available, execution.MinimumFreeBytes)
 		}
 	}
 	// The task environment is resolved before the workspace exists: a clone or
 	// fetch of a private repository needs the same credential the later push
 	// does, and an unresolvable reference must fail the execution rather than
 	// silently degrade to an unauthenticated Git operation.
-	environment, err := dispatcher.resolveEnvironment(
+	environment, err := execution.resolveEnvironment(
 		ctx, SecretScope{JobID: lease.JobID, LeaseGeneration: lease.Generation}, packet.EnvironmentRefs,
 	)
 	// Registered before the error check: a resolution that failed partway may
 	// already have written one key before failing on the next.
-	if discarder, ok := dispatcher.Environment.(SecretDiscarder); ok {
+	if discarder, ok := execution.Environment.(SecretDiscarder); ok {
 		defer func() {
 			if discardErr := discarder.DiscardJobKeys(lease.JobID); discardErr != nil {
 				slog.Error("could not discard job key material", "job_id", lease.JobID, "error", discardErr)
@@ -244,7 +262,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// Before the workspace exists, and therefore before git, the agent or the
 	// pipeline can be handed one of these. Everything this runner streams from
 	// here on has the values stripped out of it.
-	dispatcher.redact(lease.JobID, environment)
+	execution.redact(lease.JobID, environment)
 	request, err := prepareRequest(packet, environment)
 	if err != nil {
 		return Result{}, err
@@ -253,16 +271,16 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// old record goes rather than describing a directory that is about to be
 	// replaced. Safety against a concurrent sweep comes from the claim above;
 	// this keeps the registry truthful and its count bound honest.
-	dispatcher.forgetRetainedWorkspace(packet.JobID)
-	workspace, err := dispatcher.Workspaces.Prepare(ctx, request)
+	execution.forgetRetainedWorkspace(packet.JobID)
+	workspace, err := execution.Workspaces.Prepare(ctx, request)
 	if err != nil {
 		return Result{}, fmt.Errorf("prepare workspace: %w", err)
 	}
 	defer func() {
-		if dispatcher.retain(ctx, packet, workspace, result, err) {
+		if execution.retain(ctx, packet, workspace, result, err) {
 			return
 		}
-		cleanupErr := dispatcher.cleanup(context.Background(), packet)
+		cleanupErr := execution.cleanup(context.Background(), packet)
 		if cleanupErr != nil && err == nil {
 			err = fmt.Errorf("cleanup workspace: %w", cleanupErr)
 		}
@@ -283,15 +301,15 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	}()
 	rotations := newRotationWatcher(
 		credentialFiles,
-		dispatcher.RotationInterval,
-		dispatcher.storeSecret(SecretScope{JobID: lease.JobID, LeaseGeneration: lease.Generation}),
-		func(values []string) { dispatcher.redactValues(lease.JobID, values) },
+		execution.RotationInterval,
+		execution.storeSecret(SecretScope{JobID: lease.JobID, LeaseGeneration: lease.Generation}),
+		func(values []string) { execution.redactValues(lease.JobID, values) },
 		slog.Default(),
 	)
 	rotations.Start(ctx)
 	defer rotations.Stop()
 
-	initial, err := dispatcher.snapshot(ctx, workspace)
+	initial, err := execution.snapshot(ctx, workspace)
 	if err != nil {
 		return Result{}, err
 	}
@@ -299,13 +317,13 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return Result{}, err
 	}
 	if packet.Role == taskpacket.RolePipeline {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, agentEnvironment, packet.Pipeline)
+		pipelineResults, pipelineErr := execution.runPipeline(ctx, workspace.Repository, agentEnvironment, packet.Pipeline)
 		result = Result{Status: "completed", ExitCode: 0, InitialRevision: initial.Revision, PipelineResults: pipelineResults}
 		if pipelineErr != nil {
 			result.Status = "failed"
 			result.Summary = pipelineErr.Error()
 		}
-		final, snapshotErr := dispatcher.snapshot(context.Background(), workspace)
+		final, snapshotErr := execution.snapshot(context.Background(), workspace)
 		if snapshotErr != nil {
 			return Result{}, snapshotErr
 		}
@@ -322,12 +340,12 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		return result, nil
 	}
 
-	output := dispatcher.logOutput(lease)
+	output := execution.logOutput(lease)
 	// The agent phase is a goal loop rather than a single launch: the gate
 	// decides whether the objective was met and, while it was not and budget
 	// remains, the agent is continued in the same session (see goalgate.go).
 	// With MaxContinuations at zero this is exactly one Execute, as before.
-	run := dispatcher.runAgent(ctx, lease.Generation, packet, workspace, initial, agentEnvironment, output)
+	run := execution.runAgent(ctx, lease.Generation, packet, workspace, initial, agentEnvironment, output)
 	if forwarder, ok := output.(*logForwarder); ok {
 		forwarder.Close()
 	}
@@ -350,7 +368,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 	// work with a generic pipeline failure — destroying the very signal the
 	// block exists to deliver.
 	if executeErr == nil && result.Status == "completed" && len(packet.Pipeline) > 0 {
-		pipelineResults, pipelineErr := dispatcher.runPipeline(ctx, workspace.Repository, agentEnvironment, packet.Pipeline)
+		pipelineResults, pipelineErr := execution.runPipeline(ctx, workspace.Repository, agentEnvironment, packet.Pipeline)
 		result.PipelineResults = pipelineResults
 		if pipelineErr != nil {
 			executeErr = pipelineErr
@@ -360,7 +378,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 			}
 		}
 	}
-	final, snapshotErr := dispatcher.snapshot(context.Background(), workspace)
+	final, snapshotErr := execution.snapshot(context.Background(), workspace)
 	if snapshotErr != nil {
 		return Result{}, snapshotErr
 	}
@@ -371,7 +389,7 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		// reports no completed work, so publishing it there would present a
 		// non-delivery as a delivery.
 		if executeErr == nil && result.Status == "completed" {
-			if deliverErr := dispatcher.deliver(ctx, workspace, packet, request.Branch, environment, &result); deliverErr != nil {
+			if deliverErr := execution.deliver(ctx, workspace, packet, request.Branch, environment, &result); deliverErr != nil {
 				executeErr = deliverErr
 			}
 		}
@@ -379,12 +397,12 @@ func (dispatcher Dispatcher) Execute(ctx context.Context, lease control.Lease) (
 		// nothing. Anchor outside refs/heads so the next preparation
 		// cannot destroy the commit when it resets the branch.
 		if executeErr == nil && result.Status == "completed" && result.Committed && !packet.Constraints.MayPush {
-			if err := dispatcher.Delivery.RecordWorkInProgress(ctx, workspace, workInProgressReference(packet.ExecutionID)); err != nil {
+			if err := execution.Delivery.RecordWorkInProgress(ctx, workspace, workInProgressReference(packet.ExecutionID)); err != nil {
 				slog.Warn("could not anchor completed work that may not push", "job_id", packet.JobID, "execution_id", packet.ExecutionID, "error", err)
 			}
 		}
 		if executeErr != nil || result.Status != "completed" {
-			dispatcher.retainWorkInProgress(ctx, workspace, packet, environment, &result)
+			execution.retainWorkInProgress(ctx, workspace, packet, environment, &result)
 		}
 	}
 	if executeErr != nil {
