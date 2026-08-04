@@ -99,11 +99,24 @@ compose-tls-stack:
 test-release-tags:
 	sh scripts/release-version_test.sh
 
+# Protobuf tooling. A native `buf` is preferred when it is already on PATH --
+# the ci-runner image (infra/ci-runner/Dockerfile) bakes it in, and the native
+# path is immune to bind-mount layout mismatches -- with the Docker fallback
+# below for bare runners. Both produce the same pinned output: the Docker
+# image and the baked binary are the same buf version.
 proto-lint:
-	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) lint
+	@if command -v buf >/dev/null 2>&1; then \
+		buf lint; \
+	else \
+		docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) lint; \
+	fi
 
 proto-generate:
-	docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) generate
+	@if command -v buf >/dev/null 2>&1; then \
+		buf generate; \
+	else \
+		docker run --rm -v "$(CURDIR):/workspace" -w /workspace $(BUF_IMAGE) generate; \
+	fi
 
 proto-check: proto-lint proto-generate
 	git diff --exit-code -- gen/go
@@ -117,11 +130,16 @@ proto-check: proto-lint proto-generate
 # works when the path visible to the invoking process is also the path the
 # Docker daemon can see, which fails whenever the two are separated by a
 # container boundary of their own -- exactly the layout some self-hosted
-# runners use. `go install` sidesteps the mismatch entirely and produces the
-# same pinned output.
+# runners use. A native `sqlc` already on PATH (the ci-runner image bakes it
+# in) is used directly; otherwise `go install` produces the same pinned
+# output.
 sqlc-generate:
-	GOBIN="$$($(GO) env GOPATH)/bin" $(GO) install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION)
-	cd orchestrator && "$$($(GO) env GOPATH)/bin/sqlc" generate
+	@if command -v sqlc >/dev/null 2>&1; then \
+		cd orchestrator && sqlc generate; \
+	else \
+		GOBIN="$$($(GO) env GOPATH)/bin" $(GO) install github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION); \
+		cd orchestrator && "$$($(GO) env GOPATH)/bin/sqlc" generate; \
+	fi
 
 sqlc-check: sqlc-generate
 	git diff --exit-code -- orchestrator/internal/db
