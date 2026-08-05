@@ -275,6 +275,29 @@ func TestPrepareRejectsUnsafeResolvedEnvironment(t *testing.T) {
 	}
 }
 
+// Every git invocation must run non-interactively: a clone or fetch with no
+// credential would otherwise try to read a username from a terminal that does
+// not exist and fail with the cryptic "could not read Username ... No such
+// device or address" (#391) instead of a clear authentication error.
+func TestGitCommandsNeverPromptForCredentials(t *testing.T) {
+	binary, recorded := fakeGit(t)
+	manager := Manager{DataDirectory: t.TempDir(), GitBinary: binary}
+	if _, err := manager.Prepare(context.Background(), PrepareRequest{
+		ProjectID:     "project-1",
+		JobID:         "job-2",
+		RepositoryURL: "https://github.example/owner/repository.git",
+		DefaultBranch: "main",
+		Branch:        "agent/1234/run-a1b2c3",
+	}); err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	for _, environment := range readGitEnvironments(t, recorded) {
+		if !gitEnvironmentContains(environment, "GIT_TERMINAL_PROMPT=0") {
+			t.Fatalf("git invocation ran without GIT_TERMINAL_PROMPT=0: %#v", environment)
+		}
+	}
+}
+
 func TestCleanupExistingRemovesOnlyManagedWorkspace(t *testing.T) {
 	binary, recorded := fakeGit(t)
 	dataDirectory := t.TempDir()

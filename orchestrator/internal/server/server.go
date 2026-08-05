@@ -1415,6 +1415,27 @@ func implementExecutionID(jobID string) string {
 	return jobID + "-implement"
 }
 
+// repositoryEnvironmentRefs declares the code-host credential a packet's
+// repository operations need. The runner resolves each declared reference
+// (control plane credential first, the runner's own environment second) and
+// uses it to authenticate the clone, fetch, and push that populate the
+// workspace; an undeclared reference is never even looked up, which is what
+// left a GitHub HTTPS managed clone unauthenticated (#391) -- git then tried
+// to prompt for a username and failed with "could not read Username ... No
+// such device or address" because there is no terminal to read one from.
+//
+// Only a managed clone from a GitHub HTTPS URL declares anything (GITHUB_TOKEN).
+// Every other repository shape authenticates some other way -- an SSH key the
+// runner host already has, or a code host its git already trusts -- and
+// declaring a reference it cannot resolve would fail the execution outright,
+// so those shapes declare nothing.
+func repositoryEnvironmentRefs(mode, repositoryURL string) []map[string]string {
+	if mode == "managed_clone" && strings.HasPrefix(repositoryURL, "https://github.com/") {
+		return []map[string]string{{"name": "GITHUB_TOKEN", "secretRef": "github_token"}}
+	}
+	return []map[string]string{}
+}
+
 // planExecutionID is implementExecutionID's counterpart for a job's planning
 // execution (#351) -- distinct so a CancelExecution sent while a job is still
 // planning addresses the execution actually running, not the developer one
@@ -1437,7 +1458,7 @@ func developerPacket(jobID, projectID, externalID, title, body, mode, repository
 		"protocolVersion": "1.0", "jobId": jobID, "executionId": implementExecutionID(jobID), "role": "developer", "objective": "Implement " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
-		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": []any{}, "executionImage": executionImage,
+		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": repositoryEnvironmentRefs(mode, repositoryURL), "executionImage": executionImage,
 		"constraints": map[string]bool{"mayModifyFiles": true, "mayPush": true, "mayMerge": false}, "pipeline": pipeline, "acceptanceCriteria": []string{}, "plan": plan, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
 	}, nil
 }
@@ -1493,7 +1514,7 @@ func plannerPacket(jobID, projectID, externalID, title, body, mode, repositoryUR
 		"protocolVersion": "1.0", "jobId": jobID, "executionId": planExecutionID(jobID), "role": "planner", "objective": "Plan an implementation for " + externalID + ": " + title,
 		"issue":      map[string]string{"externalId": externalID, "title": title, "body": body},
 		"repository": map[string]string{"projectId": projectID, "mode": mode, "url": repositoryURL, "localPath": localPath, "defaultBranch": defaultBranch, "branch": branch},
-		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": []any{}, "executionImage": executionImage,
+		"promptPath": ".loop/prompt.md", "expectedOutput": ".loop/result.json", "timeoutSeconds": timeoutSeconds, "environmentRefs": repositoryEnvironmentRefs(mode, repositoryURL), "executionImage": executionImage,
 		"constraints": map[string]bool{"mayModifyFiles": false, "mayPush": false, "mayMerge": false}, "pipeline": []any{}, "acceptanceCriteria": []string{}, "plan": []string{}, "previousFailures": []string{}, "currentCommit": "", "diffSummary": "", "failedChecks": []string{}, "reviewFindings": []string{},
 	}, nil
 }
