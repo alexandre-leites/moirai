@@ -6,14 +6,14 @@ SQLC_VERSION ?= v1.29.0
 COMPOSE_VERSION ?= v2.38.2
 GO ?= go
 
-.PHONY: help test lint typecheck validate compose compose-overlays \
+.PHONY: help test lint typecheck validate coverage compose compose-overlays \
         proto-lint proto-generate proto-check sqlc-generate sqlc-check test-release-tags compose-tls-stack \
-        test-orchestrator test-postgres-integration test-integration-notice test-runner test-api test-web \
+        test-orchestrator test-postgres-integration test-integration-notice test-coverage-script test-runner test-api test-web \
         build-orchestrator \
         build-runner build-api build-web build-images
 
 help:
-	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run Go orchestrator tests (no database; PostgreSQL suites excluded).' '  make test-postgres-integration  Run the PostgreSQL suites. Needs LOOP_TEST_DATABASE_URL.' '  make lint              Verify Go formatting.' '  make typecheck         Run Go vet.' '  make validate          Run test, format, vet, Compose, and proto checks.'
+	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run Go orchestrator tests (no database; PostgreSQL suites excluded).' '  make test-postgres-integration  Run the PostgreSQL suites. Needs LOOP_TEST_DATABASE_URL.' '  make coverage          Report and gate test coverage (Go + web).' '  make lint              Verify Go formatting.' '  make typecheck         Run Go vet.' '  make validate          Run test, format, vet, Compose, and proto checks.'
 
 test: test-orchestrator test-runner test-api test-web
 
@@ -27,6 +27,9 @@ test-orchestrator:
 
 test-integration-notice:
 	sh scripts/integration-suite-notice_test.sh
+
+test-coverage-script:
+	sh scripts/coverage-report_test.sh
 
 # The orchestrator's correctness is mostly its SQL -- mutual exclusion is a
 # primary key, fencing is a WHERE clause -- so these run against a real
@@ -99,6 +102,12 @@ compose-tls-stack:
 test-release-tags:
 	sh scripts/release-version_test.sh
 
+# Test coverage across the Go modules and web, gated on per-module thresholds
+# (scripts/coverage-report.sh). The orchestrator leg includes its integration
+# suites and needs LOOP_TEST_DATABASE_URL, same as test-postgres-integration.
+coverage:
+	sh scripts/coverage-report.sh
+
 # Protobuf tooling. A native `buf` is preferred when it is already on PATH --
 # the ci-runner image (infra/ci-runner/Dockerfile) bakes it in, and the native
 # path is immune to bind-mount layout mismatches -- with the Docker fallback
@@ -144,4 +153,4 @@ sqlc-generate:
 sqlc-check: sqlc-generate
 	git diff --exit-code -- orchestrator/internal/db
 
-validate: test-orchestrator test-integration-notice lint typecheck compose compose-overlays test-release-tags proto-check sqlc-check
+validate: test-orchestrator test-integration-notice test-coverage-script lint typecheck compose compose-overlays test-release-tags proto-check sqlc-check

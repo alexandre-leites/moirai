@@ -217,6 +217,8 @@ Run `make help` for available targets. `make test` runs orchestrator, runner, AP
 
 `make test` deliberately excludes the orchestrator's PostgreSQL integration suites — most of the workflow state machine — because they need a real database. It says so on screen when it finishes, naming the suites it left out; run them with `make test-postgres-integration` and a `LOOP_TEST_DATABASE_URL`. See [orchestrator local checks](orchestrator/README.md#local-checks).
 
+`make coverage` reports and gates statement coverage across the three Go modules and the web suite, failing when a module drops below its floor. Like the integration suites, the orchestrator leg needs `LOOP_TEST_DATABASE_URL`; without it that leg is skipped with a notice. See [scripts/coverage-report.sh](scripts/coverage-report.sh).
+
 Each service README lists its executable configuration surface:
 
 - [orchestrator configuration](orchestrator/README.md#configuration)
