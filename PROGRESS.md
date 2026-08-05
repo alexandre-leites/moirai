@@ -439,3 +439,23 @@ restructure this file or edit another session's section — append a new one.
 - Notes: Pure documentation/meta-files change. No Go, proto, SQL, or web
   source files were touched. `.github/workflows/ci.yml` and `Makefile` were
   read-only references, per this session's ownership boundaries.
+
+## Session: issue-377 (Makefile test-api missing -race)
+
+- Completed: 2026-08-05
+- Agent/session identifier: issue-377 worktree agent
+- Relevant files:
+  - `Makefile`
+- Behavior delivered:
+  - Added `-race` to the `test-api` target (`cd api && $(GO) test -race
+    ./...`), matching `test-orchestrator` and `test-runner`, which already ran
+    with race detection. CI (`ci.yml:164`) already ran `go test -race` for all
+    three modules, so this closes a local-vs-CI gap: `make test-api` run
+    locally previously skipped race detection that CI always applied.
+- Validation performed:
+  - `make test-api` run directly; the echoed invocation confirms
+    `cd api && go test -race ./...` executed, and all five API packages
+    (`internal/auth`, `internal/config`, `internal/http`,
+    `internal/http/handlers`, `internal/orchestrator`) passed with no race
+    reported.
+- Notes: One-line change, no new races surfaced.
