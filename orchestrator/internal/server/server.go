@@ -1848,6 +1848,17 @@ func databaseError(err error) error {
 	if status.Code(err) != codes.Unknown {
 		return err
 	}
+	// A canceled or timed-out context is not a database failure: it means the
+	// caller (a disconnected client, a shutdown, a deadline) stopped waiting
+	// while the query was in flight. Logging it as ERROR spams the console
+	// with noise that has nothing to do with Postgres, so it is surfaced to
+	// the caller with the matching gRPC code and no error log.
+	if errors.Is(err, context.Canceled) {
+		return status.Error(codes.Canceled, "request canceled")
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return status.Error(codes.DeadlineExceeded, "request deadline exceeded")
+	}
 	slog.Error("database operation failed", "error", err)
 	return status.Error(codes.Internal, "database operation failed")
 }

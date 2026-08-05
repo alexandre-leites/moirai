@@ -791,6 +791,26 @@ func TestDatabaseErrorNilIsNil(t *testing.T) {
 	}
 }
 
+func TestDatabaseErrorDoesNotLogContextCancellation(t *testing.T) {
+	logs := captureLogs(t)
+
+	canceled := databaseError(context.Canceled)
+	if got, want := status.Code(canceled), codes.Canceled; got != want {
+		t.Fatalf("code = %v, want %v", got, want)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a canceled context must not be logged as a database failure, got: %s", logs.String())
+	}
+
+	deadline := databaseError(context.DeadlineExceeded)
+	if got, want := status.Code(deadline), codes.DeadlineExceeded; got != want {
+		t.Fatalf("code = %v, want %v", got, want)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("a deadline-exceeded context must not be logged as a database failure, got: %s", logs.String())
+	}
+}
+
 func TestConfigurationErrorIsDistinctFromDatabaseError(t *testing.T) {
 	logs := captureLogs(t)
 
