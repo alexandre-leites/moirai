@@ -174,6 +174,25 @@ jobs:
           go-version: "1.25.12"
       - run: make lint-go
 
+  # Runs `go test -coverprofile` across the three Go modules (orchestrator,
+  # runner, api -- gen/go is generated protobuf code with no tests of its
+  # own) and prints per-function and total coverage to the job log, gated on
+  # a conservative per-module floor. See Makefile#coverage-go and
+  # scripts/go-coverage.sh for why each floor is set where it is: they sit
+  # below the module's actual coverage on the PR that introduced this job so
+  # the gate itself never breaks CI, and are meant to be raised only in the
+  # same PR that raises a module's real coverage.
+  coverage-go:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
+        with:
+          go-version: "1.25.12"
+      - run: make coverage-go
+
   typecheck:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
@@ -276,6 +295,28 @@ jobs:
       - run: npm i -g "npm@${NPM_VERSION}"
         if: needs.resolve-runner.outputs.baked == 'false'
       - run: make test-web
+
+  # Own job rather than a step of test-web, for the same reason test-web is
+  # itself split out from build-web: a coverage-threshold failure should read
+  # as itself, not as "the web tests broke". `make coverage-web` is `npm ci &&
+  # npm run test -- --coverage`, which vitest.config.ts turns into a coverage
+  # run gated on the thresholds documented there (below the suite's actual
+  # numbers as of issue #372, for the same reason the Go floors are
+  # conservative -- see coverage-go above).
+  coverage-web:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: needs.resolve-runner.outputs.baked == 'false'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm i -g "npm@${NPM_VERSION}"
+        if: needs.resolve-runner.outputs.baked == 'false'
+      - run: make coverage-web
 
   build-web:
     needs: resolve-runner
@@ -478,7 +519,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, lint-go, typecheck, sqlc-check, proto-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, lint-go, coverage-go, typecheck, sqlc-check, proto-check, runner, api, test-web, coverage-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true

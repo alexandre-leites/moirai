@@ -62,6 +62,88 @@ restructure this file or edit another session's section — append a new one.
   per this session's file ownership (`web/src/status.ts`). No Go, proto or CI
   files were changed.
 
+## Session: issue-372 (zero coverage reporting infrastructure)
+
+- Completed: 2026-08-05
+- Agent/session identifier: issue-372 worktree agent
+- Relevant files:
+  - `scripts/go-coverage.sh` (new)
+  - `Makefile` (`coverage-go`, `coverage-web`, `coverage` targets)
+  - `.github/workflows/ci.yml` (`coverage-go`, `coverage-web` jobs)
+  - `web/package.json`, `web/package-lock.json` (`@vitest/coverage-v8` devDependency)
+  - `web/vitest.config.ts` (`test.coverage` block)
+  - `.gitignore` (`coverage.out`)
+- Behavior delivered:
+  - Go: `scripts/go-coverage.sh <module-dir> <floor-percent>` runs
+    `go test -coverprofile=coverage.out ./...` for one module, prints
+    `go tool cover -func=coverage.out` (per-function + total) to the log, then
+    fails if the module's total statement coverage is below its floor.
+    `make coverage-go` runs it for `orchestrator`, `runner` and `api` (the
+    three Go modules with tests; `gen/go` is generated protobuf code with no
+    tests and was deliberately left out).
+  - Web: `@vitest/coverage-v8@^4.1.10` (pinned to match the installed
+    `vitest@4.1.10`) added to devDependencies; `vitest.config.ts` gained a
+    `test.coverage` block (`provider: "v8"`, `reporter: ["text", "text-summary"]`,
+    thresholds statements 70/branches 65/functions 70/lines 75). Only active
+    behind `--coverage`, so `npm test` is unchanged; `npm run test --
+    --coverage` (the exact invocation the issue specified) or
+    `make coverage-web` (`npm ci && npm run test -- --coverage`) both print
+    the per-file and summary coverage table to the log and enforce the
+    thresholds.
+  - CI: two new jobs mirroring the existing `lint-go`/`test-web` job-per-check
+    pattern -- `coverage-go` (needs Go, runs `make coverage-go`) and
+    `coverage-web` (needs Node, runs `make coverage-web`) -- both added to
+    `validate`'s `needs` list so a coverage regression below floor fails the
+    PR the same way a lint or test failure would, visible as its own named
+    GitHub check rather than folded into `lint-go`/`test-web`.
+  - Thresholds are deliberately conservative floors, not the issue's
+    aspirational 70%, chosen from real measurements taken on this branch so
+    the PR that introduces the gate cannot fail its own gate:
+    - `api`: 72.4% actual -> 65% floor. Weak package: `internal/orchestrator`
+      (TLS/CA loading) at 27.1%; everything else in the module is 85%+.
+    - `runner`: 80.6% actual -> 75% floor. Every package already above 65%;
+      closest module to the 70% aspiration.
+    - `orchestrator`: 16.0% actual (unit suite only, `go test ./...` with no
+      build tags) -> 12% floor. This number understates the module: its
+      largest package, `internal/server`, is exercised mainly by
+      `make test-postgres-integration` (build tag `integration`, needs a real
+      Postgres), which `coverage-go` does not run and whose coverage this
+      profile does not merge in. `idgen`, `secrethash` and `textutil` are a
+      genuine 0% and the real, actionable gap -- flagged as follow-up work
+      rather than fixed in this PR, since fixing coverage gaps is a different
+      task from building the reporting infrastructure that makes them
+      visible.
+    - `web`: 84.76%/77.22%/83.19%/87.89% (stmts/branches/funcs/lines) actual,
+      already above the issue's 70% aspiration on every axis except branches;
+      set floors at 70/65/70/75 for headroom against normal run-to-run
+      variance.
+    Raise a floor only in the same PR that raises the module's real coverage,
+    per the comments left in `Makefile#coverage-go` and `vitest.config.ts`.
+- Validation performed:
+  - `cd api && go test -coverprofile=... ./... && go tool cover -func=...`
+    -> total 72.4%
+  - `cd runner && go test -coverprofile=... ./... && go tool cover -func=...`
+    -> total 80.6%
+  - `cd orchestrator && go test -coverprofile=... ./... && go tool cover -func=...`
+    -> total 16.0%
+  - `sh scripts/go-coverage.sh api 65` -> exit 0, prints report + total
+  - `sh scripts/go-coverage.sh runner 75` -> exit 0
+  - `sh scripts/go-coverage.sh orchestrator 12` -> exit 0
+  - `sh scripts/go-coverage.sh orchestrator 99` -> exit 1 (deliberate
+    failure-path check: confirms the floor actually gates)
+  - `npm install` (web, adds `@vitest/coverage-v8`) -> 0 vulnerabilities
+  - `npm run test -- --coverage` (web) -> 248 passed, coverage 84.76% stmts,
+    exit 0, thresholds satisfied
+  - `make coverage` (root) -> runs both `coverage-go` and `coverage-web` in
+    sequence, exit 0
+  - `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`
+    -> parses clean
+- Notes: `gen/go` (protobuf-generated Go module) was intentionally excluded
+  from `coverage-go` -- it has no `_test.go` files, so there is nothing to
+  measure. Files touched are scoped to this session's ownership (CI workflow
+  files, `web/package.json` devDependencies, Go module test/CI config); no
+  handler, `events.ts`, `console-data.tsx` or `auth.go` files (owned by
+  issues #362 / #388) were touched.
 ## Session: issue-388 (logout never revoked the server-side session)
 
 - Completed: 2026-08-05
@@ -291,3 +373,69 @@ restructure this file or edit another session's section — append a new one.
   inspected by hand and is well-formed. Did not touch `.github/workflows/ci.yml`,
   `Makefile`, or any top-level doc files (LICENSE/CONTRIBUTING.md/issue
   templates) — those belong to the concurrent #372/#374 work.
+## Session: issue-374 (add open-source project files)
+
+- Completed: 2026-08-05
+- Agent/session identifier: issue-374 worktree agent, session_01RJrCZXw86ZYEfQdzsMcNE2
+- Relevant files (all new):
+  - `LICENSE`
+  - `CONTRIBUTING.md`
+  - `SECURITY.md`
+  - `CODE_OF_CONDUCT.md`
+  - `CODEOWNERS`
+  - `.github/ISSUE_TEMPLATE/bug_report.yml`
+  - `.github/ISSUE_TEMPLATE/feature_request.yml`
+  - `.github/ISSUE_TEMPLATE/question.yml`
+  - `.github/ISSUE_TEMPLATE/config.yml`
+  - `.github/PULL_REQUEST_TEMPLATE.md`
+- Behavior delivered:
+  - `LICENSE`: MIT, copyright Alexandre Leites (the GitHub org/repo owner —
+    `gh repo view` reports `licenseInfo: null` and `owner.login:
+    alexandre-leites`, and `git log` shows Alexandre Leites as the sole
+    non-agent, non-dependabot human author). MIT chosen because neither
+    `README.md` nor `PROJECT.md` states a license preference and the project
+    ships permissively-licensed Docker images intended for open redistribution
+    (`ghcr.io/alexandre-leites/moirai/*`); MIT is the least restrictive common
+    choice and imposes no copyleft obligation on downstream users of the
+    published images.
+  - `CONTRIBUTING.md`: dev setup, the actual `make` targets from `Makefile`
+    (`test`, `test-orchestrator`, `test-postgres-integration`, `test-runner`,
+    `test-api`, `test-web`, `lint`, `lint-go`, `typecheck`, `validate`,
+    `sqlc-generate`/`sqlc-check`, `proto-generate`/`proto-check`), the sqlc
+    and proto workflows from `AGENTS.md` §12, and a PR process matching what
+    `.github/workflows/ci.yml` actually gates (no invented steps).
+  - `SECURITY.md`: private disclosure via GitHub Security Advisories (no
+    fabricated email address), scope notes specific to this project's threat
+    model (GitHub tokens, per-project credentials, agent provider keys,
+    runner lease fencing, GitHub CLI adapter injection), and a
+    pre-1.0/best-effort supported-versions statement consistent with
+    `docs/release.md`'s tagging scheme referenced from `README.md`.
+  - `.github/ISSUE_TEMPLATE/{bug_report,feature_request,question}.yml`: GitHub
+    issue-forms (current YAML convention, not legacy Markdown), each scoped
+    to the four real components (`orchestrator`/`api`/`runner`/`web`) plus
+    proto/gen and docs. `config.yml` keeps blank issues enabled.
+  - `.github/PULL_REQUEST_TEMPLATE.md`: checklist matching this repo's real
+    gates — targeted tests, `lint`/`lint-go`/`typecheck`, `proto-check`/
+    `sqlc-check` when relevant, doc updates, `PROGRESS.md` updates, no
+    secrets/debug code.
+  - `CODE_OF_CONDUCT.md`: standard Contributor Covenant v2.1, enforcement
+    contact routed through GitHub Security Advisories (no fabricated email).
+  - `CODEOWNERS`: single catch-all rule (`* @alexandre-leites`), matching
+    that they are the only non-agent human contributor in `git log`.
+  - Did not touch `.github/workflows/ci.yml` or `Makefile` (out of scope per
+    task ownership — other in-flight PRs edit those). Skipped `CHANGELOG.md`
+    per the issue's own guidance (explicitly lower priority, "currently
+    hand-written per GitHub Release" — deriving one from `git log` cheaply
+    was not attempted since release notes are already handled via GitHub
+    Releases per `docs/release.md`).
+- Validation performed:
+  - `python3 -c "import yaml; yaml.safe_load(...)"` on each new
+    `.github/ISSUE_TEMPLATE/*.yml` — all parse.
+  - `make lint` (gofmt check across tracked/untracked `*.go` files) — passes;
+    no Go files were touched by this change.
+  - Confirmed `.github/workflows/ci.yml` has no markdown-lint gate, so no
+    additional formatting check applies to the new docs.
+  - No code changes, so no orchestrator/runner/api/web test suites were run.
+- Notes: Pure documentation/meta-files change. No Go, proto, SQL, or web
+  source files were touched. `.github/workflows/ci.yml` and `Makefile` were
+  read-only references, per this session's ownership boundaries.
