@@ -461,8 +461,48 @@ jobs:
           scanners: secret
           exit-code: "1"
 
+  # Test coverage, gated on per-module thresholds (scripts/coverage-report.sh).
+  # The orchestrator leg measures the integration-tagged suites, so this job
+  # needs the postgres service and LOOP_TEST_DATABASE_URL exactly like
+  # test-postgres-integration, plus the Go and Node toolchains for the other
+  # three legs. `make coverage` exits non-zero when any module's statement
+  # coverage drops below its floor, so a regression fails this job.
+  coverage:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    env:
+      LOOP_TEST_DATABASE_URL: postgresql://loop:loop-test-password@postgres:5432/loop_test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: loop_test
+          POSTGRES_USER: loop
+          POSTGRES_PASSWORD: loop-test-password
+        options: >-
+          --health-cmd "pg_isready -U loop -d loop_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
+        with:
+          go-version: "1.25.12"
+          cache-dependency-path: orchestrator/go.sum
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: needs.resolve-runner.outputs.baked == 'false'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm i -g "npm@${NPM_VERSION}"
+        if: needs.resolve-runner.outputs.baked == 'false'
+      - run: make coverage
+
   validate:
-    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, proto-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, proto-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan, coverage]
     runs-on: ubuntu-latest
     steps:
       - run: true
