@@ -219,8 +219,8 @@ RUN set -eux \
 # wrapped-mode boot (dockerd, then drop to the runner user). The autoscaler
 # never uses the wrapper -- it installs its own -- so it is a local-testing
 # convenience only.
-COPY entrypoint.sh /usr/local/bin/ci-runner-entrypoint
-COPY wrapper.sh /usr/local/bin/ci-runner-wrapper
+COPY infra/ci-runner/entrypoint.sh /usr/local/bin/ci-runner-entrypoint
+COPY infra/ci-runner/wrapper.sh /usr/local/bin/ci-runner-wrapper
 RUN chmod 0755 /usr/local/bin/ci-runner-entrypoint /usr/local/bin/ci-runner-wrapper
 
 ENV DOCKER_DATA_ROOT=/var/lib/docker \
