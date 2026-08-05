@@ -31,6 +31,20 @@ function replaceByID<T extends { id: string }>(items: T[], next: T): T[] {
   return items.map((item) => item.id === next.id ? next : item);
 }
 
+/**
+ * Like replaceByID, but patches a matching row instead of swapping it out
+ * wholesale — for events whose payload only carries a subset of the row's
+ * fields (e.g. the SSE workflow event's `WorkflowLifecycle` shape). A row
+ * with no existing match is inserted as-is, same as replaceByID: there is
+ * nothing to wipe for a workflow the snapshot hasn't loaded yet, and the next
+ * poll fills in the rest.
+ */
+function mergeByID<T extends { id: string }>(items: T[], patch: Partial<T> & { id: string }): T[] {
+  const index = items.findIndex((item) => item.id === patch.id);
+  if (index < 0) return [patch as T, ...items];
+  return items.map((item) => item.id === patch.id ? { ...item, ...patch } : item);
+}
+
 export function ConsoleDataProvider({ api, children }: { api: ApiClient; children: ReactNode }) {
   const load = useCallback(
     async (signal: AbortSignal): Promise<ConsoleSnapshot> => {
@@ -51,7 +65,7 @@ export function ConsoleDataProvider({ api, children }: { api: ApiClient; childre
   useEffect(() => subscribeEvents((event) => {
     update((snapshot) => {
       if (event.workflow) {
-        return { ...snapshot, workflows: replaceByID(snapshot.workflows, event.workflow) };
+        return { ...snapshot, workflows: mergeByID(snapshot.workflows, event.workflow) };
       }
       if (event.runner) {
         return { ...snapshot, runners: replaceByID(snapshot.runners, event.runner) };
