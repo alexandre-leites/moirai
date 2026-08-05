@@ -35,6 +35,7 @@ Thumbs.db
 
 # Project-specific
 runner/runner
+coverage.out
 
 # Agent tooling
 # Ignore all local Claude Code runtime state (live git worktrees, locks, loop leases)
