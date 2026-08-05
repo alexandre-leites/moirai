@@ -10,6 +10,7 @@ GO ?= go
 .PHONY: help test lint lint-go typecheck validate compose compose-overlays \
         proto-lint proto-generate proto-check sqlc-generate sqlc-check test-release-tags compose-tls-stack \
         test-orchestrator test-postgres-integration test-integration-notice test-runner test-api test-web \
+        coverage-go coverage-web coverage \
         build-orchestrator \
         build-runner build-api build-web build-images
 
@@ -57,6 +58,35 @@ test-api:
 
 test-web:
 	cd web && npm ci && npm run typecheck && npm run lint && npm test
+
+# Per-module coverage floors, deliberately below what issue #372 found on the
+# introducing PR so the gate that adds coverage reporting does not itself fail
+# CI. Each is a documented floor to raise over time, not the 70% aspiration:
+#   api          72.4% actual -> 65% floor. internal/orchestrator (TLS/CA
+#                loading) is the weak package at 27%; api/http/handlers and
+#                api/auth are already 85%+.
+#   runner       80.6% actual -> 75% floor. Every package is already above
+#                65%; this is the module closest to the 70% target.
+#   orchestrator 16.0% actual (unit suite only) -> 12% floor. This module's
+#                real coverage is understated here: internal/server (the
+#                largest package by far) is exercised mainly by the
+#                Postgres-backed suite behind `make test-postgres-integration`
+#                (build tag `integration`), which this target does not run and
+#                whose coverage is not merged into this profile. idgen,
+#                secrethash and textutil sit at a genuine 0% and are the
+#                actionable gap -- see issue #372 for the follow-up to add
+#                unit tests for them and to merge the integration suite's
+#                coverage profile in for an accurate internal/server number.
+# Raise a floor only in the same PR that raises the module's real coverage.
+coverage-go:
+	sh scripts/go-coverage.sh api 65
+	sh scripts/go-coverage.sh runner 75
+	sh scripts/go-coverage.sh orchestrator 12
+
+coverage-web:
+	cd web && npm ci && npm run test -- --coverage
+
+coverage: coverage-go coverage-web
 
 lint:
 	test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard -- '*.go'))"
