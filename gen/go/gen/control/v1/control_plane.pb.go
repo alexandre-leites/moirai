@@ -5160,7 +5160,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\rBlockWorkflow\x12%.loop.control.v1.BlockWorkflowRequest\x1a&.loop.control.v1.BlockWorkflowResponse\x12p\n" +
 	"\x13GetSchedulerMetrics\x12+.loop.control.v1.GetSchedulerMetricsRequest\x1a,.loop.control.v1.GetSchedulerMetricsResponse\x12g\n" +
 	"\x10GetSystemVersion\x12(.loop.control.v1.GetSystemVersionRequest\x1a).loop.control.v1.GetSystemVersionResponse\x12Z\n" +
-	"\fStreamEvents\x12$.loop.control.v1.StreamEventsRequest\x1a\".loop.control.v1.ControlPlaneEvent0\x01B@Z>github.com/loop-engineering/contracts/gen/control/v1;controlv1b\x06proto3"
+	"\fStreamEvents\x12$.loop.control.v1.StreamEventsRequest\x1a\".loop.control.v1.ControlPlaneEvent0\x01BGZEgithub.com/alexandre-leites/moirai/contracts/gen/control/v1;controlv1b\x06proto3"
 
 var (
 	file_proto_control_plane_proto_rawDescOnce sync.Once

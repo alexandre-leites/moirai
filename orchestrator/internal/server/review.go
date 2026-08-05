@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 )
 
 // jobRoleDeveloper, jobRoleReviewer and jobRolePlanner are the three values

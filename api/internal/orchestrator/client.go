@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"

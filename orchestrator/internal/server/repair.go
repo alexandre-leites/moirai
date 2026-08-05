@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 )
 
 // pipelineFailureReason reads whether a developer (or repair) execution's own

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/loop-engineering/api/internal/orchestrator"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"

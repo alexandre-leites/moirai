@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/loop-engineering/api/internal/auth"
 	"github.com/loop-engineering/api/internal/orchestrator"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
 const eventKeepAliveInterval = 15 * time.Second

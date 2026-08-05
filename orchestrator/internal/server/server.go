@@ -15,11 +15,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/db"
 	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/metrics"

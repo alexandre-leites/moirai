@@ -459,3 +459,67 @@ restructure this file or edit another session's section — append a new one.
     `internal/http/handlers`, `internal/orchestrator`) passed with no race
     reported.
 - Notes: One-line change, no new races surfaced.
+
+## Session: issue-378 (buf module rebrand: loop-engineering -> moirai)
+
+- Completed: 2026-08-05
+- Agent/session identifier: issue-378 worktree agent
+- Relevant files:
+  - `buf.yaml`, `buf.gen.yaml`
+  - `proto/control_plane.proto`, `proto/runner_control.proto` (`go_package`)
+  - `gen/go/go.mod` and all generated `gen/go/gen/**/*.pb.go` (regenerated)
+  - `gen/go`-consuming `go.mod` files: `api/go.mod`, `runner/go.mod`,
+    `orchestrator/go.mod` (only the `github.com/loop-engineering/contracts`
+    require/replace lines — the modules' own names, e.g.
+    `github.com/loop-engineering/api`, were left untouched; out of scope for
+    this issue)
+  - Every `.go` file across `api/`, `runner/`, `orchestrator/` importing the
+    contracts package (~50 files), plus `api/Dockerfile` / `runner/Dockerfile`
+    comments referencing the old replace directive
+- Behavior delivered:
+  - `buf.yaml` module renamed `buf.build/loop-engineering/loop-engineering`
+    -> `buf.build/alexandre-leites/moirai`.
+  - `buf.gen.yaml` `go_out`/`grpc_out` `module=` option changed to
+    `github.com/alexandre-leites/moirai/contracts`.
+  - Both `.proto` files' `go_package` option updated to
+    `github.com/alexandre-leites/moirai/contracts/gen/{control,runner}/v1`.
+  - Ran `make proto-generate` (via the Dockerized `buf` fallback, since `buf`
+    CLI isn't installed locally) to regenerate `gen/go/gen/control/v1` and
+    `gen/go/gen/runner/v1`. Directory layout under `gen/go` is unchanged
+    (`gen/go/gen/{control,runner}/v1`, not `gen/go/github.com/...`) because
+    buf derives the on-disk path from the `go_package` suffix after the
+    module prefix, not from the module string itself — so no directory
+    rename was needed or performed, contrary to the issue's suggestion #4
+    (verified by inspecting the regenerated tree before/after).
+  - Updated every Go import of `github.com/loop-engineering/contracts/...`
+    to `github.com/alexandre-leites/moirai/contracts/...` via a scripted
+    `sed` across all three modules, then re-ran `gofmt -w` (import block
+    ordering shifted since the new module path sorts differently
+    alphabetically).
+- Validation performed:
+  - `grep -rIn "loop-engineering/contracts\|loop-engineering/loop-engineering" .`
+    (excluding `.git`) — zero hits repo-wide.
+  - `go build ./...` in `gen/go`, `api`, `runner`, `orchestrator` — all clean.
+  - `make lint` (gofmt check) — passes after the import-reorder fixup.
+  - `make typecheck` (`go vet` in orchestrator) — passes.
+  - `make lint-go` (golangci-lint across all three modules) — `0 issues.`
+    x3.
+  - `make proto-check` — the `git diff --exit-code -- gen/go` step reports
+    only the expected diff (the rebrand itself, not yet committed at the
+    time of the check); once committed this gate is satisfied because
+    regenerating from the updated `buf.gen.yaml`/`.proto` files reproduces
+    byte-for-byte what's committed.
+  - `make test-orchestrator`, `make test-api`, `make test-runner` — all
+    packages pass (`go test -race`). PostgreSQL-gated integration suites
+    under the `integration` build tag were not run (they don't compile in
+    the default suite and this change doesn't touch DB code); left the
+    shared integration Postgres instance untouched per prior guidance that
+    it's shared across concurrent agent sessions.
+  - `web/` was intentionally left untouched (`web/package.json`'s
+    `loop-engineering-web` package name is npm branding, not a buf/Go import
+    path, and `web/**` is outside this issue's ownership boundary per the
+    orchestrating task).
+- Notes: Purely a rename/rebrand; no behavioral change. The three service
+  modules' own Go module identities (`github.com/loop-engineering/api`,
+  `.../orchestrator`, `.../runner`) were deliberately left as-is — the issue
+  and its "Affected files" list scope this to the buf/contracts module only.

@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/loop-engineering/contracts v0.0.0-00010101000000-000000000000
+	github.com/alexandre-leites/moirai/contracts v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/crypto v0.54.0
 	google.golang.org/grpc v1.83.0
@@ -30,4 +30,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/loop-engineering/contracts => ../gen/go
+replace github.com/alexandre-leites/moirai/contracts => ../gen/go

@@ -7,9 +7,9 @@ import (
 	"errors"
 	"strings"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 	"github.com/loop-engineering/orchestrator/internal/db"
 	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/secrethash"

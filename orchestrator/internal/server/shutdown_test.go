@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/secrethash"
 	"google.golang.org/grpc/metadata"
