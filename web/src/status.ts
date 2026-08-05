@@ -43,16 +43,14 @@ export type StatusMeta = {
 // (orchestrator/internal/server/status.go's Status type is the source of
 // truth): offered, preparing, planning, waiting_github_checks, delivering,
 // waiting_human, waiting_ai_review, repairing, pipeline_failed and the four
-// terminal statuses. `waiting_human` is kept even though nothing writes it
-// yet -- SubmitHumanDecision (orchestrator/internal/server/management.go) is
-// a real, wired RPC that today always answers "V1 has no approval phase",
-// and the console's DecisionPanel (workflow-detail.tsx) is built against the
-// day it doesn't. `planning` (#351) is a real, wired status: a project that
+// terminal statuses. `planning` (#351) is a real, wired status: a project that
 // opts into requirePlanning sits here while its planner execution runs,
 // before ever reaching `preparing`. `delivering` (#359), `waiting_ai_review`
-// (#356), `repairing` (#357) and `pipeline_failed` (#359) are likewise real,
-// wired statuses -- see status.go:16-137 for each one's full semantics; the
-// summary that matters here is that all four hold the project lock and are
+// (#356), `repairing` (#357), `pipeline_failed` (#359) and `waiting_human`
+// (the human-approval gate, resolved by SubmitHumanDecision in
+// orchestrator/internal/server/management.go) are likewise real, wired
+// statuses -- see status.go:16-137 for each one's full semantics; the
+// summary that matters here is that all five hold the project lock and are
 // active work in progress, exactly like `preparing`/`planning`, so none of
 // them belongs in TERMINAL_STATUSES below on that basis alone.
 // `pipeline_failed` is the one deliberate exception: status.go documents it

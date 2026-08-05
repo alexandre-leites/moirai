@@ -54,11 +54,11 @@ Moirai solves these by treating the agent as one replaceable execution component
 
 - **Multiple projects.** Register several projects, enable/disable independently, support managed clones and existing local paths, synchronize eligible issues from each.
 - **Global scheduling.** One global queue across all enabled projects, highest numeric priority wins, creation timestamp as tie-breaker, skip projects with active workflows.
-- **Project concurrency.** One active workflow per project. The project stays locked for every phase of a run — in the Go V1 orchestrator that is implementation, pull-request delivery, and waiting for checks, and it extends to review, repair, and waiting for approval when those phases are implemented.
+- **Project concurrency.** One active workflow per project. The project stays locked for every phase of a run — in the Go V1 orchestrator that is implementation, pull-request delivery, and waiting for checks, and it extends to review, repair, and waiting for approval.
 - **Runner fleet.** Multiple runner containers, one job per runner at a time, outbound gRPC connections, capability/label advertisement, heartbeats, lease renewals, safe reconnection, drain/revoke support.
 - **Durable issue workflow.** A Go state machine whose every transition is persisted to PostgreSQL, so workflows survive orchestrator restart and workflow history is preserved. It is event-driven: the orchestrator dispatches an agent execution and advances the run only on the runner's terminal event. Retries are manual — there are no automatic workflow retries or execution deadlines.
 - **Portable integrations.** Generic issue-tracker interface, code-host interface, and agent-backend interface. GitHub CLI adapters for the MVP. OpenCode backend first, with local-process and Docker execution modes.
-- **Complete delivery flow.** Branch or worktree preparation, an opt-in planning phase, implementation, push, PR creation, GitHub check monitoring, an opt-in human-approval gate, automatic merge, issue completion. (Deterministic local pipeline, independent AI review, and repair cycles are target scope not yet implemented in the Go V1 orchestrator -- see #250's remaining follow-ups #352/#353/#354.)
+- **Complete delivery flow.** Branch or worktree preparation, an opt-in planning phase, implementation, push, PR creation, GitHub check monitoring, an opt-in human-approval gate, automatic merge, issue completion. A deterministic local pipeline, independent AI review, and bounded repair cycles are implemented and opt-in per project.
 - **Web administration.** Local login, project registration/configuration, runner tokens and status, global queue, workflow dashboard with phase and attempt tracking, logs and events, retry/resume/cancel/block/approve controls.
 
 ### Design principles
@@ -66,7 +66,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 | Principle | Description |
 |---|---|
 | Orchestrator is authoritative | Runner memory, agent conversation state, and process output are not authoritative |
-| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the GitHub-check gate (a run merges only on green), the runner's result-document evidence, and (for a project that opts in) a human-approval gate between green checks and merge; the pipeline and AI review gates are not implemented in V1 |
+| Agents do not decide completion | Completing requires deterministic gates: repo changes, pipeline, AI review, checks, human approval, merge. V1 enforces the GitHub-check gate (a run merges only on green), the runner's result-document evidence, the deterministic local pipeline and independent AI review gates (opt-in per project), and (for a project that opts in) a human-approval gate between green checks and merge |
 | Portability through interfaces | Provider-specific behavior is translated at adapter boundaries |
 | Durable state outside conversations | An agent session can be replaced without losing the task |
 | Bounded loops | Every retry loop has explicit limits (attempts, duration, executions) |
@@ -82,7 +82,7 @@ Moirai solves these by treating the agent as one replaceable execution component
 - Global scheduler that selects the highest-priority eligible issue across all unlocked projects.
 - Single-project concurrency lock.
 - Runner registration via one-time tokens, outbound gRPC, heartbeats, lease renewals, reconnection, drain, and revocation.
-- Per-issue workflow state machine: prepare, an opt-in planning phase (`planning`, projectConfig.RequirePlanning -- #351), implement, push, PR, GitHub checks, an opt-in human-approval gate (`waiting_human`, resolved by `SubmitHumanDecision`), merge, issue completion. Local pipeline, AI review, and repair cycles are specified above but are **not implemented in the Go V1 orchestrator** (see #250's remaining follow-ups #352/#353/#354); their schema columns and RPCs remain reserved.
+- Per-issue workflow state machine: prepare, an opt-in planning phase (`planning`, projectConfig.RequirePlanning -- #351), implement, push, PR, GitHub checks, an opt-in deterministic local pipeline gate, an opt-in independent AI review gate, bounded repair cycles (opt-in `EnableRepairLoop`), an opt-in human-approval gate (`waiting_human`, resolved by `SubmitHumanDecision`), merge, issue completion.
 - GitHub issue-tracker adapter (via `gh` CLI).
 - GitHub code-host adapter (via `gh` CLI).
 - OpenCode agent backend.

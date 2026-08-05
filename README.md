@@ -207,7 +207,7 @@ Pushing a git tag on its own publishes nothing; a GitHub Release has to be publi
 - Job events are fenced on the lease generation, the job status, and a monotonic sequence number, so a stale or replayed event from a runner that has lost its lease is rejected rather than applied.
 - Issues are re-read from the tracker on a timer as well as on demand, so an unattended deployment discovers new work without an operator pressing "Sync now". `agent:ready` opts an issue in; `agent:blocked` and `agent:delivered` opt it back out.
 
-Planning, a deterministic local pipeline, independent AI review, repair loops, and the human approval gate are described in [`PROJECT.md`](PROJECT.md) but are **not implemented in the V1 Go orchestrator**. A V1 workflow dispatches one implementation execution, opens a pull request, waits for checks, and merges.
+Planning, a deterministic local pipeline, independent AI review, bounded repair loops, and the human approval gate are implemented as opt-in per-project gates. A V1 workflow dispatches an implementation execution (optionally after a planning phase), opens a pull request, waits for checks, and merges; projects that opt in also gate on the deterministic pipeline, an independent AI review, and bounded repair cycles. See [`PROJECT.md`](PROJECT.md) for the full delivery flow.
 
 The API is published at `http://localhost:8080`; the dashboard is published at `http://localhost:3000`. Compose disables the API secure-cookie setting only because this development topology terminates no TLS.
 
