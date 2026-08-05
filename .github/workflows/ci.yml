@@ -1,9 +1,46 @@
 name: CI
 
+# Runner pool: jobs run on the self-hosted pool when the repository variable
+# CI_SELFHOSTED_RUNNERS is "true"; otherwise (unset or "false") they run on
+# GitHub-hosted ubuntu-latest. resolve-runner picks the pool once and every work
+# job inherits it. There is no automatic fallback between pools, so when the
+# flag is on the pool must be healthy or jobs will queue.
+#
+# The self-hosted pool runs the ci-runner image (infra/ci-runner/Dockerfile):
+# the autoscaler starts one container per job with the whole toolchain baked in
+# and its own disposable dockerd, so nothing accumulates on the host and the
+# cache dies with the container. The migration flag CI_RUNNER_BAKED must be
+# "true" only once the pool has been moved to that image. It is what turns off
+# the per-job setup-* steps (the toolchain is already present) and the Docker
+# prune steps (each job already owns a fresh daemon). Until then it stays false
+# and every job behaves exactly as it did on the socket-mount myoung34 runner.
+# The GitHub-hosted pool never has baked tooling.
+#
+# Required Tooling (GitHub-hosted pool only; the self-hosted pool inherits
+# everything from the image):
+# - git: >= 2.39
+# - make: GNU make >= 4.3
+# - gcc: build-essential >= 12 (for `go test -race`)
+# - docker: daemon + CLI >= 24, runner user in the docker group
+# - docker compose: v2 plugin
+# - curl: >= 7.68
+# - bash: >= 5.0
+# - base: Ubuntu 22.04 / 24.04 LTS
+#
+# Changes that touch only infra/ci-runner/ (or its publish workflow) skip this
+# workflow entirely: the ci-runner image is built and published by
+# ci-runner.yml instead, and nothing here depends on it.
+
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "infra/ci-runner/**"
+      - ".github/workflows/ci-runner.yml"
   pull_request:
+    paths-ignore:
+      - "infra/ci-runner/**"
+      - ".github/workflows/ci-runner.yml"
 
 permissions:
   contents: read
@@ -17,13 +54,49 @@ env:
   # Pinned explicitly: the Node image ships npm 11, and package.json declares
   # npm@12 as this project's package manager.
   NPM_VERSION: "12.0.2"
+  # True selects the self-hosted pool; unset or any other value selects
+  # GitHub-hosted runners. Set it as a repository variable.
+  CI_SELFHOSTED_RUNNERS: ${{ vars.CI_SELFHOSTED_RUNNERS || 'false' }}
+  # False until the self-hosted pool has been moved to the ci-runner image
+  # (infra/ci-runner/Dockerfile). True is what engages the baked toolchain:
+  # setup-* steps and ad-hoc `go install`s are skipped, and the Docker prune
+  # steps are skipped too (each job already owns a fresh daemon). Never true on
+  # the GitHub-hosted pool.
+  CI_RUNNER_BAKED: ${{ vars.CI_RUNNER_BAKED || 'false' }}
 
 jobs:
+  resolve-runner:
+    runs-on: ["self-hosted", "linux"]
+    outputs:
+      runner: ${{ steps.resolve.outputs.runner }}
+      baked: ${{ steps.resolve.outputs.baked }}
+    steps:
+      - name: Select runner pool
+        id: resolve
+        run: |
+          if [[ "${CI_SELFHOSTED_RUNNERS,,}" == "true" ]]; then
+            echo "runner=[\"self-hosted\", \"linux\"]" >> "$GITHUB_OUTPUT"
+            echo "::notice::CI_SELFHOSTED_RUNNERS=true -- running on the self-hosted pool."
+          else
+            echo "runner=[\"ubuntu-latest\"]" >> "$GITHUB_OUTPUT"
+          fi
+          # The baked toolchain only applies to a self-hosted pool that has
+          # been moved onto the ci-runner image. Until CI_RUNNER_BAKED is true
+          # the pool still runs the old socket-mount runner and every job must
+          # keep its setup-* steps.
+          if [[ "${CI_SELFHOSTED_RUNNERS,,}" == "true" && "${CI_RUNNER_BAKED,,}" == "true" ]]; then
+            echo "baked=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "baked=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test-orchestrator:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
           cache-dependency-path: orchestrator/go.sum
@@ -34,11 +107,21 @@ jobs:
   # database. This is the job that would have caught a retry that wedges a
   # project or a failure that respawns itself every second.
   test-postgres-integration:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     # The job container and the postgres service share the user-defined network
     # GitHub Actions creates for the job, so the container reaches the service
-    # by its service name on port 5432. No port is published: the service is
-    # reached by name on the job network.
+    # by its service name on port 5432 -- no dependence on the runner machine's
+    # own network stack, which is exactly what made `localhost` unusable for
+    # self-hosted runners that themselves execute inside a container. A previous
+    # version put the job container on the host network (`--network host`) to
+    # reach the service's host-published port, but GitHub Actions always
+    # attaches the job container to the job's own user-defined network too, and
+    # Docker rejects the combination ("conflicting options: cannot attach both
+    # user-defined and non-user-defined network-modes"), so the job never ran.
+    # No port is published either: the service is reached by name on the job
+    # network, and a published port would collide between concurrent runs that
+    # share a self-hosted pool.
     container:
       image: golang:1.25.12
     env:
@@ -58,25 +141,30 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
           cache-dependency-path: orchestrator/go.sum
       - run: make test-postgres-integration
 
   lint:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
       - run: make lint
 
   typecheck:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
           cache-dependency-path: orchestrator/go.sum
@@ -88,29 +176,36 @@ jobs:
   # build if the checked-in generated code is stale, the same enforcement
   # `proto-check` gives the protobuf bindings.
   sqlc-check:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      # `make sqlc-check` shells out to `go install` (Makefile sqlc-generate),
-      # so the job cannot rely on the runner image having Go preinstalled.
-      # sqlc also compiles libpg_query in /tmp during generation, which can
-      # exhaust the runner disk; prune Docker's accumulated images and build
-      # cache first to reclaim the same filesystem.
+      # `make sqlc-check` uses the baked sqlc when present and falls back to
+      # `go install` (Makefile sqlc-generate), so the job needs Go either way
+      # and setup-go stays unless the pool is baked. sqlc also compiles
+      # libpg_query in /tmp during generation, which exhausted the runner disk
+      # in earlier runs; on the socket-mount pool prune the host daemon first,
+      # but on the baked pool each job owns a fresh daemon, so the prune is a
+      # no-op and can stay off.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
           cache-dependency-path: orchestrator/go.sum
       - name: Free disk space
+        if: needs.resolve-runner.outputs.baked == 'false'
         run: |
           docker builder prune --all --force || true
           docker system prune --all --force --filter "until=1h" || true
       - run: make sqlc-check
 
   runner:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
           cache-dependency-path: runner/go.sum
@@ -118,10 +213,12 @@ jobs:
       - run: cd runner && go vet ./...
 
   api:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
           cache-dependency-path: api/go.sum
@@ -130,34 +227,40 @@ jobs:
 
   # Own job rather than a step of build-web, so a failing vitest suite or an
   # eslint error is reported as itself instead of as "the web build broke", and
-  # so the two can run concurrently.
+  # so the two can run concurrently when the self-hosted pool has the capacity.
   # `make test-web` is `cd web && npm ci && npm run typecheck && npm run lint &&
   # npm test`: any one of those exiting non-zero fails the chain, and therefore
   # this job. Note `npm run lint` is `eslint .` with no `--max-warnings`, so it
   # gates eslint *errors* only; the ten warnings in the quality backlog do not
   # fail this job today.
   test-web:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm i -g "npm@${NPM_VERSION}"
+        if: needs.resolve-runner.outputs.baked == 'false'
       - run: make test-web
 
   build-web:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm i -g "npm@${NPM_VERSION}"
+        if: needs.resolve-runner.outputs.baked == 'false'
       - run: make build-web
 
   # `compose-smoke` below only proves each overlay parses; it does not catch
@@ -167,7 +270,8 @@ jobs:
   # render-tls-stack.sh --check that would have caught it) was wired into
   # `make validate` but never into a CI job, so it never actually ran.
   compose-overlays:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       # `docker compose config` output is not byte-stable across compose
@@ -181,7 +285,8 @@ jobs:
       - run: make compose-overlays
 
   compose-smoke:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Validate every Compose combination
@@ -190,12 +295,15 @@ jobs:
           docker compose -f compose.yaml -f compose.build.yaml config --quiet
           docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
       # Building all four images from scratch pulls a Go toolchain per service
-      # plus a Node base image, and earlier runs exhausted the runner's disk
-      # mid-build ("no space left on device"). The build cache is the dominant
-      # consumer (18 GB on the host daemon in recent history), so prune it fully
-      # first to guarantee headroom; the 1h window on the image prune leaves a
-      # concurrently-running job's freshly pulled base images alone.
+      # plus a Node base image, and earlier runs exhausted the self-hosted
+      # runner's disk mid-build ("no space left on device"). The build cache is
+      # the dominant consumer (18 GB on the host daemon in recent history), so
+      # prune it fully first to guarantee headroom; the 1h window on the image
+      # prune leaves a concurrently-running job's freshly pulled base images
+      # alone. On the baked pool each job builds against its own fresh,
+      # disposable dockerd, so there is nothing to reclaim -- skip the prune.
       - name: Free disk space before building
+        if: needs.resolve-runner.outputs.baked == 'false'
         run: |
           docker builder prune --all --force || true
           docker system prune --all --force --filter "until=1h" || true
@@ -206,9 +314,12 @@ jobs:
       - name: Build and start stack
         run: MOIRAI_BUILD_VERSION="$(git rev-parse --short=12 HEAD)" docker compose -f compose.yaml -f compose.build.yaml up --build --detach --wait --wait-timeout 240
       # The four builds above regenerated several GB of BuildKit cache on the
-      # host daemon. Prune it now, while the stack runs, so it never lingers
-      # between jobs.
+      # host daemon (the runner mounts the socket, so the build writes to the
+      # host's /var/lib/docker -- the same disk the runner itself runs on).
+      # Prune it now, while the stack runs, so it never lingers between jobs.
+      # On the baked pool the daemon dies with the container, nothing lingers.
       - name: Reclaim build cache
+        if: needs.resolve-runner.outputs.baked == 'false'
         run: docker builder prune --all --force || true
       # Run through a throwaway container on --network host rather than curling
       # directly from the job: the job step itself executes in the self-hosted
@@ -289,33 +400,47 @@ jobs:
         if: always()
         run: |
           docker compose -f compose.yaml -f compose.build.yaml down --volumes --remove-orphans
-          # Don't leave the four freshly built images behind to accumulate on
-          # the runner's disk across runs.
+          # Don't leave the four freshly built images behind to accumulate on the
+          # shared runner's disk across runs.
           docker image rm ghcr.io/alexandre-leites/moirai/api ghcr.io/alexandre-leites/moirai/orchestrator ghcr.io/alexandre-leites/moirai/runner ghcr.io/alexandre-leites/moirai/web || true
-          # And reclaim whatever build cache this run generated, so the daemon is
-          # left clean for the next job on this host.
-          docker builder prune --all --force || true
+          # Reclaim the build cache this run generated. Socket-mount pool: wipe
+          # the host daemon clean for the next job. Baked pool: the daemon dies
+          # with the container -- nothing accumulates, nothing to reclaim.
+          if [[ "${CI_RUNNER_BAKED,,}" != "true" ]]; then
+            docker builder prune --all --force || true
+          fi
 
   vulnerability-scan:
-    runs-on: ubuntu-latest
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           go-version: "1.25.12"
       - name: Scan Go dependencies
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          command -v govulncheck >/dev/null 2>&1 || go install golang.org/x/vuln/cmd/govulncheck@latest
           cd api && govulncheck ./...
           cd ../runner && govulncheck ./...
           cd ../orchestrator && govulncheck ./...
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        if: needs.resolve-runner.outputs.baked == 'false'
         with:
           node-version: ${{ env.NODE_VERSION }}
       - run: npm i -g "npm@${NPM_VERSION}"
+        if: needs.resolve-runner.outputs.baked == 'false'
       - name: Scan Node dependencies
         run: cd web && npm ci && npm audit --audit-level=high
+      # trivy is baked into the ci-runner image, so the baked pool scans with
+      # the pinned binary directly; the GitHub-hosted pool installs it through
+      # the pinned action. Exactly one of these steps runs per pool.
       - name: Scan filesystem, secrets, and container configuration
+        if: needs.resolve-runner.outputs.baked == 'true'
+        run: trivy fs --scanners secret --exit-code 1 .
+      - name: Scan filesystem, secrets, and container configuration
+        if: needs.resolve-runner.outputs.baked == 'false'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
@@ -324,7 +449,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true
