@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { Workflow } from "./api";
 import {
-  ATTEMPT_BUDGETS, PHASES, attemptRows, describeEvent, deriveGates, executionError, logText, reachedPhase, statusMeta,
+  ATTEMPT_BUDGETS, CUT_STATUSES, PHASES, TERMINAL_STATUSES, attemptRows, describeEvent, deriveGates, executionError,
+  isTerminal, logText, reachedPhase, statusMeta,
 } from "./status";
 import { workflow } from "./test-console";
 
@@ -17,6 +18,30 @@ describe("statusMeta", () => {
 
   it("names a status added server-side rather than dropping it", () => {
     expect(statusMeta("quiescing")).toMatchObject({ label: "quiescing", variant: "idle", phase: null });
+  });
+
+  it("covers the four statuses #359/#356/#357 added to the orchestrator (#360)", () => {
+    expect(statusMeta("delivering")).toMatchObject({ label: "Delivering", variant: "run", pulse: true, phase: "pr" });
+    expect(statusMeta("waiting_ai_review")).toMatchObject({ variant: "run", pulse: true, phase: "review" });
+    expect(statusMeta("repairing")).toMatchObject({ label: "Repairing", variant: "warn", pulse: true, phase: "implement" });
+    expect(statusMeta("pipeline_failed")).toMatchObject({ variant: "warn", phase: "pipeline" });
+  });
+});
+
+describe("terminal and cut status sets (#360)", () => {
+  it("keeps delivering, waiting_ai_review and repairing out of TERMINAL_STATUSES -- all three hold the project lock", () => {
+    expect(isTerminal("delivering")).toBe(false);
+    expect(isTerminal("waiting_ai_review")).toBe(false);
+    expect(isTerminal("repairing")).toBe(false);
+  });
+
+  it("treats pipeline_failed as terminal for display purposes, unlike status.go's own terminalStatuses list", () => {
+    expect(TERMINAL_STATUSES.has("pipeline_failed")).toBe(true);
+    expect(isTerminal("pipeline_failed")).toBe(true);
+  });
+
+  it("cuts a pipeline_failed run's thread instead of drawing it as a plain finished run", () => {
+    expect(CUT_STATUSES.has("pipeline_failed")).toBe(true);
   });
 });
 
@@ -44,6 +69,13 @@ describe("reachedPhase", () => {
       status: "waiting_github_checks", planningAttempts: 0, implementationAttempts: 0, reviewCycles: 0,
     });
     expect(reachedPhase(run)).toBe(at("checks"));
+  });
+
+  it("places the four #360 statuses on the phase path from the live status alone", () => {
+    expect(reachedPhase(workflow({ status: "delivering" }))).toBe(at("pr"));
+    expect(reachedPhase(workflow({ status: "waiting_ai_review" }))).toBe(at("review"));
+    expect(reachedPhase(workflow({ status: "repairing" }))).toBe(at("implement"));
+    expect(reachedPhase(workflow({ status: "pipeline_failed" }))).toBe(at("pipeline"));
   });
 });
 
@@ -76,6 +108,23 @@ describe("deriveGates", () => {
     const run = workflow({ status: "waiting_human", pullRequestUrl: "https://example.test/pull/7" });
     expect(stateOf(run, "GitHub checks")).toBe("passed");
     expect(stateOf(run, "Human approval")).toBe("pending");
+  });
+
+  it("fails the pipeline gate for a pipeline_failed run since it is drawn as a cut thread", () => {
+    const run = workflow({ status: "pipeline_failed" });
+    expect(stateOf(run, "Local pipeline")).toBe("failed");
+    expect(stateOf(run, "AI review")).toBe("not_reached");
+  });
+
+  it("marks a bare repairing run's own phase (implement) pending, distinct from a cut run's failed gate", () => {
+    const run = workflow({ status: "repairing" });
+    expect(stateOf(run, "Local pipeline")).toBe("not_reached");
+  });
+
+  it("credits a repairing run's own pipeline attempt once pipelineRepairAttempts records it", () => {
+    const run = workflow({ status: "repairing", pipelineRepairAttempts: 1 });
+    expect(stateOf(run, "Local pipeline")).toBe("pending");
+    expect(stateOf(run, "AI review")).toBe("not_reached");
   });
 });
 

@@ -39,17 +39,30 @@ export type StatusMeta = {
   phase: Phase | null;
 };
 
-// The Go V1 orchestrator writes exactly eight of these
+// The Go V1 orchestrator writes exactly thirteen of these
 // (orchestrator/internal/server/status.go's Status type is the source of
-// truth): offered, preparing, planning, waiting_github_checks and the four
+// truth): offered, preparing, planning, waiting_github_checks, delivering,
+// waiting_human, waiting_ai_review, repairing, pipeline_failed and the four
 // terminal statuses. `waiting_human` is kept even though nothing writes it
 // yet -- SubmitHumanDecision (orchestrator/internal/server/management.go) is
 // a real, wired RPC that today always answers "V1 has no approval phase",
 // and the console's DecisionPanel (workflow-detail.tsx) is built against the
 // day it doesn't. `planning` (#351) is a real, wired status: a project that
 // opts into requirePlanning sits here while its planner execution runs,
-// before ever reaching `preparing`. Every other entry this table used to
-// carry -- implementing, local_pipeline, repairing, ai_review, pushing,
+// before ever reaching `preparing`. `delivering` (#359), `waiting_ai_review`
+// (#356), `repairing` (#357) and `pipeline_failed` (#359) are likewise real,
+// wired statuses -- see status.go:16-137 for each one's full semantics; the
+// summary that matters here is that all four hold the project lock and are
+// active work in progress, exactly like `preparing`/`planning`, so none of
+// them belongs in TERMINAL_STATUSES below on that basis alone.
+// `pipeline_failed` is the one deliberate exception: status.go documents it
+// as "a brief hand-off to the repair-or-block decision", and the console
+// treats that hand-off as effectively terminal for the *display* purposes
+// TERMINAL_STATUSES serves (the active count, the workflow list's
+// active/terminal filter) even though the Go orchestrator's own
+// moirai_active_workflows gauge counts it as active until the hand-off
+// resolves -- see TERMINAL_STATUSES's comment below. Every other entry this
+// table used to carry -- implementing, local_pipeline, ai_review, pushing,
 // pr_created, merging, recovering -- named phases of a pipeline the deleted
 // internal/workflow package (#247) modelled but the Go orchestrator never
 // implemented, and were pruned in #265: statusMeta's fallback below covers a
@@ -60,16 +73,42 @@ export const STATUS_META: Record<string, StatusMeta> = {
   planning: { label: "Planning", variant: "run", pulse: true, phase: "plan" },
   preparing: { label: "Preparing", variant: "run", pulse: true, phase: "prepare" },
   waiting_github_checks: { label: "Waiting on checks", variant: "wait", pulse: false, phase: "checks" },
+  delivering: { label: "Delivering", variant: "run", pulse: true, phase: "pr" },
   waiting_human: { label: "Needs decision", variant: "wait", pulse: false, phase: "human" },
+  waiting_ai_review: { label: "In AI review", variant: "run", pulse: true, phase: "review" },
+  repairing: { label: "Repairing", variant: "warn", pulse: true, phase: "implement" },
+  pipeline_failed: { label: "Pipeline failed", variant: "warn", pulse: false, phase: "pipeline" },
   completed: { label: "Delivered", variant: "ok", pulse: false, phase: "done" },
   blocked: { label: "Blocked", variant: "bad", pulse: false, phase: null },
   failed: { label: "Failed", variant: "bad", pulse: false, phase: null },
   cancelled: { label: "Cancelled", variant: "idle", pulse: false, phase: null },
 };
 
-export const TERMINAL_STATUSES = new Set(["completed", "blocked", "failed", "cancelled"]);
-/** Terminal runs whose thread is drawn cut rather than finished. */
-export const CUT_STATUSES = new Set(["blocked", "failed", "cancelled"]);
+// `pipeline_failed` is included here even though status.go's own
+// terminalStatuses (the list its Prometheus active-workflow gauge and
+// project-lock bookkeeping use) deliberately excludes it -- a run sitting at
+// `pipeline_failed` still holds its project lock and is still active by the
+// orchestrator's own accounting, exactly like `delivering`, `waiting_human`,
+// `waiting_ai_review` and `repairing`, none of which are listed here either.
+// The console's TERMINAL_STATUSES answers a narrower, display-only question
+// -- "is this row done enough that a human should stop counting it toward
+// the active/needs-attention totals" -- and `pipeline_failed` is a
+// deterministic, bounded hand-off (status.go: "a brief hand-off to the
+// repair-or-block decision") that resolves to `repairing` or `blocked`
+// before an operator can meaningfully act on it as "in flight" work; leaving
+// it out of this set is what let pipeline_failed runs show as permanently
+// active in the sidebar (#360).
+export const TERMINAL_STATUSES = new Set(["completed", "blocked", "failed", "cancelled", "pipeline_failed"]);
+/**
+ * Terminal runs whose thread is drawn cut rather than finished, and whose
+ * event-feed tone reads as a failure rather than a success (see
+ * overview.tsx's feedTone). `pipeline_failed` belongs here for the same
+ * reason it belongs in TERMINAL_STATUSES above: it names a failed pipeline
+ * command, and treating it as a plain "terminal" run without also treating
+ * it as a "cut" one would have `feedTone`/`isTerminal` fall through to their
+ * completed-run branch and paint a failed run's thread and feed entry green.
+ */
+export const CUT_STATUSES = new Set(["blocked", "failed", "cancelled", "pipeline_failed"]);
 /** The set the "Needs you" triage and the nav's hot count are built from. */
 export const NEEDS_ATTENTION_STATUSES = new Set(["waiting_human", "blocked"]);
 
@@ -117,10 +156,13 @@ const phaseIndex = (phase: Phase): number => PHASES.indexOf(phase);
  * is only ever written by the phase that owns it. Everything here is therefore
  * evidence of a phase having been entered, never an assumption.
  *
- * The Go V1 orchestrator writes only `offered`, `preparing`,
- * `waiting_github_checks` and the terminal statuses, and it never increments the
- * attempt counters, so today the pull request and the live status carry this on
- * their own.
+ * The Go V1 orchestrator increments planningAttempts, reviewCycles,
+ * ciRepairAttempts and pipelineRepairAttempts, but never implementationAttempts
+ * (server.go has no writer for it), so a run that never reached review or a
+ * repair cycle -- most of a happy-path `preparing`/`delivering` run's life --
+ * has nothing in the counters above to place it past `plan`; the live status
+ * below is what carries this for those statuses, exactly as it does for
+ * `offered`.
  *
  * Specification task A2 replaces this with gate state derived server-side; this
  * function is the seam that change lands on.
