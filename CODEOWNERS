@@ -1,0 +1,9 @@
+# PR review routing. Default to the maintainer; per-directory owners below
+# take precedence for their paths.
+* @alexandre-leites
+
+/orchestrator/ @alexandre-leites
+/api/ @alexandre-leites
+/runner/ @alexandre-leites
+/web/ @alexandre-leites
+/proto/ @alexandre-leites
