@@ -363,22 +363,3 @@ type AppWorkflowTransitionOutbox struct {
 	ProcessedAt         pgtype.Timestamptz
 	ProcessingStartedAt pgtype.Timestamptz
 }
-
-type LanggraphCheckpoint struct {
-	ThreadID           string
-	CheckpointID       string
-	ParentCheckpointID pgtype.Text
-	Checkpoint         []byte
-	Metadata           []byte
-	CreatedAt          pgtype.Timestamptz
-}
-
-type LanggraphCheckpointWrite struct {
-	ThreadID     string
-	CheckpointID string
-	TaskID       string
-	Idx          int32
-	Channel      string
-	Type         pgtype.Text
-	Value        []byte
-}

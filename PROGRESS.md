@@ -299,6 +299,80 @@ restructure this file or edit another session's section — append a new one.
   was read but left as-is (see root cause above for why sending the full
   detail payload was rejected).
 
+## Session: issue-365 (drop dead LangGraph schema and asyncpg DSN compat)
+
+- Completed: 2026-08-05
+- Agent/session identifier: issue-365 worktree agent
+- Root cause: #247 replaced the Python/LangGraph orchestrator with the Go
+  state machine, but the schema/tables it wrote to (`langgraph.checkpoints`,
+  `langgraph.checkpoint_writes`), the sqlc-generated Go structs for them
+  (`LanggraphCheckpoint`, `LanggraphCheckpointWrite`), the SQLAlchemy-style
+  `postgresql+asyncpg://` default DSNs in the three compose files, and the
+  compat shim in `config.go` that stripped the `+asyncpg` suffix were never
+  cleaned up. They cost every fresh deployment a dead schema plus a
+  never-exercised code path, and the 2026-07-29 platform review still read
+  as a live description of a codebase that no longer exists.
+- Relevant files:
+  - `orchestrator/migrations/033_drop_langgraph.sql` (new): drops
+    `langgraph.checkpoint_writes`, `langgraph.checkpoints`, and the
+    `langgraph` schema. The old 001/002 migrations were left untouched
+    (migrations are historical, not editable in place).
+  - `orchestrator/internal/db/models.go`: regenerated via `make
+    sqlc-generate`; the only diff is the removal of the two `Langgraph*`
+    structs, since sqlc derives its schema by replaying every migration in
+    order and the new migration removes `langgraph` from that replayed
+    state.
+  - `orchestrator/internal/config/config.go`: removed `normalizeDatabaseURL`
+    and the `net/url` import it required; `Config.DatabaseURL` now just
+    carries the value from `LOOP_DATABASE_URL` unchanged.
+  - `orchestrator/internal/config/config_test.go`: removed
+    `TestLoadNormalizesPythonDatabaseURL`, which exercised the removed shim.
+  - `orchestrator/README.md`: updated the `LOOP_DATABASE_URL` table row,
+    which documented the now-removed `+asyncpg` normalization.
+  - `compose.yaml`, `compose.tls-stack.yaml`, `compose.secrets.yaml`:
+    default/example DSNs changed from `postgresql+asyncpg://` to
+    `postgresql://`.
+  - `docs/reviews/2026-07-29-platform-review.md`: added a "Historical"
+    callout at the top; body left untouched.
+- Behavior delivered: a fresh deployment no longer creates or ships a schema
+  nothing reads from, and `LOOP_DATABASE_URL` is a plain PostgreSQL URL with
+  no scheme-rewriting behind it. Confirmed no other `langgraph` references
+  exist anywhere in the repo (migrations, generated code, docs) apart from a
+  now-historical checkbox in `tasks/todo.md` that was left alone as an old
+  changelog entry.
+- Validation performed: `make sqlc-generate` (regenerated models.go with the
+  expected diff only), `make lint` (gofmt), `make lint-go` (golangci-lint,
+  three modules), `make typecheck` (go vet), `make test-orchestrator` (unit
+  suite), a full PostgreSQL integration run against a disposable
+  `moirai-test-postgres-issue-365` container (verifies migrations 001-033
+  apply cleanly end to end and nothing depends on the dropped schema), a
+  manual `\dn` against that database confirming only `app` and `public`
+  schemas remain post-migration, and `make compose`.
+- Commands executed (from the `issue-365` worktree root):
+  - `make sqlc-generate` → regenerated `orchestrator/internal/db/models.go`;
+    `git diff` shows only the two `Langgraph*` structs removed
+  - `make lint` → clean
+  - `make lint-go` → `0 issues.` x3 (orchestrator, runner, api)
+  - `make typecheck` → clean
+  - `make test-orchestrator` → all non-integration Go suites pass
+  - `docker run -d --name moirai-test-postgres-issue-365 -p 5433:5432 -e
+    POSTGRES_DB=loop_test -e POSTGRES_USER=loop -e
+    POSTGRES_PASSWORD=loop-test-password postgres:16-alpine`
+  - `LOOP_TEST_DATABASE_URL=postgresql://loop:loop-test-password@localhost:5433/loop_test
+    make test-postgres-integration` → `ok` 105 tests, `internal/server`
+    19.5s
+  - `docker exec moirai-test-postgres-issue-365 psql -U loop -d loop_test -c
+    '\dn'` → only `app` and `public` schemas listed
+  - `docker rm -f moirai-test-postgres-issue-365` → test container cleaned up
+  - `make compose` → clean
+- Notes: `make compose-overlays` failed in this sandbox with `docker compose
+  5.3.1 does not match pinned v2.38.2` — a pre-existing local tooling
+  version mismatch unrelated to this change (it is a version-pin assertion
+  in `scripts/render-tls-stack.sh`, not a rendering failure caused by the
+  DSN edits); `compose-overlays` config for the affected files was otherwise
+  inspected by hand and is well-formed. Did not touch `.github/workflows/ci.yml`,
+  `Makefile`, or any top-level doc files (LICENSE/CONTRIBUTING.md/issue
+  templates) — those belong to the concurrent #372/#374 work.
 ## Session: issue-374 (add open-source project files)
 
 - Completed: 2026-08-05
