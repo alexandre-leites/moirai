@@ -76,17 +76,15 @@ func (outbox *eventOutbox) Save(events []*runnerv1.ExecutionEvent) error {
 		return fmt.Errorf("create event outbox temporary file: %w", err)
 	}
 	temporaryPath := temporary.Name()
+	defer temporary.Close()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
 		return fmt.Errorf("secure event outbox temporary file: %w", err)
 	}
 	if _, err := temporary.Write(append(contents, '\n')); err != nil {
-		temporary.Close()
 		return fmt.Errorf("write event outbox: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
 		return fmt.Errorf("sync event outbox: %w", err)
 	}
 	if err := temporary.Close(); err != nil {

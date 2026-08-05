@@ -22,14 +22,14 @@ func (backend DockerCLIBackend) Name() string {
 
 func (backend DockerCLIBackend) HealthCheck(context.Context) error {
 	if backend.Image == "" {
-		return errors.New("Docker CLI backend image is required")
+		return errors.New("docker CLI backend image is required")
 	}
 	return nil
 }
 
 func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (Result, error) {
 	if request.Prompt == "" || request.ExecutionID == "" {
-		return Result{}, errors.New("Docker CLI backend prompt and execution ID are required")
+		return Result{}, errors.New("docker CLI backend prompt and execution ID are required")
 	}
 	if err := backend.HealthCheck(ctx); err != nil {
 		return Result{}, err
@@ -60,7 +60,7 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 		writeExecutionManifest(filepath.Dir(resultPath), "docker-cli", request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 	}}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 	if err != nil {
-		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("Docker CLI backend execution failed: %w", err)
+		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("docker CLI backend execution failed: %w", err)
 	}
 	document, err := readResultDocument(resultPath, request.ExecutionID)
 	if err != nil {

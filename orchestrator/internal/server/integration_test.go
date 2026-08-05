@@ -1165,7 +1165,7 @@ func TestDeliveryBlocksAfterExhaustingItsRetryBudget(t *testing.T) {
 
 // A run mid-delivery has done real, unfinished work: before StatusDelivering
 // existed it would have been sitting at 'completed', the same value a merged
-// run ends at, and GetSchedulerMetrics's `status NOT IN (terminalStatusList)`
+// run ends at, and GetSchedulerMetrics's `status NOT IN (terminalStatuses)`
 // predicate would have wrongly read it as finished.
 func TestSchedulerMetricsCountsADeliveringRunAsActive(t *testing.T) {
 	h := newHarness(t)

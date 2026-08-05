@@ -97,7 +97,7 @@ func (executor DockerExecutor) Cancel(executionID string) error {
 
 func (executor DockerExecutor) validate(request Request) error {
 	if executor.Image == "" || strings.ContainsAny(executor.Image, " \t\r\n\x00") {
-		return errors.New("Docker image is required and must not contain whitespace")
+		return errors.New("docker image is required and must not contain whitespace")
 	}
 	if request.ExecutionID == "" {
 		return errors.New("execution ID is required")
@@ -159,9 +159,9 @@ func writeEnvironmentFile(environment map[string]string) (string, error) {
 		return "", fmt.Errorf("create Docker environment file: %w", err)
 	}
 	path := file.Name()
+	defer file.Close()
 	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		os.Remove(path)
+		_ = os.Remove(path)
 		return "", fmt.Errorf("secure Docker environment file: %w", err)
 	}
 	keys := make([]string, 0, len(environment))
@@ -171,13 +171,12 @@ func writeEnvironmentFile(environment map[string]string) (string, error) {
 	sort.Strings(keys)
 	for _, key := range keys {
 		if _, err := fmt.Fprintf(file, "%s=%s\n", key, environment[key]); err != nil {
-			file.Close()
-			os.Remove(path)
+			_ = os.Remove(path)
 			return "", fmt.Errorf("write Docker environment file: %w", err)
 		}
 	}
 	if err := file.Close(); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return "", fmt.Errorf("close Docker environment file: %w", err)
 	}
 	return path, nil

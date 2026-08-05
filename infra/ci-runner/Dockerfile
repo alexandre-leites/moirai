@@ -21,7 +21,7 @@
 # the host and the cache dies with the container. The "Required Tooling"
 # comment that used to describe what the host had to have installed by hand is
 # now real and versioned: git, make, gcc, curl, bash, docker, compose, Go, Node,
-# sqlc, buf, gh, govulncheck and trivy are all pinned below.
+# sqlc, buf, gh, govulncheck, golangci-lint and trivy are all pinned below.
 #
 # The image is multi-architecture (linux/amd64, linux/arm64). Download URLs
 # and checksums are per-architecture, so everything below switches on
@@ -42,6 +42,7 @@ ARG GH_VERSION=2.63.2
 ARG SQLC_VERSION=v1.29.0
 ARG BUF_VERSION=v1.50.0
 ARG GOVULNCHECK_VERSION=v1.6.0
+ARG GOLANGCI_LINT_VERSION=v2.12.2
 ARG TRIVY_VERSION=v0.73.0
 # Docker CE engine/CLI and friends, pinned to the exact apt versions published
 # for jammy. docker-ce 29.x depends on containerd >= 2.0, hence the explicit
@@ -207,12 +208,14 @@ RUN set -eux \
     && install -m 0755 /tmp/trivy /usr/local/bin/trivy \
     && rm -rf /tmp/trivy.tar.gz /tmp/trivy
 
-# govulncheck is a Go module, so it is compiled from source with the baked
-# toolchain and then the module cache is dropped -- the image carries the binary,
-# not a fresh download of the world.
+# govulncheck and golangci-lint are Go modules, so they are compiled from source
+# with the baked toolchain and then the module cache is dropped -- the image
+# carries the binaries, not a fresh download of the world.
 RUN set -eux \
     && go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" \
     && install -m 0755 "/root/go/bin/govulncheck" /usr/local/bin/govulncheck \
+    && go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
+    && install -m 0755 "/root/go/bin/golangci-lint" /usr/local/bin/golangci-lint \
     && rm -rf /root/go /root/.cache/go-build
 
 # The contract entrypoint (non-root: register --ephemeral, run one job, exit)

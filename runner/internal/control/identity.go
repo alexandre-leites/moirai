@@ -83,17 +83,15 @@ func (store IdentityStore) Save(identity Identity) error {
 		return fmt.Errorf("create runner identity temporary file: %w", err)
 	}
 	temporaryPath := temporary.Name()
+	defer temporary.Close()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
 		return fmt.Errorf("secure runner identity temporary file: %w", err)
 	}
 	if _, err := temporary.Write(append(contents, '\n')); err != nil {
-		temporary.Close()
 		return fmt.Errorf("write runner identity: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
 		return fmt.Errorf("sync runner identity: %w", err)
 	}
 	if err := temporary.Close(); err != nil {

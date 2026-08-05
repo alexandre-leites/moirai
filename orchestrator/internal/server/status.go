@@ -150,25 +150,6 @@ const (
 // replaces did.
 func (s Status) String() string { return string(s) }
 
-// quoted renders a single Status as a SQL literal ('offered'), for the
-// queries below that spell a status directly into the query text instead of
-// binding it as a parameter.
-func (s Status) quoted() string { return "'" + string(s) + "'" }
-
-// qOffered, qPreparing etc. are the query-text form of each status, named so
-// a query that spells 'offered' now says qOffered and fails to compile if the
-// constant it comes from is ever renamed or removed -- the raw string
-// literals server.go, delivery.go and recovery.go used to write by hand.
-var (
-	qOffered             = StatusOffered.quoted()
-	qPreparing           = StatusPreparing.quoted()
-	qWaitingGithubChecks = StatusWaitingGithubChecks.quoted()
-	qDelivering          = StatusDelivering.quoted()
-	qCompleted           = StatusCompleted.quoted()
-	qBlocked             = StatusBlocked.quoted()
-	qCancelled           = StatusCancelled.quoted()
-)
-
 // knownStatuses backs ParseStatus. It is built from the constants above
 // rather than restated so the parser and the vocabulary can never disagree.
 var knownStatuses = map[Status]bool{
@@ -219,10 +200,6 @@ func ParseStatus(value string) (Status, bool) {
 // StatusCompleted entry once had to cover.
 var terminalStatuses = []Status{StatusCompleted, StatusFailed, StatusBlocked, StatusCancelled}
 
-// terminalStatusList renders them as the SQL literal list `'a','b'`. Built
-// from the constants above, never from input.
-var terminalStatusList = sqlStatusList(terminalStatuses)
-
 func terminalStatus(state string) bool {
 	status, ok := ParseStatus(state)
 	return ok && slices.Contains(terminalStatuses, status)
@@ -246,23 +223,7 @@ func terminalStatus(state string) bool {
 // include StatusCompleted.
 var genuinelyTerminalStatuses = []Status{StatusFailed, StatusBlocked, StatusCancelled}
 
-var genuinelyTerminalStatusList = sqlStatusList(genuinelyTerminalStatuses)
-
 func genuinelyTerminalStatus(state string) bool {
 	status, ok := ParseStatus(state)
 	return ok && slices.Contains(genuinelyTerminalStatuses, status)
-}
-
-// sqlStatusList renders a status set as the SQL literal list `'a','b'` for
-// splicing into a query's IN (...) / NOT IN (...) clause. Every caller passes
-// a package-level slice built from the Status constants, never from input.
-func sqlStatusList(statuses []Status) string {
-	list := ""
-	for i, status := range statuses {
-		if i > 0 {
-			list += ","
-		}
-		list += status.quoted()
-	}
-	return list
 }

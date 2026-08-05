@@ -431,12 +431,12 @@ func gateSignature(reasons []gateReason, remainingWork []string, diff string) st
 	sort.Strings(remaining)
 	hash := sha256.New()
 	for _, reason := range reasons {
-		fmt.Fprintf(hash, "reason\x00%s\x00", reason)
+		_, _ = fmt.Fprintf(hash, "reason\x00%s\x00", reason)
 	}
 	for _, entry := range remaining {
-		fmt.Fprintf(hash, "remaining\x00%s\x00", entry)
+		_, _ = fmt.Fprintf(hash, "remaining\x00%s\x00", entry)
 	}
-	fmt.Fprintf(hash, "diff\x00%s\x00", diff)
+	_, _ = fmt.Fprintf(hash, "diff\x00%s\x00", diff)
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
