@@ -77,7 +77,7 @@ services:
       # user can read and unsets the variable, so none reaches the server
       # process. They are still visible to `docker inspect`; compose.secrets.yaml
       # is the overlay that avoids that.
-      LOOP_DATABASE_URL: "postgresql+asyncpg://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop"
+      LOOP_DATABASE_URL: "postgresql://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop"
       LOOP_INITIAL_ADMIN_USERNAME: "${MOIRAI_ADMIN_USERNAME:-admin}"
       # At least 8 characters with a digit, a capital, a lowercase and a symbol.
       # A password that fails the policy stops the orchestrator from starting,

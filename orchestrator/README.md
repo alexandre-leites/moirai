@@ -71,7 +71,7 @@ Every secret below can be supplied either directly or as `<NAME>_FILE` pointing 
 
 | Variable | Required | Meaning |
 |---|---|---|
-| `LOOP_DATABASE_URL` | yes | PostgreSQL connection URL. A `postgresql+asyncpg://` scheme is accepted and normalised, so connection strings written for the previous Python orchestrator keep working. |
+| `LOOP_DATABASE_URL` | yes | PostgreSQL connection URL (e.g. `postgresql://user:pass@host:5432/db`). |
 | `LOOP_GRPC_BIND` | no | `host:port` to serve gRPC on. Defaults to `0.0.0.0:50051`. The container healthcheck derives its port from this. |
 | `LOOP_METRICS_BIND` | no | `host:port` to serve Prometheus metrics on. Defaults to `0.0.0.0:9090`; set it to an empty or blank value to serve none. A value without a port, or a port that cannot be bound, stops the process rather than being logged and ignored. |
 | `LOOP_SECRET_KEY` | for credentials | 32-byte key, base64 or hex, used to encrypt project credentials at rest. Storing a credential without it is refused. |
