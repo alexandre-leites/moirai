@@ -153,5 +153,5 @@ jobs:
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache,ignore-error=true
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
