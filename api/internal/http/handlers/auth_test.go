@@ -1,12 +1,17 @@
 package handlers
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/loop-engineering/api/internal/auth"
+	"github.com/loop-engineering/api/internal/orchestrator"
+	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
 func TestAuthMeRequiresSession(t *testing.T) {
@@ -61,5 +66,301 @@ func TestLogoutIdempotentWithoutSession(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("got %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func authMux(client authClient) http.Handler {
+	mux := http.NewServeMux()
+	NewAuthHandlers(client, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60)).RegisterRoutes(mux)
+	return mux
+}
+
+func TestLoginSetsTheSessionCookiesAndReturnsTheUser(t *testing.T) {
+	stub := &stubClient{login: func(context.Context, string, string) (*controlv1.LoginResponse, error) {
+		return &controlv1.LoginResponse{
+			SessionToken: "session-value", CsrfToken: "csrf-value", UserId: "u-1",
+		}, nil
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, projectRequest(
+		t, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"hunter2"}`, ""))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	calls := stub.recorded("Login")
+	if len(calls) != 1 || calls[0].args[0] != "admin" || calls[0].args[1] != "hunter2" {
+		t.Fatalf("Login calls = %#v", calls)
+	}
+	if body := decodeProject(t, rec); body["userId"] != "u-1" {
+		t.Errorf("payload = %#v", body)
+	}
+	set := map[string]*http.Cookie{}
+	for _, c := range rec.Result().Cookies() {
+		set[c.Name] = c
+	}
+	session, ok := set[auth.SessionCookieName]
+	if !ok || session.Value != "session-value" {
+		t.Fatalf("session cookie = %#v", set[auth.SessionCookieName])
+	}
+	// The session cookie is the credential: it must never be readable by
+	// scripts, and cookieSecure was requested.
+	if !session.HttpOnly || !session.Secure {
+		t.Errorf("session cookie flags: httpOnly = %v, secure = %v", session.HttpOnly, session.Secure)
+	}
+	csrf, ok := set[auth.CSRFCookieName]
+	if !ok || csrf.Value != "csrf-value" {
+		t.Fatalf("csrf cookie = %#v", set[auth.CSRFCookieName])
+	}
+	// The CSRF cookie has to be readable by the console to be echoed back.
+	if csrf.HttpOnly {
+		t.Errorf("csrf cookie is httpOnly, the console cannot echo it")
+	}
+	// The response body must not leak the tokens themselves.
+	if bodyText := rec.Body.String(); strings.Contains(bodyText, "session-value") || strings.Contains(bodyText, "csrf-value") {
+		t.Errorf("login body leaked a token: %s", bodyText)
+	}
+}
+
+func TestLoginRejectsMissingCredentialsBeforeCalling(t *testing.T) {
+	for _, body := range []string{`{}`, `{"username":"admin"}`, `{"password":"hunter2"}`, `{"username":"","password":""}`} {
+		stub := &stubClient{}
+		rec := httptest.NewRecorder()
+		authMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodPost, "/api/v1/auth/login", body, ""))
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: status = %d, want 422", body, rec.Code)
+		}
+		if len(stub.calls) != 0 {
+			t.Errorf("%s: reached the orchestrator: %#v", body, stub.calls)
+		}
+	}
+}
+
+func TestLoginRejectsAMalformedBody(t *testing.T) {
+	for _, body := range []string{`{`, `{"user":"admin"}`} {
+		stub := &stubClient{}
+		rec := httptest.NewRecorder()
+		authMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodPost, "/api/v1/auth/login", body, ""))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+// A rejected login answers 401 with no detail: the message must not tell a
+// caller whether the username or the password was the wrong one.
+func TestLoginAnswers401WithoutDetailOnBadCredentials(t *testing.T) {
+	stub := &stubClient{login: func(context.Context, string, string) (*controlv1.LoginResponse, error) {
+		return nil, orchestrator.ErrUnauthorized
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, projectRequest(
+		t, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"wrong"}`, ""))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if len(rec.Result().Cookies()) != 0 {
+		t.Errorf("a failed login set cookies: %#v", rec.Result().Cookies())
+	}
+	if strings.Contains(rec.Body.String(), "admin") {
+		t.Errorf("401 body echoed the username: %s", rec.Body.String())
+	}
+}
+
+func TestLoginSurfacesAnUnreachableOrchestrator(t *testing.T) {
+	stub := &stubClient{login: func(context.Context, string, string) (*controlv1.LoginResponse, error) {
+		return nil, errors.New("connection refused")
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, projectRequest(
+		t, http.MethodPost, "/api/v1/auth/login", `{"username":"admin","password":"hunter2"}`, ""))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestMeReturnsTheSignedInUser(t *testing.T) {
+	stub := &stubClient{whoAmI: func(context.Context) (*controlv1.WhoAmIResponse, error) {
+		return &controlv1.WhoAmIResponse{
+			UserId: "u-1", Username: "admin", Role: "administrator",
+			Email: "admin@example.test", DisplayName: "Admin",
+		}, nil
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodGet, "/api/v1/auth/me", "", "admin-session"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := decodeProject(t, rec)
+	for key, want := range map[string]any{
+		"userId": "u-1", "username": "admin", "role": "administrator",
+		"email": "admin@example.test", "displayName": "Admin",
+	} {
+		if body[key] != want {
+			t.Errorf("%s = %#v, want %#v", key, body[key], want)
+		}
+	}
+}
+
+// An expired session must answer 401 so the console redirects to login rather
+// than showing a service-unavailable banner the user cannot act on.
+func TestMeAnswers401WhenTheSessionIsRejected(t *testing.T) {
+	stub := &stubClient{whoAmI: func(context.Context) (*controlv1.WhoAmIResponse, error) {
+		return nil, orchestrator.ErrUnauthorized
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodGet, "/api/v1/auth/me", "", "stale-session"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestMeSurfacesOtherFailuresAs503(t *testing.T) {
+	stub := &stubClient{whoAmI: func(context.Context) (*controlv1.WhoAmIResponse, error) {
+		return nil, errors.New("boom")
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, projectRequest(t, http.MethodGet, "/api/v1/auth/me", "", "admin-session"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestUpdateAccountForwardsEveryFieldAndReturnsTheUser(t *testing.T) {
+	stub := &stubClient{updateAccount: func(_ context.Context, req *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error) {
+		return &controlv1.UpdateAccountResponse{
+			UserId: "u-1", Username: "admin", Role: "administrator",
+			Email: req.GetNewEmail(), DisplayName: req.GetDisplayName(),
+		}, nil
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, mutateRequest(t, http.MethodPut, "/api/v1/auth/account",
+		`{"currentPassword":"old","newPassword":"new","newEmail":"a@b.test","displayName":"Ada"}`, "admin-session"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	calls := stub.recorded("UpdateAccount")
+	if len(calls) != 1 {
+		t.Fatalf("UpdateAccount calls = %d, want 1", len(calls))
+	}
+	req, _ := calls[0].args[0].(*controlv1.UpdateAccountRequest)
+	if req == nil || req.GetCurrentPassword() != "old" || req.GetNewPassword() != "new" ||
+		req.GetNewEmail() != "a@b.test" || req.GetDisplayName() != "Ada" {
+		t.Fatalf("forwarded request = %#v", req)
+	}
+	body := decodeProject(t, rec)
+	if body["email"] != "a@b.test" || body["displayName"] != "Ada" {
+		t.Fatalf("payload = %#v", body)
+	}
+	// The passwords travel inbound only.
+	if text := rec.Body.String(); strings.Contains(text, "old") || strings.Contains(text, "new") {
+		t.Errorf("account response echoed a password: %s", text)
+	}
+}
+
+func TestUpdateAccountRejectsAMalformedBody(t *testing.T) {
+	for _, body := range []string{`{`, `{"password":"x"}`} {
+		stub := &stubClient{}
+		rec := httptest.NewRecorder()
+		authMux(stub).ServeHTTP(rec, mutateRequest(t, http.MethodPut, "/api/v1/auth/account", body, "admin-session"))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", body, rec.Code)
+		}
+		if len(stub.calls) != 0 {
+			t.Errorf("%s: reached the orchestrator: %#v", body, stub.calls)
+		}
+	}
+}
+
+// A wrong current password is a validation failure, not a session failure:
+// answering 401 would sign the user out of a session that is still valid.
+func TestUpdateAccountSurfacesAWrongPasswordAs422(t *testing.T) {
+	stub := &stubClient{updateAccount: func(context.Context, *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error) {
+		return nil, orchestrator.ErrInvalidInput
+	}}
+	rec := httptest.NewRecorder()
+	authMux(stub).ServeHTTP(rec, mutateRequest(t, http.MethodPut, "/api/v1/auth/account",
+		`{"currentPassword":"wrong","newPassword":"new"}`, "admin-session"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+}
+
+func TestUpdateAccountRequiresSessionAndCSRF(t *testing.T) {
+	stub := &stubClient{}
+	mux := authMux(stub)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, projectRequest(t, http.MethodPut, "/api/v1/auth/account", `{}`, ""))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("without a session: status = %d, want 401", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, projectRequest(t, http.MethodPut, "/api/v1/auth/account", `{}`, "admin-session"))
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("without CSRF: status = %d, want 403", rec.Code)
+	}
+
+	if len(stub.calls) != 0 {
+		t.Fatalf("an unauthenticated request reached the orchestrator: %#v", stub.calls)
+	}
+}
+
+// logoutRequest builds a request whose context already carries the session
+// token, the way auth.RequireSession would.
+//
+// NOTE: the logout route is registered without auth.RequireSession, so in the
+// running server the token never reaches this handler and the orchestrator-side
+// revocation below is skipped. That is a real gap (a captured session token
+// stays usable after logout) and is tracked separately; this test pins the
+// handler behavior so the route fix does not have to invent it.
+func logoutRequest() *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	return req.WithContext(auth.WithSessionToken(req.Context(), "session-value"))
+}
+
+// Logout revokes the session server-side as well as clearing the cookies; a
+// cookie-only logout would leave the token usable by anything that captured it.
+func TestLogoutRevokesTheSessionServerSide(t *testing.T) {
+	stub := &stubClient{logout: func(context.Context) error { return nil }}
+	h := NewAuthHandlers(stub, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
+	rec := httptest.NewRecorder()
+
+	h.logout(rec, logoutRequest())
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if len(stub.recorded("Logout")) != 1 {
+		t.Fatalf("Logout calls = %#v, want 1", stub.calls)
+	}
+}
+
+// An orchestrator that cannot be reached must not strand the browser with a
+// live session cookie: the cookies are cleared either way.
+func TestLogoutClearsCookiesEvenWhenRevocationFails(t *testing.T) {
+	stub := &stubClient{logout: func(context.Context) error { return errors.New("unreachable") }}
+	h := NewAuthHandlers(stub, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
+	rec := httptest.NewRecorder()
+
+	h.logout(rec, logoutRequest())
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	for _, name := range []string{auth.SessionCookieName, auth.CSRFCookieName} {
+		cleared := false
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == name && c.MaxAge == -1 && c.Value == "" {
+				cleared = true
+			}
+		}
+		if !cleared {
+			t.Errorf("%s was not cleared", name)
+		}
 	}
 }

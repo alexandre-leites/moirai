@@ -1,20 +1,28 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
-	"github.com/loop-engineering/api/internal/orchestrator"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
+// runnerClient is the slice of the orchestrator client these handlers use.
+// Depending on the interface rather than the concrete *orchestrator.Client is
+// what lets a test drive the handlers directly (same reason as eventClient).
+type runnerClient interface {
+	ListRunners(ctx context.Context) (*controlv1.ListRunnersResponse, error)
+	SetRunnerState(ctx context.Context, runnerID, state string) (*controlv1.SetRunnerStateResponse, error)
+}
+
 type RunnerHandlers struct {
-	client  *orchestrator.Client
+	client  runnerClient
 	limiter *auth.RateLimiter
 }
 
-func NewRunnerHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *RunnerHandlers {
+func NewRunnerHandlers(client runnerClient, limiter *auth.RateLimiter) *RunnerHandlers {
 	return &RunnerHandlers{client: client, limiter: limiter}
 }
 

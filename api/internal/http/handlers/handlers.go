@@ -309,12 +309,19 @@ func redactURLUserinfo(raw string) string {
 	return u.String()
 }
 
+// runnerTokenClient is the slice of the orchestrator client these handlers use.
+type runnerTokenClient interface {
+	ListRunnerRegistrationTokens(ctx context.Context) (*controlv1.ListRunnerRegistrationTokensResponse, error)
+	CreateRunnerRegistrationToken(ctx context.Context, allowedLabels []string) (*controlv1.CreateRunnerRegistrationTokenResponse, error)
+	RevokeRunnerRegistrationToken(ctx context.Context, tokenID string) (*controlv1.RevokeRunnerRegistrationTokenResponse, error)
+}
+
 type RunnerTokenHandlers struct {
-	client  *orchestrator.Client
+	client  runnerTokenClient
 	limiter *auth.RateLimiter
 }
 
-func NewRunnerTokenHandlers(client *orchestrator.Client, limiter *auth.RateLimiter) *RunnerTokenHandlers {
+func NewRunnerTokenHandlers(client runnerTokenClient, limiter *auth.RateLimiter) *RunnerTokenHandlers {
 	return &RunnerTokenHandlers{client: client, limiter: limiter}
 }
 

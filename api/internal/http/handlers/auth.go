@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -11,14 +12,22 @@ import (
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
+// authClient is the slice of the orchestrator client these handlers use.
+type authClient interface {
+	Login(ctx context.Context, username, password string) (*controlv1.LoginResponse, error)
+	Logout(ctx context.Context) error
+	WhoAmI(ctx context.Context) (*controlv1.WhoAmIResponse, error)
+	UpdateAccount(ctx context.Context, req *controlv1.UpdateAccountRequest) (*controlv1.UpdateAccountResponse, error)
+}
+
 type AuthHandlers struct {
-	client          *orchestrator.Client
+	client          authClient
 	cookieSecure    bool
 	loginLimiter    *auth.RateLimiter
 	mutationLimiter *auth.RateLimiter
 }
 
-func NewAuthHandlers(client *orchestrator.Client, cookieSecure bool, loginLimiter, mutationLimiter *auth.RateLimiter) *AuthHandlers {
+func NewAuthHandlers(client authClient, cookieSecure bool, loginLimiter, mutationLimiter *auth.RateLimiter) *AuthHandlers {
 	return &AuthHandlers{
 		client:          client,
 		cookieSecure:    cookieSecure,
