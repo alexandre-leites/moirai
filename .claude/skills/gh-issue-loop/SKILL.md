@@ -451,28 +451,11 @@ merges, so expect to redo this every pass.
 git -C "$REPO" merge-tree --write-tree --name-only "origin/$DEFAULT_BRANCH" "origin/<branch>"
 ```
 
-In practice the only file that ever conflicts is the shared append-only progress log (e.g.
-`PROGRESS.md`), because every agent appends a section. **Resolve by keeping BOTH sides — never
-drop another agent's entry.** In that branch's worktree, using **per-issue temp paths** so two
-concurrent resolutions cannot clobber each other:
-
-```bash
-T="$(mktemp -d "/tmp/gh-issue-loop-<N>.XXXXXX")"
-git merge "origin/$DEFAULT_BRANCH" --no-commit
-git show :1:PROGRESS.md > "$T/base"
-git show :2:PROGRESS.md > "$T/ours"
-git show :3:PROGRESS.md > "$T/theirs"
-git merge-file --union "$T/ours" "$T/base" "$T/theirs" && cp "$T/ours" PROGRESS.md
-git add PROGRESS.md && git commit --no-edit && git push
-rm -rf "$T"
-```
-
-Merge the default branch **into** the feature branch. Never rebase, never force-push. Before
-committing, verify no conflict markers remain **AND** the merged file is **larger than both
-inputs** — that is the cheap proof no one's section was dropped.
-
-If a **source file** conflicts (not just the progress log), do **not** guess: report it and leave
-that PR alone.
+Progress is tracked on the GitHub issue, not in a shared file, so there is no append-only log to
+conflict on. If a **source file** conflicts, resolve it yourself: inspect both sides of the conflict,
+trace each change back to its origin PR and issue, and decide which changes fit — keep both when they
+are independent, take the newer or more complete side when they overlap. Only when you cannot reach a
+confident resolution do you report it and leave that PR alone.
 
 Skip any branch whose sub-agent is still running — check `"$SLOTS" list` for a live lease.
 
@@ -706,7 +689,7 @@ Each brief must contain every point below.
   acting on that.
 
 **Context to read**
-- `AGENTS.md` (especially "Definition of done"), `PROJECT.md`, `PROGRESS.md`, `README.md` and the
+- `AGENTS.md` (especially "Definition of done"), `PROJECT.md`, `README.md` and the
   `Makefile` in that worktree; any review document the issue cites a finding ID from; and the full
   issue text and comments via `gh api "repos/$OWNER/$NAME/issues/<N>"`.
 

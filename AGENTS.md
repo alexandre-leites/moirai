@@ -16,11 +16,11 @@ Multiple agents may work on this repository simultaneously. There is no AI lock.
 
 ## 1.1 Work claiming
 
-Before starting work, check `PROGRESS.md` for the current `In Progress` task.
+Before starting work, check the GitHub issues for the current in-progress task.
 
-- If a task is already `In Progress` with a recent timestamp (within the last hour), assume another agent is actively working on it. Select a different task or wait.
-- If a task is `In Progress` with a stale timestamp (older than 1 hour), you may assume the agent crashed or lost context. Claim the task by updating its entry with your session identifier and a fresh timestamp.
-- If no task is `In Progress`, select the next task from `Pending Implementation` or from GitHub issues, add it to `In Progress` with your session identifier and timestamp, and start.
+- If an issue is already assigned to another agent, assume that agent is actively working on it. Select a different issue or wait.
+- If an issue is assigned to an agent that has gone stale, assume that agent crashed or lost context. Claim the issue by commenting on it with your session identifier.
+- If no issue is in progress, select the next issue from the backlog, assign it to yourself, and start.
 
 ## 1.2 File conflicts
 
@@ -29,12 +29,11 @@ If another agent's changes conflict with yours:
 1. Do not overwrite their work silently.
 2. Rebase or merge carefully.
 3. If the conflict is large, stop and select a different task.
-4. Record the conflict in `PROGRESS.md`.
+4. Record the conflict in the GitHub issue.
 
 ## 1.3 Shared state
 
-- `PROGRESS.md` is the coordination point. Keep it current.
-- GitHub issues are the backlog. An agent may assign an issue to itself by commenting.
+- GitHub issues are the coordination point and the backlog. An agent may assign an issue to itself by commenting.
 - Whenever you open a GitHub issue, add the `ai-doable` label to it. That label is what marks an issue as eligible for autonomous implementation, so an issue you file without it never re-enters the backlog you and other agents select from.
 - Source code changes by different agents should touch different modules. The monorepo layout (`api/`, `orchestrator/`, `runner/`, `web/`) naturally separates concerns.
 - Service-level boundaries (gRPC, REST, shared protos) are shared contracts. Coordinate changes to `.proto` files or public API types with care.
@@ -46,19 +45,17 @@ Agents may work on independent tasks without synchronising for every edit, provi
 - The changes are in different top-level modules (`api/`, `orchestrator/`, `runner/`, `web/`, `proto/`).
 - The changes do not modify shared interfaces or contracts.
 - Each agent runs tests for its own module before committing.
-- `PROGRESS.md` is updated to reflect progress.
 
 ---
 
 # 2. Startup behavior
 
-1. Read `PROGRESS.md` when it exists.
-2. Read `PROJECT.md`.
-3. Inspect the current repository structure.
-4. Inspect the files related to the next implementation task.
-5. Check `git status` and the current diff.
-6. Select the next implementation task.
-7. Start implementing it.
+1. Read `PROJECT.md`.
+2. Inspect the current repository structure.
+3. Inspect the files related to the next implementation task.
+4. Check `git status` and the current diff.
+5. Select the next implementation task.
+6. Start implementing it.
 
 Do not begin by running every test, build, lint, type-check, migration, Docker image, or end-to-end workflow.
 
@@ -66,7 +63,6 @@ Do not perform a complete architecture or quality audit at the beginning of ever
 
 Assume previously completed and validated work still works unless:
 
-- `PROGRESS.md` reports a failure.
 - The repository is visibly broken.
 - The next task depends on behavior that must be confirmed.
 - A relevant targeted test fails.
@@ -151,13 +147,13 @@ Do not stop after validation when another implementation task is available.
 
 # 5. Selecting the next task
 
-Use `PROGRESS.md`, `PROJECT.md`, and GitHub issues to select the next task.
+Use `PROJECT.md` and GitHub issues to select the next task.
 
 Use this order.
 
 ## First: continue active implementation
 
-When `PROGRESS.md` contains a non-stale `In Progress` task:
+When a GitHub issue is assigned to you and in progress:
 
 - Inspect it.
 - Continue it.
@@ -228,7 +224,7 @@ issue
 
 After finishing one task:
 
-1. Update `PROGRESS.md`.
+1. Update the GitHub issue.
 2. Select the next implementation task.
 3. Continue implementing.
 
@@ -289,7 +285,7 @@ Unless existing work requires another order, progress approximately through:
 47. End-to-end MVP validation.
 48. Production-readiness hardening.
 
-Many of these have been partially or fully implemented. Check the current codebase and `PROGRESS.md` for the exact state. Refer to GitHub issues for known gaps in each area.
+Many of these have been partially or fully implemented. Check the current codebase for the exact state. Refer to GitHub issues for known gaps in each area.
 
 Do not wait until every backend component exists before creating a useful vertical slice.
 
@@ -343,7 +339,6 @@ Run the complete repository validation only when:
 - The session is ending after substantial changes.
 - The MVP is approaching completion.
 - A broad regression is suspected.
-- PROGRESS.md requires it.
 
 Do not run the entire suite repeatedly without new changes.
 
@@ -357,7 +352,7 @@ If a relevant targeted test fails:
 
 1. Determine whether your implementation caused the failure.
 2. Fix the failure when it is related.
-3. Record unrelated pre-existing failures in `PROGRESS.md`.
+3. Record unrelated pre-existing failures in the GitHub issue.
 4. Continue implementation when the unrelated failure does not block the task.
 5. Do not spend the whole session fixing unrelated low-impact tests while critical MVP work remains.
 
@@ -500,7 +495,7 @@ Follow these rules throughout implementation:
 - Avoid unrelated refactors.
 - Do not silently omit requirements from `PROJECT.md`.
 - Fix P0 and P1 bugs before adding new features when the bug blocks the feature.
-- When multiple agents are active, coordinate through `PROGRESS.md` and avoid touching shared files without checking.
+- When multiple agents are active, coordinate through GitHub issues and avoid touching shared files without checking.
 - Database access in the orchestrator goes through [sqlc](https://sqlc.dev)-generated code (`orchestrator/internal/db`, generated from `orchestrator/internal/db/queries/*.sql` and `orchestrator/migrations/`). Hand-written SQL string literals in Go (`pool.Exec(ctx, \`...\`)`, `pool.Query(ctx, \`...\`)`, `pool.QueryRow(ctx, \`...\`)`) are not accepted for new or changed code. A new or changed query means editing a `.sql` file under `orchestrator/internal/db/queries/` and running `make sqlc-generate` to regenerate; `make sqlc-check` (wired into CI and `make validate`) fails the build when the checked-in generated code is stale. See `orchestrator/README.md` for the full workflow.
 
 ---
@@ -516,7 +511,7 @@ Use this decision order:
 3. Existing implementation conventions.
 4. Secure and reliable engineering practices.
 5. The simplest implementation compatible with portability.
-6. Record the decision in `PROGRESS.md`.
+6. Record the decision in the GitHub issue.
 
 Ask for human input only when:
 
@@ -545,7 +540,7 @@ When something fails:
 4. Attempt a reasonable correction.
 5. Run targeted validation.
 6. Change strategy when the same failure repeats.
-7. Record unresolved blockers in `PROGRESS.md`.
+7. Record unresolved blockers in the GitHub issue.
 8. Continue other implementation work when possible.
 
 Failure categories:
@@ -563,125 +558,7 @@ Do not spend the entire session retrying an unavailable external service.
 
 ---
 
-# 15. Maintain PROGRESS.md
-
-Create `PROGRESS.md` when it does not exist.
-
-Keep it current throughout the session.
-
-Use:
-
-```markdown
-# Implementation Progress
-
-## Current Status
-
-- Overall status:
-- Current phase:
-- Active implementation:
-- Last updated:
-- Agent/session identifier:
-
-## In Progress
-
-- [ ] Implementation task
-  - Started:
-  - Relevant files:
-  - Current state:
-  - Remaining work:
-  - Definition of done:
-  - Targeted validation:
-
-## Done
-
-- [x] Completed implementation
-  - Completed:
-  - Relevant files:
-  - Behavior delivered:
-  - Validation performed:
-  - Commands executed:
-  - Notes:
-
-## Blocked
-
-- [ ] Blocked task
-  - Reason:
-  - Evidence:
-  - Attempts made:
-  - Required resolution:
-  - Independent work still available:
-
-## Pending Implementation
-
-- [ ] Next implementation task
-  - Priority:
-  - Dependencies:
-  - Expected behavior:
-  - Definition of done:
-
-## Quality Backlog
-
-Only add items here when they do not belong directly to an active implementation.
-
-- [ ] Improvement
-  - Category:
-  - Risk:
-  - Expected benefit:
-  - Recommended timing:
-
-## Decisions
-
-- Decision:
-  - Context:
-  - Alternatives considered:
-  - Reason:
-  - Consequences:
-
-## Validation Status
-
-Record only validation that was actually run.
-
-- Targeted tests:
-- Service tests:
-- Full repository tests:
-- Build:
-- Lint:
-- Type checks:
-- Database migrations:
-- Docker Compose:
-- End-to-end workflow:
-
-## Known Issues
-
-- Issue:
-  - Severity:
-  - Impact:
-  - Evidence:
-  - Suggested resolution:
-
-## Next Recommended Implementation
-
-Describe the exact next implementation task, relevant files, expected behavior, and targeted validation.
-```
-
-## PROGRESS.md rules
-
-- Keep implementation tasks separate from general quality work.
-- Always keep at least one specific `Next Recommended Implementation` while implementation remains.
-- Do not replace pending implementation with generic "run tests" work.
-- Mark something done only after relevant validation.
-- Record exact commands that were run.
-- Do not claim full validation when only targeted checks ran.
-- Preserve useful history.
-- Correct stale information.
-- Avoid vague descriptions.
-- Record blockers precisely.
-- Update after meaningful progress.
-- Include your session identifier and timestamp in the `Active implementation` field so other agents can detect staleness.
-
----
-
-# 16. Definition of done for an implementation task
+# 15. Definition of done for an implementation task
 
 An implementation task is done when:
 
@@ -695,7 +572,6 @@ An implementation task is done when:
 - Relevant documentation is updated.
 - No temporary debug code remains.
 - No secret or local artifact is committed.
-- `PROGRESS.md` contains evidence.
 - For bug fixes: the GitHub issue is verifiably resolved.
 
 Do not require a complete repository-wide test run for every small task.
@@ -704,7 +580,7 @@ Do not mark unvalidated code done.
 
 ---
 
-# 17. MVP completion
+# 16. MVP completion
 
 Do not consider the MVP complete until the acceptance criteria in `PROJECT.md` are satisfied or explicitly blocked.
 
@@ -732,7 +608,7 @@ Until then, continue implementing the next requirement.
 
 ---
 
-# 18. Before ending the session
+# 17. Before ending the session
 
 Before ending:
 
@@ -744,7 +620,7 @@ Before ending:
 6. Review `git status` and the diff.
 7. Remove temporary files, debug code, secrets, and accidental artifacts.
 8. Update relevant documentation.
-9. Update `PROGRESS.md` with:
+9. Update the GitHub issue with:
 
    - What was implemented.
    - What remains incomplete.
@@ -755,4 +631,4 @@ Before ending:
 10. Confirm another agent can continue without re-auditing the repository.
 11. Unassign yourself from any GitHub issue you claimed.
 
-Make no repository changes after updating `PROGRESS.md` and releasing your issue assignments.
+Make no repository changes after updating the GitHub issue and releasing your issue assignments.

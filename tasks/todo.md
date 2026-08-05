@@ -42,7 +42,7 @@ the repository, and the error did not say so.
 - [x] Console: a credentials section per project reporting "set <age> ago" or the fallback,
       with set / replace / remove. Admin-only; a viewer sees the state and no controls.
 - [x] `LOOP_SECRET_KEY` wired through `compose.yaml`, `compose.secrets.yaml`, `.env.example`
-      and the orchestrator entrypoint. Deliberately no default — see PROGRESS.md.
+      and the orchestrator entrypoint. Deliberately no default.
 
 **Verified.** Unit, integration (against real Postgres, twice, for migration idempotence)
 and end-to-end against the built stack: stored, replaced, removed and re-read through
@@ -266,10 +266,9 @@ persist_actor` expects a viewer rejection that does not happen, one ruff error
 
 ### 2026-08-01 — Roadmap reconciliation
 
-Reconciled this file and `PROGRESS.md` against the tracker and the working tree. Every box in
-Phases 0–4 was unticked despite 34 of 35 items having shipped, and `PROGRESS.md` still named
-a task merged three commits earlier as in progress. Neither file was a usable progress signal.
-The CI finding above came out of that reconciliation.
+Reconciled this file against the tracker and the working tree. Every box in
+Phases 0–4 was unticked despite 34 of 35 items having shipped. The file was not a usable progress
+signal. The CI finding above came out of that reconciliation.
 
 ### 2026-08-01 — CI restored, and the six failures it found
 
