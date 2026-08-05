@@ -210,12 +210,23 @@ jobs:
       # between jobs.
       - name: Reclaim build cache
         run: docker builder prune --all --force || true
+      # Run through a throwaway container on --network host rather than curling
+      # directly from the job: the job step itself executes in the self-hosted
+      # runner's own network namespace, which is not the docker daemon's host
+      # namespace that Compose actually publishes port 3000 on -- the same gap
+      # test-postgres-integration hit against localhost:5432. --network host
+      # attaches this container to the daemon's host network, where the
+      # published port is reachable, without moving the whole job (and its
+      # `docker compose` calls, which need the runner's own docker CLI) into a
+      # container of its own.
       - name: Verify readiness endpoints
         run: |
-          curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/
+          docker run --rm --network host curlimages/curl:8.11.1 \
+            --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/
           # Only port 3000 is published; nginx proxies /api/ to the API, so this
           # also proves the console can reach its own backend.
-          curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/api/v1/health
+          docker run --rm --network host curlimages/curl:8.11.1 \
+            --fail --retry 12 --retry-all-errors --retry-delay 2 http://localhost:3000/api/v1/health
       # Queue depth, active workflow counts and the fleet-wide runner heartbeat
       # age exist in no other service's reach, so a listener that silently never
       # binds means nobody exports them at all -- which is the state issue #296
