@@ -13,9 +13,9 @@ import (
 	"regexp"
 	"strings"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 	"github.com/jackc/pgx/v5"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
 	"github.com/loop-engineering/orchestrator/internal/db"
 	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"github.com/loop-engineering/orchestrator/internal/textutil"

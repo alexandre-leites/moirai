@@ -1,6 +1,6 @@
 syntax = "proto3";
 package loop.control.v1;
-option go_package = "github.com/loop-engineering/contracts/gen/control/v1;controlv1";
+option go_package = "github.com/alexandre-leites/moirai/contracts/gen/control/v1;controlv1";
 
 service ControlPlane {
   rpc Login(LoginRequest) returns (LoginResponse);

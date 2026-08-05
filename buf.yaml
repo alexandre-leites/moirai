@@ -1,5 +1,5 @@
 version: v1
-name: buf.build/loop-engineering/loop-engineering
+name: buf.build/alexandre-leites/moirai
 build:
   excludes:
     - .claude

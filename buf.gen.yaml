@@ -3,8 +3,8 @@ plugins:
   - plugin: buf.build/protocolbuffers/go:v1.36.6
     out: gen/go
     opt:
-      - module=github.com/loop-engineering/contracts
+      - module=github.com/alexandre-leites/moirai/contracts
   - plugin: buf.build/grpc/go:v1.5.1
     out: gen/go
     opt:
-      - module=github.com/loop-engineering/contracts
+      - module=github.com/alexandre-leites/moirai/contracts

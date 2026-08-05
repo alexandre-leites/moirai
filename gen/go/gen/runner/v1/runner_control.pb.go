@@ -1349,7 +1349,7 @@ const file_proto_runner_control_proto_rawDesc = "" +
 	"\x0eRegisterRunner\x12%.loop.runner.v1.RegisterRunnerRequest\x1a&.loop.runner.v1.RegisterRunnerResponse\x12Y\n" +
 	"\aConnect\x12$.loop.runner.v1.RunnerToOrchestrator\x1a$.loop.runner.v1.OrchestratorToRunner(\x010\x01\x12e\n" +
 	"\x10ResolveJobSecret\x12'.loop.runner.v1.ResolveJobSecretRequest\x1a(.loop.runner.v1.ResolveJobSecretResponse\x12_\n" +
-	"\x0eStoreJobSecret\x12%.loop.runner.v1.StoreJobSecretRequest\x1a&.loop.runner.v1.StoreJobSecretResponseB>Z<github.com/loop-engineering/contracts/gen/runner/v1;runnerv1b\x06proto3"
+	"\x0eStoreJobSecret\x12%.loop.runner.v1.StoreJobSecretRequest\x1a&.loop.runner.v1.StoreJobSecretResponseBEZCgithub.com/alexandre-leites/moirai/contracts/gen/runner/v1;runnerv1b\x06proto3"
 
 var (
 	file_proto_runner_control_proto_rawDescOnce sync.Once

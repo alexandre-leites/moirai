@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 	"github.com/loop-engineering/runner/internal/config"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"

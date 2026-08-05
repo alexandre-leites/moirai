@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
 // runnerClient is the slice of the orchestrator client these handlers use.

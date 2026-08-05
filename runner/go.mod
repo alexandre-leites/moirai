@@ -3,7 +3,7 @@ module github.com/loop-engineering/runner
 go 1.25.0
 
 require (
-	github.com/loop-engineering/contracts v0.0.0
+	github.com/alexandre-leites/moirai/contracts v0.0.0
 	github.com/prometheus/client_golang v1.24.1
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.11
@@ -22,4 +22,4 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
 
-replace github.com/loop-engineering/contracts => ../gen/go
+replace github.com/alexandre-leites/moirai/contracts => ../gen/go

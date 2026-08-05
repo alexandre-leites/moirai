@@ -1,6 +1,6 @@
 syntax = "proto3";
 package loop.runner.v1;
-option go_package = "github.com/loop-engineering/contracts/gen/runner/v1;runnerv1";
+option go_package = "github.com/alexandre-leites/moirai/contracts/gen/runner/v1;runnerv1";
 
 service RunnerControl {
   rpc RegisterRunner(RegisterRunnerRequest) returns (RegisterRunnerResponse);

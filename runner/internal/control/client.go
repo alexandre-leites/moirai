@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 )
 
 var ErrNotConnected = errors.New("runner control stream is not connected")

@@ -1,5 +1,5 @@
 # Build context is the repository root: the runner module resolves the generated
-# contracts through `replace github.com/loop-engineering/contracts => ../gen/go`.
+# contracts through `replace github.com/alexandre-leites/moirai/contracts => ../gen/go`.
 #
 # The builder always runs on the native build platform and cross-compiles to the
 # requested target, so a linux/arm64 image costs no QEMU emulation for the Go

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	runnerv1 "github.com/loop-engineering/contracts/gen/runner/v1"
+	runnerv1 "github.com/alexandre-leites/moirai/contracts/gen/runner/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"

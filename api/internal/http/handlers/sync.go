@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/loop-engineering/api/internal/auth"
 	apiserver "github.com/loop-engineering/api/internal/http"
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
 )
 
 // The console sends a small JSON object or nothing at all; the cap is here so a

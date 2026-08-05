@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 	"github.com/loop-engineering/orchestrator/internal/idgen"
 	"google.golang.org/grpc/metadata"
 )

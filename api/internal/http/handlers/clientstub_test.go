@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	controlv1 "github.com/alexandre-leites/moirai/contracts/gen/control/v1"
 )
 
 // stubClient implements the per-resource orchestrator client interfaces the

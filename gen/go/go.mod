@@ -1,4 +1,4 @@
-module github.com/loop-engineering/contracts
+module github.com/alexandre-leites/moirai/contracts
 
 go 1.25.0
 
