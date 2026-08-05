@@ -199,6 +199,19 @@ jobs:
           docker system prune --all --force --filter "until=1h" || true
       - run: make sqlc-check
 
+  # The protobuf analogue of sqlc-check: regenerates gen/go from
+  # proto/*.proto and fails the build if the checked-in bindings are stale,
+  # the same enforcement sqlc-check gives the database bindings. The baked
+  # pool ships the pinned buf binary; on the GitHub-hosted pool `make
+  # proto-check` falls back to the pinned bufbuild/buf Docker image (Makefile
+  # proto-generate), which is why this job does not need a Go toolchain.
+  proto-check:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: make proto-check
+
   runner:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
@@ -449,7 +462,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, proto-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true
