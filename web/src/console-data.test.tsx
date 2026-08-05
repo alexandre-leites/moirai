@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConsoleDataProvider, useConsoleData } from "./console-data";
+import { ConsoleDataProvider } from "./console-data";
+import { useConsoleData } from "./console-data-context";
 import { mount, unmountAll } from "./test-dom";
 import { stubApi, workflow } from "./test-console";
 

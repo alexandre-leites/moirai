@@ -4,10 +4,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router";
 import type { ApiClient } from "./api";
-import { useAuth } from "./auth";
-import {
-  ConsoleDataProvider, activeWorkflows, needsAttention, onlineRunners, useConsoleData,
-} from "./console-data";
+import { useAuth } from "./auth-context";
+import { ConsoleDataProvider } from "./console-data";
+import { activeWorkflows, needsAttention, onlineRunners, useConsoleData } from "./console-data-context";
 import { AccountPage } from "./account";
 import { OverviewPage } from "./overview";
 import { ProjectsPage } from "./projects";
@@ -15,8 +14,9 @@ import { QueuePage } from "./queue";
 import { RunnersPage } from "./runners";
 import { WorkflowsPage } from "./workflows";
 import { WorkflowDetailPage } from "./workflow-detail";
-import { useFocusTrap } from "./ui";
+import { useFocusTrap } from "./ui/focus-trap";
 import { resolvedTheme, useTheme } from "./theme";
+import { routeTitle } from "./route-title";
 
 function Mark() {
   return (
@@ -39,21 +39,6 @@ function Wordmark() {
       </span>
     </Link>
   );
-}
-
-const ROUTE_TITLES: Array<[RegExp, string]> = [
-  [/^\/$/, "Overview"],
-  [/^\/queue/, "Queue"],
-  [/^\/workflows\/.+/, "Workflow"],
-  [/^\/workflows/, "Workflows"],
-  [/^\/runners/, "Runners"],
-  [/^\/projects/, "Projects"],
-  [/^\/account/, "Account"],
-];
-
-export function routeTitle(pathname: string): string {
-  const match = ROUTE_TITLES.find(([pattern]) => pattern.test(pathname));
-  return match ? `${match[1]} — Moirai Console` : "Moirai Console";
 }
 
 /** Sidebar counts, live from the shared snapshot (specification.md §3.1). */

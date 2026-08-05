@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { OverviewPage, triage } from "./overview";
+import { OverviewPage } from "./overview";
+import { triage } from "./triage";
 import { unmountAll } from "./test-dom";
 import { event, mountView, project, runner, stubApi, workflow } from "./test-console";
 

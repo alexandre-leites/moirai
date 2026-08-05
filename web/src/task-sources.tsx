@@ -11,9 +11,11 @@ import type {
   ApiClient, Project, TaskSource, TaskSourceCreate, TaskSourceField, TaskSourceTypeDescriptor, TaskSourceUpdate,
 } from "./api";
 import { ApiError } from "./api";
-import { useIsAdmin } from "./auth";
-import { useConsoleData } from "./console-data";
-import { ErrorBlock, Modal, useConfirm, useToast } from "./ui";
+import { useIsAdmin } from "./auth-context";
+import { useConsoleData } from "./console-data-context";
+import { ErrorBlock, Modal } from "./ui";
+import { useConfirm } from "./ui/use-confirm";
+import { useToast } from "./ui/toast-context";
 
 function taskSourceFailure(reason: unknown, fallback: string): string {
   if (reason instanceof ApiError && reason.isForbidden) return "You need the admin role for that";

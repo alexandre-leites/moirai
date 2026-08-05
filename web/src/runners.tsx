@@ -3,15 +3,16 @@
 import { useCallback, useState } from "react";
 import type { ApiClient, CreatedToken, Runner, RunnerToken } from "./api";
 import { ApiError } from "./api";
-import { useConsoleData } from "./console-data";
+import { useConsoleData } from "./console-data-context";
 import { absolute } from "./format";
 import { usePolled } from "./poll";
 import { describeHeartbeat, describeRunnerStatus } from "./runner-status";
-import { useIsAdmin } from "./auth";
+import { useIsAdmin } from "./auth-context";
 import {
   Card, CardHeader, Empty, ErrorBlock, KV, KVRow, Modal, Pill, Skeleton, TableWrap,
-  useConfirm, useToast,
 } from "./ui";
+import { useConfirm } from "./ui/use-confirm";
+import { useToast } from "./ui/toast-context";
 
 export function RunnersPage({ api }: { api: ApiClient }) {
   const isAdmin = useIsAdmin();

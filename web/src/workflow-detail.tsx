@@ -4,15 +4,17 @@ import { useCallback, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import type { ApiClient, Workflow, WorkflowEvent } from "./api";
 import { ApiError } from "./api";
-import { useConsoleData } from "./console-data";
+import { useConsoleData } from "./console-data-context";
 import { absolute, clock } from "./format";
 import { usePolled } from "./poll";
 import { attemptRows, deriveGates, describeEvent, executionError, isTerminal, logText, statusMeta, PHASE_LABEL } from "./status";
-import { useIsAdmin } from "./auth";
+import { useIsAdmin } from "./auth-context";
 import {
   Age, Banner, Card, CardHeader, Empty, ErrorBlock, GateRow, KV, KVRow, Meter, Skeleton,
-  StatusPill, useConfirm, useToast,
+  StatusPill,
 } from "./ui";
+import { useConfirm } from "./ui/use-confirm";
+import { useToast } from "./ui/toast-context";
 import { AnsiLog } from "./ui/ansi";
 import { PhaseThread, ThreadLegend } from "./ui/thread";
 
