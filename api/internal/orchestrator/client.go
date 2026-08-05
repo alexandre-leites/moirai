@@ -94,6 +94,7 @@ func DialWithTLS(ctx context.Context, endpoint string, options TLSOptions) (*Cli
 	if err != nil {
 		return nil, err
 	}
+	//nolint:staticcheck // DialContext+WithBlock blocks until connected, the fail-fast behaviour startup relies on; NewClient is lazy and would not.
 	conn, err := grpc.DialContext(
 		ctx,
 		endpoint,

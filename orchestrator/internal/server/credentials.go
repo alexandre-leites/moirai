@@ -296,7 +296,7 @@ func validCredentialName(name string) bool {
 
 func validateCredential(kind, filePath string) (string, error) {
 	kind = strings.TrimSpace(kind)
-	if kind != "github_token" && kind != "ssh_private_key" && !(strings.HasPrefix(kind, "agent:") && validCredentialName(strings.TrimPrefix(kind, "agent:"))) {
+	if kind != "github_token" && kind != "ssh_private_key" && (!strings.HasPrefix(kind, "agent:") || !validCredentialName(strings.TrimPrefix(kind, "agent:"))) {
 		return "", errors.New("credential kind is invalid")
 	}
 	if filePath == "" {

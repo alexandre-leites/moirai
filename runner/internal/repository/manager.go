@@ -546,13 +546,12 @@ func (manager Manager) quarantine(root, jobID string, cleanupErr error) error {
 		return err
 	}
 	temporaryPath := temporary.Name()
+	defer temporary.Close()
 	defer os.Remove(temporaryPath)
 	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
 		return err
 	}
 	if _, err := temporary.Write(contents); err != nil {
-		temporary.Close()
 		return err
 	}
 	if err := temporary.Close(); err != nil {
@@ -673,14 +672,14 @@ func (manager Manager) lockRepository(ctx context.Context, root, key string) (fu
 			}, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			file.Close()
+			_ = file.Close()
 			return nil, fmt.Errorf("lock repository: %w", err)
 		}
 		timer := time.NewTimer(manager.lockPollInterval())
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			file.Close()
+			_ = file.Close()
 			return nil, ctx.Err()
 		case <-timer.C:
 		}
@@ -741,7 +740,7 @@ func safeSegment(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if !(unicode.IsLetter(character) || unicode.IsDigit(character) || character == '.' || character == '_' || character == '-') {
+		if !unicode.IsLetter(character) && !unicode.IsDigit(character) && character != '.' && character != '_' && character != '-' {
 			return false
 		}
 	}

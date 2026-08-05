@@ -12,7 +12,8 @@ func TestRateLimiterBoundsRequestsAndResetsWindow(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	limiter := NewRateLimiter(time.Minute, 2)
 	limiter.now = func() time.Time { return now }
-	if !limiter.Allow("client") || !limiter.Allow("client") || limiter.Allow("client") {
+	first, second, third := limiter.Allow("client"), limiter.Allow("client"), limiter.Allow("client")
+	if !first || !second || third {
 		t.Fatal("unexpected limit result")
 	}
 	now = now.Add(time.Minute)

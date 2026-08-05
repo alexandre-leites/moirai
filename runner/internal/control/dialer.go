@@ -70,6 +70,7 @@ func DialWithHeaders(ctx context.Context, endpoint string, tlsOptions TLSOptions
 		}
 		options = append(options, grpc.WithPerRPCCredentials(credentials))
 	}
+	//nolint:staticcheck // DialContext blocks until connected, the fail-fast startup behaviour the runner relies on; NewClient is lazy and would not.
 	connection, err := grpc.DialContext(ctx, endpoint, options...)
 	if err != nil {
 		return nil, nil, err

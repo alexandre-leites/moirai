@@ -158,6 +158,22 @@ jobs:
           go-version: "1.25.12"
       - run: make lint
 
+  # golangci-lint across all three Go modules (orchestrator, runner, api). The
+  # baked pool ships the pinned golangci-lint; the GitHub-hosted pool installs
+  # it via the Makefile's fallback (Makefile lint-go). Runs separately from the
+  # `lint` job so gofmt and the deeper linters fail independently. The config
+  # is .golangci.yml at the repo root, auto-discovered from each module dir.
+  lint-go:
+    needs: resolve-runner
+    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        if: needs.resolve-runner.outputs.baked == 'false'
+        with:
+          go-version: "1.25.12"
+      - run: make lint-go
+
   typecheck:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
@@ -462,7 +478,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, proto-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
+    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, lint-go, typecheck, sqlc-check, proto-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true

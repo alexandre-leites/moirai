@@ -498,10 +498,6 @@ func (r *EventReporter) logChunks(message string) []string {
 	return chunks
 }
 
-func marshalEventPayloadWithPrefixes(payload map[string]any, prefixes []string) ([]byte, error) {
-	return marshalEventPayloadWithLimit(payload, newRedactionSet(prefixes), maxExecutionEventPayloadBytes)
-}
-
 func marshalEventPayloadWithLimit(payload map[string]any, redaction *redactionSet, maxPayloadBytes int) ([]byte, error) {
 	if payload == nil {
 		payload = map[string]any{}

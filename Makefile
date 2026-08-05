@@ -1,19 +1,20 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
 SQLC_VERSION ?= v1.29.0
+GOLANGCI_LINT_VERSION ?= v2.12.2
 # `docker compose config` output is not byte-stable across compose versions, so
 # compose.tls-stack.yaml is rendered with (and checked against) this exact one.
 # Keep in sync with the version pinned in .github/workflows/ci.yml.
 COMPOSE_VERSION ?= v2.38.2
 GO ?= go
 
-.PHONY: help test lint typecheck validate compose compose-overlays \
+.PHONY: help test lint lint-go typecheck validate compose compose-overlays \
         proto-lint proto-generate proto-check sqlc-generate sqlc-check test-release-tags compose-tls-stack \
         test-orchestrator test-postgres-integration test-integration-notice test-runner test-api test-web \
         build-orchestrator \
         build-runner build-api build-web build-images
 
 help:
-	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run Go orchestrator tests (no database; PostgreSQL suites excluded).' '  make test-postgres-integration  Run the PostgreSQL suites. Needs LOOP_TEST_DATABASE_URL.' '  make lint              Verify Go formatting.' '  make typecheck         Run Go vet.' '  make validate          Run test, format, vet, Compose, and proto checks.'
+	@printf '%s\n' 'Targets:' '  make test              Run orchestrator, runner, API, and web checks.' '  make test-orchestrator Run Go orchestrator tests (no database; PostgreSQL suites excluded).' '  make test-postgres-integration  Run the PostgreSQL suites. Needs LOOP_TEST_DATABASE_URL.' '  make lint              Verify Go formatting.' '  make lint-go           Run golangci-lint across the Go modules.' '  make typecheck         Run Go vet.' '  make validate          Run test, format, vet, Compose, and proto checks.'
 
 test: test-orchestrator test-runner test-api test-web
 
@@ -59,6 +60,22 @@ test-web:
 
 lint:
 	test -z "$$(gofmt -l $$(git ls-files --cached --others --exclude-standard -- '*.go'))"
+
+# golangci-lint across the three Go modules. The config lives at the repo root
+# (.golangci.yml) and is auto-discovered from each module directory. The
+# ci-runner image bakes a pinned golangci-lint; on a bare runner it is
+# installed on demand (see ci.yml lint job).
+lint-go:
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		cd orchestrator && golangci-lint run ./...; \
+		cd ../runner && golangci-lint run ./...; \
+		cd ../api && golangci-lint run ./...; \
+	else \
+		GOBIN="$$($(GO) env GOPATH)/bin" $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+		cd orchestrator && "$$($(GO) env GOPATH)/bin/golangci-lint" run ./...; \
+		cd ../runner && "$$($(GO) env GOPATH)/bin/golangci-lint" run ./...; \
+		cd ../api && "$$($(GO) env GOPATH)/bin/golangci-lint" run ./...; \
+	fi
 
 typecheck:
 	cd orchestrator && $(GO) vet ./...
@@ -144,4 +161,4 @@ sqlc-generate:
 sqlc-check: sqlc-generate
 	git diff --exit-code -- orchestrator/internal/db
 
-validate: test-orchestrator test-integration-notice lint typecheck compose compose-overlays test-release-tags proto-check sqlc-check
+validate: test-orchestrator test-integration-notice lint lint-go typecheck compose compose-overlays test-release-tags proto-check sqlc-check
