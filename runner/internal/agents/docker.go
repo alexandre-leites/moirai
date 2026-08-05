@@ -62,7 +62,7 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("docker CLI backend execution failed: %w", err)
 	}
-	document, err := readResultDocument(resultPath, request.ExecutionID)
+	document, err := readResultDocument(resultPath, request.ExecutionID, request.Role)
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, err
 	}

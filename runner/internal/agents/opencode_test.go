@@ -38,6 +38,63 @@ JSON
 	}
 }
 
+// A planner's result document legitimately reports status "planned" (#407): the
+// plan it wrote is its deliverable, not a code change. The runner must accept it
+// and report the planner execution as a success so the orchestrator folds the
+// plan into the developer packet, rather than rejecting it as an invalid status.
+func TestOpenCodeBackendAcceptsPlannerPlannedStatus(t *testing.T) {
+	workspace := t.TempDir()
+	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+cat > .loop/result.json <<'JSON'
+{"protocolVersion":"1.0","executionId":"execution-1","status":"planned","summary":"implement a shopping list app","remainingWork":["create pyproject.toml","add a smoke test"],"sessionId":"session-1"}
+JSON
+`)
+	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+	result, err := backend.Execute(context.Background(), Request{
+		ExecutionID: "execution-1",
+		Role:        RolePlanner,
+		Workspace:   workspace,
+		Prompt:      "plan the task",
+		Timeout:     time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a completed planner result rather than a failure", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("Status = %q, want completed (normalized from planned)", result.Status)
+	}
+	if result.Summary != "implement a shopping list app" {
+		t.Fatalf("Summary = %q", result.Summary)
+	}
+	if len(result.RemainingWork) != 2 || result.RemainingWork[0] != "create pyproject.toml" {
+		t.Fatalf("RemainingWork = %#v", result.RemainingWork)
+	}
+	if result.Raw == nil || result.Raw["status"] != "planned" {
+		t.Fatalf("Raw result = %#v, want the agent's own planned status preserved", result.Raw)
+	}
+}
+
+// A non-planner role writing "planned" is a malformed result, not a planner.
+func TestOpenCodeBackendRejectsPlannedStatusForNonPlanner(t *testing.T) {
+	workspace := t.TempDir()
+	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+cat > .loop/result.json <<'JSON'
+{"protocolVersion":"1.0","executionId":"execution-1","status":"planned","summary":"implemented"}
+JSON
+`)
+	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+	_, err := backend.Execute(context.Background(), Request{
+		ExecutionID: "execution-1",
+		Role:        RoleDeveloper,
+		Workspace:   workspace,
+		Prompt:      "implement the task",
+		Timeout:     time.Second,
+	})
+	if !errors.Is(err, ErrNoResultEvidence) {
+		t.Fatalf("Execute() error = %v, want ErrNoResultEvidence", err)
+	}
+}
+
 func TestOpenCodeBackendCarriesRawResultDocumentForRoleSpecificFields(t *testing.T) {
 	workspace := t.TempDir()
 	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
