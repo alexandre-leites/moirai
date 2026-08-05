@@ -625,9 +625,13 @@ func (manager Manager) gitWithEnv(ctx context.Context, extraEnvironment []string
 
 func (manager Manager) gitOutputWithEnv(ctx context.Context, extraEnvironment []string, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, manager.gitBinary(), arguments...)
-	if len(extraEnvironment) > 0 {
-		command.Env = append(os.Environ(), extraEnvironment...)
-	}
+	// GIT_TERMINAL_PROMPT=0 makes git fail instead of trying to read a
+	// username or password from a terminal that does not exist. Without it a
+	// clone or fetch that has no credential ends as the cryptic "could not
+	// read Username ... No such device or address" (#391) rather than a clear
+	// authentication failure.
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = append(command.Env, extraEnvironment...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", arguments[0], err, strings.TrimSpace(string(output)))

@@ -178,6 +178,62 @@ func TestDeveloperPacketMayModifyAndPush(t *testing.T) {
 	}
 }
 
+// A GitHub HTTPS managed clone must carry the GITHUB_TOKEN environment
+// reference, or the runner has no credential to authenticate the clone with
+// and git fails trying to prompt for one (#391).
+func TestDeveloperPacketDeclaresGitHubTokenForGitHubClone(t *testing.T) {
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://github.com/acme/repo.git", "", "main", "agent/test", "", 3600, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, ok := packet["environmentRefs"].([]map[string]string)
+	if !ok || len(refs) != 1 || refs[0]["name"] != "GITHUB_TOKEN" || refs[0]["secretRef"] != "github_token" {
+		t.Fatalf("environmentRefs = %#v, want the GITHUB_TOKEN reference", packet["environmentRefs"])
+	}
+}
+
+// A clone the runner can already authenticate another way (an SSH key it
+// declares, or a code host its git already trusts) declares nothing, so a
+// project that never needed a GitHub token is not suddenly required to have
+// one.
+func TestDeveloperPacketDeclaresNoTokenForNonGitHubClone(t *testing.T) {
+	packet, err := developerPacket("1b5f4a4d-2345-4ff2-a014-189531caf2d7", "2b5f4a4d-2345-4ff2-a014-189531caf2d7", "42", "Fix scheduler", "", "managed_clone", "https://gitlab.example/acme/repo.git", "", "main", "agent/test", "", 3600, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs, ok := packet["environmentRefs"].([]map[string]string); !ok || len(refs) != 0 {
+		t.Fatalf("environmentRefs = %#v, want none for a non-GitHub clone", packet["environmentRefs"])
+	}
+}
+
+func TestRepositoryEnvironmentRefs(t *testing.T) {
+	tests := []struct {
+		name, mode, url string
+		want            string
+	}{
+		{name: "github https managed clone", mode: "managed_clone", url: "https://github.com/acme/repo.git", want: "GITHUB_TOKEN"},
+		{name: "github https without .git", mode: "managed_clone", url: "https://github.com/acme/repo", want: "GITHUB_TOKEN"},
+		{name: "github ssh managed clone", mode: "managed_clone", url: "git@github.com:acme/repo.git", want: ""},
+		{name: "non github https", mode: "managed_clone", url: "https://gitlab.com/acme/repo.git", want: ""},
+		{name: "github over other scheme", mode: "managed_clone", url: "ssh://git@github.com/acme/repo.git", want: ""},
+		{name: "existing path", mode: "existing_path", url: "https://github.com/acme/repo.git", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			refs := repositoryEnvironmentRefs(test.mode, test.url)
+			if test.want == "" {
+				if len(refs) != 0 {
+					t.Fatalf("repositoryEnvironmentRefs(%q, %q) = %#v, want none", test.mode, test.url, refs)
+				}
+				return
+			}
+			if len(refs) != 1 || refs[0]["name"] != test.want {
+				t.Fatalf("repositoryEnvironmentRefs(%q, %q) = %#v, want name %q", test.mode, test.url, refs, test.want)
+			}
+		})
+	}
+}
+
 // A planner packet (#351) must never be allowed to modify files or push --
 // the runner's own taskpacket.Validate refuses that combination independently,
 // but plannerPacket must not rely solely on the runner catching its mistake.
