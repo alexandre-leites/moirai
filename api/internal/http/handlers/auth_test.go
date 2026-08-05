@@ -12,6 +12,7 @@ import (
 	"github.com/loop-engineering/api/internal/auth"
 	"github.com/loop-engineering/api/internal/orchestrator"
 	controlv1 "github.com/loop-engineering/contracts/gen/control/v1"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestAuthMeRequiresSession(t *testing.T) {
@@ -56,7 +57,13 @@ func TestLogoutClearsCookies(t *testing.T) {
 	}
 }
 
-func TestLogoutIdempotentWithoutSession(t *testing.T) {
+// A logout call with no session cookie at all answers 401, the same as every
+// other session-protected route (see TestAuthMeRequiresSession). Deliberately
+// not 204: the route needs the session cookie to identify which server-side
+// session to revoke, so RequireSession must run before the handler, and there
+// is nothing sensitive in telling an unauthenticated caller it isn't signed
+// in — every sibling endpoint already does exactly that.
+func TestLogoutRequiresSession(t *testing.T) {
 	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -64,8 +71,66 @@ func TestLogoutIdempotentWithoutSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// A logout call with a session cookie but no CSRF token is rejected the same
+// way an account update would be: logout is a mutation (it revokes a
+// server-side session) and the console always sends the CSRF header for it
+// (see web/src/api.ts logout()).
+func TestLogoutRequiresCSRF(t *testing.T) {
+	h := NewAuthHandlers(nil, true, auth.NewRateLimiter(time.Minute, 10), auth.NewRateLimiter(time.Minute, 60))
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "test-session"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+// End-to-end through the real mux (not the handler directly): a valid
+// session + CSRF pair must reach the orchestrator's Logout RPC with the
+// session token that RequireSession pulled off the cookie. This is the
+// regression test for the bug where logout was registered without
+// RequireSession, so auth.SessionToken(ctx) was always empty and
+// client.Logout was never called even though the response looked like a
+// success (204, cookies cleared).
+func TestLogoutRouteRevokesTheSessionServerSide(t *testing.T) {
+	var gotSessionMD []string
+	stub := &stubClient{logout: func(ctx context.Context) error {
+		if md, ok := metadata.FromOutgoingContext(ctx); ok {
+			gotSessionMD = md.Get("x-loop-session")
+		}
+		return nil
+	}}
+	mux := authMux(stub)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "captured-token"})
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "test-csrf"})
+	req.Header.Set(auth.CSRFHeaderName, "test-csrf")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusNoContent {
-		t.Fatalf("got %d, want %d", rec.Code, http.StatusNoContent)
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	calls := stub.recorded("Logout")
+	if len(calls) != 1 {
+		t.Fatalf("Logout calls = %#v, want 1 call carrying the session token", stub.calls)
+	}
+	// This is the crux of the bug: before the fix, RequireSession never ran on
+	// this route, so auth.SessionToken(ctx) was always empty and this
+	// metadata (and the whole Logout call) never happened even though the
+	// response still looked like a successful 204.
+	if len(gotSessionMD) != 1 || gotSessionMD[0] != "captured-token" {
+		t.Fatalf("session token forwarded to the orchestrator = %#v, want [captured-token]", gotSessionMD)
 	}
 }
 
@@ -311,13 +376,9 @@ func TestUpdateAccountRequiresSessionAndCSRF(t *testing.T) {
 }
 
 // logoutRequest builds a request whose context already carries the session
-// token, the way auth.RequireSession would.
-//
-// NOTE: the logout route is registered without auth.RequireSession, so in the
-// running server the token never reaches this handler and the orchestrator-side
-// revocation below is skipped. That is a real gap (a captured session token
-// stays usable after logout) and is tracked separately; this test pins the
-// handler behavior so the route fix does not have to invent it.
+// token, the way auth.RequireSession would after running on the real route
+// (see TestLogoutRouteRevokesTheSessionServerSide for the end-to-end version
+// that exercises RequireSession itself).
 func logoutRequest() *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 	return req.WithContext(auth.WithSessionToken(req.Context(), "session-value"))

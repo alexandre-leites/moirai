@@ -38,7 +38,7 @@ func NewAuthHandlers(client authClient, cookieSecure bool, loginLimiter, mutatio
 
 func (h *AuthHandlers) RegisterRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/auth/login", h.loginLimiter.Middleware(http.HandlerFunc(h.login)))
-	mux.Handle("POST /api/v1/auth/logout", http.HandlerFunc(h.logout))
+	mux.Handle("POST /api/v1/auth/logout", requireMutation(h.mutationLimiter, h.logout))
 	mux.Handle("GET /api/v1/auth/me", auth.RequireSession(http.HandlerFunc(h.me)))
 	mux.Handle("PUT /api/v1/auth/account", requireMutation(h.mutationLimiter, h.updateAccount))
 }
