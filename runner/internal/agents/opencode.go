@@ -170,7 +170,7 @@ func (backend OpenCodeBackend) run(parent context.Context, request Request, resu
 
 	raw := readRawResultDocument(resultPath)
 
-	document, docErr := readResultDocument(resultPath, request.ExecutionID)
+	document, docErr := readResultDocument(resultPath, request.ExecutionID, request.Role)
 	if docErr == nil {
 		return Result{
 			Status:        document.Status,
@@ -305,7 +305,7 @@ func readRawResultDocument(path string) map[string]any {
 	return document
 }
 
-func readResultDocument(path, executionID string) (resultDocument, error) {
+func readResultDocument(path, executionID string, role Role) (resultDocument, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -330,6 +330,18 @@ func readResultDocument(path, executionID string) (resultDocument, error) {
 	}
 	switch document.Status {
 	case "completed", "blocked", "failed":
+		return document, nil
+	case "planned":
+		// A planner's terminal status is "planned" (#351): the plan it wrote is
+		// its deliverable, not a code change. Normalize it to "completed" so the
+		// runner reports the planner execution as a success and the orchestrator
+		// folds the plan into the developer packet (phase_dispatch.go's
+		// plannerCompleted branch). Any other role writing "planned" is a
+		// malformed result, not a planner.
+		if role != RolePlanner {
+			return resultDocument{}, fmt.Errorf("agent result has invalid status %q", document.Status)
+		}
+		document.Status = "completed"
 		return document, nil
 	default:
 		return resultDocument{}, fmt.Errorf("agent result has invalid status %q", document.Status)

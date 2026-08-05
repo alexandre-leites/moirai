@@ -72,7 +72,7 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, fmt.Errorf("CLI backend execution failed: %w", err)
 	}
-	document, err := readResultDocument(resultPath, request.ExecutionID)
+	document, err := readResultDocument(resultPath, request.ExecutionID, request.Role)
 	if err != nil {
 		return Result{ExitCode: executionResult.ExitCode}, err
 	}
