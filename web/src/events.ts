@@ -1,8 +1,17 @@
-import type { Runner, Workflow } from "./api";
+import type { Runner, WorkflowLifecycle } from "./api";
 
+/**
+ * `workflow` carries only the lifecycle fields (id/projectId/status/phase):
+ * that's all `writeSSEEvent` in api/internal/http/handlers/events.go sends,
+ * mirroring the control endpoints' `workflowPayload` shape rather than the
+ * full row `workflowDetailPayload` builds. Typing it as the full `Workflow`
+ * would let a consumer replace a complete row with this stub and wipe
+ * `issueTitle`, `pullRequestUrl`, attempt counters, etc. — see console-data's
+ * `mergeByID`, which patches the existing row instead.
+ */
 export type DashboardEvent = {
   type: "workflow" | "runner";
-  workflow?: Workflow;
+  workflow?: WorkflowLifecycle;
   runner?: Runner;
 };
 
