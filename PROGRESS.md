@@ -594,3 +594,70 @@ restructure this file or edit another session's section — append a new one.
   modules' own Go module identities (`github.com/loop-engineering/api`,
   `.../orchestrator`, `.../runner`) were deliberately left as-is — the issue
   and its "Affected files" list scope this to the buf/contracts module only.
+
+## Issue #370: server.go / persistExecutionEvent size (mitigations tier only)
+
+- Agent/session identifier: issue-370 worktree agent
+- Scope decision: issue #370 offers two tiers — a "medium refactor" (split
+  `server.go` into 5-6 concern files, plus a declarative
+  `map[Status][]Status` transition-legality table) and "mitigations
+  (low-hanging)" (extract the phase-dispatch switch to its own file/function,
+  plus a topology doc comment). This session deliberately did only the
+  mitigations tier: a single autonomous pass with no human reviewer in the
+  loop is the wrong setting for a large structural refactor of the riskiest
+  code in the system. The medium refactor remains open work for a
+  human-scoped follow-up issue.
+- Relevant files:
+  - `orchestrator/internal/server/server.go` (2714 lines before, 2499 after)
+  - `orchestrator/internal/server/phase_dispatch.go` (new, 298 lines)
+- Behavior delivered (pure code motion, no logic change):
+  - Moved `persistExecutionEvent` (previously `server.go:1614`, 214 lines
+    including its existing comments) verbatim into a new file
+    `phase_dispatch.go`, together with the imports it alone needs
+    (`context`, `encoding/json`, `errors`, `runnerv1`, `pgx`, `db`, `idgen`,
+    `codes`, `status`) that `server.go` no longer needs to declare on its own
+    behalf now that the function moved. Not one line inside the function
+    body was altered.
+  - Added a doc comment block above the function documenting the full
+    workflow-run state-machine topology it drives: every `Status` transition
+    edge `persistExecutionEvent` and its after-commit calls
+    (`handleReviewCompletion`, `dispatchImplementationJob`,
+    `dispatchReviewerJob`, `pipelineFailedOrBlock`, `deliverWorkflow`) are
+    responsible for, cross-checked against the real `switch` branches and
+    against each `Status` constant's own doc comment in `status.go` (not
+    written from assumption) — planning/reviewer/pipeline/repair loopbacks,
+    which statuses release the project lock, and which four are genuinely
+    terminal.
+- Validation performed:
+  - Byte-for-byte diff of the extracted function body: captured
+    `server.go`'s original lines 1614-1827 with `sed` before editing,
+    compared against the function body ultimately checked into
+    `phase_dispatch.go` — `diff` reported zero differences.
+  - `git diff --stat orchestrator/internal/server/server.go` — 215
+    deletions, 0 insertions/modifications: confirms `server.go` itself was
+    touched by nothing but the removal of the relocated function.
+  - `go build ./...` (orchestrator module) — clean.
+  - `gofmt -l .` / `make lint` — clean, no reformatting needed.
+  - `make typecheck` (`go vet ./...`) — clean.
+  - `make lint-go` (golangci-lint, all three Go modules) — `0 issues.` x3.
+  - `make test-orchestrator` (`go test -race ./...`) — all non-integration
+    packages pass, identical to baseline.
+  - Test-identity check: ran `go test ./internal/server/... -v`, extracted
+    every `--- PASS/FAIL` line, sorted, both on this branch and after
+    `git stash -u` back to the pre-change tree — `diff` of the two sorted
+    68-line lists reported zero differences (same 68 tests, same names, same
+    outcomes, before and after).
+  - PostgreSQL-gated integration suites (`integration` build tag,
+    `events_test.go`, `integration_test.go`, `pipeline_test.go`,
+    `repair_test.go`, `review_test.go`, etc. — 105 tests) were not run: no
+    local Postgres was available in this session
+    (`docker ps --filter name=postgres` empty, `LOOP_TEST_DATABASE_URL`
+    unset), and per prior guidance in this file the integration Postgres is
+    shared across concurrent agent sessions, so standing up a fresh instance
+    ad hoc for a pure-code-motion change was avoided. The unit-level
+    test-identity diff above, plus the exact-body diff, are the substitute
+    evidence of behavior preservation for this pass.
+- Notes: No new files beyond `phase_dispatch.go` were created; the "medium
+  refactor" tier (splitting `server.go` into 5-6 concern files; a
+  declarative `map[Status][]Status` legality table as executable code) was
+  explicitly left undone per the scope decision above.
