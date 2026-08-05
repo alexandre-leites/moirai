@@ -2,8 +2,9 @@
 //
 // Interim mode per specification.md §4.5: every view polls its endpoints while
 // visible and pauses while the tab is hidden. Components never see the polling —
-// they get `{data, error, loading, refresh}` — so the SSE transport that task E1
-// introduces can replace the inside of this hook without touching a view.
+// they get `{data, error, loading, refresh}` — so the SSE transport that
+// workflow-detail.tsx uses for live workflow events can coexist with this hook
+// without touching a view.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { describeLoadError } from "./runner-status";
 
