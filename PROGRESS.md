@@ -298,3 +298,70 @@ restructure this file or edit another session's section — append a new one.
   or API contract change was needed. `api/internal/http/handlers/events.go`
   was read but left as-is (see root cause above for why sending the full
   detail payload was rejected).
+
+## Session: issue-374 (add open-source project files)
+
+- Completed: 2026-08-05
+- Agent/session identifier: issue-374 worktree agent, session_01RJrCZXw86ZYEfQdzsMcNE2
+- Relevant files (all new):
+  - `LICENSE`
+  - `CONTRIBUTING.md`
+  - `SECURITY.md`
+  - `CODE_OF_CONDUCT.md`
+  - `CODEOWNERS`
+  - `.github/ISSUE_TEMPLATE/bug_report.yml`
+  - `.github/ISSUE_TEMPLATE/feature_request.yml`
+  - `.github/ISSUE_TEMPLATE/question.yml`
+  - `.github/ISSUE_TEMPLATE/config.yml`
+  - `.github/PULL_REQUEST_TEMPLATE.md`
+- Behavior delivered:
+  - `LICENSE`: MIT, copyright Alexandre Leites (the GitHub org/repo owner —
+    `gh repo view` reports `licenseInfo: null` and `owner.login:
+    alexandre-leites`, and `git log` shows Alexandre Leites as the sole
+    non-agent, non-dependabot human author). MIT chosen because neither
+    `README.md` nor `PROJECT.md` states a license preference and the project
+    ships permissively-licensed Docker images intended for open redistribution
+    (`ghcr.io/alexandre-leites/moirai/*`); MIT is the least restrictive common
+    choice and imposes no copyleft obligation on downstream users of the
+    published images.
+  - `CONTRIBUTING.md`: dev setup, the actual `make` targets from `Makefile`
+    (`test`, `test-orchestrator`, `test-postgres-integration`, `test-runner`,
+    `test-api`, `test-web`, `lint`, `lint-go`, `typecheck`, `validate`,
+    `sqlc-generate`/`sqlc-check`, `proto-generate`/`proto-check`), the sqlc
+    and proto workflows from `AGENTS.md` §12, and a PR process matching what
+    `.github/workflows/ci.yml` actually gates (no invented steps).
+  - `SECURITY.md`: private disclosure via GitHub Security Advisories (no
+    fabricated email address), scope notes specific to this project's threat
+    model (GitHub tokens, per-project credentials, agent provider keys,
+    runner lease fencing, GitHub CLI adapter injection), and a
+    pre-1.0/best-effort supported-versions statement consistent with
+    `docs/release.md`'s tagging scheme referenced from `README.md`.
+  - `.github/ISSUE_TEMPLATE/{bug_report,feature_request,question}.yml`: GitHub
+    issue-forms (current YAML convention, not legacy Markdown), each scoped
+    to the four real components (`orchestrator`/`api`/`runner`/`web`) plus
+    proto/gen and docs. `config.yml` keeps blank issues enabled.
+  - `.github/PULL_REQUEST_TEMPLATE.md`: checklist matching this repo's real
+    gates — targeted tests, `lint`/`lint-go`/`typecheck`, `proto-check`/
+    `sqlc-check` when relevant, doc updates, `PROGRESS.md` updates, no
+    secrets/debug code.
+  - `CODE_OF_CONDUCT.md`: standard Contributor Covenant v2.1, enforcement
+    contact routed through GitHub Security Advisories (no fabricated email).
+  - `CODEOWNERS`: single catch-all rule (`* @alexandre-leites`), matching
+    that they are the only non-agent human contributor in `git log`.
+  - Did not touch `.github/workflows/ci.yml` or `Makefile` (out of scope per
+    task ownership — other in-flight PRs edit those). Skipped `CHANGELOG.md`
+    per the issue's own guidance (explicitly lower priority, "currently
+    hand-written per GitHub Release" — deriving one from `git log` cheaply
+    was not attempted since release notes are already handled via GitHub
+    Releases per `docs/release.md`).
+- Validation performed:
+  - `python3 -c "import yaml; yaml.safe_load(...)"` on each new
+    `.github/ISSUE_TEMPLATE/*.yml` — all parse.
+  - `make lint` (gofmt check across tracked/untracked `*.go` files) — passes;
+    no Go files were touched by this change.
+  - Confirmed `.github/workflows/ci.yml` has no markdown-lint gate, so no
+    additional formatting check applies to the new docs.
+  - No code changes, so no orchestrator/runner/api/web test suites were run.
+- Notes: Pure documentation/meta-files change. No Go, proto, SQL, or web
+  source files were touched. `.github/workflows/ci.yml` and `Makefile` were
+  read-only references, per this session's ownership boundaries.
