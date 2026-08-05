@@ -215,6 +215,8 @@ The API is published at `http://localhost:8080`; the dashboard is published at `
 
 Run `make help` for available targets. `make test` runs orchestrator, runner, API, and web validation.
 
+`make test` deliberately excludes the orchestrator's PostgreSQL integration suites — most of the workflow state machine — because they need a real database. It says so on screen when it finishes, naming the suites it left out; run them with `make test-postgres-integration` and a `LOOP_TEST_DATABASE_URL`. See [orchestrator local checks](orchestrator/README.md#local-checks).
+
 Each service README lists its executable configuration surface:
 
 - [orchestrator configuration](orchestrator/README.md#configuration)
