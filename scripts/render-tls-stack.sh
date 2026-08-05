@@ -14,7 +14,21 @@
 # file stays configurable through Portainer's environment-variable form. Without
 # it, every default would be baked in and overriding anything would mean editing
 # the YAML.
+#
+# `docker compose config` output is not byte-stable across compose versions
+# (long-line wrapping and scalar quoting differ), so the generated file only
+# matches the version it was rendered with. Refuse to run under a different one
+# rather than emit a file that will fail `make compose-overlays` on CI. Override
+# with COMPOSE_VERSION when bumping the pin.
 set -eu
+
+expected="${COMPOSE_VERSION:-v2.38.2}"
+expected="${expected#v}"
+actual="$(docker compose version --short 2>/dev/null || true)"
+if [ "$actual" != "$expected" ]; then
+	echo "docker compose $actual does not match pinned v$expected; install the pinned version or set COMPOSE_VERSION" >&2
+	exit 1
+fi
 
 target=compose.tls-stack.yaml
 check=false
