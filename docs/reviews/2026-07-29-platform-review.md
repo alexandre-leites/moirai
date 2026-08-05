@@ -1,5 +1,10 @@
 # Platform review — logical bugs, competitor gaps, autonomy roadmap
 
+> **Historical.** This review covers the Python/LangGraph orchestrator, which
+> was replaced by the pure-Go state machine in #247. It is kept for the
+> record of findings and the roadmap it produced; do not use it as a
+> description of the current codebase.
+
 Date: 2026-07-29
 Scope: `orchestrator/`, `runner/`, workflow engine, scheduling/persistence, recovery guarantees.
 Method: full manual read of the workflow core (`orchestrator/src/moirai/workflows/*`, `scheduler.py`) plus two focused deep reviews of the Go runner and the orchestrator persistence/services layers. Findings marked *(verify)* were produced by the deep reviews and should be re-confirmed with a failing test before large fixes are built on them.

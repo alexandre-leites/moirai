@@ -87,7 +87,7 @@ services:
         required: true
     environment:
       - LOOP_AGENT_CREDENTIAL_REFS=${MOIRAI_AGENT_CREDENTIAL_REFS-}
-      - LOOP_DATABASE_URL=postgresql+asyncpg://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop
+      - LOOP_DATABASE_URL=postgresql://loop:${MOIRAI_POSTGRES_PASSWORD:-moirai-local-postgres}@postgres:5432/loop
       - LOOP_GITHUB_TOKEN=${MOIRAI_GITHUB_TOKEN-}
       - LOOP_GRPC_BIND=0.0.0.0:50051
       - LOOP_INITIAL_ADMIN_PASSWORD=${MOIRAI_ADMIN_PASSWORD:-Moirai-Local-1}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -103,7 +102,7 @@ func Load() (Config, error) {
 		return Config{}, errors.New("LOOP_GRPC_TLS_CLIENT_CA_FILE requires server TLS")
 	}
 	return Config{
-		DatabaseURL:       normalizeDatabaseURL(databaseURL),
+		DatabaseURL:       databaseURL,
 		GRPCBind:          bind,
 		MetricsBind:       metricsBind,
 		IssueSyncInterval: syncInterval,
@@ -156,15 +155,4 @@ func value(name string) (string, error) {
 		return "", fmt.Errorf("%s is required", name)
 	}
 	return plain, nil
-}
-
-func normalizeDatabaseURL(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return value
-	}
-	if parsed.Scheme == "postgresql+asyncpg" {
-		parsed.Scheme = "postgresql"
-	}
-	return parsed.String()
 }
