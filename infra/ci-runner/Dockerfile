@@ -59,7 +59,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     GOFLAGS=-mod=mod
 
 # Base apt packages. build-essential is required for `go test -race` (cgo), git
-# and make for the build targets, and libicu70 + liblttng-ust are the GitHub
+# and make for the build targets, and libicu70 + liblttng-ust1 are the GitHub
 # runner's documented runtime dependencies on Ubuntu 22.04. sudo, passwd and
 # util-linux are contract requirements: the runner user gets passwordless sudo,
 # the wrapped-mode wrapper needs usermod (passwd) to join the docker group, and
@@ -84,7 +84,7 @@ RUN set -eux \
         passwd \
         util-linux \
         libicu70 \
-        liblttng-ust \
+        liblttng-ust1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker engine, CLI, compose plugin and buildx, pinned, from Docker's apt repo.
