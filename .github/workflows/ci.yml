@@ -1,21 +1,5 @@
 name: CI
 
-# Runner pool: jobs run on the self-hosted pool when the repository variable
-# CI_SELFHOSTED_RUNNERS is "true"; otherwise (unset or "false") they run on
-# GitHub-hosted ubuntu-latest. resolve-runner picks the pool once and every work
-# job inherits it. There is no automatic fallback between pools, so when the
-# flag is on the pool must be healthy or jobs will queue.
-#
-# Required Tooling:
-# - git: >= 2.39
-# - make: GNU make >= 4.3
-# - gcc: build-essential >= 12 (for `go test -race`)
-# - docker: daemon + CLI >= 24, runner user in the docker group
-# - docker compose: v2 plugin
-# - curl: >= 7.68
-# - bash: >= 5.0
-# - base: Ubuntu 22.04 / 24.04 LTS
-
 on:
   push:
     branches: [main]
@@ -33,29 +17,10 @@ env:
   # Pinned explicitly: the Node image ships npm 11, and package.json declares
   # npm@12 as this project's package manager.
   NPM_VERSION: "12.0.2"
-  # True selects the self-hosted pool; unset or any other value selects
-  # GitHub-hosted runners. Set it as a repository variable.
-  CI_SELFHOSTED_RUNNERS: ${{ vars.CI_SELFHOSTED_RUNNERS || 'false' }}
 
 jobs:
-  resolve-runner:
-    runs-on: ["self-hosted", "linux"]
-    outputs:
-      runner: ${{ steps.resolve.outputs.runner }}
-    steps:
-      - name: Select runner pool
-        id: resolve
-        run: |
-          if [[ "${CI_SELFHOSTED_RUNNERS,,}" == "true" ]]; then
-            echo "runner=[\"self-hosted\", \"linux\"]" >> "$GITHUB_OUTPUT"
-            echo "::notice::CI_SELFHOSTED_RUNNERS=true -- running on the self-hosted pool."
-          else
-            echo "runner=[\"ubuntu-latest\"]" >> "$GITHUB_OUTPUT"
-          fi
-
   test-orchestrator:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -69,21 +34,11 @@ jobs:
   # database. This is the job that would have caught a retry that wedges a
   # project or a failure that respawns itself every second.
   test-postgres-integration:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     # The job container and the postgres service share the user-defined network
     # GitHub Actions creates for the job, so the container reaches the service
-    # by its service name on port 5432 -- no dependence on the runner machine's
-    # own network stack, which is exactly what made `localhost` unusable for
-    # self-hosted runners that themselves execute inside a container. A previous
-    # version put the job container on the host network (`--network host`) to
-    # reach the service's host-published port, but GitHub Actions always
-    # attaches the job container to the job's own user-defined network too, and
-    # Docker rejects the combination ("conflicting options: cannot attach both
-    # user-defined and non-user-defined network-modes"), so the job never ran.
-    # No port is published either: the service is reached by name on the job
-    # network, and a published port would collide between concurrent runs that
-    # share a self-hosted pool.
+    # by its service name on port 5432. No port is published: the service is
+    # reached by name on the job network.
     container:
       image: golang:1.25.12
     env:
@@ -109,8 +64,7 @@ jobs:
       - run: make test-postgres-integration
 
   lint:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -119,8 +73,7 @@ jobs:
       - run: make lint
 
   typecheck:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -135,16 +88,14 @@ jobs:
   # build if the checked-in generated code is stale, the same enforcement
   # `proto-check` gives the protobuf bindings.
   sqlc-check:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       # `make sqlc-check` shells out to `go install` (Makefile sqlc-generate),
-      # so the job cannot rely on the runner image having Go preinstalled -- a
-      # previous version failed with "go: not found" on pool machines that
-      # didn't. sqlc also compiles libpg_query in /tmp during generation, which
-      # exhausted the runner disk in earlier runs; prune Docker's accumulated
-      # images and build cache first to reclaim the same filesystem.
+      # so the job cannot rely on the runner image having Go preinstalled.
+      # sqlc also compiles libpg_query in /tmp during generation, which can
+      # exhaust the runner disk; prune Docker's accumulated images and build
+      # cache first to reclaim the same filesystem.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.25.12"
@@ -156,8 +107,7 @@ jobs:
       - run: make sqlc-check
 
   runner:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -168,8 +118,7 @@ jobs:
       - run: cd runner && go vet ./...
 
   api:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -181,15 +130,14 @@ jobs:
 
   # Own job rather than a step of build-web, so a failing vitest suite or an
   # eslint error is reported as itself instead of as "the web build broke", and
-  # so the two can run concurrently when the self-hosted pool has the capacity.
+  # so the two can run concurrently.
   # `make test-web` is `cd web && npm ci && npm run typecheck && npm run lint &&
   # npm test`: any one of those exiting non-zero fails the chain, and therefore
   # this job. Note `npm run lint` is `eslint .` with no `--max-warnings`, so it
   # gates eslint *errors* only; the ten warnings in the quality backlog do not
   # fail this job today.
   test-web:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -201,8 +149,7 @@ jobs:
       - run: make test-web
 
   build-web:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -220,15 +167,13 @@ jobs:
   # render-tls-stack.sh --check that would have caught it) was wired into
   # `make validate` but never into a CI job, so it never actually ran.
   compose-overlays:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - run: make compose-overlays
 
   compose-smoke:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Validate every Compose combination
@@ -237,12 +182,11 @@ jobs:
           docker compose -f compose.yaml -f compose.build.yaml config --quiet
           docker compose -f compose.yaml -f compose.secrets.yaml config --quiet
       # Building all four images from scratch pulls a Go toolchain per service
-      # plus a Node base image, and earlier runs exhausted the self-hosted
-      # runner's disk mid-build ("no space left on device"). The build cache is
-      # the dominant consumer (18 GB on the host daemon in recent history), so
-      # prune it fully first to guarantee headroom; the 1h window on the image
-      # prune leaves a concurrently-running job's freshly pulled base images
-      # alone.
+      # plus a Node base image, and earlier runs exhausted the runner's disk
+      # mid-build ("no space left on device"). The build cache is the dominant
+      # consumer (18 GB on the host daemon in recent history), so prune it fully
+      # first to guarantee headroom; the 1h window on the image prune leaves a
+      # concurrently-running job's freshly pulled base images alone.
       - name: Free disk space before building
         run: |
           docker builder prune --all --force || true
@@ -254,9 +198,8 @@ jobs:
       - name: Build and start stack
         run: MOIRAI_BUILD_VERSION="$(git rev-parse --short=12 HEAD)" docker compose -f compose.yaml -f compose.build.yaml up --build --detach --wait --wait-timeout 240
       # The four builds above regenerated several GB of BuildKit cache on the
-      # host daemon (the runner mounts the socket, so the build writes to the
-      # host's /var/lib/docker -- the same disk the runner itself runs on).
-      # Prune it now, while the stack runs, so it never lingers between jobs.
+      # host daemon. Prune it now, while the stack runs, so it never lingers
+      # between jobs.
       - name: Reclaim build cache
         run: docker builder prune --all --force || true
       - name: Verify readiness endpoints
@@ -327,16 +270,15 @@ jobs:
         if: always()
         run: |
           docker compose -f compose.yaml -f compose.build.yaml down --volumes --remove-orphans
-          # Don't leave the four freshly built images behind to accumulate on the
-          # shared runner's disk across runs.
+          # Don't leave the four freshly built images behind to accumulate on
+          # the runner's disk across runs.
           docker image rm ghcr.io/alexandre-leites/moirai/api ghcr.io/alexandre-leites/moirai/orchestrator ghcr.io/alexandre-leites/moirai/runner ghcr.io/alexandre-leites/moirai/web || true
           # And reclaim whatever build cache this run generated, so the daemon is
           # left clean for the next job on this host.
           docker builder prune --all --force || true
 
   vulnerability-scan:
-    needs: resolve-runner
-    runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
@@ -363,7 +305,7 @@ jobs:
           exit-code: "1"
 
   validate:
-    needs: [resolve-runner, test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
+    needs: [test-orchestrator, test-postgres-integration, lint, typecheck, sqlc-check, runner, api, test-web, build-web, compose-smoke, compose-overlays, vulnerability-scan]
     runs-on: ubuntu-latest
     steps:
       - run: true
