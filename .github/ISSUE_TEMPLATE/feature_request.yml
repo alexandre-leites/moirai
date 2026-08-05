@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose an enhancement or new capability for Moirai
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. See [`PROJECT.md`](../../PROJECT.md) for the current MVP scope — it helps to note whether this fits inside it or extends it.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Which part of the system would this touch?
+      options:
+        - orchestrator
+        - api
+        - runner
+        - web
+        - proto / gen
+        - docs
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem or limitation are you running into?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen? Include any alternatives you considered.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps evaluate this — links, screenshots, related issues.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true

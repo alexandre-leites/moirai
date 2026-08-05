@@ -1,0 +1,22 @@
+name: Question
+description: Ask a question about using, configuring, or understanding Moirai
+title: "question: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking, it's worth checking [`README.md`](../../README.md) (setup and configuration) and [`PROJECT.md`](../../PROJECT.md) (architecture and scope) — many common questions are already answered there.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: Be as specific as you can — what are you trying to do, and what's unclear or not working as expected?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Relevant configuration, Compose overlays, version/commit, or anything else that helps answer this.
