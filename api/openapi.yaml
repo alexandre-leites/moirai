@@ -23,6 +23,56 @@ paths:
                 $ref: '#/components/schemas/SchedulerMetrics'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/queue:
+    get:
+      summary: List the pending scheduling queue
+      description: |
+        Issues eligible for scheduling, highest priority first, as the
+        orchestrator's `ListQueue` returns them. Entries are a projection of
+        queued issues, not workflows: nothing here has started yet, so there is
+        no workflow ID to link to.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum entries to return.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Queue entries, highest priority first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/QueueEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '504':
+          $ref: '#/components/responses/OrchestratorTimeout'
+  /metrics:
+    get:
+      summary: Prometheus exposition of the API's own metrics
+      description: |
+        Request counts and latencies for the routes this service serves, plus
+        its orchestrator client metrics. Queue depth, active workflow counts and
+        runner heartbeat age are orchestrator-owned and are scraped from the
+        orchestrator's own metrics listener instead.
+      responses:
+        '200':
+          description: Metrics in the Prometheus text exposition format
+          content:
+            text/plain:
+              schema: { type: string }
   /live:
     get:
       summary: Liveness probe
@@ -860,7 +910,23 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
+    OrchestratorTimeout:
+      description: The orchestrator did not answer before the request deadline
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
   schemas:
+    Problem:
+      type: object
+      description: >-
+        The error body every failing route returns, served as
+        `application/problem+json`. `detail` is omitted when the API has
+        nothing to add beyond the title.
+      required: [status, title]
+      properties:
+        status: { type: integer }
+        title: { type: string }
+        detail: { type: string }
     LoginRequest:
       type: object
       required: [username, password]
@@ -1245,6 +1311,27 @@ components:
             to its own tick interval.
           items:
             $ref: '#/components/schemas/LoopStatus'
+    QueueEntry:
+      type: object
+      description: >-
+        One issue waiting to be scheduled. Every field is always present; the
+        API emits the empty string rather than null when the orchestrator has
+        no value, so `blockedReason` is empty for an entry that is merely
+        waiting its turn.
+      required: [projectId, projectName, externalId, title, priority, blockedReason]
+      properties:
+        projectId: { type: string }
+        projectName: { type: string }
+        externalId:
+          type: string
+          description: Issue identifier in the task source, e.g. a GitHub issue number.
+        title: { type: string }
+        priority: { type: integer, format: int32 }
+        blockedReason:
+          type: string
+          description: >-
+            Why this entry cannot start yet -- for example the project already
+            has a workflow running. Empty when nothing is holding it back.
     LoopStatus:
       type: object
       required: [name, healthy]
