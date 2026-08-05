@@ -13,8 +13,9 @@
 #   - on a weekly schedule, so the baked toolchain does not silently rot;
 #   - on workflow_dispatch, for an ad-hoc rebuild.
 #
-# The arm64 leg (TARGETARCH URLs and checksums) is only exercised by the
-# publish job, i.e. after merge to main and on the weekly cadence.
+# The publish job builds amd64 only (PLATFORMS below); the pool is x64 and the
+# QEMU-emulated arm64 leg proved unreliable. The Dockerfile's arm64 TARGETARCH
+# branches are retained for a future native-arm64 build.
 #
 # Both jobs follow the same resolve-runner pattern as ci.yml: they run on the
 # self-hosted pool when CI_SELFHOSTED_RUNNERS is "true", GitHub-hosted
@@ -49,7 +50,11 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}/ci-runner
-  PLATFORMS: linux/amd64,linux/arm64
+  # The pool is x64 (self-hosted runner label X64). arm64 was dropped from the
+  # publish platforms: the QEMU-emulated arm64 leg is unreliable (fs/syscall
+  # emulation glitches) and no consumer needs it. Re-add via a native arm64
+  # runner job if an arm64 pool ever appears.
+  PLATFORMS: linux/amd64
   # True selects the self-hosted pool; unset or any other value selects
   # GitHub-hosted runners. Set it as a repository variable. The pool currently
   # runs a different image, so it can build the ci-runner image itself.
