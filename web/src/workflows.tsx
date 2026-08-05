@@ -2,47 +2,13 @@
 // string, so an operator can link a colleague straight at what they are looking at.
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
-import type { Workflow } from "./api";
-import { useConsoleData } from "./console-data";
-import { ATTEMPT_BUDGETS, NEEDS_ATTENTION_STATUSES, isTerminal } from "./status";
+import { useConsoleData } from "./console-data-context";
+import { ATTEMPT_BUDGETS } from "./status";
 import {
   Age, Card, Empty, ErrorBlock, FilterChips, Meter, RowLink, Skeleton, StatusPill, TableWrap,
 } from "./ui";
 import { PhaseThread } from "./ui/thread";
-
-const FILTERS = [
-  ["active", "Active"],
-  ["needs_you", "Needs you"],
-  ["terminal", "Terminal"],
-  ["all", "All"],
-] as const;
-
-type Filter = (typeof FILTERS)[number][0];
-
-const isFilter = (value: string | null): value is Filter =>
-  FILTERS.some(([key]) => key === value);
-
-export function matchesFilter(workflow: Workflow, filter: Filter): boolean {
-  switch (filter) {
-    case "active": return !isTerminal(workflow.status);
-    case "needs_you": return NEEDS_ATTENTION_STATUSES.has(workflow.status);
-    case "terminal": return isTerminal(workflow.status);
-    case "all": return true;
-  }
-}
-
-/** Search covers what an operator has in hand: an issue, a branch, or a PR. */
-export function matchesQuery(workflow: Workflow, projectName: string, query: string): boolean {
-  if (!query) return true;
-  const needle = query.toLowerCase();
-  return [
-    projectName,
-    workflow.issueExternalId,
-    workflow.issueTitle,
-    workflow.branchName,
-    workflow.pullRequestExternalId,
-  ].some((field) => field?.toLowerCase().includes(needle));
-}
+import { FILTERS, isFilter, matchesFilter, matchesQuery, type Filter } from "./workflow-filters";
 
 export function WorkflowsPage() {
   const navigate = useNavigate();

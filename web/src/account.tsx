@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { ApiClient } from "./api";
-import { useAuth } from "./auth";
+import { useAuth } from "./auth-context";
 
 export function AccountPage({ api }: { api: ApiClient }) {
   const { state, refresh } = useAuth();

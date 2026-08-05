@@ -1,11 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { BrowserRouter, Route, Routes } from "react-router";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "./api";
-import { AuthProvider } from "./auth";
-import { LoginPage } from "./login";
-import { Console } from "./shell";
-import { ToastProvider } from "./ui";
+import { App } from "./app";
 import { initTheme } from "./theme";
 import "./styles.css";
 
@@ -38,19 +34,4 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-function App() {
-  return (
-    <BrowserRouter>
-      <AuthProvider api={api}>
-        <ToastProvider>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="*" element={<Console api={api} />} />
-          </Routes>
-        </ToastProvider>
-      </AuthProvider>
-    </BrowserRouter>
-  );
-}
-
-createRoot(document.getElementById("root")!).render(<ErrorBoundary><App /></ErrorBoundary>);
+createRoot(document.getElementById("root")!).render(<ErrorBoundary><App api={api} /></ErrorBoundary>);

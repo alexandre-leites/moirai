@@ -1,12 +1,10 @@
 // The console's component library (specification.md §2.5). Every component here
 // exists in docs/design/web-console/mockup.html; the styling lives in
 // src/styles.css so components carry no literal colours.
-import {
-  createContext, useCallback, useContext, useEffect, useMemo, useRef, useState,
-  type ReactNode,
-} from "react";
+import { useRef, type ReactNode } from "react";
 import { absolute, ageAgo } from "../format";
 import { GATE_LABEL, statusMeta, type GateState, type PillVariant } from "../status";
+import { useFocusTrap } from "./focus-trap";
 
 // --- Pill -----------------------------------------------------------------
 
@@ -236,84 +234,7 @@ export function Skeleton({ cards = 1 }: { cards?: number }) {
   );
 }
 
-// --- Toast ----------------------------------------------------------------
-
-type ToastContextValue = (message: string) => void;
-
-const ToastContext = createContext<ToastContextValue>(() => undefined);
-
-/** Announces one message at a time, bottom-centre, auto-dismissed. */
-export function ToastProvider({ children }: { children: ReactNode }) {
-  const [message, setMessage] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const show = useCallback((text: string) => {
-    setMessage(text);
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setMessage(null), 2600);
-  }, []);
-
-  useEffect(() => () => {
-    if (timer.current) clearTimeout(timer.current);
-  }, []);
-
-  return (
-    <ToastContext.Provider value={show}>
-      {children}
-      <div role="status" aria-live="polite">{message && <div id="toast">{message}</div>}</div>
-    </ToastContext.Provider>
-  );
-}
-
-export function useToast(): ToastContextValue {
-  return useContext(ToastContext);
-}
-
-// --- Modal / confirm ------------------------------------------------------
-
-const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
-
-/**
- * Keeps keyboard focus inside `panel` while it is open, moves focus into it on
- * mount, returns focus to whatever opened it, and closes on Escape
- * (specification.md §6). Used by both the modal and the mobile nav drawer.
- */
-export function useFocusTrap(panel: { current: HTMLElement | null }, onClose: () => void): void {
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const focusable = () =>
-      Array.from(panel.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])
-        .filter((node) => !node.hasAttribute("disabled"));
-
-    focusable()[0]?.focus();
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const nodes = focusable();
-      if (nodes.length === 0) return;
-      const first = nodes[0];
-      const last = nodes[nodes.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
-      opener?.focus?.();
-    };
-  }, [panel, onClose]);
-}
+// --- Modal ------------------------------------------------------------
 
 /** A modal dialog. Focus-trapped, Escape closes, backdrop click closes. */
 export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
@@ -329,41 +250,3 @@ export function Modal({ title, onClose, children }: { title: string; onClose: ()
   );
 }
 
-export type Confirmation = {
-  title: string;
-  /** Says what will happen, in the operator's terms. Destructive actions must. */
-  body: ReactNode;
-  confirmLabel: string;
-  danger?: boolean;
-  onConfirm: () => void;
-};
-
-export function ConfirmDialog({ confirmation, onClose }: { confirmation: Confirmation; onClose: () => void }) {
-  return (
-    <Modal title={confirmation.title} onClose={onClose}>
-      <h2>{confirmation.title}</h2>
-      <p>{confirmation.body}</p>
-      <div className="btnrow">
-        <button
-          type="button"
-          className={confirmation.danger ? "btn danger" : "btn primary"}
-          onClick={() => { onClose(); confirmation.onConfirm(); }}
-        >
-          {confirmation.confirmLabel}
-        </button>
-        <button type="button" className="btn" onClick={onClose}>Cancel</button>
-      </div>
-    </Modal>
-  );
-}
-
-/** Opens a confirm dialog and returns the element to render plus the opener. */
-export function useConfirm(): { confirm: (confirmation: Confirmation) => void; dialog: ReactNode } {
-  const [pending, setPending] = useState<Confirmation | null>(null);
-  const close = useCallback(() => setPending(null), []);
-  const dialog = useMemo(
-    () => (pending ? <ConfirmDialog confirmation={pending} onClose={close} /> : null),
-    [pending, close]
-  );
-  return { confirm: setPending, dialog };
-}

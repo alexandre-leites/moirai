@@ -9,14 +9,16 @@ import type {
   ApiClient, CredentialKind, GitCredentialKind, PipelineStep, Project, ProjectConfiguration, ProjectCredential,
 } from "./api";
 import { ApiError } from "./api";
-import { activeWorkflowFor, useConsoleData } from "./console-data";
-import { useIsAdmin } from "./auth";
+import { activeWorkflowFor, useConsoleData } from "./console-data-context";
+import { useIsAdmin } from "./auth-context";
 import { ageAgo } from "./format";
 import { usePolled } from "./poll";
 import { TaskSources } from "./task-sources";
 import {
-  Card, Empty, ErrorBlock, KV, KVRow, Modal, Pill, Skeleton, useConfirm, useToast,
+  Card, Empty, ErrorBlock, KV, KVRow, Modal, Pill, Skeleton,
 } from "./ui";
+import { useConfirm } from "./ui/use-confirm";
+import { useToast } from "./ui/toast-context";
 
 export function ProjectsPage({ api }: { api: ApiClient }) {
   const isAdmin = useIsAdmin();

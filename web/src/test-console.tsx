@@ -11,7 +11,7 @@ import type {
 } from "./api";
 import { AuthProvider } from "./auth";
 import { ConsoleDataProvider } from "./console-data";
-import { ToastProvider } from "./ui";
+import { ToastProvider } from "./ui/toast";
 import { mount } from "./test-dom";
 
 export const NOW = "2026-08-01T12:00:00Z";

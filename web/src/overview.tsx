@@ -3,10 +3,11 @@
 import { useCallback, useMemo } from "react";
 import { Link } from "react-router";
 import type { ApiClient, Health, IssueSyncStatus, SchedulerMetrics, Workflow, WorkflowEvent } from "./api";
-import { activeWorkflows, onlineRunners, useConsoleData } from "./console-data";
+import { activeWorkflows, onlineRunners, useConsoleData } from "./console-data-context";
 import { ageAgo, plural, shortClock } from "./format";
 import { usePolled } from "./poll";
 import { CUT_STATUSES, describeEvent, isTerminal, statusMeta } from "./status";
+import { triage } from "./triage";
 import {
   AttentionItem, Card, CardHeader, Empty, ErrorBlock, FeedItem, HealthStrip, Probe,
   Skeleton, StatTile, StatusPill,
@@ -260,61 +261,6 @@ function Vitality({ vitals, error }: { vitals: Vitals | null; error: string | nu
       <Probe tone="idle" trailing value={`${eligible} eligible issues tracked`} />
     </HealthStrip>
   );
-}
-
-// --- Triage ---------------------------------------------------------------
-
-type TriageItem = {
-  kind: string;
-  tone: "wait" | "crit" | "warn";
-  workflow: Workflow;
-  headline: string;
-  detail: string;
-  action: string;
-};
-
-/**
- * "Needs you", in the order specification.md §5.1 asks for: decisions first,
- * then blocked runs, then failures that left a pull request behind. Circuits sit
- * between the last two once task A7 exposes them.
- */
-export function triage(workflows: Workflow[]): TriageItem[] {
-  const items: TriageItem[] = [];
-
-  for (const workflow of workflows.filter((w) => w.status === "waiting_human")) {
-    items.push({
-      kind: "decision",
-      tone: "wait",
-      workflow,
-      headline: "is ready to merge",
-      detail: `Every automated gate passed. Waiting ${ageAgo(workflow.updatedAt, "for a while").replace(" ago", "")} for your decision.`,
-      action: "Review & decide",
-    });
-  }
-
-  for (const workflow of workflows.filter((w) => w.status === "blocked")) {
-    items.push({
-      kind: "blocked",
-      tone: "crit",
-      workflow,
-      headline: "is blocked",
-      detail: workflow.blockingReason || "No reason was recorded.",
-      action: "Inspect",
-    });
-  }
-
-  for (const workflow of workflows.filter((w) => w.status === "failed" && Boolean(w.pullRequestUrl))) {
-    items.push({
-      kind: "failed",
-      tone: "warn",
-      workflow,
-      headline: "failed with an open pull request",
-      detail: workflow.blockingReason || "The run ended before the pull request was merged or closed.",
-      action: "Inspect",
-    });
-  }
-
-  return items;
 }
 
 // --- Event feed -----------------------------------------------------------

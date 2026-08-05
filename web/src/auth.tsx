@@ -1,40 +1,8 @@
-import { createContext, useContext, useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { ApiClient, CurrentUser } from "./api";
+import { AuthContext } from "./auth-context";
 
 type AuthState = CurrentUser;
-
-type AuthContextValue = {
-  state: AuthState | null;
-  // True until the initial GET /api/v1/auth/me resolves. Consumers (ProtectedRoute)
-  // must wait for this before deciding whether to redirect to /login — otherwise a
-  // page refresh with a perfectly valid session cookie briefly reads as logged out.
-  loading: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  logout: () => Promise<void>;
-  // Re-fetches the current user after an account update so display name/email
-  // changes reflect immediately in the UI.
-  refresh: () => Promise<void>;
-};
-
-const AuthContext = createContext<AuthContextValue>({
-  state: null,
-  loading: true,
-  login: async () => undefined,
-  logout: async () => undefined,
-  refresh: async () => undefined,
-});
-
-export function useAuth(): AuthContextValue {
-  return useContext(AuthContext);
-}
-
-export function useUserId(): string | null {
-  return useAuth().state?.userId ?? null;
-}
-
-export function useIsAdmin(): boolean {
-  return useAuth().state?.role === "admin";
-}
 
 export function AuthProvider({ api, children }: { api: ApiClient; children: ReactNode }) {
   const [state, setState] = useState<AuthState | null>(null);

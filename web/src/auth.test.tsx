@@ -8,7 +8,8 @@
 import { act } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { ApiError, type ApiClient, type CurrentUser } from "./api";
-import { AuthProvider, useAuth, useIsAdmin } from "./auth";
+import { AuthProvider } from "./auth";
+import { useAuth, useIsAdmin } from "./auth-context";
 import { button, click, deferred, mount, unmountAll } from "./test-dom";
 
 afterEach(unmountAll);

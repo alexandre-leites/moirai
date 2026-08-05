@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkflowsPage, matchesFilter, matchesQuery } from "./workflows";
+import { WorkflowsPage } from "./workflows";
+import { matchesFilter, matchesQuery } from "./workflow-filters";
 import { click, unmountAll } from "./test-dom";
 import { mountView, stubApi, workflow } from "./test-console";
 

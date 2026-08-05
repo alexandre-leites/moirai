@@ -4,8 +4,9 @@ import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ApiClient } from "./api";
 import { AuthProvider } from "./auth";
-import { Console, routeTitle } from "./shell";
-import { ToastProvider } from "./ui";
+import { Console } from "./shell";
+import { routeTitle } from "./route-title";
+import { ToastProvider } from "./ui/toast";
 import { click, mount, unmountAll } from "./test-dom";
 import { VIEWER, project, queueEntry, runner, stubApi, workflow } from "./test-console";
 

@@ -278,9 +278,8 @@ jobs:
   # so the two can run concurrently when the self-hosted pool has the capacity.
   # `make test-web` is `cd web && npm ci && npm run typecheck && npm run lint &&
   # npm test`: any one of those exiting non-zero fails the chain, and therefore
-  # this job. Note `npm run lint` is `eslint .` with no `--max-warnings`, so it
-  # gates eslint *errors* only; the ten warnings in the quality backlog do not
-  # fail this job today.
+  # this job. `npm run lint` is `eslint . --max-warnings 0`, so eslint warnings
+  # fail this job the same as errors -- there is no warnings backlog to track.
   test-web:
     needs: resolve-runner
     runs-on: ${{ fromJSON(needs.resolve-runner.outputs.runner) }}

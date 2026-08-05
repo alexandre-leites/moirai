@@ -440,6 +440,77 @@ restructure this file or edit another session's section — append a new one.
   source files were touched. `.github/workflows/ci.yml` and `Makefile` were
   read-only references, per this session's ownership boundaries.
 
+## Done
+
+- [x] Fix #376: gate eslint warnings in CI (`web`, `react-refresh/only-export-components`)
+  - Completed: 2026-08-05 (session issue-376)
+  - Relevant files:
+    - `web/package.json` (`lint` script)
+    - `.github/workflows/ci.yml` (comment above `test-web` only)
+    - New: `web/src/auth-context.ts`, `web/src/app.tsx`,
+      `web/src/console-data-context.ts`, `web/src/route-title.ts`,
+      `web/src/triage.ts`, `web/src/workflow-filters.ts`,
+      `web/src/ui/toast-context.ts`, `web/src/ui/toast.tsx`,
+      `web/src/ui/focus-trap.ts`, `web/src/ui/confirm.tsx`,
+      `web/src/ui/use-confirm.tsx`
+    - Edited: `web/src/auth.tsx`, `web/src/console-data.tsx`,
+      `web/src/main.tsx`, `web/src/overview.tsx`, `web/src/shell.tsx`,
+      `web/src/workflows.tsx`, `web/src/ui/index.tsx`, plus every consumer
+      of the moved hooks/selectors (`account.tsx`, `login.tsx`, `queue.tsx`,
+      `runners.tsx`, `projects.tsx`, `task-sources.tsx`,
+      `workflow-detail.tsx`) and their tests
+      (`auth.test.tsx`, `console-data.test.tsx`, `overview.test.tsx`,
+      `shell.test.tsx`, `workflows.test.tsx`, `test-console.tsx`)
+  - Behavior delivered: `npm run lint` had drifted to 16
+    `react-refresh/only-export-components` warnings (issue said 10) across 8
+    files, and CI's `npm run lint` step had no `--max-warnings`, so warnings
+    never failed the build (option 1 from #376, the recommended fix, chosen
+    over updating the stale comment). Root cause in every case was a single
+    file mixing a component export with a non-component export (a hook, a
+    context object, or a plain helper function) in the same module. Fixed
+    each by moving the non-component export(s) into a sibling file:
+    - `auth.tsx`/`console-data.tsx`: split each file's context + reader
+      hook(s) into a new `*-context.ts` module, leaving only the Provider
+      component behind.
+    - `main.tsx`: extracted the inline, unexported `App` component into
+      `app.tsx` (fast refresh flags a component defined in a file with no
+      component export, even if nothing is exported at all).
+    - `overview.tsx`/`shell.tsx`/`workflows.tsx`: moved plain helper
+      functions (`triage`, `routeTitle`, `matchesFilter`/`matchesQuery`) that
+      had no reason to live beside the page component into their own
+      modules.
+    - `ui/index.tsx` (the shared component library): `useToast`,
+      `useFocusTrap`, and `useConfirm` were each hooks tightly coupled to a
+      component (`ToastProvider`, `Modal`, `ConfirmDialog`). Rather than
+      eslint-disabling them in place, split each pair the same way: the
+      hook into its own file, the component it needs staying importable
+      from `ui/index.tsx` (`Modal`) or moved alongside its own context
+      (`ToastProvider` -> `ui/toast.tsx`, `ConfirmDialog` -> `ui/confirm.tsx`).
+      No eslint-disable comments were needed anywhere — every warning had a
+      real, mechanical fix.
+    - Set `web/package.json`'s `lint` script to `eslint . --max-warnings 0`
+      and rewrote the stale `ci.yml` comment above `test-web` (no longer
+      mentions a "quality backlog").
+  - Validation performed: ran directly in the worktree (not through `make`,
+    to avoid `npm ci`'s network fetch during iteration; `make test-web` runs
+    the same underlying commands and is what CI invokes).
+  - Commands executed (all from `web/`, all passing after the fix):
+    - `npm run lint` -> `eslint . --max-warnings 0`, 0 problems (was 16
+      warnings before the fix, confirmed by running lint before touching
+      any source file).
+    - `npm run typecheck` -> `tsc --noEmit`, clean.
+    - `npm test` -> `vitest run`, 18 test files / 250 tests passed (same
+      count as before the refactor — no test was added or removed, only
+      import paths changed for functions/hooks that moved files).
+    - `npm run build` -> `tsc && vite build`, succeeded.
+  - Notes: No runtime behavior changed — this is a pure export-surface
+    refactor (functions/hooks moved to new files, call sites updated to the
+    new import path). Fast Refresh boundaries only improve: every file left
+    behind now exports components only, `ui/toast.tsx`/`ui/confirm.tsx` now
+    also satisfy the rule instead of relying on being nested under the
+    already-passing `ui/index.tsx`. `ai-doable`/`ai-working` labels and the
+    issue itself are managed by the outer issue-loop tooling, not this
+    session directly.
 ## Session: issue-377 (Makefile test-api missing -race)
 
 - Completed: 2026-08-05

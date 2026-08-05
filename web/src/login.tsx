@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Navigate } from "react-router";
-import { useAuth } from "./auth";
+import { useAuth } from "./auth-context";
 
 export function LoginPage() {
   const { login, state } = useAuth();

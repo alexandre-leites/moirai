@@ -3,11 +3,12 @@
 import { useCallback } from "react";
 import type { ApiClient, IssueSyncStatus } from "./api";
 import { ApiError } from "./api";
-import { useConsoleData } from "./console-data";
+import { useConsoleData } from "./console-data-context";
 import { ageAgo, holdReason } from "./format";
 import { usePolled } from "./poll";
-import { useIsAdmin } from "./auth";
-import { Age, Card, CardHeader, Empty, ErrorBlock, Pill, Skeleton, TableWrap, useToast } from "./ui";
+import { useIsAdmin } from "./auth-context";
+import { Age, Card, CardHeader, Empty, ErrorBlock, Pill, Skeleton, TableWrap } from "./ui";
+import { useToast } from "./ui/toast-context";
 
 /** Priority bands from the mockup: 6+ demands attention, 3+ is elevated. */
 function PriorityPill({ priority }: { priority: number }) {
