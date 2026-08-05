@@ -129,6 +129,7 @@ RUN set -eux \
 # /runner and job checkouts land in RUNNER_WORKDIR, so both are chowned here.
 # Passwordless sudo covers pre-scripts and workflows that legitimately run sudo.
 RUN set -eux \
+    && groupadd --gid 1001 runner \
     && useradd --create-home --shell /bin/bash --uid 1001 --gid 1001 runner \
     && echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner \
     && chmod 0440 /etc/sudoers.d/runner \
@@ -200,7 +201,7 @@ RUN set -eux \
     && curl -fsSL "https://github.com/bufbuild/buf/releases/download/${BUF_VERSION}/buf-Linux-${BUF_ARCH}" \
         -o /usr/local/bin/buf \
     && chmod 0755 /usr/local/bin/buf \
-    && curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${TRIVY_ARCH}.tar.gz" \
+    && curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-${TRIVY_ARCH}.tar.gz" \
         -o /tmp/trivy.tar.gz \
     && tar -xzf /tmp/trivy.tar.gz -C /tmp \
     && install -m 0755 /tmp/trivy /usr/local/bin/trivy \
