@@ -54,8 +54,7 @@ services:
       start_period: 20s
       test:
         - CMD-SHELL
-        - wget --no-verbose --tries=1 --spider http://localhost:8080/ready || exit
-          1
+        - wget --no-verbose --tries=1 --spider http://localhost:8080/ready || exit 1
       timeout: 5s
     image: ${MOIRAI_IMAGE_PREFIX:-ghcr.io/alexandre-leites/moirai}/api:${MOIRAI_IMAGE_TAG:-latest}
     networks:
@@ -244,7 +243,7 @@ services:
     image: alpine/openssl:3.3.2
     networks:
       control: null
-    restart: 'no'
+    restart: "no"
     volumes:
       - source: tls
         target: /tls

@@ -1,5 +1,9 @@
 BUF_IMAGE ?= bufbuild/buf:1.50.0
 SQLC_VERSION ?= v1.29.0
+# `docker compose config` output is not byte-stable across compose versions, so
+# compose.tls-stack.yaml is rendered with (and checked against) this exact one.
+# Keep in sync with the version pinned in .github/workflows/ci.yml.
+COMPOSE_VERSION ?= v2.38.2
 GO ?= go
 
 .PHONY: help test lint typecheck validate compose compose-overlays \
@@ -66,11 +70,11 @@ compose-overlays:
 	docker compose -f compose.yaml -f compose.tls.yaml config | grep -q 'LOOP_GRPC_TLS_CERT_FILE'
 	test "$$(docker compose -f compose.yaml -f compose.tls.yaml config | grep -c 'LOOP_ORCHESTRATOR_TLS: "true"')" = 2
 	docker compose -f compose.yaml -f compose.tls.yaml -f compose.secrets.yaml config --quiet
-	sh scripts/render-tls-stack.sh --check
+	COMPOSE_VERSION="$(COMPOSE_VERSION)" sh scripts/render-tls-stack.sh --check
 	docker compose -f compose.tls-stack.yaml config --quiet
 
 compose-tls-stack:
-	sh scripts/render-tls-stack.sh
+	COMPOSE_VERSION="$(COMPOSE_VERSION)" sh scripts/render-tls-stack.sh
 
 test-release-tags:
 	sh scripts/release-version_test.sh

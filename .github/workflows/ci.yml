@@ -170,6 +170,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # `docker compose config` output is not byte-stable across compose
+      # versions, and compose.tls-stack.yaml is rendered with a pinned version
+      # (see Makefile COMPOSE_VERSION). Pin the same version here so the
+      # render-tls-stack.sh --check below is deterministic regardless of what
+      # the runner image ships.
+      - uses: docker/setup-compose-action@v2.3.0
+        with:
+          version: v2.38.2
       - run: make compose-overlays
 
   compose-smoke:
