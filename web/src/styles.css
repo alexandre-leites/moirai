@@ -436,6 +436,19 @@ tr.rowlink:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px
 }
 .modal h2 { margin: 0 0 6px; font: 600 18px/1.25 var(--serif); }
 .modal p { margin: 0 0 14px; color: var(--ink-2); }
+.modal .btnrow { margin-top: 16px; }
+.modal fieldset {
+  margin: 14px 0 0; padding: 12px 14px 14px;
+  border: 1px solid var(--border-soft); border-radius: 10px;
+}
+.modal fieldset legend {
+  padding: 0 6px; color: var(--ink-2); font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+}
+.modal fieldset .row-line input[type="text"] { flex: 1; }
+.modal fieldset input[type="text"], .modal fieldset input[type="number"] {
+  min-width: 0; padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface); color: var(--ink); font-size: 13px;
+}
 .token-value { display: flex; gap: 8px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--ground); overflow-wrap: anywhere; }
 
 #toast {

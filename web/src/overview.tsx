@@ -184,7 +184,9 @@ function SystemVersions({ health, runners }: { health?: Health; runners: import(
   return (
     <Card>
       <CardHeader title="System versions" />
-      {versions.map(([name, version]) => <div className="row-line" key={name}><span>{name}</span><code>{version}</code></div>)}
+      <div className="card-b">
+        {versions.map(([name, version]) => <div className="row-line" key={name}><span>{name}</span><code>{version}</code></div>)}
+      </div>
     </Card>
   );
 }
