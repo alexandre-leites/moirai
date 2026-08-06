@@ -520,6 +520,14 @@ type Project struct {
 	// developer packet's Plan context. Defaults to false, so an existing
 	// project's behavior is unchanged unless it explicitly turns this on.
 	RequirePlanning bool `protobuf:"varint,14,opt,name=require_planning,json=requirePlanning,proto3" json:"require_planning,omitempty"`
+	// Opt-out of the GitHub-checks gate (observeWorkflow): when false (the
+	// default), a run that opened a pull request merges only once GitHub reports
+	// its checks green -- a repository whose checks never report (no CI
+	// configured, a token that cannot read the rollup) waits out abandonedChecks
+	// and then blocks. Setting this true skips that wait for a repository where
+	// checks are not meaningful: a pending or absent check rollup is treated as
+	// passing, while an explicitly failing check still blocks the run.
+	SkipChecks bool `protobuf:"varint,15,opt,name=skip_checks,json=skipChecks,proto3" json:"skip_checks,omitempty"`
 	// The project's configured task sources (app.project_task_sources): 0, 1 or
 	// N of them, each independently enabled and provider-configured. Read-only
 	// for now -- creating/editing/deleting a source needs #294's field-level
@@ -649,6 +657,13 @@ func (x *Project) GetRequireHumanApproval() bool {
 func (x *Project) GetRequirePlanning() bool {
 	if x != nil {
 		return x.RequirePlanning
+	}
+	return false
+}
+
+func (x *Project) GetSkipChecks() bool {
+	if x != nil {
+		return x.SkipChecks
 	}
 	return false
 }
@@ -1470,6 +1485,7 @@ type ProjectConfiguration struct {
 	ExecutionTimeoutSeconds int32                  `protobuf:"varint,9,opt,name=execution_timeout_seconds,json=executionTimeoutSeconds,proto3" json:"execution_timeout_seconds,omitempty"`
 	RequireHumanApproval    bool                   `protobuf:"varint,10,opt,name=require_human_approval,json=requireHumanApproval,proto3" json:"require_human_approval,omitempty"`
 	RequirePlanning         bool                   `protobuf:"varint,11,opt,name=require_planning,json=requirePlanning,proto3" json:"require_planning,omitempty"`
+	SkipChecks              bool                   `protobuf:"varint,12,opt,name=skip_checks,json=skipChecks,proto3" json:"skip_checks,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
 }
@@ -1577,6 +1593,13 @@ func (x *ProjectConfiguration) GetRequireHumanApproval() bool {
 func (x *ProjectConfiguration) GetRequirePlanning() bool {
 	if x != nil {
 		return x.RequirePlanning
+	}
+	return false
+}
+
+func (x *ProjectConfiguration) GetSkipChecks() bool {
+	if x != nil {
+		return x.SkipChecks
 	}
 	return false
 }
@@ -4812,7 +4835,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12'\n" +
 	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\x12\x1a\n" +
 	"\bposition\x18\x03 \x01(\x05R\bposition\x12\x1a\n" +
-	"\brequired\x18\x04 \x01(\bR\brequired\"\xf4\x04\n" +
+	"\brequired\x18\x04 \x01(\bR\brequired\"\x95\x05\n" +
 	"\aProject\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -4827,7 +4850,9 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	" \x01(\tR\x0eexecutionImage\x12:\n" +
 	"\x19execution_timeout_seconds\x18\v \x01(\x05R\x17executionTimeoutSeconds\x124\n" +
 	"\x16require_human_approval\x18\f \x01(\bR\x14requireHumanApproval\x12)\n" +
-	"\x10require_planning\x18\x0e \x01(\bR\x0frequirePlanning\x12>\n" +
+	"\x10require_planning\x18\x0e \x01(\bR\x0frequirePlanning\x12\x1f\n" +
+	"\vskip_checks\x18\x0f \x01(\bR\n" +
+	"skipChecks\x12>\n" +
 	"\ftask_sources\x18\r \x03(\v2\x1b.loop.control.v1.TaskSourceR\vtaskSources\"\xce\x01\n" +
 	"\n" +
 	"TaskSource\x12\x0e\n" +
@@ -4889,7 +4914,7 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x0etask_source_id\x18\x01 \x01(\tR\ftaskSourceId\"\x1a\n" +
 	"\x18DeleteTaskSourceResponse\"L\n" +
 	"\x14ListProjectsResponse\x124\n" +
-	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\x97\x04\n" +
+	"\bprojects\x18\x01 \x03(\v2\x18.loop.control.v1.ProjectR\bprojects\"\xb8\x04\n" +
 	"\x14ProjectConfiguration\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12'\n" +
 	"\x0frepository_mode\x18\x02 \x01(\tR\x0erepositoryMode\x12%\n" +
@@ -4902,7 +4927,9 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\x19execution_timeout_seconds\x18\t \x01(\x05R\x17executionTimeoutSeconds\x124\n" +
 	"\x16require_human_approval\x18\n" +
 	" \x01(\bR\x14requireHumanApproval\x12)\n" +
-	"\x10require_planning\x18\v \x01(\bR\x0frequirePlanning\"W\n" +
+	"\x10require_planning\x18\v \x01(\bR\x0frequirePlanning\x12\x1f\n" +
+	"\vskip_checks\x18\f \x01(\bR\n" +
+	"skipChecks\"W\n" +
 	"\x14CreateProjectRequest\x12?\n" +
 	"\aproject\x18\x01 \x01(\v2%.loop.control.v1.ProjectConfigurationR\aproject\"K\n" +
 	"\x15CreateProjectResponse\x122\n" +

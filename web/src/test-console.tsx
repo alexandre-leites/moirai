@@ -56,6 +56,7 @@ export function project(overrides: Partial<Project> = {}): Project {
     executionImage: "",
     requireHumanApproval: false,
     requirePlanning: false,
+    skipChecks: false,
     taskSources: [],
     ...overrides,
   };

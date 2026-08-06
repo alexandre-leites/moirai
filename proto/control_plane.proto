@@ -86,6 +86,14 @@ message Project {
   // developer packet's Plan context. Defaults to false, so an existing
   // project's behavior is unchanged unless it explicitly turns this on.
   bool require_planning = 14;
+  // Opt-out of the GitHub-checks gate (observeWorkflow): when false (the
+  // default), a run that opened a pull request merges only once GitHub reports
+  // its checks green -- a repository whose checks never report (no CI
+  // configured, a token that cannot read the rollup) waits out abandonedChecks
+  // and then blocks. Setting this true skips that wait for a repository where
+  // checks are not meaningful: a pending or absent check rollup is treated as
+  // passing, while an explicitly failing check still blocks the run.
+  bool skip_checks = 15;
   // The project's configured task sources (app.project_task_sources): 0, 1 or
   // N of them, each independently enabled and provider-configured. Read-only
   // for now -- creating/editing/deleting a source needs #294's field-level
@@ -205,6 +213,7 @@ message ProjectConfiguration {
   int32 execution_timeout_seconds = 9;
   bool require_human_approval = 10;
   bool require_planning = 11;
+  bool skip_checks = 12;
 }
 message CreateProjectRequest { ProjectConfiguration project = 1; }
 message CreateProjectResponse { Project project = 1; }

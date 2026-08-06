@@ -131,6 +131,18 @@ type projectConfig struct {
 	// reason RequireHumanApproval is -- a missing JSON key decodes to false,
 	// not an error.
 	RequirePlanning bool `json:"require_planning"`
+	// SkipChecks opts a project out of the GitHub-checks gate: observeWorkflow
+	// merges a delivered pull request only once GitHub reports its checks green
+	// (the default), and a project whose checks never report -- no CI
+	// configured, a token that cannot read the rollup -- waits out
+	// abandonedChecks and then blocks. Setting this true treats a pending or
+	// absent check rollup as passing, so a repository without meaningful checks
+	// completes on its own instead of parking at 'waiting_github_checks'; an
+	// explicitly failing check still blocks the run either way. The zero value
+	// (false, a missing JSON key) keeps the gate on for every project that
+	// predates this field, matching the opt-in pattern the gates above use.
+	// See delivery.go's observeWorkflow.
+	SkipChecks bool `json:"skip_checks"`
 	// EnableAiReview opts a project into dispatching an independent reviewer
 	// execution after a developer execution reports success and before
 	// delivery (review.go's dispatchReviewerJob). Absent (the zero value,
@@ -402,7 +414,7 @@ func (s *ControlServer) CreateProject(ctx context.Context, request *controlv1.Cr
 		return nil, err
 	}
 	id := idgen.NewID()
-	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval(), RequirePlanning: cfg.GetRequirePlanning()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval(), RequirePlanning: cfg.GetRequirePlanning(), SkipChecks: cfg.GetSkipChecks()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
 	}
@@ -447,7 +459,7 @@ func (s *ControlServer) UpdateProject(ctx context.Context, request *controlv1.Up
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval(), RequirePlanning: cfg.GetRequirePlanning()})
+	encoded, err := json.Marshal(projectConfig{Labels: cfg.GetRequiredRunnerLabels(), ExecutionImage: cfg.GetExecutionImage(), ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(), RequireHumanApproval: cfg.GetRequireHumanApproval(), RequirePlanning: cfg.GetRequirePlanning(), SkipChecks: cfg.GetSkipChecks()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "encode project configuration")
 	}
@@ -1982,6 +1994,7 @@ func (s *Core) project(ctx context.Context, queries projectQuerier, id string) (
 	project.ExecutionTimeoutSeconds = config.ExecutionTimeoutSeconds
 	project.RequireHumanApproval = config.RequireHumanApproval
 	project.RequirePlanning = config.RequirePlanning
+	project.SkipChecks = config.SkipChecks
 	steps, err := queries.ListProjectPipelineSteps(ctx, id)
 	if err != nil {
 		return nil, databaseError(err)
@@ -2252,6 +2265,7 @@ func validateProject(cfg *controlv1.ProjectConfiguration) (*controlv1.ProjectCon
 		ExecutionTimeoutSeconds: cfg.GetExecutionTimeoutSeconds(),
 		RequireHumanApproval:    cfg.GetRequireHumanApproval(),
 		RequirePlanning:         cfg.GetRequirePlanning(),
+		SkipChecks:              cfg.GetSkipChecks(),
 	}, cfg.GetPipelineSteps(), nil
 }
 

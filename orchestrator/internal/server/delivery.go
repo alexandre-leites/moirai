@@ -32,6 +32,12 @@ type deliveryWorkflow struct {
 	// (server.go's projectConfig), decoded here rather than re-fetched: only
 	// observeWorkflow reads it, but deliverWorkflow shares this same struct.
 	requireApproval bool
+	// skipChecks is the project's SkipChecks configuration, read the same way:
+	// observeWorkflow consults it to decide whether a pending or absent check
+	// rollup keeps a run waiting or counts as passing. Only observeWorkflow
+	// reads it, but it lives on the shared struct because that is where every
+	// project configuration flag already travels.
+	skipChecks bool
 	// codeHostType is the project's code_host_type configuration, resolved to
 	// a CodeHost via Core.adapters.resolveCodeHost. repositoryURL is handed to
 	// that CodeHost exactly as stored -- only the adapter itself (github.go's
@@ -159,6 +165,17 @@ func (s *Core) observeWorkflow(ctx context.Context, workflowID string) error {
 	}
 	if checks == checksFailed {
 		return s.blockExternal(ctx, workflowID, errors.New("required GitHub checks failed"))
+	}
+	if checks != checksGreen && workflow.skipChecks {
+		// The project opted out of the checks gate (server.go's SkipChecks): a
+		// pending -- or empty, or unrecognised -- rollup would otherwise park
+		// this run here forever (abandonedChecks only blocks it hours later),
+		// which is the cost of refusing to read "no checks" as success. For a
+		// repository where checks are not meaningful that wait is pure
+		// friction, so treat the still-undecided rollup as passing and carry
+		// on to merge (or the human-approval gate). An explicitly failing
+		// check already returned above and still blocks, opt-out or not.
+		checks = checksGreen
 	}
 	if checks != checksGreen {
 		return nil // pending, or a state this code does not recognise: never merge
@@ -291,6 +308,7 @@ func (s *Core) deliveryWorkflow(ctx context.Context, workflowID string, requireP
 		defaultBranch:   row.DefaultBranch,
 		branch:          row.BranchName,
 		requireApproval: config.RequireHumanApproval,
+		skipChecks:      config.SkipChecks,
 		codeHostType:    row.CodeHostType,
 	}
 	if requirePR && !row.PrExternalID.Valid {
