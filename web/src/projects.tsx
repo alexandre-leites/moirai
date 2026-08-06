@@ -121,6 +121,7 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
 
       {creating && (
         <ProjectForm
+          api={api}
           title="Add project"
           submitLabel="Add project"
           onClose={() => setCreating(false)}
@@ -130,6 +131,7 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
       )}
       {editing && (
         <ProjectForm
+          api={api}
           title="Configure project"
           submitLabel="Save changes"
           project={editing}
@@ -142,14 +144,16 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
   );
 }
 
-function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }: {
+function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone, api }: {
   title: string;
   submitLabel: string;
   project?: Project;
   onClose: () => void;
   onSubmit: (config: ProjectConfiguration) => Promise<Project>;
   onDone: () => void;
+  api: ApiClient;
 }) {
+  const toast = useToast();
   const [name, setName] = useState(project?.name ?? "");
   const [mode, setMode] = useState(project?.repositoryMode === "existing_path" ? "existing_path" : "managed_clone");
   const [source, setSource] = useState(
@@ -161,6 +165,10 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
   const [executionImage, setExecutionImage] = useState(project?.executionImage ?? "");
   const [requireHumanApproval, setRequireHumanApproval] = useState(project?.requireHumanApproval ?? false);
   const [requirePlanning, setRequirePlanning] = useState(project?.requirePlanning ?? false);
+  // #392: a new GitHub project can carry a GitHub task source along with it, so
+  // its issues are picked up without a second trip to the task-source form.
+  const [addGitHubTaskSource, setAddGitHubTaskSource] = useState(true);
+  const githubSource = !project && mode === "managed_clone" && isGitHubSource(source);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -179,6 +187,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
     }
     setError("");
     setSaving(true);
+    let warning: string | null = null;
     onSubmit({
       name: name.trim(),
       repositoryMode: mode,
@@ -191,7 +200,34 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
       requireHumanApproval: requireHumanApproval || undefined,
       requirePlanning: requirePlanning || undefined,
     }).then(
-      () => { onDone(); onClose(); },
+      (created) => {
+        if (githubSource && addGitHubTaskSource) {
+          return api.createTaskSource(created.id, {
+            provider: "github",
+            name: "GitHub",
+            enabled: true,
+            configuration: { ref: source.trim() },
+          }).then(
+            () => created,
+            // The project exists already; failing the whole submit would strand
+            // the operator in a form that can only be resubmitted into a
+            // duplicate. Warn instead and finish the flow.
+            (reason: unknown) => {
+              warning = `Project added, but the GitHub task source could not be created: ${reason instanceof Error ? reason.message : String(reason)}`;
+              return created;
+            }
+          );
+        }
+        return created;
+      }
+    ).then(
+      () => {
+        onDone();
+        onClose();
+        // The toast slot holds one message, so the warning must outlast
+        // onDone's own "Project added" announcement.
+        if (warning) toast(warning);
+      },
       (reason: unknown) => {
         setError(reason instanceof ApiError && reason.isForbidden
           ? "You need the admin role to change projects."
@@ -239,6 +275,21 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
             <input value={executionImage} placeholder="ghcr.io/acme/project-tools:latest" onChange={(event) => setExecutionImage(event.target.value)} />
           </label>
         </div>
+        {githubSource && (
+          <fieldset>
+            <legend>Task source</legend>
+            <label>
+              <input
+                type="checkbox"
+                checked={addGitHubTaskSource}
+                onChange={(event) => setAddGitHubTaskSource(event.target.checked)}
+              /> Add GitHub as a task source
+            </label>
+            <p className="t2">
+              Creates a GitHub task source for this repository so its issues are picked up for scheduling.
+            </p>
+          </fieldset>
+        )}
         <fieldset>
           <legend>Local pipeline</legend>
           <p className="t2">Required commands must pass before AI review. No required command blocks completion.</p>
@@ -308,6 +359,11 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone }:
 
 function newPipelineStep(position: number): PipelineStep {
   return { command: "", timeoutSeconds: 300, position, required: true };
+}
+
+/** Whether a repository URL points at GitHub, so the form can offer a GitHub task source. */
+function isGitHubSource(value: string): boolean {
+  return value.includes("github.com");
 }
 
 function movePipelineStep(steps: PipelineStep[], index: number, offset: number): PipelineStep[] {

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
 import { ProjectsPage } from "./projects";
 import { button, buttons, chooseOption, click, field, form, selectField, submitForm, textarea, typeInto, unmountAll } from "./test-dom";
-import { VIEWER, credential, mountView, project, stubApi, workflow } from "./test-console";
+import { VIEWER, credential, mountView, project, stubApi, taskSource, workflow } from "./test-console";
 
 afterEach(unmountAll);
 
@@ -110,6 +110,68 @@ describe("ProjectsPage", () => {
 
     expect(createProject).not.toHaveBeenCalled();
     expect(document.querySelector(".modal")?.textContent).toContain("A repository URL is required");
+  });
+
+  it("creates a GitHub task source when adding a GitHub project", async () => {
+    const createProject = vi.fn(async () => project());
+    const createTaskSource = vi.fn(async () => taskSource());
+    const api = stubApi({ createProject, createTaskSource });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add project/));
+    await typeInto(field(document.body, /Name/), "payments-api");
+    await typeInto(field(document.body, /Repository URL/), "https://github.com/acme/payments.git");
+    await submitForm(form(document.body));
+
+    expect(createProject).toHaveBeenCalled();
+    expect(createTaskSource).toHaveBeenCalledWith("project-1", {
+      provider: "github",
+      name: "GitHub",
+      enabled: true,
+      configuration: { ref: "https://github.com/acme/payments.git" },
+    });
+  });
+
+  it("skips the GitHub task source when the operator unchecks it", async () => {
+    const createProject = vi.fn(async () => project());
+    const createTaskSource = vi.fn(async () => taskSource());
+    const api = stubApi({ createProject, createTaskSource });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add project/));
+    await typeInto(field(document.body, /Name/), "payments-api");
+    await typeInto(field(document.body, /Repository URL/), "https://github.com/acme/payments.git");
+    await click(field(document.body, /Add GitHub as a task source/));
+    await submitForm(form(document.body));
+
+    expect(createProject).toHaveBeenCalled();
+    expect(createTaskSource).not.toHaveBeenCalled();
+  });
+
+  it("does not offer a GitHub task source for a non-GitHub repository", async () => {
+    const api = stubApi();
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add project/));
+    await typeInto(field(document.body, /Name/), "payments-api");
+    await typeInto(field(document.body, /Repository URL/), "https://git.example.test/payments.git");
+    expect(document.body.textContent).not.toContain("Add GitHub as a task source");
+  });
+
+  it("still adds the project when the GitHub task source fails", async () => {
+    const createProject = vi.fn(async () => project());
+    const createTaskSource = vi.fn(async () => { throw new Error("boom"); });
+    const api = stubApi({ createProject, createTaskSource });
+    const container = await mountView(<ProjectsPage api={api} />, api);
+
+    await click(button(container, /Add project/));
+    await typeInto(field(document.body, /Name/), "payments-api");
+    await typeInto(field(document.body, /Repository URL/), "https://github.com/acme/payments.git");
+    await submitForm(form(document.body));
+
+    expect(createProject).toHaveBeenCalled();
+    expect(container.querySelector(".modal")).toBeNull();
+    expect(container.textContent).toContain("Project added, but the GitHub task source could not be created");
   });
 
   it("keeps the form open and explains a rejected save", async () => {
