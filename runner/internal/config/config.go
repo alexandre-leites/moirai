@@ -91,6 +91,10 @@ type Config struct {
 	// budgets nor an execution's wall-clock bound — though a continuing
 	// execution does hold its runner and project slot for longer within it.
 	MaxContinuations int
+	// AgentSilenceTimeout bounds how long one agent attempt may run without
+	// producing any output before the runner terminates it and the goal gate
+	// re-engages the agent. Zero disables the bound.
+	AgentSilenceTimeout time.Duration
 }
 
 func (c Config) IdentityPath() string {
@@ -141,6 +145,7 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 		RetentionMaxAge:      72 * time.Hour,
 		RetentionMaxCount:    10,
 		MaxContinuations:     3,
+		AgentSilenceTimeout:  10 * time.Minute,
 		TLSCAFile:            envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CA_FILE"),
 		TLSClientCertFile:    envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_CERT_FILE"),
 		TLSClientKeyFile:     envValue(lookupEnv, "LOOP_ORCHESTRATOR_TLS_CLIENT_KEY_FILE"),
@@ -228,6 +233,9 @@ func Load(lookupEnv func(string) (string, bool), hostname func() (string, error)
 	if config.MaxContinuations, err = boundedIntEnv(lookupEnv, "LOOP_RUNNER_MAX_CONTINUATIONS", config.MaxContinuations, 0, maxContinuationBudget); err != nil {
 		return Config{}, err
 	}
+	if config.AgentSilenceTimeout, err = silenceTimeoutEnv(lookupEnv, "LOOP_RUNNER_AGENT_SILENCE_TIMEOUT", config.AgentSilenceTimeout); err != nil {
+		return Config{}, err
+	}
 	config.DockerCPULimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_CPU_LIMIT")
 	config.DockerMemoryLimit = envValue(lookupEnv, "LOOP_RUNNER_DOCKER_MEMORY_LIMIT")
 	config.DockerNetwork = envOrDefault(lookupEnv, "LOOP_RUNNER_DOCKER_NETWORK", config.DockerNetwork)
@@ -301,6 +309,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxContinuations < 0 || c.MaxContinuations > maxContinuationBudget {
 		return errors.New("runner continuation budget is invalid")
+	}
+	if c.AgentSilenceTimeout < 0 {
+		return errors.New("runner agent silence timeout is invalid")
 	}
 	if len(c.WorkspaceRetention) > 0 && (c.RetentionMaxAge <= 0 || c.RetentionMaxCount < 1) {
 		return errors.New("runner workspace retention must be bounded by an age and a workspace count")
@@ -502,6 +513,21 @@ func durationEnv(lookupEnv func(string) (string, bool), key string, defaultValue
 	parsed, err := time.ParseDuration(strings.TrimSpace(value))
 	if err != nil || parsed <= 0 {
 		return 0, fmt.Errorf("%s must be a positive duration", key)
+	}
+	return parsed, nil
+}
+
+// silenceTimeoutEnv reads the agent silence bound, which unlike most durations
+// is allowed to be zero: zero switches the bound off, restoring the behavior of
+// waiting out the packet timeout on a silent agent.
+func silenceTimeoutEnv(lookupEnv func(string) (string, bool), key string, defaultValue time.Duration) (time.Duration, error) {
+	value, ok := lookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return defaultValue, nil
+	}
+	parsed, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative duration", key)
 	}
 	return parsed, nil
 }

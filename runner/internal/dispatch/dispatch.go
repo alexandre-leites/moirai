@@ -117,6 +117,10 @@ type Dispatcher struct {
 	// execution. Continuations happen inside a single lease, so no orchestrator
 	// budget is touched by them.
 	MaxContinuations int
+	// AgentSilence bounds how long one agent attempt may run without producing
+	// any output before the runner terminates it and the goal gate re-engages
+	// the agent (see execution.Request.Silence). Zero disables the bound.
+	AgentSilence time.Duration
 	// EmitLog, when set, is called with each chunk of agent stdout/stderr
 	// as it is produced, so it can be streamed to the orchestrator as log
 	// events (see control.EventReporter.EmitLog).

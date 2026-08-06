@@ -355,3 +355,27 @@ func TestLoadRejectsInvalidRetentionBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadReadsTheAgentSilenceTimeout(t *testing.T) {
+	hostname := func() (string, error) { return "runner", nil }
+	settings, err := Load(lookup(map[string]string{}), hostname)
+	if err != nil || settings.AgentSilenceTimeout != 10*time.Minute {
+		t.Fatalf("default AgentSilenceTimeout = %v, err = %v", settings.AgentSilenceTimeout, err)
+	}
+	settings, err = Load(lookup(map[string]string{"LOOP_RUNNER_AGENT_SILENCE_TIMEOUT": "0s"}), hostname)
+	if err != nil || settings.AgentSilenceTimeout != 0 {
+		t.Fatalf("disabled AgentSilenceTimeout = %v, err = %v", settings.AgentSilenceTimeout, err)
+	}
+	settings, err = Load(lookup(map[string]string{"LOOP_RUNNER_AGENT_SILENCE_TIMEOUT": "5m"}), hostname)
+	if err != nil || settings.AgentSilenceTimeout != 5*time.Minute {
+		t.Fatalf("AgentSilenceTimeout = %v, err = %v", settings.AgentSilenceTimeout, err)
+	}
+	for name, value := range map[string]string{"negative": "-1m", "unparsable": "soon"} {
+		if _, err := Load(lookup(map[string]string{"LOOP_RUNNER_AGENT_SILENCE_TIMEOUT": value}), hostname); err == nil {
+			t.Fatalf("Load() accepted a %s agent silence timeout", name)
+		}
+	}
+	if err := (Config{AgentSilenceTimeout: -1}).Validate(); err == nil {
+		t.Fatal("Validate() accepted a negative agent silence timeout")
+	}
+}

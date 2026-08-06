@@ -219,6 +219,7 @@ func (dispatcher Dispatcher) runAgent(
 		Prompt:          promptFor(packet) + declaration,
 		ResultPath:      packet.ExpectedOutput,
 		Timeout:         timeout,
+		Silence:         dispatcher.AgentSilence,
 		Environment:     environment,
 		Output:          output,
 	}

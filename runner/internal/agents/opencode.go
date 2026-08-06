@@ -33,6 +33,11 @@ type Request struct {
 	ResultPath      string
 	Timeout         time.Duration
 	Environment     map[string]string
+	// Silence bounds how long the agent process may run without producing any
+	// output. Zero disables the bound. A silent agent is wedged rather than
+	// working, so the runner terminates it and the goal gate's continuation
+	// loop re-engages it instead of waiting out the whole timeout.
+	Silence time.Duration
 	// Output, when set, receives a live copy of the agent's stdout and
 	// stderr as it is produced, in addition to the on-disk log files.
 	Output io.Writer
@@ -163,6 +168,7 @@ func (backend OpenCodeBackend) run(parent context.Context, request Request, resu
 		Command:     backend.command(request, resume),
 		Environment: request.Environment,
 		Timeout:     request.Timeout,
+		Silence:     request.Silence,
 		OnStarted: func(pid int) {
 			writeExecutionManifest(filepath.Dir(resultPath), "opencode", request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 		},
