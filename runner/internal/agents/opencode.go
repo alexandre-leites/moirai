@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -94,14 +95,53 @@ type OpenCodeBackend struct {
 }
 
 type resultDocument struct {
-	ProtocolVersion string   `json:"protocolVersion"`
-	ExecutionID     string   `json:"executionId"`
-	Status          string   `json:"status"`
-	Summary         string   `json:"summary"`
-	ChangedFiles    []string `json:"changedFiles"`
-	CommandsRun     []string `json:"commandsRun"`
-	RemainingWork   []string `json:"remainingWork"`
-	SessionID       string   `json:"sessionId"`
+	ProtocolVersion string     `json:"protocolVersion"`
+	ExecutionID     string     `json:"executionId"`
+	Status          string     `json:"status"`
+	Summary         string     `json:"summary"`
+	ChangedFiles    stringList `json:"changedFiles"`
+	CommandsRun     stringList `json:"commandsRun"`
+	RemainingWork   stringList `json:"remainingWork"`
+	SessionID       string     `json:"sessionId"`
+}
+
+// stringList is the underlying type of the agent's list fields. It is a named
+// type only so UnmarshalJSON can be attached to it.
+type stringList []string
+
+// stringList decodes one of the agent's list fields tolerantly. The agent is a
+// language model and occasionally writes `remainingWork` as an object, or as an
+// array of objects, instead of strings; a strict decode would fail the whole
+// result document and discard the summary and status the agent did write. A
+// non-string entry is kept as its JSON text rather than dropped: an agent that
+// wrote a non-string `remainingWork` still wrote remaining work, and the goal
+// gate must not mistake that for an empty list and declare the objective met.
+func (list *stringList) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*list = nil
+		return nil
+	}
+	var scalar string
+	if err := json.Unmarshal(data, &scalar); err == nil {
+		*list = stringList{scalar}
+		return nil
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(data, &entries); err != nil {
+		*list = stringList{string(data)}
+		return nil
+	}
+	out := make(stringList, 0, len(entries))
+	for _, entry := range entries {
+		var text string
+		if err := json.Unmarshal(entry, &text); err == nil {
+			out = append(out, text)
+		} else {
+			out = append(out, string(entry))
+		}
+	}
+	*list = out
+	return nil
 }
 
 func (backend OpenCodeBackend) Name() string {

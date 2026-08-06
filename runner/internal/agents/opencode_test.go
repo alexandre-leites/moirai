@@ -2,7 +2,9 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -284,6 +286,71 @@ func TestResultPathMustRemainInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	if _, err := resultPathWithinWorkspace(workspace, "../result.json"); err == nil {
 		t.Fatal("resultPathWithinWorkspace() accepted escaped path")
+	}
+}
+
+// An agent occasionally writes a list field with the wrong element type -- most
+// commonly `remainingWork` as an array of objects (`[{"next": "..."}]`) instead
+// of strings. A strict decode used to fail the whole result document and report
+// the run as "no evidence", discarding the summary and status the agent did
+// write. The decode must tolerate the field so the genuine result survives, and
+// a malformed `remainingWork` must stay non-empty so the goal gate keeps the
+// run in its continuation loop rather than mistaking it for "no work remains".
+func TestOpenCodeBackendToleratesMalformedRemainingWork(t *testing.T) {
+	workspace := t.TempDir()
+	binary := writeFakeOpenCode(t, workspace, `mkdir -p .loop
+cat > .loop/result.json <<'JSON'
+{"protocolVersion":"1.0","executionId":"execution-1","status":"completed","summary":"implemented the feature","changedFiles":[{"path":"a.go"}],"commandsRun":[{"command":"go test"}],"remainingWork":[{"next":"wire it into the lookup path"}],"sessionId":"session-1"}
+JSON
+`)
+	backend := OpenCodeBackend{Binary: binary, Supervisor: execution.NewSupervisor()}
+	result, err := backend.Execute(context.Background(), Request{
+		ExecutionID: "execution-1",
+		Role:        RoleDeveloper,
+		Workspace:   workspace,
+		Prompt:      "implement the task",
+		Timeout:     time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want the result document tolerated rather than discarded", err)
+	}
+	if result.Status != "completed" || result.Summary != "implemented the feature" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	if len(result.RemainingWork) == 0 {
+		t.Fatalf("RemainingWork = %#v, want the malformed entry kept so the goal gate treats work as remaining", result.RemainingWork)
+	}
+	if result.RemainingWork[0] != `{"next":"wire it into the lookup path"}` {
+		t.Fatalf("RemainingWork = %#v", result.RemainingWork)
+	}
+}
+
+// stringList decodes the same way whether the agent wrote an array of objects,
+// a bare object, or a scalar where a list belongs, and stays nil for null.
+func TestStringListUnmarshal(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		payload string
+		want    []string
+	}{
+		{name: "array of strings", payload: `["a","b"]`, want: []string{"a", "b"}},
+		{name: "array of objects", payload: `[{"a":1}]`, want: []string{`{"a":1}`}},
+		{name: "mixed array", payload: `["a",{"b":2}]`, want: []string{"a", `{"b":2}`}},
+		{name: "bare object", payload: `{"a":1}`, want: []string{`{"a":1}`}},
+		{name: "scalar string", payload: `"lots"`, want: []string{"lots"}},
+		{name: "scalar number", payload: `7`, want: []string{"7"}},
+		{name: "null", payload: `null`, want: nil},
+		{name: "empty array", payload: `[]`, want: []string{}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var list stringList
+			if err := json.Unmarshal([]byte(testCase.payload), &list); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if fmt.Sprint([]string(list)) != fmt.Sprint(testCase.want) {
+				t.Fatalf("stringList = %#v, want %#v", list, testCase.want)
+			}
+		})
 	}
 }
 
