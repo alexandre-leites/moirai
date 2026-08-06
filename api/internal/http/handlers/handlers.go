@@ -98,6 +98,7 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 		ExecutionImage       string                `json:"executionImage"`
 		RequireHumanApproval bool                  `json:"requireHumanApproval"`
 		RequirePlanning      bool                  `json:"requirePlanning"`
+		SkipChecks           bool                  `json:"skipChecks"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -115,6 +116,7 @@ func (h *ProjectHandlers) createProject(w http.ResponseWriter, r *http.Request) 
 			ExecutionImage:       body.ExecutionImage,
 			RequireHumanApproval: body.RequireHumanApproval,
 			RequirePlanning:      body.RequirePlanning,
+			SkipChecks:           body.SkipChecks,
 		},
 	})
 	if err != nil {
@@ -137,6 +139,7 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 		ExecutionImage       string                `json:"executionImage"`
 		RequireHumanApproval bool                  `json:"requireHumanApproval"`
 		RequirePlanning      bool                  `json:"requirePlanning"`
+		SkipChecks           bool                  `json:"skipChecks"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -155,6 +158,7 @@ func (h *ProjectHandlers) updateProject(w http.ResponseWriter, r *http.Request) 
 			ExecutionImage:       body.ExecutionImage,
 			RequireHumanApproval: body.RequireHumanApproval,
 			RequirePlanning:      body.RequirePlanning,
+			SkipChecks:           body.SkipChecks,
 		},
 	})
 	if err != nil {
@@ -287,6 +291,7 @@ func projectPayload(p *controlv1.Project) map[string]any {
 		"executionImage":       p.ExecutionImage,
 		"requireHumanApproval": p.RequireHumanApproval,
 		"requirePlanning":      p.RequirePlanning,
+		"skipChecks":           p.SkipChecks,
 		"taskSources":          taskSourcesPayload(p.GetTaskSources()),
 	}
 }

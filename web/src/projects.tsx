@@ -165,6 +165,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone, a
   const [executionImage, setExecutionImage] = useState(project?.executionImage ?? "");
   const [requireHumanApproval, setRequireHumanApproval] = useState(project?.requireHumanApproval ?? false);
   const [requirePlanning, setRequirePlanning] = useState(project?.requirePlanning ?? false);
+  const [skipChecks, setSkipChecks] = useState(project?.skipChecks ?? false);
   // #392: a new GitHub project can carry a GitHub task source along with it, so
   // its issues are picked up without a second trip to the task-source form.
   const [addGitHubTaskSource, setAddGitHubTaskSource] = useState(true);
@@ -199,6 +200,7 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone, a
       executionImage: executionImage.trim() || undefined,
       requireHumanApproval: requireHumanApproval || undefined,
       requirePlanning: requirePlanning || undefined,
+      skipChecks: skipChecks || undefined,
     }).then(
       (created) => {
         if (githubSource && addGitHubTaskSource) {
@@ -345,6 +347,18 @@ function ProjectForm({ title, submitLabel, project, onClose, onSubmit, onDone, a
           <p className="t2">
             When checked, a run stops once every automated gate passes (implementation, GitHub checks)
             and waits for an admin to approve or request changes on the workflow page, instead of merging automatically.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={skipChecks}
+              onChange={(event) => setSkipChecks(event.target.checked)}
+            /> Skip the GitHub-checks wait
+          </label>
+          <p className="t2">
+            When checked, a PR whose checks never report green (no CI configured, or a token that cannot read the
+            rollup) still proceeds once the implementation gate passes, instead of parking at "GitHub checks" forever.
+            An explicitly failing check still blocks the run. Off by default.
           </p>
         </fieldset>
         <div className="btnrow">

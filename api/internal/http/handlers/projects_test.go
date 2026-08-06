@@ -280,6 +280,7 @@ func (f *fakeControlPlane) CreateProject(ctx context.Context, req *controlv1.Cre
 		PipelineSteps:        req.Project.PipelineSteps,
 		RequireHumanApproval: req.Project.RequireHumanApproval,
 		RequirePlanning:      req.Project.RequirePlanning,
+		SkipChecks:           req.Project.SkipChecks,
 	}
 	f.projects[project.Id] = project
 	return &controlv1.CreateProjectResponse{Project: project}, nil
@@ -307,6 +308,7 @@ func (f *fakeControlPlane) UpdateProject(ctx context.Context, req *controlv1.Upd
 	project.PipelineSteps = req.Project.PipelineSteps
 	project.RequireHumanApproval = req.Project.RequireHumanApproval
 	project.RequirePlanning = req.Project.RequirePlanning
+	project.SkipChecks = req.Project.SkipChecks
 	return &controlv1.UpdateProjectResponse{Project: project}, nil
 }
 
@@ -566,6 +568,32 @@ func TestUpdateProjectSuccessPersistsAndReturnsConfiguration(t *testing.T) {
 	fake.mu.Unlock()
 	if stored.RepositoryMode != "existing_path" || stored.LocalRepositoryPath != "/repositories/billing" || stored.DefaultBranch != "trunk" {
 		t.Errorf("stored project = %#v, want the submitted configuration", stored)
+	}
+}
+
+// skipChecks (#155) defaults to false and must round-trip through the API
+// layer, the same lever an operator needs to turn the GitHub-checks gate off
+// for a project whose PRs never report a green rollup.
+func TestCreateProjectPersistsSkipChecks(t *testing.T) {
+	mux, fake := startProjectServer(t)
+	req := mutateRequest(t, http.MethodPost, "/api/v1/projects",
+		`{"name":"ledger","repositoryMode":"managed_clone","repositoryUrl":"git@github.com:acme/ledger.git","defaultBranch":"main","skipChecks":true}`,
+		"admin-session")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d, want %d: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	project := decodeProject(t, rec)
+	if project["skipChecks"] != true {
+		t.Errorf("skipChecks = %v, want true in the response", project["skipChecks"])
+	}
+	fake.mu.Lock()
+	stored, ok := fake.projects["p-new"]
+	fake.mu.Unlock()
+	if !ok || !stored.SkipChecks {
+		t.Errorf("stored project = %#v, want SkipChecks true", stored)
 	}
 }
 

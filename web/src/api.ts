@@ -51,6 +51,15 @@ export type Project = {
    * set this behaves exactly as it always did.
    */
   requirePlanning: boolean;
+  /**
+   * Opt-out GitHub-checks gate (#155): when true, a PR whose checks never
+   * report green (no CI configured, a token that cannot read the rollup)
+   * still proceeds once the implementation gate passes, instead of parking
+   * at `waiting_github_checks` forever. An explicitly failing check still
+   * blocks the run. Defaults to false, so a project that never set this
+   * behaves exactly as it always did.
+   */
+  skipChecks: boolean;
   /** This project's configured task sources (see ListTaskSourceTypes, #294/#345). */
   taskSources: TaskSource[];
 };
@@ -340,6 +349,7 @@ export type ProjectConfiguration = {
   executionImage?: string;
   requireHumanApproval?: boolean;
   requirePlanning?: boolean;
+  skipChecks?: boolean;
 };
 
 export class ApiError extends Error {
@@ -745,6 +755,7 @@ function normalizeProject(project: ProjectPayload): Project {
     executionImage: project.executionImage ?? "",
     requireHumanApproval: project.requireHumanApproval ?? false,
     requirePlanning: project.requirePlanning ?? false,
+    skipChecks: project.skipChecks ?? false,
     taskSources: project.taskSources ?? [],
   };
 }

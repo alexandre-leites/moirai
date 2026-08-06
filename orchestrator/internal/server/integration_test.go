@@ -111,6 +111,44 @@ func (stubGitHub) Merged(context.Context, string, string, string) (bool, error) 
 	return false, nil
 }
 
+// pendingChecksGitHub reports a rollup that never resolves -- the shape a
+// repository with no CI (or a token that cannot read its checks) always
+// returns -- but still succeeds at every merge step. observeWorkflow's
+// pending branch is exactly what must not leave a SkipChecks run waiting.
+type pendingChecksGitHub struct{}
+
+func (pendingChecksGitHub) ListTasks(context.Context, string, string, string) ([]Task, error) {
+	return nil, nil
+}
+func (pendingChecksGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (PullRequest, error) {
+	return PullRequest{Number: "1", URL: "https://example.test/pull/1", State: "OPEN", HeadSHA: "abc"}, nil
+}
+func (pendingChecksGitHub) Checks(context.Context, string, string, string) (CheckState, error) {
+	return checksPending, nil
+}
+func (pendingChecksGitHub) Merge(context.Context, string, string, string) error { return nil }
+func (pendingChecksGitHub) Merged(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+
+// failedChecksGitHub reports an explicitly failing rollup, so a test can pin
+// that the SkipChecks opt-out never swallows a real CI failure.
+type failedChecksGitHub struct{}
+
+func (failedChecksGitHub) ListTasks(context.Context, string, string, string) ([]Task, error) {
+	return nil, nil
+}
+func (failedChecksGitHub) FindOrCreatePR(context.Context, string, string, string, string, string, string) (PullRequest, error) {
+	return PullRequest{Number: "1", URL: "https://example.test/pull/1", State: "OPEN", HeadSHA: "abc"}, nil
+}
+func (failedChecksGitHub) Checks(context.Context, string, string, string) (CheckState, error) {
+	return checksFailed, nil
+}
+func (failedChecksGitHub) Merge(context.Context, string, string, string) error { return nil }
+func (failedChecksGitHub) Merged(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
+
 // sequencedGitHub lets a test control exactly which error (if any)
 // FindOrCreatePR returns on each successive call: `errs[0]` on the first
 // call, `errs[1]` on the second, and so on, falling back to `alwaysErr` (or
@@ -880,6 +918,14 @@ func (h *harness) requirePlanning(projectID string) {
 	h.exec(`UPDATE app.projects SET configuration = configuration || '{"require_planning":true}'::jsonb WHERE id=$1`, projectID)
 }
 
+// skipChecks flips a seeded project's configuration to opt out of the
+// GitHub-checks gate (projectConfig.SkipChecks), decoded fresh by
+// deliveryWorkflow on every call.
+func (h *harness) skipChecks(projectID string) {
+	h.t.Helper()
+	h.exec(`UPDATE app.projects SET configuration = configuration || '{"skip_checks":true}'::jsonb WHERE id=$1`, projectID)
+}
+
 // receiveOffer reads the next JobOffer off a runner's outbound channel and
 // decodes its task packet, for a test that needs to inspect what role or
 // context the orchestrator actually sent rather than just draining it.
@@ -963,6 +1009,55 @@ func TestObserveWorkflowMergesDirectlyWhenTheProjectDoesNotRequireApproval(t *te
 	}
 	if h.schedulable(issueID) {
 		t.Fatal("a completed run left its issue schedulable")
+	}
+}
+
+// A repository with no CI -- or a token that cannot read its checks -- always
+// reports an empty (or perpetually pending) rollup, which observeWorkflow
+// correctly refuses to read as green: a default project parks at
+// 'waiting_github_checks' until abandonedChecks blocks it hours later. That
+// wait is the whole problem a SkipChecks project opts out of: its run must
+// carry on to merge even though the rollup never resolves, while a default
+// project keeps waiting.
+func TestObserveWorkflowSkipsTheChecksWaitWhenTheProjectOptsOut(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	h.skipChecks(projectID)
+	workflowID := h.seedWaitingChecks(projectID, issueID)
+	h.setGitHub(&pendingChecksGitHub{})
+
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "completed" {
+		t.Fatalf("status = %q, want completed: a SkipChecks run must not wait on a rollup that never resolves", state.status)
+	}
+	if merged := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1 AND state='merged'`, workflowID); merged != 1 {
+		t.Fatal("the pull request was not merged even though the project skipped the checks gate")
+	}
+	if h.schedulable(issueID) {
+		t.Fatal("a completed run left its issue schedulable")
+	}
+}
+
+// SkipChecks is an opt-out of *waiting* on checks, not a license to merge code
+// GitHub explicitly reports as broken: the explicit-failure branch still blocks
+// a run, exactly as it does for a default project.
+func TestObserveWorkflowSkipChecksStillBlocksAnExplicitFailure(t *testing.T) {
+	h := newHarness(t)
+	projectID, issueID := h.project()
+	h.skipChecks(projectID)
+	workflowID := h.seedWaitingChecks(projectID, issueID)
+	h.setGitHub(&failedChecksGitHub{})
+
+	if err := h.observeWorkflow(context.Background(), workflowID); err != nil {
+		t.Fatalf("observeWorkflow: %v", err)
+	}
+	if state := h.runState(workflowID); state.status != "blocked" {
+		t.Fatalf("status = %q, want blocked: an explicitly failing check still blocks a SkipChecks run", state.status)
+	}
+	if merged := h.scalar(`SELECT COUNT(*) FROM app.pull_requests WHERE workflow_run_id=$1 AND state='merged'`, workflowID); merged != 0 {
+		t.Fatal("the pull request was merged despite an explicitly failing check")
 	}
 }
 
