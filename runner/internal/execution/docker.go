@@ -72,8 +72,15 @@ func (executor DockerExecutor) Execute(parent context.Context, request Request, 
 		Workspace:   workspace,
 		Command:     command,
 		Timeout:     request.Timeout,
+		Silence:     request.Silence,
 		OnStarted:   request.OnStarted,
 	}, stdout, stderr)
+	if errors.Is(executeErr, ErrSilenceExceeded) {
+		// The supervisor terminated the `docker run` client, which leaves the
+		// container itself running. Stop it so a silent agent does not outlive
+		// the execution that gave up on it.
+		_ = executor.stopWithTimeout(containerName)
+	}
 	close(done)
 	<-monitorDone
 	return result, executeErr
