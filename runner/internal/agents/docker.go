@@ -56,7 +56,7 @@ func (backend DockerCLIBackend) Execute(ctx context.Context, request Request) (R
 	command := append(append([]string(nil), backend.Arguments...), request.Prompt)
 	executor := backend.Executor
 	executor.Image = backend.Image
-	executionResult, err := executor.Execute(ctx, execution.Request{ExecutionID: request.ExecutionID, Workspace: request.Workspace, Command: command, Environment: request.Environment, Timeout: request.Timeout, OnStarted: func(pid int) {
+	executionResult, err := executor.Execute(ctx, execution.Request{ExecutionID: request.ExecutionID, Workspace: request.Workspace, Command: command, Environment: request.Environment, Timeout: request.Timeout, Silence: request.Silence, OnStarted: func(pid int) {
 		writeExecutionManifest(filepath.Dir(resultPath), "docker-cli", request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 	}}, streamedWriter(stdoutLog, request.Output), streamedWriter(stderrLog, request.Output))
 	if err != nil {

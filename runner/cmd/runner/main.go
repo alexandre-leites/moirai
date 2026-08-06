@@ -372,6 +372,7 @@ func run(ctx context.Context) error {
 		Retention:            retentionPolicy(settings),
 		PushWorkInProgress:   settings.PushWorkInProgress,
 		MaxContinuations:     settings.MaxContinuations,
+		AgentSilence:         settings.AgentSilenceTimeout,
 		Projects:             projects,
 		Active:               dispatch.NewActiveWorkspaces(),
 	}

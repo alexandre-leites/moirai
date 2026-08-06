@@ -309,6 +309,37 @@ func TestZeroBudgetLeavesExecutionSingleShot(t *testing.T) {
 	}
 }
 
+// #410: the configured agent silence bound travels on every request the goal
+// loop makes, first attempt and continuation alike, so each attempt is bounded
+// by the same silence and a wedged agent is re-engaged rather than waited out.
+func TestAgentSilenceBoundTravelsOnEveryRequest(t *testing.T) {
+	manager := &workspaceManager{workspace: testWorkspace(t)}
+	agent := &scriptedBackend{turns: []scriptedTurn{
+		{result: agents.Result{Status: "completed", Summary: "a", RemainingWork: []string{"one"}, SessionID: "session-1"}},
+		{result: agents.Result{Status: "completed", Summary: "b", SessionID: "session-1"}},
+	}}
+	dispatcher := Dispatcher{
+		Workspaces:        manager,
+		Backend:           agent,
+		Delivery:          &deliveryManager{commitResult: repository.CommitResult{Committed: true, Revision: "deadbeef"}},
+		MaxContinuations:  3,
+		AgentSilence:      4 * time.Minute,
+		RevisionInspector: &repeatingInspector{summaries: []repository.RevisionSummary{{Revision: "base", ChangedFiles: []string{"parser.go"}}}},
+	}
+
+	if _, err := dispatcher.Execute(context.Background(), developerLease()); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(agent.requests) != 2 {
+		t.Fatalf("invocations = %d, want 2", len(agent.requests))
+	}
+	for index, request := range agent.requests {
+		if request.Silence != 4*time.Minute {
+			t.Fatalf("request %d Silence = %v, want 4m", index, request.Silence)
+		}
+	}
+}
+
 // The packet's timeoutSeconds bounds the *total* agent wall clock. The first
 // invocation still gets the whole of it, and each continuation gets only what
 // is left, so continuations cannot extend an execution beyond the bound the

@@ -115,6 +115,51 @@ func TestSupervisorTimeoutTerminatesProcess(t *testing.T) {
 	}
 }
 
+// #410: an agent that stops producing output but never exits used to hold the
+// execution until the whole packet timeout elapsed. The silence bound
+// terminates it instead, so the goal gate can re-engage the agent.
+func TestSupervisorSilenceTerminatesSilentProcess(t *testing.T) {
+	workspace := t.TempDir()
+	supervisor := NewSupervisor()
+	started := time.Now()
+	result, err := supervisor.Execute(context.Background(), Request{
+		ExecutionID: "execution-silence",
+		Workspace:   workspace,
+		Command:     []string{"/bin/sh", "-c", "sleep 10"},
+		Timeout:     time.Minute,
+		Silence:     50 * time.Millisecond,
+	}, os.Stdout, os.Stderr)
+	if !errors.Is(err, ErrSilenceExceeded) {
+		t.Fatalf("Execute() error = %v, want silence exceeded", err)
+	}
+	if result.ExitCode == 0 {
+		t.Fatal("ExitCode = 0 after silence termination")
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("silent process was not terminated promptly")
+	}
+}
+
+// A process that keeps writing output is working, not wedged, and must not be
+// terminated for silence however long it runs.
+func TestSupervisorOutputResetsTheSilenceClock(t *testing.T) {
+	workspace := t.TempDir()
+	supervisor := NewSupervisor()
+	result, err := supervisor.Execute(context.Background(), Request{
+		ExecutionID: "execution-silence-reset",
+		Workspace:   workspace,
+		Command:     []string{"/bin/sh", "-c", "i=0; while [ $i -lt 10 ]; do echo tick; i=$((i+1)); sleep 0.02; done"},
+		Timeout:     time.Minute,
+		Silence:     100 * time.Millisecond,
+	}, os.Stdout, os.Stderr)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a clean exit", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+}
+
 func TestSupervisorCancelTerminatesActiveExecution(t *testing.T) {
 	workspace := t.TempDir()
 	supervisor := NewSupervisor()

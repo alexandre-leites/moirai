@@ -65,6 +65,7 @@ func (backend CLIBackend) Execute(parent context.Context, request Request) (Resu
 		Command:     append([]string{backend.Binary}, command...),
 		Environment: request.Environment,
 		Timeout:     request.Timeout,
+		Silence:     request.Silence,
 		OnStarted: func(pid int) {
 			writeExecutionManifest(filepath.Dir(resultPath), backend.NameValue, request.JobID, request.LeaseGeneration, request.ExecutionID, pid)
 		},
