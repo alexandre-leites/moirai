@@ -60,6 +60,75 @@ UPDATE app.workflow_runs SET superseded_at = now() WHERE id = $1 AND superseded_
 INSERT INTO app.workflow_events(workflow_run_id, event_type, severity, payload)
 VALUES ($1, 'workflow_transition', 'info', '{"reason":"reopened by manual retry"}'::jsonb);
 
+-- name: GetRetryControlJob :one
+-- Retry-with-context's (controlWorkflow, server.go) read of the job a
+-- terminal run already has, so the re-arm keeps its current role -- the step
+-- the run died at -- rather than always restarting the developer step from
+-- scratch. app.jobs.workflow_run_id is UNIQUE, so one row.
+SELECT j.id::text AS job_id, j.role, j.status AS job_status
+FROM app.jobs j
+WHERE j.workflow_run_id = $1
+FOR UPDATE;
+
+-- name: ResetWorkflowRunForRetry :execrows
+-- Re-arms a terminal run for retry-with-context: back to the in-flight status
+-- its job's role implies ('planning' for a planner, 'preparing' for a
+-- developer -- the role is read in Go before this runs), terminal state
+-- cleared, total_agent_executions bumped so each retry execution gets a
+-- distinct execution ID. The project lock is deliberately left in place: the
+-- run is still doing the same work, and a competing fresh run must not start.
+UPDATE app.workflow_runs SET
+  status = $2, current_phase = $2,
+  terminal_reason = NULL, completed_at = NULL,
+  total_agent_executions = total_agent_executions + 1,
+  updated_at = now()
+WHERE id = $1 AND status IN ('failed','blocked','cancelled') AND superseded_at IS NULL;
+
+-- name: ReopenJobForRetry :one
+-- Resets a terminal run's one job back to 'offered' for retry-with-context,
+-- keeping its current role (the step that failed) and bumping the lease
+-- generation so any stale runner event from the previous attempt is fenced.
+-- Guarded on the job still being the terminal one whose failure the retry is
+-- resuming; a second caller that raced this one finds 0 rows and does nothing.
+UPDATE app.jobs SET
+  status = 'offered', offered_at = now(), accepted_at = NULL, started_at = NULL,
+  finished_at = NULL, last_event_sequence = 0, lease_generation = lease_generation + 1,
+  recovery_reason = NULL
+WHERE workflow_run_id = $1 AND status IN ('failed','cancelled')
+RETURNING lease_generation, role;
+
+-- name: GetRetryDispatchFacts :one
+-- Everything dispatchRetryJob (server.go) needs to re-offer a retried run's
+-- job with the accumulated context carried forward: the planner's plan (the
+-- most recent plan.recorded event's payload) and the previous execution's own
+-- account of its failure (summary + remainingWork of the last failed/cancelled
+-- event). Guarded on the job still sitting at 'offered' and the run at the
+-- in-flight status the re-arm set -- a second dispatch attempt finds no row
+-- and does nothing.
+SELECT wr.project_id::text AS project_id, i.external_id, i.title, i.body,
+       p.repository_mode, COALESCE(p.repository_url, '') AS repository_url,
+       COALESCE(p.local_repository_path, '') AS local_repository_path,
+       p.default_branch, COALESCE(wr.branch_name, '') AS branch_name,
+       p.configuration, j.id::text AS job_id, j.role, j.lease_generation,
+       COALESCE(wr.plan_summary, '') AS plan_summary,
+       COALESCE(plan_e.payload::text, '{}')::text AS plan_payload,
+       COALESCE(fail_e.payload::text, '{}')::text AS failure_payload
+FROM app.workflow_runs wr
+JOIN app.issues i ON i.id = wr.issue_id
+JOIN app.projects p ON p.id = wr.project_id
+JOIN app.jobs j ON j.workflow_run_id = wr.id
+LEFT JOIN LATERAL (
+  SELECT payload FROM app.workflow_events
+  WHERE workflow_run_id = wr.id AND event_type = 'plan.recorded'
+  ORDER BY id DESC LIMIT 1
+) plan_e ON true
+LEFT JOIN LATERAL (
+  SELECT payload FROM app.workflow_events
+  WHERE workflow_run_id = wr.id AND event_type IN ('failed','cancelled')
+  ORDER BY id DESC LIMIT 1
+) fail_e ON true
+WHERE wr.id = sqlc.arg(id) AND wr.status IN ('preparing','planning') AND j.status = 'offered' AND wr.superseded_at IS NULL;
+
 -- name: SetWorkflowControlStatus :exec
 UPDATE app.workflow_runs SET
   status = $2,

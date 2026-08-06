@@ -34,7 +34,7 @@ type stubClient struct {
 	getWorkflow        func(ctx context.Context, id string) (*controlv1.GetWorkflowResponse, error)
 	listWorkflowEvents func(ctx context.Context, id string, afterID int64, limit int32) (*controlv1.ListWorkflowEventsResponse, error)
 	submitDecision     func(ctx context.Context, id, decision, comment string) (*controlv1.SubmitHumanDecisionResponse, error)
-	retryWorkflow      func(ctx context.Context, id, reason string) (*controlv1.RetryWorkflowResponse, error)
+	retryWorkflow      func(ctx context.Context, id, reason string, resume bool) (*controlv1.RetryWorkflowResponse, error)
 	cancelWorkflow     func(ctx context.Context, id, reason string) (*controlv1.CancelWorkflowResponse, error)
 	blockWorkflow      func(ctx context.Context, id, reason string) (*controlv1.BlockWorkflowResponse, error)
 
@@ -124,9 +124,9 @@ func (s *stubClient) SubmitHumanDecision(ctx context.Context, id, decision, comm
 	return s.submitDecision(ctx, id, decision, comment)
 }
 
-func (s *stubClient) RetryWorkflow(ctx context.Context, id, reason string) (*controlv1.RetryWorkflowResponse, error) {
-	s.record("RetryWorkflow", id, reason)
-	return s.retryWorkflow(ctx, id, reason)
+func (s *stubClient) RetryWorkflow(ctx context.Context, id, reason string, resume bool) (*controlv1.RetryWorkflowResponse, error) {
+	s.record("RetryWorkflow", id, reason, resume)
+	return s.retryWorkflow(ctx, id, reason, resume)
 }
 
 func (s *stubClient) CancelWorkflow(ctx context.Context, id, reason string) (*controlv1.CancelWorkflowResponse, error) {

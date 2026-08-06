@@ -796,6 +796,13 @@ paths:
   /api/v1/workflows/{workflow_id}/retry:
     post:
       summary: Retry a terminal workflow
+      description: |
+        Restarts a terminal workflow run. By default the run is superseded and
+        the issue is scheduled again from scratch. Set `resume: true` in the
+        request body to instead re-dispatch the run's current step with its
+        accumulated context (plan, branch and previous failure account). A run
+        that failed at the independent review step cannot be resumed and must be
+        retried from scratch.
       security:
         - sessionCookie: []
           csrfToken: []
@@ -1236,6 +1243,9 @@ components:
       type: object
       properties:
         reason: { type: string, maxLength: 1024 }
+        resume:
+          type: boolean
+          description: When true, restart the current step with its accumulated context instead of starting from scratch. Only valid on retry.
     Workflow:
       type: object
       required: [id, projectId, status, phase]

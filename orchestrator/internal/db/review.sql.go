@@ -180,7 +180,7 @@ FROM app.runners r
 WHERE r.status = 'online' AND r.enabled AND NOT r.draining AND r.revoked_at IS NULL
   AND r.id::text = ANY($1::text[])
   AND r.labels @> $2::jsonb
-  AND (SELECT COUNT(*) FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered', 'preparing', 'running')) < r.capacity
+  AND (SELECT COUNT(*) FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered', 'preparing', 'running') AND j.id <> $3) < r.capacity
 ORDER BY r.id
 LIMIT 1
 `
@@ -188,6 +188,7 @@ LIMIT 1
 type SelectEligibleReviewRunnerParams struct {
 	RunnerIds      []string
 	RequiredLabels []byte
+	JobID          string
 }
 
 // Picks a runner to hand the reviewer packet to, restricted to the connected
@@ -196,8 +197,14 @@ type SelectEligibleReviewRunnerParams struct {
 // issue to arbitrate over here, only one workflow's one review, so this reads
 // without FOR UPDATE/SKIP LOCKED -- a race loses at ReopenJobForReview's own
 // guard instead, which is a cheap, harmless no-op.
+// The capacity count excludes the job being dispatched (sqlc.arg(job_id)): a
+// retry-with-context re-arms its job to 'offered' before this runs, so without
+// the exclusion the very runner that already holds the job would count it
+// against its own capacity and never be selected. For the review/repair
+// callers the job is still 'completed'/'failed' at selection time, so the
+// exclusion is a no-op for them.
 func (q *Queries) SelectEligibleReviewRunner(ctx context.Context, arg SelectEligibleReviewRunnerParams) (string, error) {
-	row := q.db.QueryRow(ctx, selectEligibleReviewRunner, arg.RunnerIds, arg.RequiredLabels)
+	row := q.db.QueryRow(ctx, selectEligibleReviewRunner, arg.RunnerIds, arg.RequiredLabels, arg.JobID)
 	var runner_id string
 	err := row.Scan(&runner_id)
 	return runner_id, err

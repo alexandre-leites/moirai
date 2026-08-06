@@ -409,7 +409,7 @@ export type ApiClient = {
   getWorkflow(id: string, signal?: AbortSignal): Promise<Workflow>;
   listWorkflowEvents(id: string, options?: EventPageOptions, signal?: AbortSignal): Promise<WorkflowEventsPage>;
   submitWorkflowDecision(id: string, decision: "approved" | "changes_requested", comment?: string): Promise<WorkflowLifecycle>;
-  retryWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle>;
+  retryWorkflow(id: string, reason?: string, resume?: boolean): Promise<WorkflowLifecycle>;
   cancelWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle>;
   blockWorkflow(id: string, reason: string): Promise<WorkflowLifecycle>;
 
@@ -479,9 +479,10 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
   const controlWorkflow = async (
     id: string,
     action: "retry" | "cancel" | "block",
-    reason?: string
+    reason?: string,
+    resume?: boolean
   ): Promise<WorkflowLifecycle> =>
-    post(`/api/v1/workflows/${encodeURIComponent(id)}/${action}`, { reason: reason ?? "" });
+    post(`/api/v1/workflows/${encodeURIComponent(id)}/${action}`, { reason: reason ?? "", resume: resume ?? false });
 
   return {
     setUnauthorizedHandler(handler: (() => void) | null): void {
@@ -701,8 +702,8 @@ export function createApiClient(fetchClient: FetchFn = fetch): ApiClient {
       return post(`/api/v1/workflows/${encodeURIComponent(id)}/decision`, { decision, comment: comment ?? "" });
     },
 
-    async retryWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle> {
-      return controlWorkflow(id, "retry", reason);
+    async retryWorkflow(id: string, reason?: string, resume?: boolean): Promise<WorkflowLifecycle> {
+      return controlWorkflow(id, "retry", reason, resume);
     },
 
     async cancelWorkflow(id: string, reason?: string): Promise<WorkflowLifecycle> {

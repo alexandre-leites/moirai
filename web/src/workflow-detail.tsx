@@ -74,14 +74,24 @@ export function WorkflowDetailPage({ api }: { api: ApiClient }) {
         <Banner
           lead="Blocked."
           actions={isAdmin ? (
-            <button
-              type="button"
-              className="btn sm"
-              disabled={busy}
-              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
-            >
-              Retry with fresh context
-            </button>
+            <>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={busy}
+                onClick={() => act("Retry", () => api.retryWorkflow(run.id, undefined, true), "Retrying the current step with its accumulated context")}
+              >
+                Retry with context
+              </button>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={busy}
+                onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
+              >
+                Retry with fresh context
+              </button>
+            </>
           ) : undefined}
         >
           {run.blockingReason || "No reason was recorded."}
@@ -92,14 +102,24 @@ export function WorkflowDetailPage({ api }: { api: ApiClient }) {
         <Banner
           lead="Failed."
           actions={isAdmin ? (
-            <button
-              type="button"
-              className="btn sm"
-              disabled={busy}
-              onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
-            >
-              Retry workflow
-            </button>
+            <>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={busy}
+                onClick={() => act("Retry", () => api.retryWorkflow(run.id, undefined, true), "Retrying the current step with its accumulated context")}
+              >
+                Retry with context
+              </button>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={busy}
+                onClick={() => act("Retry", () => api.retryWorkflow(run.id), "Issue reopened — the scheduler will start a fresh run")}
+              >
+                Retry workflow
+              </button>
+            </>
           ) : undefined}
         >
           {run.blockingReason || "The run ended without delivering."}

@@ -588,7 +588,7 @@ func (s *ControlServer) ListWorkflowEvents(ctx context.Context, request *control
 }
 
 func (s *ControlServer) RetryWorkflow(ctx context.Context, request *controlv1.RetryWorkflowRequest) (*controlv1.RetryWorkflowResponse, error) {
-	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "retry")
+	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "retry", request.GetResume())
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +596,7 @@ func (s *ControlServer) RetryWorkflow(ctx context.Context, request *controlv1.Re
 }
 
 func (s *ControlServer) CancelWorkflow(ctx context.Context, request *controlv1.CancelWorkflowRequest) (*controlv1.CancelWorkflowResponse, error) {
-	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "cancel")
+	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "cancel", false)
 	if err != nil {
 		return nil, err
 	}
@@ -604,7 +604,7 @@ func (s *ControlServer) CancelWorkflow(ctx context.Context, request *controlv1.C
 }
 
 func (s *ControlServer) BlockWorkflow(ctx context.Context, request *controlv1.BlockWorkflowRequest) (*controlv1.BlockWorkflowResponse, error) {
-	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "block")
+	workflow, err := s.controlWorkflow(ctx, request.GetWorkflowRunId(), request.GetReason(), "block", false)
 	if err != nil {
 		return nil, err
 	}
@@ -1747,6 +1747,143 @@ func (s *Core) dispatchImplementationJob(ctx context.Context, workflowID, jobID,
 	return s.releaseUndeliveredOffer(jobID, workflowID, facts.ProjectID)
 }
 
+// dispatchRetryJob re-offers the job a retry-with-context re-armed, once the
+// re-arm's own transaction (controlWorkflow's resume branch) has committed.
+// controlWorkflow already reset the run to 'planning'/'preparing' and the job
+// to 'offered' with a fresh lease generation, so this function only builds the
+// packet -- carrying the accumulated plan and the previous execution's own
+// account of its failure forward -- selects an eligible runner, and creates
+// the offer. Guarded on the job still sitting at 'offered' and the run still
+// in-flight (GetRetryDispatchFacts): a second caller that raced this one finds
+// no row and does nothing. If no runner can take the job right now, the
+// stranded 'offered' job falls to reclaimUnansweredOffers, which ends the run
+// and returns its issue to the queue -- the same coarser backstop
+// dispatchRepairJob relies on.
+func (s *Core) dispatchRetryJob(ctx context.Context, workflowID string) error {
+	runners := s.connectedRunners()
+	if len(runners) == 0 {
+		return nil
+	}
+	row, err := s.queries.GetRetryDispatchFacts(ctx, workflowID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // already dispatched/answered, or no longer re-armed
+	}
+	if err != nil {
+		return databaseError(err)
+	}
+	var config projectConfig
+	if err := json.Unmarshal(row.Configuration, &config); err != nil {
+		return configurationError(err)
+	}
+	labels := config.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+	requiredLabels, err := jsonLabels(labels)
+	if err != nil {
+		return err
+	}
+	runnerID, err := s.queries.SelectEligibleReviewRunner(ctx, db.SelectEligibleReviewRunnerParams{
+		RunnerIds: runners, RequiredLabels: []byte(requiredLabels), JobID: row.JobID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // no eligible runner; the stranded job is reclaimed later
+	}
+	if err != nil {
+		return databaseError(err)
+	}
+	pipeline, err := pipelineStepsForPacket(ctx, s.queries, row.ProjectID)
+	if err != nil {
+		return err
+	}
+	packet, err := retryPacket(row, planFromRetryContext(row.PlanPayload, row.PlanSummary), failuresFromRetryContext(row.FailurePayload), config, pipeline)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		return databaseError(err)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return databaseError(err)
+	}
+	defer tx.Rollback(ctx)
+	queries := s.queries.WithTx(tx)
+	if err := queries.CreateJobOffer(ctx, db.CreateJobOfferParams{ID: idgen.NewID(), JobID: row.JobID, RunnerID: runnerID}); err != nil {
+		return databaseError(err)
+	}
+	if err := commit(tx); err != nil {
+		return err
+	}
+	message := &runnerv1.OrchestratorToRunner{Message: &runnerv1.OrchestratorToRunner_Offer{Offer: &runnerv1.JobOffer{JobId: row.JobID, LeaseGeneration: row.LeaseGeneration, TaskPacketJson: string(encoded)}}}
+	s.enqueue(runnerID, message)
+	return nil
+}
+
+// planFromRetryContext rebuilds the plan a retried run carries forward: the
+// planner's plan.recorded event payload ({"plan": [...]}), falling back to the
+// run's plan_summary column -- the plan's first line -- when that event is
+// missing. A planner-role retry has neither and returns no plan.
+func planFromRetryContext(planPayload, planSummary string) []string {
+	var payload struct {
+		Plan []string `json:"plan"`
+	}
+	if err := json.Unmarshal([]byte(planPayload), &payload); err == nil && len(payload.Plan) > 0 {
+		return payload.Plan
+	}
+	if planSummary != "" {
+		return []string{planSummary}
+	}
+	return []string{}
+}
+
+// failuresFromRetryContext reads the previous execution's own account of its
+// failure -- the summary and remainingWork of the last failed/cancelled event,
+// the shape the runner's terminal payload writes -- so the retried agent is
+// told why the prior attempt stopped instead of re-deriving it.
+func failuresFromRetryContext(failurePayload string) []string {
+	var payload struct {
+		Summary       string   `json:"summary"`
+		RemainingWork []string `json:"remainingWork"`
+	}
+	if err := json.Unmarshal([]byte(failurePayload), &payload); err != nil {
+		return nil
+	}
+	failures := append([]string{}, payload.RemainingWork...)
+	if payload.Summary != "" {
+		failures = append([]string{payload.Summary}, failures...)
+	}
+	return failures
+}
+
+// retryPacket builds the execution a retried-with-context run's job is
+// re-offered with: the same role the run died in -- a planner retry stays a
+// planner (non-modifying), a developer retry stays a developer -- carrying the
+// accumulated plan and the previous execution's failure account in the packet
+// fields the agent's prompt already renders (# CURRENT PLAN,
+// # PREVIOUS FAILURES, see dispatch.go's promptFor). A reviewer role never
+// reaches this function (controlWorkflow rejects it), so the default arm is
+// only defensive.
+func retryPacket(row db.GetRetryDispatchFactsRow, plan, failures []string, config projectConfig, pipeline []map[string]any) (map[string]any, error) {
+	packet, err := developerPacket(row.JobID, row.ProjectID, row.ExternalID, row.Title, row.Body, row.RepositoryMode,
+		row.RepositoryUrl, row.LocalRepositoryPath, row.DefaultBranch, row.BranchName,
+		config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds), plan, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	if row.Role == jobRolePlanner {
+		packet, err = plannerPacket(row.JobID, row.ProjectID, row.ExternalID, row.Title, row.Body, row.RepositoryMode,
+			row.RepositoryUrl, row.LocalRepositoryPath, row.DefaultBranch, row.BranchName,
+			config.ExecutionImage, executionTimeoutSeconds(config.ExecutionTimeoutSeconds))
+		if err != nil {
+			return nil, err
+		}
+	}
+	packet["previousFailures"] = failures
+	return packet, nil
+}
+
 // jsonUnicodeEscapeMarker is how a `\uXXXX` escape spells in JSON text --
 // the only place either of the two bytes sanitizeEventPayload cares about,
 // NUL and an unpaired surrogate half, can appear in text that already passed
@@ -2057,7 +2194,7 @@ func workflowFromDetailRow(row db.GetWorkflowDetailRow) *controlv1.Workflow {
 	return workflow
 }
 
-func (s *Core) controlWorkflow(ctx context.Context, id, reason, action string) (*controlv1.Workflow, error) {
+func (s *Core) controlWorkflow(ctx context.Context, id, reason, action string, resume bool) (*controlv1.Workflow, error) {
 	actor, err := s.requireMutation(ctx)
 	if err != nil {
 		return nil, err
@@ -2096,26 +2233,81 @@ func (s *Core) controlWorkflow(ctx context.Context, id, reason, action string) (
 		if !genuinelyTerminalStatus(current) {
 			return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
 		}
-		// Retry supersedes this run rather than reviving it. A job is unique
-		// per workflow run (app.jobs.workflow_run_id is UNIQUE), so the run
-		// that already had its execution cannot be given another one; the
-		// scheduler picks the issue up again -- its own eligible bit is
-		// untouched, see #268 -- and creates a fresh run whose history
-		// stands alongside this one. Superseding is what stops this run's
-		// own failed/blocked/completed status from continuing to exclude
-		// the issue via the app.workflow_runs join ListQueueEntries and
-		// ClaimSchedulableIssue both run. The previous implementation took
-		// the project lock and parked the run in a "recovering" status
-		// nothing reads, which left the project unable to schedule anything
-		// again.
-		if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: id}); err != nil {
-			return nil, databaseError(err)
-		}
-		if err := queries.SupersedeWorkflowRun(ctx, id); err != nil {
-			return nil, databaseError(err)
-		}
-		if err := queries.CreateRetryEvent(ctx, id); err != nil {
-			return nil, databaseError(err)
+		if resume {
+			// Retry-with-context re-arms this same run's current step instead
+			// of superseding it: the run keeps its thread, branch and project
+			// lock, and the job is re-offered in the role it died in, carrying
+			// the accumulated plan and the previous execution's own account of
+			// its failure forward (dispatchRetryJob, after commit). This is the
+			// "the agent API errored, don't start from zero" path. A reviewer
+			// job is deliberately not resumed here: an independent review must
+			// stay fresh (AGENTS.md), so a run blocked at the review step falls
+			// back to the fresh-context retry below.
+			job, err := queries.GetRetryControlJob(ctx, id)
+			if err != nil {
+				return nil, databaseError(err)
+			}
+			if job.Role == jobRoleReviewer {
+				return nil, status.Error(codes.FailedPrecondition, "a run blocked at the review step is not retryable with context; use Retry with fresh context")
+			}
+			// The terminal state this resume is leaving released the project
+			// lock (delivery.go), so the scheduler may have handed the
+			// project's other issues to new runs. Re-acquire the lock under
+			// this run before it works again -- one workflow per project
+			// (TestOnlyOneWorkflowRunsPerProject) -- and refuse to resume
+			// if another run already holds it, e.g. a fresh retry of this
+			// same issue won it after this run died: the issue is already
+			// being worked by that run. Checked before anything is mutated
+			// so a rejection leaves no half-re-armed run behind.
+			if affected, err := queries.CreateProjectLock(ctx, db.CreateProjectLockParams{ProjectID: projectID, WorkflowRunID: id}); err != nil {
+				return nil, databaseError(err)
+			} else if affected != 1 {
+				return nil, status.Error(codes.FailedPrecondition, "another workflow is running for this project; use Retry with fresh context instead")
+			}
+			target := StatusPreparing
+			if job.Role == jobRolePlanner {
+				target = StatusPlanning
+			}
+			affected, err := queries.ResetWorkflowRunForRetry(ctx, db.ResetWorkflowRunForRetryParams{ID: id, Status: target.String()})
+			if err != nil {
+				return nil, databaseError(err)
+			}
+			if affected != 1 {
+				return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
+			}
+			if _, err := queries.ReopenJobForRetry(ctx, id); errors.Is(err, pgx.ErrNoRows) {
+				return nil, status.Error(codes.FailedPrecondition, "workflow run is not retryable")
+			} else if err != nil {
+				return nil, databaseError(err)
+			}
+			if err := queries.CreateWorkflowEvent(ctx, db.CreateWorkflowEventParams{
+				WorkflowRunID: id, EventType: "workflow_transition", Severity: "info",
+				Column4: []byte(`{"reason":"retried with context; the current step is being re-dispatched"}`),
+			}); err != nil {
+				return nil, databaseError(err)
+			}
+		} else {
+			// Retry supersedes this run rather than reviving it. A job is unique
+			// per workflow run (app.jobs.workflow_run_id is UNIQUE), so the run
+			// that already had its execution cannot be given another one; the
+			// scheduler picks the issue up again -- its own eligible bit is
+			// untouched, see #268 -- and creates a fresh run whose history
+			// stands alongside this one. Superseding is what stops this run's
+			// own failed/blocked/completed status from continuing to exclude
+			// the issue via the app.workflow_runs join ListQueueEntries and
+			// ClaimSchedulableIssue both run. The previous implementation took
+			// the project lock and parked the run in a "recovering" status
+			// nothing reads, which left the project unable to schedule anything
+			// again.
+			if err := queries.DeleteProjectLock(ctx, db.DeleteProjectLockParams{ProjectID: projectID, WorkflowRunID: id}); err != nil {
+				return nil, databaseError(err)
+			}
+			if err := queries.SupersedeWorkflowRun(ctx, id); err != nil {
+				return nil, databaseError(err)
+			}
+			if err := queries.CreateRetryEvent(ctx, id); err != nil {
+				return nil, databaseError(err)
+			}
 		}
 	case "cancel", "block":
 		next := StatusCancelled
@@ -2174,6 +2366,14 @@ func (s *Core) controlWorkflow(ctx context.Context, id, reason, action string) (
 	// Best-effort: the runner may already be disconnected, in which case the
 	// lease sweep is the backstop. Never fail the RPC over it — the database
 	// state is already committed and correct regardless of delivery.
+	if resume {
+		// Re-offer the re-armed job to an eligible runner now that the re-arm
+		// is committed. Best-effort like the cancel message below:
+		// reclaimUnansweredOffers is the backstop when no runner can take it.
+		if err := s.dispatchRetryJob(ctx, id); err != nil {
+			return nil, err
+		}
+	}
 	if jobToCancel != "" && runnerHoldingLease != "" {
 		// A job cancelled mid-planning (#351) is still running its
 		// planner-role execution, not the developer one -- current (read

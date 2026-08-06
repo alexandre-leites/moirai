@@ -135,7 +135,7 @@ func (s *Core) dispatchReviewerJob(ctx context.Context, workflowID string) error
 		return err
 	}
 	runnerID, err := s.queries.SelectEligibleReviewRunner(ctx, db.SelectEligibleReviewRunnerParams{
-		RunnerIds: runners, RequiredLabels: []byte(requiredLabels),
+		RunnerIds: runners, RequiredLabels: []byte(requiredLabels), JobID: row.JobID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // resumeStrandedReviewDispatches retries once an eligible runner is free

@@ -35,12 +35,18 @@ WHERE wr.id = sqlc.arg(id) AND wr.status = 'waiting_ai_review' AND j.role = 'dev
 -- issue to arbitrate over here, only one workflow's one review, so this reads
 -- without FOR UPDATE/SKIP LOCKED -- a race loses at ReopenJobForReview's own
 -- guard instead, which is a cheap, harmless no-op.
+-- The capacity count excludes the job being dispatched (sqlc.arg(job_id)): a
+-- retry-with-context re-arms its job to 'offered' before this runs, so without
+-- the exclusion the very runner that already holds the job would count it
+-- against its own capacity and never be selected. For the review/repair
+-- callers the job is still 'completed'/'failed' at selection time, so the
+-- exclusion is a no-op for them.
 SELECT r.id::text AS runner_id
 FROM app.runners r
 WHERE r.status = 'online' AND r.enabled AND NOT r.draining AND r.revoked_at IS NULL
   AND r.id::text = ANY(sqlc.arg(runner_ids)::text[])
   AND r.labels @> sqlc.arg(required_labels)::jsonb
-  AND (SELECT COUNT(*) FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered', 'preparing', 'running')) < r.capacity
+  AND (SELECT COUNT(*) FROM app.jobs j WHERE j.runner_id = r.id AND j.status IN ('offered', 'preparing', 'running') AND j.id <> sqlc.arg(job_id)) < r.capacity
 ORDER BY r.id
 LIMIT 1;
 

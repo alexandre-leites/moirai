@@ -271,7 +271,7 @@ func TestWorkflowControlRoutesForwardTheIDAndReason(t *testing.T) {
 		t.Run(tc.path, func(t *testing.T) {
 			answer := &controlv1.Workflow{Id: "wf-5", ProjectId: "p-1", Status: "queued", Phase: "planning"}
 			stub := &stubClient{
-				retryWorkflow: func(context.Context, string, string) (*controlv1.RetryWorkflowResponse, error) {
+				retryWorkflow: func(context.Context, string, string, bool) (*controlv1.RetryWorkflowResponse, error) {
 					return &controlv1.RetryWorkflowResponse{Workflow: answer}, nil
 				},
 				cancelWorkflow: func(context.Context, string, string) (*controlv1.CancelWorkflowResponse, error) {
@@ -302,6 +302,27 @@ func TestWorkflowControlRoutesForwardTheIDAndReason(t *testing.T) {
 				t.Errorf("control response carried detail fields: %#v", body)
 			}
 		})
+	}
+}
+
+// A retry with `resume: true` is forwarded as a retry-with-context, not a
+// fresh one: the RPC distinguishes the two on the resume flag.
+func TestRetryWithContextForwardsResumeToTheOrchestrator(t *testing.T) {
+	answer := &controlv1.Workflow{Id: "wf-5", ProjectId: "p-1", Status: "preparing", Phase: "preparing"}
+	stub := &stubClient{
+		retryWorkflow: func(_ context.Context, _ string, _ string, resume bool) (*controlv1.RetryWorkflowResponse, error) {
+			if !resume {
+				t.Fatal("resume flag was not forwarded")
+			}
+			return &controlv1.RetryWorkflowResponse{Workflow: answer}, nil
+		},
+	}
+	rec := httptest.NewRecorder()
+	workflowMux(stub).ServeHTTP(rec, mutateRequest(
+		t, http.MethodPost, "/api/v1/workflows/wf-5/retry", `{"resume":true}`, "admin-session"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -336,7 +357,7 @@ func TestBlockWithoutAReasonNeverReachesTheOrchestrator(t *testing.T) {
 }
 
 func TestWorkflowControlSurfacesOrchestratorRejection(t *testing.T) {
-	stub := &stubClient{retryWorkflow: func(context.Context, string, string) (*controlv1.RetryWorkflowResponse, error) {
+	stub := &stubClient{retryWorkflow: func(context.Context, string, string, bool) (*controlv1.RetryWorkflowResponse, error) {
 		return nil, orchestrator.ErrInvalidInput
 	}}
 	rec := httptest.NewRecorder()
