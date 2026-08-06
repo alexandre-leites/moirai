@@ -208,7 +208,7 @@ func (s *Core) dispatchRepairJob(ctx context.Context, workflowID string) error {
 	// enabled, not draining, not revoked, under capacity, labels match) -- it is
 	// reused here rather than duplicated as a repair-scoped copy.
 	runnerID, err := s.queries.SelectEligibleReviewRunner(ctx, db.SelectEligibleReviewRunnerParams{
-		RunnerIds: runners, RequiredLabels: []byte(requiredLabels),
+		RunnerIds: runners, RequiredLabels: []byte(requiredLabels), JobID: row.JobID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // resumeStrandedReviewVerdicts retries once an eligible runner is free
@@ -375,7 +375,7 @@ func (s *Core) dispatchPipelineRepairJob(ctx context.Context, workflowID string)
 		return err
 	}
 	runnerID, err := s.queries.SelectEligibleReviewRunner(ctx, db.SelectEligibleReviewRunnerParams{
-		RunnerIds: runners, RequiredLabels: []byte(requiredLabels),
+		RunnerIds: runners, RequiredLabels: []byte(requiredLabels), JobID: row.JobID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // applyStrandedPipelineDecision retries once an eligible runner is free

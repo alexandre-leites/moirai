@@ -36,6 +36,17 @@ describe("WorkflowDetailPage", () => {
     expect(banner.textContent).toContain("Blocked.");
     expect(banner.textContent).toContain("Non-progress: 4 identical outcomes");
     expect(button(container, /Retry with fresh context/)).toBeTruthy();
+    expect(button(container, /Retry with context/)).toBeTruthy();
+  });
+
+  it("retries with the accumulated context when Retry with context is clicked", async () => {
+    const retryWorkflow = vi.fn(async () => workflow({ status: "preparing" }));
+    const api = stubApi({ getWorkflow: async () => workflow({ status: "failed" }), retryWorkflow });
+    const container = await mountDetail(api);
+
+    await click(button(container, /Retry with context/));
+    expect(retryWorkflow).toHaveBeenCalledWith("wf-1", undefined, true);
+    expect(document.querySelector("#toast")?.textContent).toContain("Retrying the current step");
   });
 
   it("shows a failure banner with a retry for a failed run", async () => {

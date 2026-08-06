@@ -354,7 +354,12 @@ message LogoutRequest {}
 message LogoutResponse {}
 message SubmitHumanDecisionRequest { string workflow_run_id = 1; string decision = 2; string comment = 3; }
 message SubmitHumanDecisionResponse { Workflow workflow = 1; }
-message RetryWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
+// resume distinguishes the two retry flavours: false (the default) supersedes
+// the run and lets the scheduler start a fresh one from scratch; true re-arms
+// the same run's current step and re-dispatches it carrying the accumulated
+// context (plan, prior failure) forward, so an agent API error does not force
+// the whole workflow to start from zero.
+message RetryWorkflowRequest { string workflow_run_id = 1; string reason = 2; bool resume = 3; }
 message RetryWorkflowResponse { Workflow workflow = 1; }
 message CancelWorkflowRequest { string workflow_run_id = 1; string reason = 2; }
 message CancelWorkflowResponse { Workflow workflow = 1; }

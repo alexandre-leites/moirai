@@ -441,8 +441,8 @@ func (c *Client) SubmitHumanDecision(ctx context.Context, workflowRunID, decisio
 	return resp, nil
 }
 
-func (c *Client) RetryWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.RetryWorkflowResponse, error) {
-	resp, err := c.client.RetryWorkflow(ctx, &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowRunID, Reason: reason})
+func (c *Client) RetryWorkflow(ctx context.Context, workflowRunID, reason string, resume bool) (*controlv1.RetryWorkflowResponse, error) {
+	resp, err := c.client.RetryWorkflow(ctx, &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowRunID, Reason: reason, Resume: resume})
 	if err != nil {
 		return nil, mapError(err)
 	}

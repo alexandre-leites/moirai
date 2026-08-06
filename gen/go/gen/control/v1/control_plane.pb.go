@@ -4132,10 +4132,16 @@ func (x *SubmitHumanDecisionResponse) GetWorkflow() *Workflow {
 	return nil
 }
 
+// resume distinguishes the two retry flavours: false (the default) supersedes
+// the run and lets the scheduler start a fresh one from scratch; true re-arms
+// the same run's current step and re-dispatches it carrying the accumulated
+// context (plan, prior failure) forward, so an agent API error does not force
+// the whole workflow to start from zero.
 type RetryWorkflowRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkflowRunId string                 `protobuf:"bytes,1,opt,name=workflow_run_id,json=workflowRunId,proto3" json:"workflow_run_id,omitempty"`
 	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	Resume        bool                   `protobuf:"varint,3,opt,name=resume,proto3" json:"resume,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4182,6 +4188,13 @@ func (x *RetryWorkflowRequest) GetReason() string {
 		return x.Reason
 	}
 	return ""
+}
+
+func (x *RetryWorkflowRequest) GetResume() bool {
+	if x != nil {
+		return x.Resume
+	}
+	return false
 }
 
 type RetryWorkflowResponse struct {
@@ -5112,10 +5125,11 @@ const file_proto_control_plane_proto_rawDesc = "" +
 	"\bdecision\x18\x02 \x01(\tR\bdecision\x12\x18\n" +
 	"\acomment\x18\x03 \x01(\tR\acomment\"T\n" +
 	"\x1bSubmitHumanDecisionResponse\x125\n" +
-	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow\"V\n" +
+	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow\"n\n" +
 	"\x14RetryWorkflowRequest\x12&\n" +
 	"\x0fworkflow_run_id\x18\x01 \x01(\tR\rworkflowRunId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"N\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\x12\x16\n" +
+	"\x06resume\x18\x03 \x01(\bR\x06resume\"N\n" +
 	"\x15RetryWorkflowResponse\x125\n" +
 	"\bworkflow\x18\x01 \x01(\v2\x19.loop.control.v1.WorkflowR\bworkflow\"W\n" +
 	"\x15CancelWorkflowRequest\x12&\n" +

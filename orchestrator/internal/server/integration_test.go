@@ -436,6 +436,104 @@ func TestRetryReopensTheIssueAndFreesTheProject(t *testing.T) {
 	}
 }
 
+// Retry with context (resume=true) re-arms the same run instead of superseding
+// it: the run keeps its thread, branch and the step it died at, the job is
+// re-offered with a fresh lease generation, and the project lock is re-acquired
+// so a second workflow cannot start on the same project while the resumed one
+// works.
+func TestRetryWithContextReArmsTheSameRun(t *testing.T) {
+	h := newHarness(t)
+	projectID, _ := h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	var generation int64
+	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: generation, EventSequence: 1, Type: "failed", PayloadJson: "{}",
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE project_id=$1`, projectID); locks != 0 {
+		t.Fatal("a failed run kept its project lock")
+	}
+
+	if _, err := h.Control.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID, Resume: true}); err != nil {
+		t.Fatalf("RetryWorkflow(resume=true): %v", err)
+	}
+
+	var after struct {
+		runStatus  string
+		jobStatus  string
+		generation int64
+	}
+	if err := h.pool.QueryRow(context.Background(),
+		`SELECT wr.status, j.status, j.lease_generation FROM app.workflow_runs wr JOIN app.jobs j ON j.workflow_run_id = wr.id WHERE wr.id = $1`, workflowID,
+	).Scan(&after.runStatus, &after.jobStatus, &after.generation); err != nil {
+		t.Fatal(err)
+	}
+	if after.runStatus != "preparing" {
+		t.Fatalf("run status = %s, want the same run re-armed at 'preparing'", after.runStatus)
+	}
+	if after.jobStatus != "offered" {
+		t.Fatalf("job status = %s, want the job re-offered", after.jobStatus)
+	}
+	if after.generation != generation+1 {
+		t.Fatalf("lease generation = %d, want %d (the reopen bumped it so a stale runner event is fenced)", after.generation, generation+1)
+	}
+	if locks := h.scalar(`SELECT COUNT(*) FROM app.project_locks WHERE project_id=$1`, projectID); locks != 1 {
+		t.Fatal("a resumed run did not re-acquire the project lock")
+	}
+	if runs := h.scalar(`SELECT COUNT(*) FROM app.workflow_runs`); runs != 1 {
+		t.Fatalf("workflow runs = %d, want 1 -- resume must not create a fresh run", runs)
+	}
+	if offers := h.scalar(`SELECT COUNT(*) FROM app.job_offers WHERE job_id=$1 AND status='offered'`, jobID); offers != 1 {
+		t.Fatalf("offered offers = %d, want the resumed job offered once", offers)
+	}
+	// The re-acquired project lock is what keeps the scheduler off this project
+	// while the resumed run works (ClaimSchedulableIssue skips locked projects);
+	// the run's own 'preparing' status cannot exclude its issue the way the
+	// terminal statuses it left do.
+	scheduled, err := h.ScheduleOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduled {
+		t.Fatal("the scheduler started a second workflow while the resumed run held the project lock")
+	}
+}
+
+// A run that died at the independent review step is deliberately not resumable
+// with context: the review must stay fresh, so the operator is told to use the
+// fresh-context retry instead.
+func TestRetryWithContextRejectsAReviewStepRun(t *testing.T) {
+	h := newHarness(t)
+	h.project()
+	runnerID := h.runner()
+	jobID, workflowID := h.runJob(runnerID)
+
+	var generation int64
+	if err := h.pool.QueryRow(context.Background(), `SELECT lease_generation FROM app.jobs WHERE id=$1`, jobID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.persistExecutionEvent(context.Background(), runnerID, &runnerv1.ExecutionEvent{
+		JobId: jobID, LeaseGeneration: generation, EventSequence: 1, Type: "failed", PayloadJson: "{}",
+	}); err != nil {
+		t.Fatalf("persistExecutionEvent: %v", err)
+	}
+	h.exec(`UPDATE app.jobs SET role='reviewer' WHERE id=$1`, jobID)
+
+	_, err := h.Control.RetryWorkflow(h.adminContext(), &controlv1.RetryWorkflowRequest{WorkflowRunId: workflowID, Resume: true})
+	if err == nil {
+		t.Fatal("RetryWorkflow(resume=true) on a reviewer-step run succeeded, want rejection")
+	}
+	if !strings.Contains(err.Error(), "review") {
+		t.Fatalf("error = %q, want it to name the review step", err)
+	}
+}
+
 // A runner that dies mid-job cannot report anything: every write path it has is
 // fenced on an unexpired lease. Only the recovery sweep can release the project.
 func TestRecoverySweepReclaimsAnExpiredLease(t *testing.T) {

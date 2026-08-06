@@ -17,7 +17,7 @@ type workflowClient interface {
 	GetWorkflow(ctx context.Context, workflowRunID string) (*controlv1.GetWorkflowResponse, error)
 	ListWorkflowEvents(ctx context.Context, workflowRunID string, afterID int64, limit int32) (*controlv1.ListWorkflowEventsResponse, error)
 	SubmitHumanDecision(ctx context.Context, workflowRunID, decision, comment string) (*controlv1.SubmitHumanDecisionResponse, error)
-	RetryWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.RetryWorkflowResponse, error)
+	RetryWorkflow(ctx context.Context, workflowRunID, reason string, resume bool) (*controlv1.RetryWorkflowResponse, error)
 	CancelWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.CancelWorkflowResponse, error)
 	BlockWorkflow(ctx context.Context, workflowRunID, reason string) (*controlv1.BlockWorkflowResponse, error)
 }
@@ -132,6 +132,7 @@ func (h *WorkflowHandlers) block(w http.ResponseWriter, r *http.Request) {
 func (h *WorkflowHandlers) control(w http.ResponseWriter, r *http.Request, action string) {
 	var body struct {
 		Reason string `json:"reason"`
+		Resume bool   `json:"resume"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		apiserver.WriteError(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -146,7 +147,7 @@ func (h *WorkflowHandlers) control(w http.ResponseWriter, r *http.Request, actio
 	var err error
 	switch action {
 	case "retry":
-		resp, callErr := h.client.RetryWorkflow(requestContext(r), workflowID, body.Reason)
+		resp, callErr := h.client.RetryWorkflow(requestContext(r), workflowID, body.Reason, body.Resume)
 		err = callErr
 		if resp != nil {
 			workflow = resp.Workflow
