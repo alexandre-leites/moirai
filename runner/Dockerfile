@@ -5,7 +5,7 @@
 # requested target, so a linux/arm64 image costs no QEMU emulation for the Go
 # stage. Only the runtime stage, which installs distro and npm packages, runs
 # under emulation on a foreign architecture.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS build
 ENV GOTOOLCHAIN=local \
     CGO_ENABLED=0
 WORKDIR /build
