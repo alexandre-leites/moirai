@@ -3,7 +3,7 @@
 #
 # The builder always runs on the native build platform and cross-compiles to the
 # requested target, so a linux/arm64 image costs no QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS build
 # GOTOOLCHAIN=local keeps the build from fetching another toolchain. CGO_ENABLED=0
 # is already the effective default here (the image ships no C toolchain); stating
 # it means a base image that gains one cannot silently start producing a
