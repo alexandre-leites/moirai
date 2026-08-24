@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/alexandre-leites/moirai/contracts v0.0.0
 	github.com/prometheus/client_golang v1.24.1
-	google.golang.org/grpc v1.83.0
+	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.11
 )
 
